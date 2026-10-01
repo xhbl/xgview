@@ -138,11 +138,17 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 }
 
 fn init_logging() {
+    use std::io::IsTerminal;
     use tracing_subscriber::EnvFilter;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("xgview=info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
+        // Colour is for a terminal. Redirected to a file the escape sequences
+        // are not decoration but content: they land in the middle of every field
+        // and make the log unsearchable, so a log meant to be read back gets
+        // none of them.
+        .with_ansi(std::io::stdout().is_terminal())
         .init();
 }

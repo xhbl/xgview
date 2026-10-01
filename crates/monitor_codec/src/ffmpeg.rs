@@ -31,6 +31,7 @@
 //! as a delay of a few frames, so the decoder is opened single threaded and
 //! without reordering.
 
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::Once;
 
 // The crate is published as `ffmpeg-next`, and the module carrying this backend
@@ -157,6 +158,68 @@ impl FfmpegDecoder {
     }
 }
 
+/// The argument list of a `printf` style call, which the platforms spell
+/// differently: a plain pointer on Windows, and a pointer to the tag structure
+/// of the System V calling convention on Linux.
+#[cfg(windows)]
+type VaList = *mut c_char;
+#[cfg(not(windows))]
+type VaList = *mut ffmpeg::ffi::__va_list_tag;
+
+/// Longest libavcodec message kept, in bytes.
+const LOG_LINE: usize = 1024;
+
+/// Takes libavcodec's own messages and hands them to `tracing`.
+///
+/// Left to itself the library writes to `stderr`: no timestamp, no target, and
+/// no way to filter the lines out. It also reports at error level conditions a
+/// live camera produces routinely - a picture that cannot be decoded, a stream
+/// joined between two key frames - and one camera here spends its first second
+/// waiting for a key frame, which put nearly two hundred unformatted lines on
+/// the console for a single session. They are passed on at debug level instead,
+/// because the pipeline already counts them and warns once about the condition
+/// behind them; `RUST_LOG=xgview=debug` brings back the detail for the moment it
+/// is actually worth reading.
+///
+/// Safety: libavcodec calls this from whichever thread logged, with the format
+/// string and the argument list of a `printf` call. Nothing in it may unwind
+/// into C, so nothing in it panics: a message that cannot be read is dropped.
+unsafe extern "C" fn forward_log(
+    _context: *mut c_void,
+    level: c_int,
+    format: *const c_char,
+    arguments: VaList,
+) {
+    if format.is_null() {
+        return;
+    }
+    let mut line = [0 as c_char; LOG_LINE];
+    let mut prefix = 0;
+    let written = ffmpeg::ffi::av_log_format_line2(
+        std::ptr::null_mut(),
+        level,
+        format,
+        arguments,
+        line.as_mut_ptr(),
+        LOG_LINE as c_int,
+        &mut prefix,
+    );
+    if written <= 0 {
+        return;
+    }
+    let message = CStr::from_ptr(line.as_ptr()).to_string_lossy();
+    let message = message.trim_end();
+    match level {
+        ffmpeg::ffi::AV_LOG_PANIC | ffmpeg::ffi::AV_LOG_FATAL => {
+            tracing::error!(target: "xgview::codec", "{message}")
+        }
+        ffmpeg::ffi::AV_LOG_ERROR | ffmpeg::ffi::AV_LOG_WARNING => {
+            tracing::debug!(target: "xgview::codec", "{message}")
+        }
+        _ => tracing::trace!(target: "xgview::codec", "{message}"),
+    }
+}
+
 /// Initialises the FFmpeg runtime.
 ///
 /// Every channel calls this and only the first call does anything, but the
@@ -167,6 +230,15 @@ fn init() -> Result<()> {
     INIT.call_once(|| {
         if let Err(err) = ffmpeg::init() {
             failure = Some(err.to_string());
+            return;
+        }
+        // Safety: both are plain global settings of the library, and this runs
+        // once, before any decoder exists. The callback is installed rather than
+        // left at the default because the default writes to `stderr`; the level
+        // is what bounds how much reaches it.
+        unsafe {
+            ffmpeg::ffi::av_log_set_level(ffmpeg::ffi::AV_LOG_INFO);
+            ffmpeg::ffi::av_log_set_callback(Some(forward_log));
         }
     });
     match failure {
