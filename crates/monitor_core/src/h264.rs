@@ -866,6 +866,7 @@ mod tests {
             height: 0,
             surface: None,
             low_latency: true,
+            hardware: false,
         };
         decoder.configure(&config).expect("configure the decoder");
 

@@ -47,6 +47,8 @@ pub struct ChannelUi {
     /// Stream currently decoded.
     pub stream: Option<StreamKind>,
     pub codec: Option<String>,
+    /// True while this channel's picture is decoded on the GPU.
+    pub hardware: bool,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub fps: f32,
@@ -64,6 +66,7 @@ impl Default for ChannelUi {
             detail: String::new(),
             stream: None,
             codec: None,
+            hardware: false,
             width: None,
             height: None,
             fps: 0.0,
@@ -81,11 +84,12 @@ impl ChannelUi {
                 self.state = state;
                 self.detail = detail;
             }
-            StreamEvent::Stats { stream, codec, width, height, fps, bitrate_kbps, total_frames, .. } => {
+            StreamEvent::Stats { stream, codec, width, height, hardware, fps, bitrate_kbps, total_frames, .. } => {
                 self.stream = Some(stream);
                 if codec.is_some() {
                     self.codec = codec;
                 }
+                self.hardware = hardware;
                 if width.is_some() {
                     self.width = width;
                 }
@@ -225,7 +229,7 @@ impl XgViewApp {
         }
         let discovery = DiscoveryUi::new(&config.discovery);
         let scheduler = Scheduler::new(config.layout, config.page, config.focus, config.enabled_count());
-        let manager = ChannelManager::spawn(&handle, config.reconnect.clone());
+        let manager = ChannelManager::spawn(&handle, config.reconnect.clone(), config.prefer_hardware_decode);
         let (events_tx, events_rx) = unbounded();
         let capabilities = monitor_codec::capabilities();
 
@@ -780,6 +784,34 @@ impl XgViewApp {
         ui.label(RichText::new("a change applies to the connections opened afterwards").small().color(theme::TEXT_DIM));
 
         ui.separator();
+        ui.heading("Decoding");
+        let mut prefer_hardware = self.config.prefer_hardware_decode;
+        if ui.checkbox(&mut prefer_hardware, "Prefer hardware decoding").changed() {
+            self.config.prefer_hardware_decode = prefer_hardware;
+            // A decoder is chosen when a session opens, so the change is applied
+            // by reopening the channels rather than on the next connection.
+            self.manager.set_hardware_preference(prefer_hardware);
+            dirty = true;
+            self.flash(
+                if prefer_hardware {
+                    "channels reopening, the GPU decodes where it can"
+                } else {
+                    "channels reopening on the CPU"
+                },
+                ToastKind::Info,
+            );
+        }
+        ui.label(
+            RichText::new(if self.hardware_decoder {
+                "Pictures are decoded on the GPU where the machine offers a decoder for the stream, and on the CPU everywhere else. Each tile shows which one it got."
+            } else {
+                "This build has no hardware decoder: the CPU decodes, whatever this setting says."
+            })
+            .small()
+            .color(theme::TEXT_DIM),
+        );
+
+        ui.separator();
         ui.heading(format!("Cameras ({})", self.config.cameras.len()));
         ui.horizontal(|ui| {
             if ui.button("Add devices…").clicked() {
@@ -854,7 +886,7 @@ impl XgViewApp {
         ui.label(format!(
             "decoder: {} ({})",
             self.decoder,
-            if self.hardware_decoder { "hardware / zero copy" } else { "software fallback" }
+            if self.hardware_decoder { "hardware decoding available" } else { "software decoding only" }
         ));
         ui.label(format!("config: {}", self.config_path.display()));
         ui.label(RichText::new("DPAD / arrows: move · Enter: 1x1 · Esc: back · PgUp/PgDn: page · F1: settings · F2: devices · F11: full screen").small().color(theme::TEXT_DIM));

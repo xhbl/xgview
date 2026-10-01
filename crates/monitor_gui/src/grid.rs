@@ -249,8 +249,17 @@ fn live_canvas(painter: &egui::Painter, rect: Rect, tile: &Tile<'_>) {
         painter.circle_filled(chip.left_center() + vec2(11.0, 0.0), 3.5, theme::LIVE);
         painter.text(chip.left_center() + vec2(21.0, 0.0), Align2::LEFT_CENTER, "LIVE", FontId::monospace(11.0), theme::LIVE);
 
+        // Which decoder the picture came from, next to what it is: the two are
+        // not always the same across a grid, a hardware decoder that refused one
+        // camera being the obvious case.
         let label = match channel.and_then(|channel| channel.codec.as_deref()) {
-            Some(codec) => format!("{}  {:.0}×{:.0}", codec.to_uppercase(), size.x, size.y),
+            Some(codec) => format!(
+                "{}  {}  {:.0}×{:.0}",
+                codec.to_uppercase(),
+                if channel.is_some_and(|channel| channel.hardware) { "HW" } else { "SW" },
+                size.x,
+                size.y
+            ),
             None => format!("{:.0}×{:.0}", size.x, size.y),
         };
         painter.text(

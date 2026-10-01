@@ -55,6 +55,10 @@ pub enum StreamEvent {
         codec: Option<String>,
         width: Option<u32>,
         height: Option<u32>,
+        /// True once the decoder has proved it runs on the GPU. A channel whose
+        /// hardware decoder refused the stream reports `false` here, whatever
+        /// the preference asked for.
+        hardware: bool,
         /// Frames per second measured on RTP marker bits.
         fps: f32,
         bitrate_kbps: f32,
@@ -144,6 +148,8 @@ enum ChannelCommand {
     Suspend {
         index: usize,
     },
+    /// Decode on the GPU from now on, or stop trying to.
+    PreferHardware(bool),
     Shutdown,
 }
 
@@ -158,12 +164,32 @@ pub struct ChannelManager {
 
 impl ChannelManager {
     /// Spawns the supervisor on the given runtime.
-    pub fn spawn(handle: &Handle, policy: ReconnectPolicy) -> Self {
+    ///
+    /// `prefer_hardware` is the decoding preference live channels are opened
+    /// with; see [`ChannelManager::set_hardware_preference`].
+    pub fn spawn(handle: &Handle, policy: ReconnectPolicy, prefer_hardware: bool) -> Self {
         let (command_tx, command_rx) = unbounded_channel();
         let (event_tx, event_rx) = unbounded();
         let frames = Arc::new(FrameStore::default());
-        handle.spawn(supervisor(command_rx, event_tx, frames.clone(), policy, handle.clone()));
+        handle.spawn(supervisor(
+            command_rx,
+            event_tx,
+            frames.clone(),
+            policy,
+            prefer_hardware,
+            handle.clone(),
+        ));
         Self { commands: command_tx, events: event_rx, frames, handle: handle.clone() }
+    }
+
+    /// Switches decoding between the GPU and the CPU.
+    ///
+    /// A decoder is picked once, when a session opens, so the live channels are
+    /// reopened for the change to take effect. The preference only ever asks:
+    /// a machine without a usable device, or a stream the hardware decoder will
+    /// not take, keeps decoding on the CPU.
+    pub fn set_hardware_preference(&self, prefer: bool) {
+        self.send(ChannelCommand::PreferHardware(prefer));
     }
 
     /// The runtime used by the streaming tasks (the UI uses it to spawn the
@@ -229,6 +255,7 @@ impl ChannelManager {
 }
 
 struct ChannelRuntime {
+    camera_id: String,
     stream: StreamKind,
     uri: String,
     credentials: Option<(String, String)>,
@@ -249,6 +276,7 @@ async fn supervisor(
     events: Sender<StreamEvent>,
     frames: Arc<FrameStore>,
     policy: ReconnectPolicy,
+    mut prefer_hardware: bool,
     handle: Handle,
 ) {
     let mut channels: HashMap<usize, ChannelRuntime> = HashMap::new();
@@ -296,20 +324,59 @@ async fn supervisor(
                 );
                 let task = handle.spawn(run_channel(
                     index,
-                    camera_id,
+                    camera_id.clone(),
                     uri.clone(),
                     credentials.clone(),
                     stream,
+                    prefer_hardware,
                     policy.clone(),
                     events.clone(),
                     frames.clone(),
                 ));
-                channels.insert(index, ChannelRuntime { stream, uri, credentials, task });
+                channels.insert(
+                    index,
+                    ChannelRuntime { camera_id, stream, uri, credentials, task },
+                );
             }
             ChannelCommand::Suspend { index } => {
                 if let Some(existing) = channels.remove(&index) {
                     existing.task.abort();
                     tracing::debug!(target: "xgview::pipeline", index, "channel suspended");
+                }
+            }
+            ChannelCommand::PreferHardware(prefer) => {
+                if prefer == prefer_hardware {
+                    continue;
+                }
+                prefer_hardware = prefer;
+                tracing::debug!(
+                    target: "xgview::pipeline",
+                    hardware = prefer,
+                    channels = channels.len(),
+                    "decoding preference changed, reopening the channels"
+                );
+                // The decoder is chosen when a session opens, so the live
+                // channels have to be reopened for the new preference to reach
+                // them. They are started again from here because the scheduler
+                // has no reason to see a change: nothing about the cameras did.
+                for (index, runtime) in channels.drain().collect::<Vec<_>>() {
+                    let ChannelRuntime { camera_id, stream, uri, credentials, task } = runtime;
+                    task.abort();
+                    let task = handle.spawn(run_channel(
+                        index,
+                        camera_id.clone(),
+                        uri.clone(),
+                        credentials.clone(),
+                        stream,
+                        prefer_hardware,
+                        policy.clone(),
+                        events.clone(),
+                        frames.clone(),
+                    ));
+                    channels.insert(
+                        index,
+                        ChannelRuntime { camera_id, stream, uri, credentials, task },
+                    );
                 }
             }
             ChannelCommand::Shutdown => break,
@@ -329,6 +396,7 @@ async fn run_channel(
     uri: String,
     credentials: Option<(String, String)>,
     stream: StreamKind,
+    prefer_hardware: bool,
     policy: ReconnectPolicy,
     events: Sender<StreamEvent>,
     frames: Arc<FrameStore>,
@@ -356,7 +424,18 @@ async fn run_channel(
             },
         );
 
-        match run_session(index, &camera_id, &uri, credentials.clone(), stream, &events, &frames).await {
+        match run_session(
+            index,
+            &camera_id,
+            &uri,
+            credentials.clone(),
+            stream,
+            prefer_hardware,
+            &events,
+            &frames,
+        )
+        .await
+        {
             Ok(()) => failure = "stream closed by peer".to_string(),
             Err(err) => {
                 // A failing session is the only clue the user gets about a
@@ -444,6 +523,7 @@ async fn run_session(
     uri: &str,
     credentials: Option<(String, String)>,
     stream: StreamKind,
+    prefer_hardware: bool,
     events: &Sender<StreamEvent>,
     frames: &FrameStore,
 ) -> Result<()> {
@@ -459,7 +539,7 @@ async fn run_session(
     let parameter_sets = video.map(|track| track.parameter_sets.clone()).unwrap_or_default();
     let kind = Codec::from_encoding(codec.as_deref().unwrap_or_default());
 
-    let mut decoder = h264_decoder(kind, width, height, index);
+    let mut decoder = h264_decoder(kind, width, height, index, prefer_hardware);
     let mut depacketizer = H264Depacketizer::new(payload_type, parameter_sets);
     let mut sequence: u64 = 0;
     let mut decode_errors: u64 = 0;
@@ -486,6 +566,7 @@ async fn run_session(
             codec: codec.clone(),
             width,
             height,
+            hardware: uses_hardware(&decoder),
             fps: 0.0,
             bitrate_kbps: 0.0,
             total_frames: 0,
@@ -694,6 +775,7 @@ async fn run_session(
                     codec: codec.clone(),
                     width,
                     height,
+                    hardware: uses_hardware(&decoder),
                     fps: window_frames as f32 / seconds,
                     bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
                     total_frames,
@@ -707,6 +789,7 @@ async fn run_session(
                 target: "xgview::pipeline",
                 index,
                 stream = stream.as_str(),
+                hardware = uses_hardware(&decoder),
                 units = window_units,
                 unit_bytes = window_unit_bytes,
                 decoded = window_decoded,
@@ -738,7 +821,16 @@ async fn run_session(
 /// error: the session keeps running, reports its statistics and shows a
 /// placeholder, which is what a `H265` or `MJPEG` camera should look like rather
 /// than a connection that never stops reconnecting.
-fn h264_decoder(kind: Codec, width: Option<u32>, height: Option<u32>, index: usize) -> Option<Box<dyn VideoDecoder>> {
+///
+/// `prefer_hardware` only asks. A decoder that will not open is retried on the
+/// CPU, because a preference must never cost a channel its picture.
+fn h264_decoder(
+    kind: Codec,
+    width: Option<u32>,
+    height: Option<u32>,
+    index: usize,
+    prefer_hardware: bool,
+) -> Option<Box<dyn VideoDecoder>> {
     if kind != Codec::H264 {
         tracing::warn!(
             target: "xgview::pipeline",
@@ -748,21 +840,48 @@ fn h264_decoder(kind: Codec, width: Option<u32>, height: Option<u32>, index: usi
         );
         return None;
     }
-    let mut decoder = monitor_codec::create_decoder();
     let config = DecoderConfig {
         codec: kind,
         width: width.unwrap_or(0),
         height: height.unwrap_or(0),
         surface: None,
         low_latency: true,
+        hardware: prefer_hardware,
     };
-    match decoder.configure(&config) {
+    if prefer_hardware {
+        if let Some(decoder) = open_decoder(&config, index) {
+            return Some(decoder);
+        }
+        tracing::warn!(
+            target: "xgview::pipeline",
+            index,
+            "the hardware decoder did not open, decoding on the cpu instead"
+        );
+    }
+    open_decoder(&DecoderConfig { hardware: false, ..config }, index)
+}
+
+/// Opens one decoder, reporting the reason when it will not open.
+fn open_decoder(config: &DecoderConfig, index: usize) -> Option<Box<dyn VideoDecoder>> {
+    let mut decoder = monitor_codec::create_decoder();
+    match decoder.configure(config) {
         Ok(()) => Some(decoder),
         Err(err) => {
-            tracing::warn!(target: "xgview::pipeline", index, %err, "cannot configure the decoder");
+            tracing::warn!(
+                target: "xgview::pipeline",
+                index,
+                hardware = config.hardware,
+                %err,
+                "cannot configure the decoder"
+            );
             None
         }
     }
+}
+
+/// True once a channel's decoder has proved it runs on the GPU.
+fn uses_hardware(decoder: &Option<Box<dyn VideoDecoder>>) -> bool {
+    decoder.as_ref().and_then(|decoder| decoder.info()).is_some_and(|info| info.hardware)
 }
 
 fn emit(events: &Sender<StreamEvent>, event: StreamEvent) {
@@ -805,7 +924,7 @@ mod tests {
             max_delay_ms: 20,
             ..Default::default()
         };
-        let manager = ChannelManager::spawn(&handle, policy);
+        let manager = ChannelManager::spawn(&handle, policy, false);
         let cameras = vec![camera("cam-1", "rtsp://127.0.0.1:1/stream")];
         manager.apply(
             &[ScheduleChange::Activate {

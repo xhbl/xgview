@@ -91,7 +91,9 @@ pub struct VideoStreamInfo {
     pub width: u32,
     pub height: u32,
     pub fps: Option<u32>,
-    /// True when frames live in GPU memory only.
+    /// True when the decoding itself runs on dedicated hardware rather than on
+    /// the CPU. The pictures may still be copied back to system memory for the
+    /// renderer, so this does not promise a zero copy path.
     pub hardware: bool,
 }
 
@@ -113,6 +115,10 @@ pub struct DecoderConfig {
     pub surface: Option<usize>,
     /// Keep only the newest frame, dropping the ones that pile up.
     pub low_latency: bool,
+    /// Run the decoding itself on the GPU. This is a preference and not a
+    /// demand: a backend that finds no usable device, or that is offered no
+    /// hardware format for the stream, decodes on the CPU instead of failing.
+    pub hardware: bool,
 }
 
 impl Default for DecoderConfig {
@@ -123,6 +129,7 @@ impl Default for DecoderConfig {
             height: 720,
             surface: None,
             low_latency: true,
+            hardware: true,
         }
     }
 }
@@ -202,7 +209,9 @@ pub trait VideoDecoder: Send {
 /// What the current target can actually do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecoderCapabilities {
-    /// Hardware (zero copy) decoding available.
+    /// A hardware decoding path exists in this build for this platform. Whether
+    /// a given stream ends up on it is only known once decoding starts, and
+    /// [`VideoStreamInfo::hardware`] is where that answer is reported.
     pub hardware: bool,
     /// Backend that will be used by [`create_decoder`].
     pub backend: &'static str,
@@ -214,7 +223,11 @@ pub fn capabilities() -> DecoderCapabilities {
     {
         DecoderCapabilities { hardware: true, backend: "AMediaCodec" }
     }
-    #[cfg(all(not(target_os = "android"), feature = "ffmpeg"))]
+    #[cfg(all(not(target_os = "android"), feature = "ffmpeg", windows))]
+    {
+        DecoderCapabilities { hardware: true, backend: "ffmpeg" }
+    }
+    #[cfg(all(not(target_os = "android"), feature = "ffmpeg", not(windows)))]
     {
         DecoderCapabilities { hardware: false, backend: "ffmpeg" }
     }

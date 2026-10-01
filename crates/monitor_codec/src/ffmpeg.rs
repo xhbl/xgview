@@ -7,7 +7,16 @@
 //!
 //! ```text
 //! Annex-B access unit  ->  libavcodec  ->  libswscale  ->  NV12 DecodedFrame
+//!                            (or the gpu)
 //! ```
+//!
+//! Decoding runs on the GPU when the caller asks for it and the platform offers
+//! a device. On Windows that device is a Direct3D 11 one, and the pictures are
+//! copied back into system memory afterwards, which is the form the renderer
+//! takes. The copy is what the simpler path costs; the decoding itself, which is
+//! the part that costs, is off the CPU. A device that cannot be opened, and a
+//! stream the hardware decoder is offered no format for, both leave the software
+//! decoder in place: the preference is never allowed to cost a picture.
 //!
 //! The conversion goes through `libswscale` rather than a hand written loop
 //! because it reads the range the stream announced, so a limited range camera
@@ -54,6 +63,10 @@ pub struct FfmpegDecoder {
     /// Timestamp of the last access unit, reused when the decoder is drained.
     last_pts_us: i64,
     frames: u64,
+    /// Set once a picture comes back in a hardware format, which is the only
+    /// proof that the GPU is doing the decoding: whether the device is accepted
+    /// is up to the decoder, and it is only known at the first picture.
+    hardware: bool,
 }
 
 // Safety: a decoder is owned outright by the channel worker that created it and
@@ -73,6 +86,7 @@ impl Default for FfmpegDecoder {
             info: None,
             last_pts_us: 0,
             frames: 0,
+            hardware: false,
         }
     }
 }
@@ -101,10 +115,21 @@ impl FfmpegDecoder {
 
         let mut frames = Vec::new();
         let mut picture = Picture::empty();
+        let mut copied_back = Picture::empty();
+        let mut converted = Picture::empty();
         while decoder.receive_frame(&mut picture).is_ok() {
-            let mut nv12 = Picture::empty();
-            scale_into(&mut self.scaler, &mut self.scaler_key, &picture, &mut nv12)?;
-            let Some(frame) = pack(&nv12, pts_us, keyframe) else {
+            // A picture the decoder left on the GPU has to be brought back into
+            // system memory before anything can read it, and the transfer hands
+            // it over as NV12 - the very layout the renderer takes.
+            let source = if picture.format() == Pixel::D3D11 {
+                copy_back(&mut copied_back, &picture)?;
+                self.hardware = true;
+                &copied_back
+            } else {
+                &picture
+            };
+            let ready = to_nv12(&mut self.scaler, &mut self.scaler_key, source, &mut converted)?;
+            let Some(frame) = pack(ready, pts_us, keyframe) else {
                 continue;
             };
             if self.info.is_none() {
@@ -113,7 +138,7 @@ impl FfmpegDecoder {
                     width: frame.width,
                     height: frame.height,
                     fps: None,
-                    hardware: false,
+                    hardware: self.hardware,
                 });
             }
             self.frames += 1;
@@ -141,19 +166,27 @@ fn init() -> Result<()> {
     }
 }
 
-/// Builds the converter for the picture at hand when needed, then runs it.
+/// That picture in the layout the renderer takes.
 ///
-/// The output is NV12: the layout a hardware decoder also produces, and the one
-/// the renderer takes. The colour matrix is deliberately not applied here. Going
-/// from the camera's plane format to NV12 is a range conversion and a copy per
-/// row, and the renderer turns the planes into colour once, on the GPU, for every
-/// tile at the same time.
-fn scale_into(
+/// A decoder that already produces NV12 - which a hardware decoder does once its
+/// picture has been read back - is handed on untouched. Everything else is
+/// converted, the converter being rebuilt whenever the geometry or the format
+/// changes because it is bound to both.
+///
+/// The conversion goes through `libswscale` rather than a hand written loop
+/// because it reads the range the stream announced, so a limited range camera
+/// and a full range one both end up as the limited range planes the renderer
+/// expects. The colour matrix is deliberately not applied here: the renderer
+/// runs it on the GPU, once per picture and separately from the CPU work.
+fn to_nv12<'a>(
     scaler: &mut Option<Scaler>,
     key: &mut Option<(Pixel, u32, u32)>,
-    picture: &Picture,
-    nv12: &mut Picture,
-) -> Result<()> {
+    picture: &'a Picture,
+    converted: &'a mut Picture,
+) -> Result<&'a Picture> {
+    if picture.format() == Pixel::NV12 {
+        return Ok(picture);
+    }
     let wanted = (picture.format(), picture.width(), picture.height());
     if *key != Some(wanted) {
         let (format, width, height) = wanted;
@@ -173,8 +206,84 @@ fn scale_into(
     scaler
         .as_mut()
         .expect("the converter was just built")
-        .run(picture, nv12)
-        .map_err(|err| CodecError::Decode(format!("ffmpeg converter: {err}")))
+        .run(picture, converted)
+        .map_err(|err| CodecError::Decode(format!("ffmpeg converter: {err}")))?;
+    Ok(converted)
+}
+
+/// Opens the device a hardware decoder runs on.
+///
+/// `None` means the device could not be opened, which is not a failure: the
+/// software decoder takes the stream and the picture keeps flowing. Asking for
+/// hardware is a preference, and a machine that cannot honour it is not broken.
+#[cfg(windows)]
+fn open_device() -> Option<*mut ffmpeg::ffi::AVBufferRef> {
+    let mut device: *mut ffmpeg::ffi::AVBufferRef = std::ptr::null_mut();
+    // Safety: the call only writes the out parameter, and a null device name
+    // asks for whichever device the type resolves to by default.
+    let code = unsafe {
+        ffmpeg::ffi::av_hwdevice_ctx_create(
+            &mut device,
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if code < 0 || device.is_null() {
+        tracing::warn!(
+            target: "xgview::codec",
+            code,
+            "no direct3d device for the hardware decoder, decoding on the cpu"
+        );
+        return None;
+    }
+    tracing::debug!(target: "xgview::codec", "direct3d device opened for the hardware decoder");
+    Some(device)
+}
+
+/// Picks the format a decoder outputs.
+///
+/// The decoder lists what it can produce, most preferred first. A hardware
+/// format is taken when one is offered, and the decoder's own first choice
+/// otherwise, so that a stream libavcodec will not decode on the GPU still
+/// decodes on the CPU rather than failing the open.
+#[cfg(windows)]
+unsafe extern "C" fn prefer_hardware(
+    _context: *mut ffmpeg::ffi::AVCodecContext,
+    formats: *const ffmpeg::ffi::AVPixelFormat,
+) -> ffmpeg::ffi::AVPixelFormat {
+    let mut index = 0;
+    loop {
+        let format = *formats.add(index);
+        if format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE {
+            break;
+        }
+        if format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11 {
+            return format;
+        }
+        index += 1;
+    }
+    *formats
+}
+
+/// Copies a picture the decoder left on the GPU back into system memory.
+///
+/// The destination is an empty frame: the transfer fills in its size and its
+/// pixel format from the source, and for a Direct3D 11 picture that format is
+/// NV12.
+fn copy_back(destination: &mut Picture, source: &Picture) -> Result<()> {
+    // Safety: both are live frames owned by this call, and this is the
+    // documented way to bring a hardware picture back to the CPU.
+    let code = unsafe {
+        ffmpeg::ffi::av_hwframe_transfer_data(destination.as_mut_ptr(), source.as_ptr(), 0)
+    };
+    if code < 0 {
+        return Err(CodecError::Decode(format!(
+            "ffmpeg: cannot read the picture back from the gpu ({code})"
+        )));
+    }
+    Ok(())
 }
 
 /// Copies the two planes of an NV12 picture out of their strided buffers.
@@ -217,7 +326,14 @@ fn copy_plane(frame: &Picture, plane: usize, columns: usize, rows: usize) -> Opt
 
 impl VideoDecoder for FfmpegDecoder {
     fn name(&self) -> &'static str {
-        "ffmpeg"
+        // Named after the path really in use rather than the one asked for: a
+        // decoder that fell back is a software one, whatever the configuration
+        // says.
+        if self.hardware {
+            "ffmpeg + d3d11va"
+        } else {
+            "ffmpeg"
+        }
     }
 
     fn configure(&mut self, config: &DecoderConfig) -> Result<()> {
@@ -259,6 +375,26 @@ impl VideoDecoder for FfmpegDecoder {
             (*raw).thread_type = 0;
         }
 
+        // A hardware decoder needs its device, and its own say over which format
+        // it may output, in place before the context is opened: that call is
+        // where libavcodec chooses between the software and the hardware
+        // implementation of the codec.
+        #[cfg(windows)]
+        {
+            if config.hardware {
+                if let Some(device) = open_device() {
+                    // Safety: the context is still unopened, so nothing else can
+                    // observe it. The reference is handed over to the context,
+                    // which releases it when it is freed.
+                    unsafe {
+                        let raw = context.as_mut_ptr();
+                        (*raw).hw_device_ctx = device;
+                        (*raw).get_format = Some(prefer_hardware);
+                    }
+                }
+            }
+        }
+
         let decoder = context
             .decoder()
             .video()
@@ -270,6 +406,7 @@ impl VideoDecoder for FfmpegDecoder {
         self.scaler_key = None;
         self.info = None;
         self.frames = 0;
+        self.hardware = false;
         Ok(())
     }
 
@@ -312,7 +449,7 @@ mod tests {
     use super::*;
 
     fn config(codec: Codec) -> DecoderConfig {
-        DecoderConfig { codec, width: 0, height: 0, surface: None, low_latency: true }
+        DecoderConfig { codec, width: 0, height: 0, surface: None, low_latency: true, hardware: false }
     }
 
     #[test]
@@ -374,6 +511,33 @@ mod tests {
         }
         assert!(frames > 0, "the bitstream must yield at least one picture");
         assert_eq!(size, Some((160, 120)));
+    }
+
+    /// Asking for hardware must never cost the picture. The decoder either runs
+    /// on the GPU or falls back to the CPU, and either way the bitstream has to
+    /// come out as pictures.
+    #[test]
+    fn decodes_a_real_bitstream_with_hardware_requested() {
+        let Ok(path) = std::env::var("XGVIEW_TEST_H264") else {
+            return;
+        };
+        let data = std::fs::read(path).expect("read the bitstream");
+        let mut decoder = FfmpegDecoder::new();
+        decoder
+            .configure(&DecoderConfig { hardware: true, ..config(Codec::H264) })
+            .expect("configure the hardware decoder");
+        let mut frames = 0;
+        for unit in annex_b_units(&data) {
+            let keyframe = first_nal_type(&unit) == 5;
+            let Ok(produced) = decoder.decode(&unit, 0, keyframe) else {
+                continue;
+            };
+            for frame in produced {
+                assert_eq!(frame.format, PixelFormat::Nv12, "both paths hand over NV12");
+                frames += 1;
+            }
+        }
+        assert!(frames > 0, "the bitstream must yield at least one picture");
     }
 
     /// Splits an Annex-B bitstream into NAL units, keeping their start codes:

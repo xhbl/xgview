@@ -161,6 +161,10 @@ pub struct AppConfig {
     pub autostart: bool,
     /// Open the window in full screen (TV / kiosk deployment).
     pub start_fullscreen: bool,
+    /// Decode on the GPU where the machine offers a decoder for it. It is only
+    /// a preference: a device that cannot be opened, or a stream the hardware
+    /// decoder will not take, is decoded on the CPU.
+    pub prefer_hardware_decode: bool,
     pub reconnect: ReconnectPolicy,
     pub discovery: DiscoveryConfig,
     pub synology: SynologyConfig,
@@ -176,6 +180,7 @@ impl Default for AppConfig {
             focus: None,
             autostart: false,
             start_fullscreen: false,
+            prefer_hardware_decode: true,
             reconnect: ReconnectPolicy::default(),
             discovery: DiscoveryConfig::default(),
             synology: SynologyConfig::default(),
