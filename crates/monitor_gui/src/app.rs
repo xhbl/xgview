@@ -198,6 +198,10 @@ pub struct XgViewApp {
     autostart: AutostartStatus,
     decoder: &'static str,
     hardware_decoder: bool,
+    /// Whether hardware and software decoding can be chosen between here. Left
+    /// false, the setting is shown for what it is - a setting that does not
+    /// apply - rather than offered and ignored.
+    decoder_selectable: bool,
     show_settings: bool,
     show_stats: bool,
     discovery: DiscoveryUi,
@@ -254,6 +258,7 @@ impl XgViewApp {
             autostart,
             decoder: capabilities.backend,
             hardware_decoder: capabilities.hardware,
+            decoder_selectable: capabilities.selectable,
             show_settings: false,
             show_stats: true,
             discovery,
@@ -786,30 +791,31 @@ impl XgViewApp {
         ui.separator();
         ui.heading("Decoding");
         let mut prefer_hardware = self.config.prefer_hardware_decode;
-        if ui.checkbox(&mut prefer_hardware, "Prefer hardware decoding").changed() {
-            self.config.prefer_hardware_decode = prefer_hardware;
-            // A decoder is chosen when a session opens, so the change is applied
-            // by reopening the channels rather than on the next connection.
-            self.manager.set_hardware_preference(prefer_hardware);
-            dirty = true;
-            self.flash(
-                if prefer_hardware {
-                    "channels reopening, the GPU decodes where it can"
-                } else {
-                    "channels reopening on the CPU"
-                },
-                ToastKind::Info,
-            );
-        }
-        ui.label(
-            RichText::new(if self.hardware_decoder {
-                "Pictures are decoded on the GPU where the machine offers a decoder for the stream, and on the CPU everywhere else. Each tile shows which one it got."
-            } else {
-                "This build has no hardware decoder: the CPU decodes, whatever this setting says."
-            })
-            .small()
-            .color(theme::TEXT_DIM),
-        );
+        ui.add_enabled_ui(self.decoder_selectable, |ui| {
+            if ui.checkbox(&mut prefer_hardware, "Prefer hardware decoding").changed() {
+                self.config.prefer_hardware_decode = prefer_hardware;
+                // A decoder is chosen when a session opens, so the change is applied
+                // by reopening the channels rather than on the next connection.
+                self.manager.set_hardware_preference(prefer_hardware);
+                dirty = true;
+                self.flash(
+                    if prefer_hardware {
+                        "channels reopening, the GPU decodes where it can"
+                    } else {
+                        "channels reopening on the CPU"
+                    },
+                    ToastKind::Info,
+                );
+            }
+        });
+        let summary = if !self.decoder_selectable {
+            "Decoding happens in hardware here and nowhere else, so there is nothing to switch."
+        } else if self.hardware_decoder {
+            "Pictures are decoded on the GPU where the machine offers a decoder for the stream, and on the CPU everywhere else. Each tile shows which one it got."
+        } else {
+            "This build has no hardware decoder: the CPU decodes, whatever this setting says."
+        };
+        ui.label(RichText::new(summary).small().color(theme::TEXT_DIM));
 
         ui.separator();
         ui.heading(format!("Cameras ({})", self.config.cameras.len()));

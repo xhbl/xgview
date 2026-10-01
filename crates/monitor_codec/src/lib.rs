@@ -213,6 +213,11 @@ pub struct DecoderCapabilities {
     /// a given stream ends up on it is only known once decoding starts, and
     /// [`VideoStreamInfo::hardware`] is where that answer is reported.
     pub hardware: bool,
+    /// Hardware and software decoding can be chosen between. False where the
+    /// only decoder in the build is a hardware one, which is the case on
+    /// Android: preferring hardware there is not a setting, it is the only way
+    /// the platform decodes, and offering the choice would be a lie.
+    pub selectable: bool,
     /// Backend that will be used by [`create_decoder`].
     pub backend: &'static str,
 }
@@ -221,11 +226,11 @@ pub struct DecoderCapabilities {
 pub fn capabilities() -> DecoderCapabilities {
     #[cfg(target_os = "android")]
     {
-        DecoderCapabilities { hardware: true, backend: "AMediaCodec" }
+        DecoderCapabilities { hardware: true, selectable: false, backend: "AMediaCodec" }
     }
     #[cfg(all(not(target_os = "android"), feature = "ffmpeg", any(windows, target_os = "linux")))]
     {
-        DecoderCapabilities { hardware: true, backend: "ffmpeg" }
+        DecoderCapabilities { hardware: true, selectable: true, backend: "ffmpeg" }
     }
     #[cfg(all(
         not(target_os = "android"),
@@ -233,15 +238,15 @@ pub fn capabilities() -> DecoderCapabilities {
         not(any(windows, target_os = "linux"))
     ))]
     {
-        DecoderCapabilities { hardware: false, backend: "ffmpeg" }
+        DecoderCapabilities { hardware: false, selectable: true, backend: "ffmpeg" }
     }
     #[cfg(all(not(target_os = "android"), not(feature = "ffmpeg"), feature = "h264"))]
     {
-        DecoderCapabilities { hardware: false, backend: "openh264" }
+        DecoderCapabilities { hardware: false, selectable: true, backend: "openh264" }
     }
     #[cfg(all(not(target_os = "android"), not(feature = "ffmpeg"), not(feature = "h264")))]
     {
-        DecoderCapabilities { hardware: false, backend: "null" }
+        DecoderCapabilities { hardware: false, selectable: false, backend: "null" }
     }
 }
 
