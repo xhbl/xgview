@@ -11,12 +11,14 @@
 //! ```
 //!
 //! Decoding runs on the GPU when the caller asks for it and the platform offers
-//! a device. On Windows that device is a Direct3D 11 one, and the pictures are
-//! copied back into system memory afterwards, which is the form the renderer
-//! takes. The copy is what the simpler path costs; the decoding itself, which is
-//! the part that costs, is off the CPU. A device that cannot be opened, and a
-//! stream the hardware decoder is offered no format for, both leave the software
-//! decoder in place: the preference is never allowed to cost a picture.
+//! a device: CUDA and VAAPI on Linux, Direct3D 11 and CUDA on Windows, tried in
+//! that order and falling through to the one below on a machine that has no
+//! driver for the one above. Either way the pictures are copied back into system
+//! memory afterwards, which is the form the renderer takes. The copy is what the
+//! simpler path costs; the decoding itself, which is the part that costs, is off
+//! the CPU. A machine where no device opens, and a stream the chosen decoder is
+//! offered no hardware format for, both leave the software decoder in place: the
+//! preference is never allowed to cost a picture.
 //!
 //! The conversion goes through `libswscale` rather than a hand written loop
 //! because it reads the range the stream announced, so a limited range camera
@@ -63,9 +65,11 @@ pub struct FfmpegDecoder {
     /// Timestamp of the last access unit, reused when the decoder is drained.
     last_pts_us: i64,
     frames: u64,
-    /// Set once a picture comes back in a hardware format, which is the only
-    /// proof that the GPU is doing the decoding: whether the device is accepted
-    /// is up to the decoder, and it is only known at the first picture.
+    /// The device this decoder was handed, when one opened.
+    device: Option<&'static Device>,
+    /// Set once a picture comes back in that device's format, which is the only
+    /// proof the GPU is doing the work: whether the device is accepted is the
+    /// decoder's decision, and it is only known at the first picture.
     hardware: bool,
 }
 
@@ -86,6 +90,7 @@ impl Default for FfmpegDecoder {
             info: None,
             last_pts_us: 0,
             frames: 0,
+            device: None,
             hardware: false,
         }
     }
@@ -119,14 +124,18 @@ impl FfmpegDecoder {
         let mut converted = Picture::empty();
         while decoder.receive_frame(&mut picture).is_ok() {
             // A picture the decoder left on the GPU has to be brought back into
-            // system memory before anything can read it, and the transfer hands
-            // it over as NV12 - the very layout the renderer takes.
-            let source = if picture.format() == Pixel::D3D11 {
-                copy_back(&mut copied_back, &picture)?;
-                self.hardware = true;
-                &copied_back
-            } else {
-                &picture
+            // system memory before anything can read it, and every device hands
+            // it over as NV12 - the very layout the renderer takes. Which format
+            // counts as "on the GPU" is read off the picture rather than assumed
+            // from the request: accepting the device is the decoder's decision,
+            // and this is where it shows.
+            let source = match self.device {
+                Some(device) if picture.format() == device.pixel => {
+                    copy_back(&mut copied_back, &picture)?;
+                    self.hardware = true;
+                    &copied_back
+                }
+                _ => &picture,
             };
             let ready = to_nv12(&mut self.scaler, &mut self.scaler_key, source, &mut converted)?;
             let Some(frame) = pack(ready, pts_us, keyframe) else {
@@ -211,44 +220,121 @@ fn to_nv12<'a>(
     Ok(converted)
 }
 
-/// Opens the device a hardware decoder runs on.
-///
-/// `None` means the device could not be opened, which is not a failure: the
-/// software decoder takes the stream and the picture keeps flowing. Asking for
-/// hardware is a preference, and a machine that cannot honour it is not broken.
+/// One way of decoding on the GPU.
+struct Device {
+    /// What libavcodec is asked for before the decoder is opened.
+    kind: ffmpeg::ffi::AVHWDeviceType,
+    /// The pixel format that device hands its pictures over in, as the format
+    /// negotiation callback names it.
+    picture: ffmpeg::ffi::AVPixelFormat,
+    /// The same format in the wrapper's vocabulary rather than the raw one, for
+    /// recognising it on a picture that came back from the decoder.
+    pixel: Pixel,
+    /// What the decoder calls itself while this device is the one in use.
+    name: &'static str,
+}
+
 #[cfg(windows)]
-fn open_device() -> Option<*mut ffmpeg::ffi::AVBufferRef> {
-    let mut device: *mut ffmpeg::ffi::AVBufferRef = std::ptr::null_mut();
-    // Safety: the call only writes the out parameter, and a null device name
-    // asks for whichever device the type resolves to by default.
-    let code = unsafe {
-        ffmpeg::ffi::av_hwdevice_ctx_create(
-            &mut device,
-            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if code < 0 || device.is_null() {
-        tracing::warn!(
-            target: "xgview::codec",
-            code,
-            "no direct3d device for the hardware decoder, decoding on the cpu"
-        );
+const D3D11VA: Device = Device {
+    kind: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+    picture: ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11,
+    pixel: Pixel::D3D11,
+    name: "ffmpeg + d3d11va",
+};
+#[cfg(any(windows, target_os = "linux"))]
+const CUDA: Device = Device {
+    kind: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+    picture: ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA,
+    pixel: Pixel::CUDA,
+    name: "ffmpeg + cuda",
+};
+#[cfg(target_os = "linux")]
+const VAAPI: Device = Device {
+    kind: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+    picture: ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI,
+    pixel: Pixel::VAAPI,
+    name: "ffmpeg + vaapi",
+};
+
+/// The devices to try, best first.
+///
+/// The order is a preference between devices and not a requirement on any of
+/// them: they are opened in turn, and the first that opens is used. A machine
+/// without the top choice - no NVIDIA driver, no Direct3D 11 - decodes on the
+/// one below it, and a machine with none of them decodes on the CPU.
+///
+/// NVIDIA leads on Linux because VAAPI is a second hand path there: the vendor
+/// driver does not implement it, and reaching it takes a bridging package. On
+/// Windows Direct3D 11 leads instead. It serves every vendor including NVIDIA,
+/// drives the same decoding hardware and asks for nothing beyond the graphics
+/// driver, so CUDA has nothing to win by standing in front of it.
+#[cfg(windows)]
+const DEVICES: &[Device] = &[D3D11VA, CUDA];
+#[cfg(target_os = "linux")]
+const DEVICES: &[Device] = &[CUDA, VAAPI];
+#[cfg(not(any(windows, target_os = "linux")))]
+const DEVICES: &[Device] = &[];
+
+/// Opens the first device of [`DEVICES`] that will have us.
+///
+/// `None` means none of them opened, which is not a failure: the software
+/// decoder takes the stream and the picture keeps flowing. Asking for hardware
+/// is a preference, and a machine that cannot honour it is not broken.
+///
+/// The device name is left to the platform: a null name asks Direct3D for its
+/// default adapter, CUDA for the primary device, and VAAPI for the first DRM
+/// render node it can open.
+fn open_device(wanted: bool) -> Option<(&'static Device, *mut ffmpeg::ffi::AVBufferRef)> {
+    if !wanted {
         return None;
     }
-    tracing::debug!(target: "xgview::codec", "direct3d device opened for the hardware decoder");
-    Some(device)
+    for device in DEVICES {
+        let mut handle: *mut ffmpeg::ffi::AVBufferRef = std::ptr::null_mut();
+        // Safety: the call only writes the out parameter, and a null device
+        // name asks for whichever device the type resolves to by default.
+        let code = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut handle,
+                device.kind,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if code >= 0 && !handle.is_null() {
+            tracing::debug!(
+                target: "xgview::codec",
+                device = device.name,
+                "device opened for the hardware decoder"
+            );
+            return Some((device, handle));
+        }
+        // A missing driver, or missing hardware. That is ordinary on a machine
+        // that has neither, so only the whole list failing is worth warning
+        // about: a machine with one device out of two is not a problem to
+        // report, it is the reason for the list.
+        tracing::debug!(
+            target: "xgview::codec",
+            device = device.name,
+            code,
+            "device turned the hardware decoder down"
+        );
+    }
+    if !DEVICES.is_empty() {
+        tracing::warn!(
+            target: "xgview::codec",
+            "no device for the hardware decoder, decoding on the cpu"
+        );
+    }
+    None
 }
 
 /// Picks the format a decoder outputs.
 ///
 /// The decoder lists what it can produce, most preferred first. A hardware
-/// format is taken when one is offered, and the decoder's own first choice
+/// format is taken when one is on offer, and the decoder's own first choice
 /// otherwise, so that a stream libavcodec will not decode on the GPU still
 /// decodes on the CPU rather than failing the open.
-#[cfg(windows)]
 unsafe extern "C" fn prefer_hardware(
     _context: *mut ffmpeg::ffi::AVCodecContext,
     formats: *const ffmpeg::ffi::AVPixelFormat,
@@ -259,7 +345,9 @@ unsafe extern "C" fn prefer_hardware(
         if format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE {
             break;
         }
-        if format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11 {
+        // A decoder only offers the formats the device it was given can
+        // produce, so whichever of ours appears on the list is the one to take.
+        if DEVICES.iter().any(|device| device.picture == format) {
             return format;
         }
         index += 1;
@@ -270,7 +358,7 @@ unsafe extern "C" fn prefer_hardware(
 /// Copies a picture the decoder left on the GPU back into system memory.
 ///
 /// The destination is an empty frame: the transfer fills in its size and its
-/// pixel format from the source, and for a Direct3D 11 picture that format is
+/// pixel format from the source, and both Direct3D 11 and VAAPI hand it over as
 /// NV12.
 fn copy_back(destination: &mut Picture, source: &Picture) -> Result<()> {
     // Safety: both are live frames owned by this call, and this is the
@@ -326,14 +414,11 @@ fn copy_plane(frame: &Picture, plane: usize, columns: usize, rows: usize) -> Opt
 
 impl VideoDecoder for FfmpegDecoder {
     fn name(&self) -> &'static str {
-        // Named after the path really in use rather than the one asked for: a
-        // decoder that fell back is a software one, whatever the configuration
-        // says.
-        if self.hardware {
-            "ffmpeg + d3d11va"
-        } else {
-            "ffmpeg"
-        }
+        // Named after the device this decoder was given rather than the one the
+        // caller asked for: a decoder that fell back is a software one, whatever
+        // the configuration says. Whether pictures really come off it is a
+        // separate question, and `hardware` is where the answer is kept.
+        self.device.map_or("ffmpeg", |device| device.name)
     }
 
     fn configure(&mut self, config: &DecoderConfig) -> Result<()> {
@@ -379,19 +464,15 @@ impl VideoDecoder for FfmpegDecoder {
         // it may output, in place before the context is opened: that call is
         // where libavcodec chooses between the software and the hardware
         // implementation of the codec.
-        #[cfg(windows)]
-        {
-            if config.hardware {
-                if let Some(device) = open_device() {
-                    // Safety: the context is still unopened, so nothing else can
-                    // observe it. The reference is handed over to the context,
-                    // which releases it when it is freed.
-                    unsafe {
-                        let raw = context.as_mut_ptr();
-                        (*raw).hw_device_ctx = device;
-                        (*raw).get_format = Some(prefer_hardware);
-                    }
-                }
+        let device = open_device(config.hardware);
+        if let Some((_device, handle)) = device {
+            // Safety: the context is still unopened, so nothing else can observe
+            // it. The reference is handed over to the context, which releases it
+            // when it is freed.
+            unsafe {
+                let raw = context.as_mut_ptr();
+                (*raw).hw_device_ctx = handle;
+                (*raw).get_format = Some(prefer_hardware);
             }
         }
 
@@ -406,6 +487,7 @@ impl VideoDecoder for FfmpegDecoder {
         self.scaler_key = None;
         self.info = None;
         self.frames = 0;
+        self.device = device.map(|(device, _)| device);
         self.hardware = false;
         Ok(())
     }

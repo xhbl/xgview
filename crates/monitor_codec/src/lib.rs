@@ -223,11 +223,15 @@ pub fn capabilities() -> DecoderCapabilities {
     {
         DecoderCapabilities { hardware: true, backend: "AMediaCodec" }
     }
-    #[cfg(all(not(target_os = "android"), feature = "ffmpeg", windows))]
+    #[cfg(all(not(target_os = "android"), feature = "ffmpeg", any(windows, target_os = "linux")))]
     {
         DecoderCapabilities { hardware: true, backend: "ffmpeg" }
     }
-    #[cfg(all(not(target_os = "android"), feature = "ffmpeg", not(windows)))]
+    #[cfg(all(
+        not(target_os = "android"),
+        feature = "ffmpeg",
+        not(any(windows, target_os = "linux"))
+    ))]
     {
         DecoderCapabilities { hardware: false, backend: "ffmpeg" }
     }

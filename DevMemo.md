@@ -133,8 +133,21 @@ and for reordering. Open the decoder with `AV_CODEC_FLAG_LOW_DELAY`,
 of several frames.
 
 **Version pairing.** `ffmpeg-next`'s major version tracks the FFmpeg release it
-binds to (9 ↔ `avcodec-63`). A mismatch shows up as a wall of missing symbols at
-link time.
+binds to (9 ↔ `avcodec-63`), but the crate is not tied to that one release: it
+carries version branches from 5.1 up. The same source therefore builds against
+vcpkg's 9.0.2 on Windows and against Ubuntu 24.04's 6.1 on Linux. Worth checking
+before spending a build of FFmpeg from source to match.
+
+**Building on Linux.** The libraries come from the distribution:
+`libavcodec-dev`, `libavformat-dev`, `libavutil-dev`, `libswscale-dev`,
+`libswresample-dev`, and `libavfilter-dev` together with `libavdevice-dev` for
+the features the crate enables by default. A missing one stops the build naming
+the `.pc` file it went looking for, which is the whole diagnosis.
+
+**Building on Android.** Neither FFmpeg nor OpenH264 is needed there, and the
+manifests say so: both are declared for targets other than Android, so enabling
+the crate's default features pulls neither into the Android dependency graph.
+Android decodes through `AMediaCodec`.
 
 ---
 
@@ -201,3 +214,81 @@ at 55 instead of 128 — and neither the counters (`units == decoded`, `errors=0
 nor the wgpu validation layer said a word.
 
 `crates/monitor_gui/src/video.rs` holds all of it.
+
+---
+
+## 7. Decoding on the GPU
+
+**One shape, several devices.** Asking libavcodec to decode on the GPU is three
+steps wherever it runs:
+
+```text
+av_hwdevice_ctx_create    ->  hw_device_ctx
+get_format callback       ->  the pixel format that device produces
+av_hwframe_transfer_data  ->  the picture back in system memory, as NV12
+```
+
+Only two values change between devices: the `AVHWDeviceType` and the matching
+`AVPixelFormat`. That is the whole argument for keeping the hardware path inside
+the FFmpeg backend rather than beside it, one copy per operating system.
+`crates/monitor_codec/src/ffmpeg.rs` holds the steps once and a table of devices,
+a `Device` each: the type, its format in both vocabularies, and the name it
+reports. `prefer_hardware`, the negotiation callback, needs no state - a decoder
+only offers the formats of the device it was given, so whichever entry of the
+table appears in the list is the one to take.
+
+**The devices, best first.** They are tried in order and the first that opens is
+used; a machine with none of them falls through to the CPU.
+
+| Platform | Order | Why |
+| --- | --- | --- |
+| Linux | `cuda`, `vaapi` | The NVIDIA driver does not implement VAAPI. Reaching it takes a bridging package, so on an NVIDIA machine VAAPI is the second hand path. |
+| Windows | `d3d11va`, `cuda` | Direct3D 11 serves every vendor including NVIDIA, drives the same decoding hardware, and asks for nothing beyond the graphics driver. CUDA has nothing to win in front of it. |
+
+A device that turns us down is logged at `debug` and the next is tried; only the
+whole table failing is a `warn`. A machine with one device out of two is not a
+problem to report - it is the reason for the table.
+
+**Requested is not in use.** Two facts are kept apart, and it is worth keeping
+them apart: the `Device` the decoder was handed is what `name()` reports, while
+`hardware` is set only when a picture arrives back in that device's pixel format.
+Accepting the device is the decoder's decision, and the first picture is where it
+shows. The grid shows `hardware`.
+
+**What it is worth, measured.** Four 640x480 sub streams:
+
+| | hardware | software |
+| --- | --- | --- |
+| Windows, Direct3D 11 | 2-3 ms per picture | 4-5 ms |
+| WSL, CUDA | 10-15 ms | 4-19 ms |
+
+The Windows row is the point of the feature: on a native GPU path the decoding
+really does leave the CPU. The WSL row is a warning about the environment, not
+about the code - see below. The first pictures of a session cost 100-300 ms while
+the CUDA context comes up, and FFmpeg reuses the process-wide primary CUDA
+context, so a grid of channels shares one rather than creating a context each.
+
+### Hardware decoding under WSL, and what it can and cannot tell you
+
+WSL2 has no `/dev/dri`, so the DRM render node VAAPI needs is simply not there.
+`LIBVA_DRIVER_NAME=d3d12 vainfo` prints the libva version and exits: Mesa does
+ship `d3d12_drv_video.so`, so the driver is present, but it is the *display* that
+cannot be opened, and there is no way round that from inside the distribution.
+
+What WSL2 does have is `/dev/dxg`, and the NVIDIA driver for it brings
+`libnvcuvid.so`, `libnvidia-encode.so` and `libcuda.so`. With those on the linker
+path and a libavutil built with the CUDA hwcontext, `cuda` opens and decodes for
+real. Two checks before believing it: `nvidia-smi -L` answering, and
+`strings libavutil.so | grep nvcuda` finding the loader.
+
+`h264_cuvid` living in libavcodec is not the same fact. That is a decoder in its
+own right; `cuda` is the hwaccel, and a build can carry either without the other.
+
+**Do not benchmark hardware decoding in WSL.** The GPU is reached through
+`/dev/dxg` and a paravirtualised driver stack, so the copy back into system
+memory - the step no hardware decoder in this design avoids - costs far more than
+it does natively. On a stream small enough that the CPU decoder was never the
+bottleneck, the result is a hardware path that measures no faster than the
+software one and sometimes slower. Use the environment to prove the path opens,
+the fallback is reached when it does not, and the pictures are right. Take the
+numbers from the machine the program will actually run on.
