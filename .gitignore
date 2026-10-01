@@ -1,0 +1,12 @@
+# Rust
+/target
+
+# cargo-ndk output
+/android-build/
+
+# Local configuration
+/config.json
+
+# Editor / OS
+.DS_Store
+*.swp

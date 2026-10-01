@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  XGView Android manifest sample.
+
+  This file is a reference for the cargo-ndk build pipeline (see
+  scripts/build-android.sh). It is *not* consumed by cargo itself: the Android
+  Gradle project generated around the `monitor_android` cdylib is expected to
+  copy this manifest into `app/src/main/AndroidManifest.xml`.
+
+  Design notes:
+    * The activity is a `NativeActivity`, so the whole UI (egui + wgpu) runs
+      inside the native library produced by `monitor_android`.
+    * `android.app.lib_name` must match the `[lib] name` of the crate, which is
+      `monitor_android`.
+    * No launcher icon is referenced on purpose: the sample does not ship
+      `@mipmap` / `@drawable` resources, so the platform default is used.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Network access is required to pull RTSP streams and to run ONVIF / TCP
+         port discovery. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- Start on boot: the receiver below relaunches XGView after the device
+         finished booting. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Keep the screen on while the surveillance wall is displayed. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Broadcast / multicast reception has to be enabled on some TV boxes,
+         otherwise the WS-Discovery probe never leaves the device. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!-- Android TV / leanback is optional, the app also runs on phones and
+         on the plain Android launcher. -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:allowBackup="false"
+        android:hardwareAccelerated="true"
+        android:icon="@android:drawable/ic_menu_camera"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false"
+            android:screenOrientation="landscape">
+
+            <!-- Entry point of the native library. Must match `[lib] name`. -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="monitor_android" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Android TV entry point so the app shows up on the leanback
+                 launcher. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Relaunches the activity after the device booted. See
+             java/com/xhbl/xgview/BootReceiver.java. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>

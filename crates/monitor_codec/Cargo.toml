@@ -1,0 +1,39 @@
+[package]
+name = "monitor_codec"
+version.workspace = true
+authors.workspace = true
+description = "XGView platform video decoding abstraction (AMediaCodec on Android, FFmpeg fallback elsewhere)"
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+bytes = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[features]
+# FFmpeg is the decoder the desktop builds use. OpenH264 stays enabled beside it
+# so the software path is still there to compare against and to fall back on.
+default = ["h264", "ffmpeg"]
+# Enables the in process H.264 software decoder used on Windows and Linux.
+h264 = ["dep:openh264", "dep:openh264-sys2"]
+# Enables the FFmpeg decoder. It needs the FFmpeg development libraries while
+# building, and the matching runtime libraries next to the executable at run
+# time.
+ffmpeg = ["dep:ffmpeg-next"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk = "0.9"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+openh264 = { version = "0.9", optional = true }
+# The decoder's own options are not exposed by the wrapper crate, which the
+# error concealment mode is set through.
+openh264-sys2 = { version = "0.9", optional = true, default-features = false }
+# The desktop decoder. Its major version tracks the FFmpeg release it binds to,
+# so it has to match the libraries found through `VCPKG_ROOT` / `FFMPEG_DIR`.
+ffmpeg-next = { version = "9", optional = true }

@@ -1,0 +1,66 @@
+[package]
+name = "xgview"
+version = "1.0.0"
+authors = ["XHBL <newxhbl@hotmail.com>"]
+description = "A grid viewer for surveillance cameras"
+license = "MIT"
+repository = "https://github.com/xhbl/RustApps/xgview"
+readme = "README.md"
+edition = "2021"
+rust-version = "1.80"
+
+[[bin]]
+name = "xgview"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+monitor_core = { path = "crates/monitor_core" }
+monitor_codec = { path = "crates/monitor_codec" }
+monitor_gui = { path = "crates/monitor_gui" }
+
+[workspace]
+members = [
+    "crates/monitor_core",
+    "crates/monitor_codec",
+    "crates/monitor_gui",
+    "crates/monitor_android",
+]
+resolver = "2"
+
+[workspace.package]
+version = "1.0.0"
+authors = ["XHBL <newxhbl@hotmail.com>"]
+description = "A grid viewer for surveillance cameras"
+license = "MIT"
+repository = "https://github.com/xhbl/RustApps/xgview"
+edition = "2021"
+rust-version = "1.80"
+
+# Dependencies are optimized even in `cargo run`.
+#
+# H.264 decoding lives in C (OpenH264, compiled from source by `cc`), and a
+# build script compiles that C with the `OPT_LEVEL` of the package it belongs
+# to. In the unoptimized `dev` profile that is `-O0`, where a 1080p picture
+# takes around 158 ms instead of a few milliseconds. The receive loop then
+# spends all of its time inside `decode`, drains the camera at 6 fps while the
+# camera produces 25, and the picture freezes and jumps as the camera starts
+# dropping the backlog it cannot push. Only the dependencies are optimized:
+# this crate stays unoptimized, so editing and rebuilding it is still fast.
+[profile.dev.package."*"]
+opt-level = 3
+
+# The decoder converts every picture to RGBA in Rust, once per frame per
+# channel, so it is optimized like the dependencies even in `cargo run`.
+[profile.dev.package.monitor_codec]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

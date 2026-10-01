@@ -1,0 +1,351 @@
+use serde_json::Value;
+
+use crate::config::SynologyConfig;
+use crate::error::{CoreError, Result};
+use crate::model::{CameraOrigin, CameraSource};
+
+/// A camera as reported by `SYNO.SurveillanceStation.Camera` `List`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SynologyCamera {
+    pub id: i64,
+    pub name: String,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub vendor: Option<String>,
+    pub model: Option<String>,
+    pub enabled: bool,
+    pub main_url: Option<String>,
+    pub sub_url: Option<String>,
+}
+
+/// Client for the Synology DSM web API (auth + Surveillance Station).
+#[derive(Debug, Clone)]
+pub struct SynologyClient {
+    config: SynologyConfig,
+    http: reqwest::Client,
+    session: Option<String>,
+}
+
+impl SynologyClient {
+    /// Creates a client from the persisted configuration.
+    pub fn new(config: SynologyConfig) -> Result<Self> {
+        if !config.is_configured() {
+            return Err(CoreError::config("Synology host and account must be configured"));
+        }
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .danger_accept_invalid_certs(true)
+            .build()?;
+        Ok(Self { config, http, session: None })
+    }
+
+    pub fn config(&self) -> &SynologyConfig {
+        &self.config
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
+    /// `SYNO.API.Auth` `login`, requesting a session bound to Surveillance
+    /// Station.
+    pub async fn login(&mut self) -> Result<()> {
+        let account = self
+            .config
+            .account
+            .clone()
+            .unwrap_or_else(|| self.config.username.clone());
+        let url = format!("{}/webapi/auth.cgi", self.config.base_url());
+        let response = self
+            .http
+            .get(&url)
+            .query(&[
+                ("api", "SYNO.API.Auth"),
+                ("version", "6"),
+                ("method", "login"),
+                ("account", account.as_str()),
+                ("passwd", self.config.password.as_str()),
+                ("session", "SurveillanceStation"),
+                ("format", "sid"),
+            ])
+            .send()
+            .await?;
+
+        let payload: Value = response.json().await?;
+        let data = unwrap_success(&payload, "SYNO.API.Auth.login")?;
+        let sid = data
+            .get("sid")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CoreError::parse("Synology login returned no session id"))?;
+        self.session = Some(sid.to_string());
+        tracing::info!(target: "xgview::synology", host = %self.config.host, "Synology session established");
+        Ok(())
+    }
+
+    /// Ensures a session exists before calling a Surveillance Station API.
+    async fn ensure_session(&mut self) -> Result<()> {
+        if self.session.is_none() {
+            self.login().await?;
+        }
+        Ok(())
+    }
+
+    /// `SYNO.API.Auth` `logout`, best effort.
+    pub async fn logout(&mut self) {
+        let Some(session) = self.session.take() else { return };
+        let url = format!("{}/webapi/auth.cgi", self.config.base_url());
+        let result = self
+            .http
+            .get(&url)
+            .query(&[
+                ("api", "SYNO.API.Auth"),
+                ("version", "6"),
+                ("method", "logout"),
+                ("session", "SurveillanceStation"),
+                ("sid", session.as_str()),
+            ])
+            .send()
+            .await;
+        if let Err(err) = result {
+            tracing::debug!(target: "xgview::synology", %err, "Synology logout failed");
+        }
+    }
+
+    async fn call(&self, api: &str, method: &str, version: &str, params: &[(&str, &str)]) -> Result<Value> {
+        let session = self
+            .session
+            .as_deref()
+            .ok_or_else(|| CoreError::config("Synology session is not established"))?;
+        let url = format!("{}/webapi/entry.cgi", self.config.base_url());
+
+        let mut query: Vec<(&str, &str)> = vec![
+            ("api", api),
+            ("method", method),
+            ("version", version),
+            ("sid", session),
+        ];
+        query.extend_from_slice(params);
+
+        let response = self.http.get(&url).query(&query).send().await?;
+        let payload: Value = response.json().await?;
+        unwrap_success(&payload, api).map(Clone::clone)
+    }
+
+    /// Lists every camera bound to Surveillance Station.
+    pub async fn list_cameras(&mut self) -> Result<Vec<SynologyCamera>> {
+        self.ensure_session().await?;
+        let data = self
+            .call(
+                "SYNO.SurveillanceStation.Camera",
+                "List",
+                "9",
+                &[
+                    ("basic", "true"),
+                    ("streamInfo", "true"),
+                    ("additional", r#"["streamInfo"]"#),
+                ],
+            )
+            .await?;
+
+        let cameras = data
+            .get("cameras")
+            .and_then(Value::as_array)
+            .ok_or_else(|| CoreError::parse("Surveillance Station returned no camera list"))?;
+
+        Ok(cameras.iter().map(|camera| self.parse_camera(camera)).collect())
+    }
+
+    fn parse_camera(&self, value: &Value) -> SynologyCamera {
+        let id = value.get("id").and_then(Value::as_i64).unwrap_or_default();
+        let name = value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("camera {id}"));
+        let host = value
+            .get("ip")
+            .or_else(|| value.get("host"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|value| !value.is_empty());
+        let port = value
+            .get("port")
+            .and_then(Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok());
+        let status = value.get("status").and_then(Value::as_i64).unwrap_or(1);
+        let stream_info = value.get("streamInfo").map(normalize_json);
+
+        let main_url = stream_info
+            .as_ref()
+            .and_then(|info| pick_stream_url(info, &["main", "mainStream", "liveview1", "stream1"]));
+        let sub_url = stream_info
+            .as_ref()
+            .and_then(|info| pick_stream_url(info, &["sub", "subStream", "liveview2", "stream2"]));
+
+        SynologyCamera {
+            id,
+            name,
+            host,
+            port,
+            vendor: value.get("vendor").and_then(Value::as_str).map(str::to_string),
+            model: value.get("model").and_then(Value::as_str).map(str::to_string),
+            enabled: status != 0,
+            main_url,
+            sub_url,
+        }
+    }
+
+    /// Imports the NAS cameras as [`CameraSource`] entries, converting the
+    /// Surveillance Station stream URLs into RTSP URLs.
+    pub async fn import_cameras(&mut self) -> Result<Vec<CameraSource>> {
+        let cameras = self.list_cameras().await?;
+        Ok(cameras.iter().map(|camera| self.to_source(camera)).collect())
+    }
+
+    fn to_source(&self, camera: &SynologyCamera) -> CameraSource {
+        let main = camera
+            .main_url
+            .clone()
+            .map(|url| self.absolute_stream_url(&url))
+            .unwrap_or_else(|| self.fallback_stream_url(camera.id, 0));
+        let sub = camera
+            .sub_url
+            .clone()
+            .map(|url| self.absolute_stream_url(&url))
+            .unwrap_or_else(|| self.fallback_stream_url(camera.id, 1));
+
+        CameraSource {
+            id: format!("syno-{}", camera.id),
+            name: camera.name.clone(),
+            vendor: camera.vendor.clone(),
+            model: camera.model.clone(),
+            host: camera.host.clone().unwrap_or_else(|| self.config.host.clone()),
+            onvif_port: 80,
+            rtsp_main: main,
+            rtsp_sub: Some(sub),
+            username: Some(self.config.username.clone()),
+            password: Some(self.config.password.clone()),
+            enabled: camera.enabled,
+            tags: vec!["synology".to_string()],
+            origin: CameraOrigin::Synology,
+            main_profile: None,
+            sub_profile: None,
+        }
+    }
+
+    /// Makes a stream URL returned by the NAS absolute.
+    fn absolute_stream_url(&self, url: &str) -> String {
+        if url.starts_with("rtsp://") {
+            url.to_string()
+        } else if url.starts_with('/') {
+            format!("rtsp://{}:{}{}", self.config.host, 554, url)
+        } else {
+            format!(
+                "rtsp://{}:{}/{}",
+                self.config.host,
+                554,
+                url.trim_start_matches('/')
+            )
+        }
+    }
+
+    /// Surveillance Station camera proxy URL used when the API did not return
+    /// an explicit stream URL. `stream_type` 0 = main, 1 = sub.
+    fn fallback_stream_url(&self, camera_id: i64, stream_type: u8) -> String {
+        format!(
+            "rtsp://{}:554/SurveillanceStation/camera.cgi?id={camera_id}&streamType={stream_type}",
+            self.config.host
+        )
+    }
+}
+
+/// `streamInfo` is sometimes returned as a JSON encoded string.
+fn normalize_json(value: &Value) -> Value {
+    match value {
+        Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+        other => other.clone(),
+    }
+}
+
+/// Looks for a stream URL inside a `streamInfo` object using several known
+/// key spellings.
+fn pick_stream_url(info: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(entry) = info.get(*key) {
+            if let Some(url) = entry.get("url").and_then(Value::as_str) {
+                if !url.is_empty() {
+                    return Some(url.to_string());
+                }
+            }
+            if let Some(url) = entry.as_str() {
+                if !url.is_empty() {
+                    return Some(url.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Validates the `success` flag of a DSM response.
+fn unwrap_success<'a>(payload: &'a Value, api: &str) -> Result<&'a Value> {
+    let success = payload.get("success").and_then(Value::as_bool).unwrap_or(false);
+    if !success {
+        let code = payload
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_i64)
+            .unwrap_or(-1);
+        return Err(CoreError::network(format!("{api} failed with DSM error code {code}")));
+    }
+    payload
+        .get("data")
+        .ok_or_else(|| CoreError::parse(format!("{api} returned no data")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> SynologyConfig {
+        SynologyConfig {
+            host: "nas.local".into(),
+            username: "admin".into(),
+            password: "secret".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn builds_fallback_urls() {
+        let client = SynologyClient::new(config()).unwrap();
+        assert_eq!(
+            client.fallback_stream_url(3, 1),
+            "rtsp://nas.local:554/SurveillanceStation/camera.cgi?id=3&streamType=1"
+        );
+        assert_eq!(
+            client.absolute_stream_url("/SurveillanceStation/live?id=1"),
+            "rtsp://nas.local:554/SurveillanceStation/live?id=1"
+        );
+    }
+
+    #[test]
+    fn picks_stream_url_from_json_string() {
+        let info = normalize_json(&Value::String(
+            r#"{"main":{"url":"rtsp://10.0.0.9:554/main"},"sub":{"url":"rtsp://10.0.0.9:554/sub"}}"#.into(),
+        ));
+        assert_eq!(
+            pick_stream_url(&info, &["main", "mainStream"]).as_deref(),
+            Some("rtsp://10.0.0.9:554/main")
+        );
+        assert_eq!(
+            pick_stream_url(&info, &["sub"]).as_deref(),
+            Some("rtsp://10.0.0.9:554/sub")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_configuration() {
+        assert!(SynologyClient::new(SynologyConfig::default()).is_err());
+    }
+}
