@@ -103,6 +103,8 @@ this bug; they are noise once the session is understood.
 | FOSCAM MCS2020 | An `SEI` precedes every picture, and one FU-A sequence carries the whole access unit — see §1. |
 | Reolink doorbell | Requires HTTP Digest and answers `401` to the first `DESCRIBE`. |
 | Several | Set the RTP marker bit on the packets carrying parameter sets rather than on the last slice, so pictures also have to be closed by a change of RTP timestamp. |
+| FOSCAM R2 V4 | Sends around thirty pictures before its first `IDR`. A decoder rejects every one of them for want of a reference frame, so the first second of a session is a burst of failures that clears itself — see §4 for what that does to libavcodec's output. |
+| Reolink doorbell | Does not really serve four concurrent sessions. With four open the stream degrades to a picture every six to eight seconds where it runs at fifteen, and the fourth suffers first. Nothing is refused and nothing is reported — see §8. |
 
 ---
 
@@ -148,6 +150,21 @@ the `.pc` file it went looking for, which is the whole diagnosis.
 manifests say so: both are declared for targets other than Android, so enabling
 the crate's default features pulls neither into the Android dependency graph.
 Android decodes through `AMediaCodec`.
+
+**libavcodec logs to `stderr` on its own.** It writes there directly unless it is
+given a callback, with no timestamp, no target and no filter that can reach it,
+and it reports at error level what a live camera produces routinely. The camera
+in §3 is the example: thirty pictures rejected for want of a reference frame,
+six lines each, which is nearly two hundred unformatted lines for one camera in
+one session. The backend installs `av_log_set_callback` and hands the messages to
+`tracing` at debug level instead, which leaves the console the one line that says
+what is going on — the pipeline's own warning — and brings the detail back under
+`RUST_LOG=xgview=debug`.
+
+That callback is the one place where the platforms differ in a *type* rather than
+in a value: a `va_list` is a plain pointer on Windows and a pointer to
+`__va_list_tag` on Linux, so its signature is spelled once per platform behind an
+alias.
 
 ---
 
@@ -292,3 +309,44 @@ bottleneck, the result is a hardware path that measures no faster than the
 software one and sometimes slower. Use the environment to prove the path opens,
 the fallback is reached when it does not, and the pictures are right. Take the
 numbers from the machine the program will actually run on.
+
+---
+
+## 8. What a full grid costs
+
+Sixteen channels — four cameras pulled four times each, 640x480 sub streams,
+hardware decoding — measured over a minute of steady state:
+
+| | |
+| --- | --- |
+| CPU | 0.67 of a core |
+| Working set | 725 MB |
+| Threads | 391 |
+| Per picture | 1-4 ms to decode and hand it over |
+| Decode failures, units dropped | none, beyond the session-start burst of §3 |
+
+This side is not what runs out first; the cameras are. The doorbell of §3 does
+not really serve four sessions at once, which is why a grid built from a few
+cameras repeated tests the cameras rather than the wall. Sixteen *different*
+cameras would put the same load here.
+
+**A session can go quiet without going away**, which is the failure the run was
+worth having. Timing a session by its packets only catches a stream that stops
+entirely; the doorbell kept talking, at one access unit every few seconds, so
+every counter looked calm while the tile had stopped moving. The pipeline now
+times a session by its *pictures*, and the deadline it allows is learned from the
+stream rather than fixed: twice the shortest interval between two of its key
+frames, floored at five seconds and capped at fifteen, with a longer floor before
+the first picture arrives. Measured afterwards on the same four-by-four: four
+verdicts, one per instance of the doorbell, and none on the other twelve
+channels.
+
+Learned rather than set, because the only legitimate reason for a long gap
+between pictures is a wait for the next key frame, and a group of pictures is one
+second on one camera and ten on another. It is the *shortest* interval that is
+kept, never the most recent one: an estimate that followed the stream's recent
+behaviour would be fed by the very condition the deadline exists to detect, and a
+stream that had begun to dribble would widen its own deadline until it never
+fired. On the cameras to hand it reads five seconds for three of them and six for
+the MCS2020, whose group is three seconds - the camera that a fixed five second
+deadline was quietly cutting off whenever it waited for a key frame.
