@@ -13,6 +13,7 @@
 //! an ordinary texture.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use monitor_codec::{plane_stride, ColorSpace};
 use monitor_core::pipeline::VideoFrame;
@@ -113,7 +114,21 @@ pub struct VideoRenderer {
     channels: HashMap<usize, Channel>,
     /// Batches the conversion passes of one UI frame into a single submission.
     encoder: Option<wgpu::CommandEncoder>,
+    /// Where the time of the current window went; see
+    /// [`VideoRenderer::report_upload_cost`].
+    cost: UploadCost,
+    last_report: Instant,
 }
+
+/// Time spent uploading pictures, summed over the pictures of one report.
+#[derive(Debug, Default)]
+struct UploadCost {
+    pictures: u64,
+    upload_us: u64,
+}
+
+/// How often the upload cost is reported.
+const UPLOAD_REPORT: Duration = Duration::from_secs(2);
 
 impl VideoRenderer {
     /// Builds the pipeline once, from the renderer eframe already runs.
@@ -206,6 +221,8 @@ impl VideoRenderer {
             sampler,
             channels: HashMap::new(),
             encoder: None,
+            cost: UploadCost::default(),
+            last_report: Instant::now(),
         }
     }
 
@@ -240,14 +257,39 @@ impl VideoRenderer {
             return;
         };
 
+        let upload_started = Instant::now();
         write_plane(&self.state.queue, &channel.planes[0], size, stride, &frame.y);
         write_plane(&self.state.queue, &channel.planes[1], chroma, stride, &frame.uv);
         // The colour description travels with the picture, so the shader reads
         // the matrix and range this stream was coded with rather than a fixed
         // pair. It is 32 bytes, cheap enough to write every frame.
         self.state.queue.write_buffer(&channel.colour, 0, &colour_uniform(frame.colorspace));
+        self.cost.upload_us += upload_started.elapsed().as_micros() as u64;
+        self.cost.pictures += 1;
 
         self.convert(index);
+        self.report_upload_cost();
+    }
+
+    /// Reports the cost of uploading one picture, every few seconds.
+    ///
+    /// `write_texture` copies into a staging buffer on the CPU, and that copy is
+    /// what this measures: the transfer itself happens after the call returns.
+    /// It is the same bargain the decoder's own report makes, on the far side of
+    /// the picture.
+    fn report_upload_cost(&mut self) {
+        if self.cost.pictures == 0 || self.last_report.elapsed() < UPLOAD_REPORT {
+            return;
+        }
+        let pictures = self.cost.pictures as f64;
+        tracing::debug!(
+            target: "xgview::video",
+            pictures = self.cost.pictures,
+            upload_ms = self.cost.upload_us as f64 / pictures / 1000.0,
+            "where an upload's cost goes"
+        );
+        self.cost = UploadCost::default();
+        self.last_report = Instant::now();
     }
 
     /// Submits the conversion passes recorded since the last call.

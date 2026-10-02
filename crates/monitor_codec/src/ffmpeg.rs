@@ -33,6 +33,7 @@
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::Once;
+use std::time::{Duration, Instant};
 
 // The crate is published as `ffmpeg-next`, and the module carrying this backend
 // is already called `ffmpeg`, so the crate is brought in under a plain alias.
@@ -73,7 +74,31 @@ pub struct FfmpegDecoder {
     /// proof the GPU is doing the work: whether the device is accepted is the
     /// decoder's decision, and it is only known at the first picture.
     hardware: bool,
+    /// Where the time of the current window went; see
+    /// [`FfmpegDecoder::report_transfer_cost`].
+    cost: TransferCost,
+    last_report: Instant,
 }
+
+/// Time spent in each step that turns a decoded picture into planes, summed
+/// over the pictures of the current report.
+///
+/// The steps are the ones standing between the decoder and the renderer, and
+/// only the first is the decoder's own work: `copy_back` brings a hardware
+/// picture back into system memory, `convert` runs libswscale when the picture
+/// is not already NV12, and `pack` walks the planes into the padded layout the
+/// upload wants. Which of them costs is what decides whether removing the
+/// copies is worth it at all.
+#[derive(Debug, Default)]
+struct TransferCost {
+    pictures: u64,
+    copy_back_us: u64,
+    convert_us: u64,
+    pack_us: u64,
+}
+
+/// How often the transfer cost is reported.
+const TRANSFER_REPORT: Duration = Duration::from_secs(2);
 
 // Safety: a decoder is owned outright by the channel worker that created it and
 // is never touched from two threads at once; the renderer only ever sees the
@@ -94,6 +119,8 @@ impl Default for FfmpegDecoder {
             frames: 0,
             device: None,
             hardware: false,
+            cost: TransferCost::default(),
+            last_report: Instant::now(),
         }
     }
 }
@@ -131,6 +158,7 @@ impl FfmpegDecoder {
             // counts as "on the GPU" is read off the picture rather than assumed
             // from the request: accepting the device is the decoder's decision,
             // and this is where it shows.
+            let copy_started = Instant::now();
             let source = match self.device {
                 Some(device) if picture.format() == device.pixel => {
                     copy_back(&mut copied_back, &picture)?;
@@ -139,7 +167,11 @@ impl FfmpegDecoder {
                 }
                 _ => &picture,
             };
+            self.cost.copy_back_us += copy_started.elapsed().as_micros() as u64;
+
+            let convert_started = Instant::now();
             let ready = to_nv12(&mut self.scaler, &mut self.scaler_key, source, &mut converted)?;
+            self.cost.convert_us += convert_started.elapsed().as_micros() as u64;
             // The matrix is the one the stream announced, and stays the stream's
             // whatever happens here. The range does not: a picture that went
             // through libswscale came out in the studio range the NV12 planes
@@ -152,9 +184,12 @@ impl FfmpegDecoder {
                     ColorRange::Limited
                 },
             };
+            let pack_started = Instant::now();
             let Some(frame) = pack(ready, pts_us, keyframe, colorspace) else {
                 continue;
             };
+            self.cost.pack_us += pack_started.elapsed().as_micros() as u64;
+            self.cost.pictures += 1;
             if self.info.is_none() {
                 self.info = Some(VideoStreamInfo {
                     codec,
@@ -167,7 +202,32 @@ impl FfmpegDecoder {
             self.frames += 1;
             frames.push(frame);
         }
+        self.report_transfer_cost();
         Ok(frames)
+    }
+
+    /// Reports where the cost of a decoded picture went, every few seconds.
+    ///
+    /// The three steps sit between the decoder and the renderer and the report
+    /// says which of them costs. Only the first is the decoder's own work, and
+    /// whether the copies are worth removing is a question this answers rather
+    /// than a matter of opinion.
+    fn report_transfer_cost(&mut self) {
+        if self.cost.pictures == 0 || self.last_report.elapsed() < TRANSFER_REPORT {
+            return;
+        }
+        let pictures = self.cost.pictures as f64;
+        let per_picture = |micros: u64| micros as f64 / pictures / 1000.0;
+        tracing::debug!(
+            target: "xgview::codec",
+            pictures = self.cost.pictures,
+            copy_back_ms = per_picture(self.cost.copy_back_us),
+            convert_ms = per_picture(self.cost.convert_us),
+            pack_ms = per_picture(self.cost.pack_us),
+            "where a picture's cost goes"
+        );
+        self.cost = TransferCost::default();
+        self.last_report = Instant::now();
     }
 }
 

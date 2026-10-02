@@ -441,3 +441,59 @@ logcat (`adb logcat -s xgview`), and `monitor_android` no longer drops
 `run_android`'s error: the GL attempt above failed silently for exactly that
 reason before the logger existed.
 
+---
+
+## 10. What the copies between the decoder and the GPU cost
+
+Measured on the desktop (Windows, Direct3D 11 decoding), eight cameras in a
+three-by-three grid, per picture, steady state:
+
+| Stream | `copy_back` | `convert` | `pack` | upload (CPU side) |
+| --- | --- | --- | --- | --- |
+| 640x480 sub | ~0.6 ms | 0 | ~0.05 ms | ~0.25 ms |
+| 2560x1920 main | ~4.8 ms | 0 | ~1.4 ms | ~0.25 ms |
+
+The numbers come from the code itself, every two seconds at debug level:
+`xgview::codec` ("where a picture's cost goes") for the first three,
+`xgview::video` ("where an upload's cost goes") for the last. The decoder's
+`copy_back` is the `av_hwframe_transfer_data` of §7, `convert` is libswscale,
+`pack` is the row walk into the padded plane layout of §6, and the upload is the
+CPU side of `write_texture` - the transfer itself happens after the call
+returns.
+
+**`convert` is always zero on the hardware path.** Every device hands its
+picture back as NV12 already, so libswscale never runs; the step is there for
+the software path and for a device that answers in another format. Worth knowing
+before blaming the converter for anything.
+
+**`copy_back` is the only step that costs**, and it scales with the picture:
+0.6 ms at 640x480, 4.8 ms at 2560x1920. At 20 fps that is about 1.2% of a core
+per 640x480 channel, and about 10% per 2560x1920 one. `pack` is 0.05 ms at
+640x480 and 1.4 ms only at 2560x1920, where the same row walk crosses six and a
+half times as many bytes. The upload's CPU side is a quarter of a millisecond
+either way.
+
+**The measurement is what rules the two copy-removing designs out**, rather than
+an opinion about them:
+
+- Writing the transfer straight into the padded layout, and pooling the planes
+  so the per-picture allocation and its zero fill go away, would remove `pack`:
+  0.05 ms at the sizes that matter. The copy it removes is not the cost.
+- True zero copy - decoding into the very texture the shader samples - is what
+  would remove the 0.6-4.8 ms, and it is not reachable from here:
+  - `wgpu::Device::create_texture_from_hal` is public, but the `wgpu_hal::dx12`
+    `Texture` it takes has private fields and no constructor from a raw
+    resource, and wgpu's Direct3D 12 backend contains no `OpenSharedHandle` at
+    all. wgpu cannot be handed an outside texture without patching it.
+  - the decoder's textures come from FFmpeg's own Direct3D 11 device while wgpu
+    runs on Direct3D 12, and FFmpeg neither creates its pool with the shared
+    flags cross-device sharing needs nor accepts a texture we made.
+  - the two devices would have to synchronise through a fence wgpu offers no way
+    to wait on.
+
+  That is a patched `wgpu-hal`, a change to FFmpeg's hardware path and a
+  hand-rolled cross-device fence, against about a tenth of a core per 2560x1920
+  channel - and the software path, which is what a machine without a device
+  falls back to, would not gain from it at all.
+
+
