@@ -14,10 +14,8 @@
 
 use std::collections::HashMap;
 
+use monitor_codec::plane_stride;
 use monitor_core::pipeline::VideoFrame;
-
-/// Row alignment wgpu demands of a texture upload, in bytes.
-const ROW_ALIGNMENT: usize = 256;
 
 /// The format egui reads a picture in.
 ///
@@ -96,9 +94,6 @@ struct Channel {
     surface: VideoSurface,
     /// Picture size in pixels; `surface.size` is the same, rounded for egui.
     size: (u32, u32),
-    /// Padded copy of one plane, reused between uploads so a picture does not
-    /// allocate.
-    scratch: Vec<u8>,
 }
 
 /// Uploads decoded pictures and keeps one set of textures per channel.
@@ -209,8 +204,14 @@ impl VideoRenderer {
         }
         let (width, height) = (size.0 as usize, size.1 as usize);
         let chroma = chroma_size(size);
-        let (chroma_width, chroma_height) = (chroma.0 as usize, chroma.1 as usize);
-        if frame.y.len() < width * height || frame.uv.len() < chroma_width * 2 * chroma_height {
+        let chroma_height = chroma.1 as usize;
+        // The decoder laid the planes out for an upload already - every row
+        // padded to the boundary wgpu wants - so they go to the GPU as they
+        // are, without a second walk over the picture here. Both planes share a
+        // row length: one chroma pair covers two luma samples, so a chroma row
+        // of U and V bytes is as long as a luma row.
+        let stride = plane_stride(width);
+        if frame.y.len() < stride * height || frame.uv.len() < stride * chroma_height {
             return;
         }
 
@@ -221,15 +222,8 @@ impl VideoRenderer {
             return;
         };
 
-        // wgpu wants every uploaded row to start on a 256 byte boundary, so both
-        // planes are copied into a padded buffer. The two share a row length: one
-        // chroma pair covers two luma samples, so a chroma row of U and V bytes is
-        // as long as a luma row.
-        let stride = next_multiple_of(width, ROW_ALIGNMENT);
-        copy_plane(&mut channel.scratch, &frame.y, stride, width, height);
-        write_plane(&self.state.queue, &channel.planes[0], size, stride, &channel.scratch);
-        copy_plane(&mut channel.scratch, &frame.uv, stride, width, chroma_height);
-        write_plane(&self.state.queue, &channel.planes[1], chroma, stride, &channel.scratch);
+        write_plane(&self.state.queue, &channel.planes[0], size, stride, &frame.y);
+        write_plane(&self.state.queue, &channel.planes[1], chroma, stride, &frame.uv);
 
         self.convert(index);
     }
@@ -309,7 +303,6 @@ impl VideoRenderer {
                 bind_group,
                 surface: VideoSurface { id, size: egui::vec2(size.0 as f32, size.1 as f32) },
                 size,
-                scratch: Vec::new(),
             },
         );
     }
@@ -348,11 +341,6 @@ fn chroma_size(size: (u32, u32)) -> (u32, u32) {
     (size.0.div_ceil(2), size.1.div_ceil(2))
 }
 
-/// Rounds `value` up to the next multiple of `alignment`.
-fn next_multiple_of(value: usize, alignment: usize) -> usize {
-    value.div_ceil(alignment) * alignment
-}
-
 /// Creates one sampled plane texture.
 fn create_plane(
     device: &wgpu::Device,
@@ -370,20 +358,6 @@ fn create_plane(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
-}
-
-/// Copies `rows` rows of `columns` bytes into a buffer whose rows are `stride`.
-fn copy_plane(scratch: &mut Vec<u8>, source: &[u8], stride: usize, columns: usize, rows: usize) {
-    scratch.clear();
-    scratch.resize(stride * rows, 0);
-    for row in 0..rows {
-        let (from, to) = (row * columns, row * stride);
-        if let (Some(source), Some(target)) =
-            (source.get(from..from + columns), scratch.get_mut(to..to + columns))
-        {
-            target.copy_from_slice(source);
-        }
-    }
 }
 
 /// Uploads one padded plane into its texture.

@@ -33,7 +33,7 @@
 use jpeg_decoder::{Decoder as JpegDecoder, PixelFormat as JpegPixelFormat};
 
 use crate::{
-    Codec, CodecError, DecodedFrame, DecoderConfig, PixelFormat, Result, VideoDecoder,
+    plane_stride, Codec, CodecError, DecodedFrame, DecoderConfig, PixelFormat, Result, VideoDecoder,
     VideoStreamInfo,
 };
 
@@ -165,7 +165,8 @@ impl Layout {
 ///
 /// Chroma is averaged over each two by two block rather than taken from one
 /// pixel of it, which is what keeps a colour edge from stepping by a whole
-/// sample.
+/// sample. Rows are padded the way the upload wants them, so the picture is
+/// walked once here and never again.
 fn to_nv12(
     pixels: &[u8],
     layout: Layout,
@@ -175,15 +176,16 @@ fn to_nv12(
     if width == 0 || height == 0 {
         return None;
     }
-    let stride = layout.stride();
-    if pixels.len() < width * height * stride {
+    let sample = layout.stride();
+    if pixels.len() < width * height * sample {
         return None;
     }
 
     let chroma_width = width.div_ceil(2);
     let chroma_height = height.div_ceil(2);
+    let padded = plane_stride(width);
 
-    let mut luma_plane = vec![0u8; width * height];
+    let mut luma_plane = vec![0u8; padded * height];
     // Summed per chroma sample as the luma pass runs, then divided once the
     // whole block has been added up. A block at an odd edge is short a pixel,
     // which is why the count is kept rather than assumed to be four.
@@ -192,7 +194,7 @@ fn to_nv12(
 
     for row in 0..height {
         for column in 0..width {
-            let offset = (row * width + column) * stride;
+            let offset = (row * width + column) * sample;
             let (luma, blue, red) = match layout {
                 Layout::Rgb => {
                     let red = i32::from(pixels[offset]);
@@ -207,7 +209,7 @@ fn to_nv12(
                     (luma_of(grey, grey, grey), 128, 128)
                 }
             };
-            luma_plane[row * width + column] = clamp8(luma);
+            luma_plane[row * padded + column] = clamp8(luma);
 
             let block = (row / 2) * chroma_width + column / 2;
             chroma_sums[block][0] += u32::from(clamp8(blue));
@@ -216,11 +218,14 @@ fn to_nv12(
         }
     }
 
-    let mut chroma_plane = vec![0u8; chroma_width * chroma_height * 2];
-    for (index, sums) in chroma_sums.iter().enumerate() {
-        let count = chroma_counts[index].max(1);
-        chroma_plane[index * 2] = (sums[0] / count) as u8;
-        chroma_plane[index * 2 + 1] = (sums[1] / count) as u8;
+    let mut chroma_plane = vec![0u8; padded * chroma_height];
+    for row in 0..chroma_height {
+        for column in 0..chroma_width {
+            let block = row * chroma_width + column;
+            let count = chroma_counts[block].max(1);
+            chroma_plane[row * padded + column * 2] = (chroma_sums[block][0] / count) as u8;
+            chroma_plane[row * padded + column * 2 + 1] = (chroma_sums[block][1] / count) as u8;
+        }
     }
     Some((luma_plane, chroma_plane))
 }
@@ -253,19 +258,40 @@ mod tests {
         pixels.iter().flatten().copied().collect()
     }
 
+    /// One plane's picture bytes, with the row padding taken back out.
+    ///
+    /// The planes leave padded for the upload, so a test reading one straight
+    /// through would be reading its padding as much as its picture.
+    fn content(plane: &[u8], width: usize, row_bytes: usize, rows: usize) -> Vec<u8> {
+        let stride = plane_stride(width);
+        (0..rows)
+            .flat_map(|row| plane[row * stride..row * stride + row_bytes].to_vec())
+            .collect()
+    }
+
     #[test]
     fn white_and_black_land_on_the_range_the_shader_expands() {
         let white = rgb_bytes(&[[255, 255, 255]; 4]);
         let (luma, chroma) = to_nv12(&white, Layout::Rgb, 2, 2).unwrap();
         // Limited range white is 235, not 255: the shader multiplies by
         // 255/219 after subtracting 16, so full white has to arrive as 235.
-        assert_eq!(luma, vec![235u8; 4]);
-        assert_eq!(chroma, vec![128u8; 2]);
+        assert_eq!(content(&luma, 2, 2, 2), vec![235u8; 4]);
+        assert_eq!(content(&chroma, 2, 2, 1), vec![128u8; 2]);
 
         let black = rgb_bytes(&[[0, 0, 0]; 4]);
         let (luma, chroma) = to_nv12(&black, Layout::Rgb, 2, 2).unwrap();
-        assert_eq!(luma, vec![16u8; 4]);
-        assert_eq!(chroma, vec![128u8; 2]);
+        assert_eq!(content(&luma, 2, 2, 2), vec![16u8; 4]);
+        assert_eq!(content(&chroma, 2, 2, 1), vec![128u8; 2]);
+    }
+
+    #[test]
+    fn every_row_is_padded_so_the_upload_can_take_it() {
+        let (luma, chroma) = to_nv12(&rgb_bytes(&[[9, 9, 9]; 4]), Layout::Rgb, 2, 2).unwrap();
+        // Two pixels wide, so a row is padded well past the picture: the upload
+        // wants every row to start on the alignment.
+        assert_eq!(luma.len(), plane_stride(2) * 2);
+        assert_eq!(chroma.len(), plane_stride(2));
+        assert!(luma.len() > 2 * 2, "a row is longer than the picture in it");
     }
 
     #[test]
@@ -276,6 +302,7 @@ mod tests {
         let blue = [0u8, 0, 255];
         let pixels = [red, red, blue, blue, red, red, blue, blue];
         let (_, chroma) = to_nv12(&rgb_bytes(&pixels), Layout::Rgb, 4, 2).unwrap();
+        let chroma = content(&chroma, 4, 4, 1);
         assert_eq!(
             chroma,
             vec![
@@ -296,6 +323,7 @@ mod tests {
         // blue has to come out as the average of the two, not as either one.
         let pixels = [[255u8, 0, 0], [255, 0, 0], [0, 0, 255], [0, 0, 255]];
         let (_, chroma) = to_nv12(&rgb_bytes(&pixels), Layout::Rgb, 2, 2).unwrap();
+        let chroma = content(&chroma, 2, 2, 1);
         let averages = |first: i32, second: i32| ((first + second) / 2) as u8;
         assert_eq!(
             chroma[0],
@@ -311,8 +339,8 @@ mod tests {
     fn a_grey_picture_gets_a_neutral_chroma_plane() {
         let grey = vec![128u8; 4];
         let (luma, chroma) = to_nv12(&grey, Layout::Gray, 2, 2).unwrap();
-        assert_eq!(luma, vec![126u8; 4]);
-        assert_eq!(chroma, vec![128u8; 2]);
+        assert_eq!(content(&luma, 2, 2, 2), vec![126u8; 4]);
+        assert_eq!(content(&chroma, 2, 2, 1), vec![128u8; 2]);
     }
 
     #[test]
@@ -322,9 +350,8 @@ mod tests {
         // four, two of which do not exist.
         let pixels = vec![255u8; 3 * 3 * 3];
         let (luma, chroma) = to_nv12(&pixels, Layout::Rgb, 3, 3).unwrap();
-        assert_eq!(luma.len(), 9);
-        assert_eq!(chroma.len(), 8);
-        assert_eq!(chroma, vec![128u8; 8]);
+        assert_eq!(content(&luma, 3, 3, 3).len(), 9);
+        assert_eq!(content(&chroma, 3, 4, 2), vec![128u8; 8]);
     }
 
     #[test]
@@ -369,13 +396,17 @@ mod tests {
         assert_eq!(frame.format, PixelFormat::Nv12);
         assert_eq!(frame.planes.len(), 2);
         let (luma, chroma) = (&frame.planes[0], &frame.planes[1]);
-        assert_eq!(luma.len(), (frame.width * frame.height) as usize);
-        assert_eq!(chroma.len(), luma.len() / 2);
+        let (width, height) = (frame.width as usize, frame.height as usize);
+        // Every row carries the alignment's padding, which is what lets the
+        // renderer hand the plane to the GPU without walking it again.
+        assert_eq!(luma.len(), plane_stride(width) * height);
+        assert_eq!(chroma.len(), plane_stride(width) * height.div_ceil(2));
         // A picture that decoded to nothing but the black level would satisfy
         // every length above and still be wrong.
-        let first = luma[0];
+        let picture = content(luma, width, width, height);
+        let first = picture[0];
         assert!(
-            luma.iter().any(|value| *value != first),
+            picture.iter().any(|value| *value != first),
             "the luma plane is a flat colour, which a camera picture never is"
         );
         assert_eq!(decoder.frames(), 1);

@@ -24,7 +24,8 @@ use openh264_sys2::{
 };
 
 use crate::{
-    Codec, CodecError, DecodedFrame, DecoderConfig, PixelFormat, Result, VideoDecoder, VideoStreamInfo,
+    plane_stride, Codec, CodecError, DecodedFrame, DecoderConfig, PixelFormat, Result, VideoDecoder,
+    VideoStreamInfo,
 };
 
 /// H.264 decoder backed by OpenH264.
@@ -57,7 +58,8 @@ impl H264Decoder {
 /// keeps the two chroma halves interleaved rather than apart, so the chroma is
 /// repacked and nothing else: the colour matrix belongs to the renderer, which
 /// runs it on the GPU for the whole grid at once instead of here, per picture,
-/// per channel.
+/// per channel. The rows of the frame written here are padded the way the
+/// upload wants them, so this one walk over the picture is the only one.
 fn to_frame(
     (y_plane, u_plane, v_plane): (&[u8], &[u8], &[u8]),
     strides: (usize, usize, usize),
@@ -70,21 +72,22 @@ fn to_frame(
     }
     let chroma_width = width.div_ceil(2);
     let chroma_height = height.div_ceil(2);
+    let padded = plane_stride(width);
 
-    let mut luma = Vec::with_capacity(width * height);
+    let mut luma = vec![0u8; padded * height];
     for row in 0..height {
         let source = &y_plane[row * strides.0..];
-        luma.extend_from_slice(&source[..width]);
+        luma[row * padded..row * padded + width].copy_from_slice(&source[..width]);
     }
 
     // One byte of U followed by one of V covers two luma samples, so a chroma
     // row is as long as a luma row and there are half as many of them.
-    let mut chroma = Vec::with_capacity(chroma_width * 2 * chroma_height);
+    let mut chroma = vec![0u8; padded * chroma_height];
     for row in 0..chroma_height {
         let (u_row, v_row) = (&u_plane[row * strides.1..], &v_plane[row * strides.2..]);
         for column in 0..chroma_width {
-            chroma.push(u_row[column]);
-            chroma.push(v_row[column]);
+            chroma[row * padded + column * 2] = u_row[column];
+            chroma[row * padded + column * 2 + 1] = v_row[column];
         }
     }
 
@@ -310,9 +313,15 @@ mod tests {
             let Ok(produced) = decoder.decode(packet, 0, keyframe) else { continue };
             for frame in produced {
                 assert_eq!(frame.format, PixelFormat::Nv12);
-                let samples = frame.width as usize * frame.height as usize;
-                assert_eq!(frame.planes[0].len(), samples, "one luma byte per pixel");
-                assert_eq!(frame.planes[1].len(), samples / 2, "one chroma pair per two pixels");
+                let (width, height) = (frame.width as usize, frame.height as usize);
+                // The rows are padded for the upload, so a plane is longer than
+                // the picture in it.
+                assert_eq!(frame.planes[0].len(), plane_stride(width) * height, "luma rows");
+                assert_eq!(
+                    frame.planes[1].len(),
+                    plane_stride(width) * height.div_ceil(2),
+                    "chroma rows"
+                );
                 assert!(
                     frame.planes[0].iter().any(|sample| *sample != frame.planes[0][0]),
                     "the luma plane must carry a picture and not a flat field"

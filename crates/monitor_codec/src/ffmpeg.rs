@@ -48,7 +48,8 @@ use ffmpeg::util::frame::video::Video as Picture;
 use ffmpeg::Packet;
 
 use crate::{
-    Codec, CodecError, DecodedFrame, DecoderConfig, PixelFormat, Result, VideoDecoder, VideoStreamInfo,
+    plane_stride, Codec, CodecError, DecodedFrame, DecoderConfig, PixelFormat, Result, VideoDecoder,
+    VideoStreamInfo,
 };
 
 /// Decoder backed by FFmpeg's `libavcodec`.
@@ -469,17 +470,22 @@ fn pack(nv12: &Picture, pts_us: i64, keyframe: bool) -> Option<DecodedFrame> {
     })
 }
 
-/// Copies the leading `columns` bytes of `rows` rows out of one strided plane.
+/// Copies the leading `columns` bytes of `rows` rows out of one strided plane,
+/// laying them out as the renderer takes them.
 ///
-/// A decoder aligns every row to a stride that is usually wider than the
-/// picture, so the rows are copied one at a time and the padding is left behind.
+/// A decoder aligns every row to a stride of its own, usually wider than the
+/// picture, so the rows are copied one at a time. The destination pads in turn:
+/// one walk over the picture writes the layout the upload wants, which is one
+/// walk fewer than writing it twice.
 fn copy_plane(frame: &Picture, plane: usize, columns: usize, rows: usize) -> Option<Vec<u8>> {
     let stride = frame.stride(plane);
     let data = frame.data(plane);
-    let mut buffer = Vec::with_capacity(columns * rows);
+    let padded = plane_stride(columns);
+    let mut buffer = vec![0u8; padded * rows];
     for row in 0..rows {
         let start = row * stride;
-        buffer.extend_from_slice(data.get(start..start + columns)?);
+        let end = row * padded + columns;
+        buffer[row * padded..end].copy_from_slice(data.get(start..start + columns)?);
     }
     Some(buffer)
 }
@@ -652,9 +658,15 @@ mod tests {
             };
             for frame in produced {
                 assert_eq!(frame.format, PixelFormat::Nv12);
-                let samples = frame.width as usize * frame.height as usize;
-                assert_eq!(frame.planes[0].len(), samples, "one luma byte per pixel");
-                assert_eq!(frame.planes[1].len(), samples / 2, "one chroma pair per two pixels");
+                let (width, height) = (frame.width as usize, frame.height as usize);
+                // The rows are padded for the upload, so a plane is longer than
+                // the picture in it.
+                assert_eq!(frame.planes[0].len(), plane_stride(width) * height, "luma rows");
+                assert_eq!(
+                    frame.planes[1].len(),
+                    plane_stride(width) * height.div_ceil(2),
+                    "chroma rows"
+                );
                 assert!(
                     frame.planes[0].iter().any(|sample| *sample != frame.planes[0][0]),
                     "the luma plane must carry a picture and not a flat field"

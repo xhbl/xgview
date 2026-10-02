@@ -124,10 +124,11 @@ pub struct VideoFrame {
     pub sequence: u64,
     pub width: u32,
     pub height: u32,
-    /// Luma plane, `width * height` bytes.
+    /// Luma plane: `height` rows, each padded to the alignment a texture
+    /// upload wants, of which the leading `width` bytes hold the picture.
     pub y: Vec<u8>,
-    /// Interleaved chroma, `width * height / 2` bytes: one byte of U and one of V
-    /// for every two luma samples.
+    /// Interleaved chroma over `height / 2` rows of that same padded length:
+    /// one byte of U and one of V for every two luma samples.
     pub uv: Vec<u8>,
 }
 
@@ -775,6 +776,10 @@ async fn run_session(
     let mut window_unit_bytes: u64 = 0;
     let mut window_decoded: u64 = 0;
     let mut window_errors: u64 = 0;
+    // Pictures refused while the session is still waiting for its first one.
+    // Kept apart from the errors, which count a session that had a picture and
+    // then lost it.
+    let mut window_opening: u64 = 0;
     // Marker terminated packets that assembled no access unit, and packets that
     // do not carry the negotiated payload type. A channel whose pictures never
     // assemble is either fragmenting them in a way the depacketizer does not
@@ -958,38 +963,61 @@ async fn run_session(
                             // One damaged picture is not worth a new session:
                             // the encoder recovers at its next IDR.
                             Err(err) => {
-                                decode_errors += 1;
-                                window_errors += 1;
-                                // The first rejections carry the payload that
-                                // caused them, which names the NAL units the
-                                // decoder was given.
-                                if decode_errors <= 3 {
-                                    tracing::debug!(
-                                        target: "xgview::pipeline",
-                                        index,
-                                        len = unit.data.len(),
-                                        types = ?nal_types(&unit.data),
-                                        keyframe = unit.keyframe,
-                                        au = %hex(&unit.data, 24),
-                                        cached = ?depacketizer.parameter_sets(),
-                                        "access unit rejected by the decoder"
-                                    );
-                                }
-                                if decode_errors == 1 {
-                                    tracing::warn!(
-                                        target: "xgview::pipeline",
-                                        index,
-                                        %err,
-                                        "decoding failed, waiting for the next key frame"
-                                    );
+                                // Pictures refused before the session has shown
+                                // one are its opening rather than damage. A
+                                // camera that sends a run of pictures before its
+                                // first IDR leaves the decoder nothing to
+                                // reference - one here spends its first thirty
+                                // five that way and then runs clean - so
+                                // counting them as errors would report a
+                                // working channel as a broken one at every
+                                // connect. They are counted apart, and the
+                                // warning is kept for a session that had a
+                                // picture and then lost it.
+                                if !stall.running {
+                                    window_opening += 1;
+                                    if window_opening == 1 {
+                                        tracing::debug!(
+                                            target: "xgview::pipeline",
+                                            index,
+                                            %err,
+                                            "no picture yet, waiting for the first key frame"
+                                        );
+                                    }
                                 } else {
-                                    tracing::debug!(
-                                        target: "xgview::pipeline",
-                                        index,
-                                        errors = decode_errors,
-                                        %err,
-                                        "decoding failed"
-                                    );
+                                    decode_errors += 1;
+                                    window_errors += 1;
+                                    // The first rejections carry the payload
+                                    // that caused them, which names the NAL
+                                    // units the decoder was given.
+                                    if decode_errors <= 3 {
+                                        tracing::debug!(
+                                            target: "xgview::pipeline",
+                                            index,
+                                            len = unit.data.len(),
+                                            types = ?nal_types(&unit.data),
+                                            keyframe = unit.keyframe,
+                                            au = %hex(&unit.data, 24),
+                                            cached = ?depacketizer.parameter_sets(),
+                                            "access unit rejected by the decoder"
+                                        );
+                                    }
+                                    if decode_errors == 1 {
+                                        tracing::warn!(
+                                            target: "xgview::pipeline",
+                                            index,
+                                            %err,
+                                            "decoding failed, waiting for the next key frame"
+                                        );
+                                    } else {
+                                        tracing::debug!(
+                                            target: "xgview::pipeline",
+                                            index,
+                                            errors = decode_errors,
+                                            %err,
+                                            "decoding failed"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1039,6 +1067,7 @@ async fn run_session(
                 unit_bytes = window_unit_bytes,
                 decoded = window_decoded,
                 errors = window_errors,
+                opening = window_opening,
                 dropped = window_dropped,
                 foreign = window_foreign,
                 reordered = window_reordered,
@@ -1055,6 +1084,7 @@ async fn run_session(
             window_unit_bytes = 0;
             window_decoded = 0;
             window_errors = 0;
+            window_opening = 0;
             window_dropped = 0;
             window_foreign = 0;
             window_reordered = 0;

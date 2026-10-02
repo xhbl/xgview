@@ -139,6 +139,21 @@ impl Default for DecoderConfig {
     }
 }
 
+/// Row alignment of the planes of a [`DecodedFrame`], in bytes.
+///
+/// A texture upload wants every row to start on a 256 byte boundary, which is
+/// the alignment `wgpu` demands of a copy into a texture. The decoders pad
+/// their rows to it so the renderer can take the planes as they come, and the
+/// reason it is done here rather than there is the copy it saves: a decoder
+/// already walks its picture row by row to strip the stride its own frames
+/// carry, and one walk can write either layout.
+pub const PLANE_ROW_ALIGNMENT: usize = 256;
+
+/// Bytes one row of a plane of `width` samples occupies, padding included.
+pub const fn plane_stride(width: usize) -> usize {
+    width.div_ceil(PLANE_ROW_ALIGNMENT) * PLANE_ROW_ALIGNMENT
+}
+
 /// A decoded frame produced by a decoder.
 ///
 /// On the zero copy path only the metadata is filled in: the pixels stay in the
@@ -154,6 +169,11 @@ pub struct DecodedFrame {
     /// Opaque handle to the GPU buffer (AHardwareBuffer / D3D11 texture).
     pub buffer: Option<usize>,
     /// CPU planes, empty on the zero copy path.
+    ///
+    /// Luma first, then the interleaved chroma of NV12. Every row is
+    /// [`PLANE_ROW_ALIGNMENT`] bytes long whatever the width - see
+    /// [`plane_stride`] - so the renderer can hand a plane to the GPU without
+    /// walking it again.
     pub planes: Vec<Vec<u8>>,
 }
 
