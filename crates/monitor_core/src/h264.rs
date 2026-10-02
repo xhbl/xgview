@@ -934,7 +934,7 @@ mod tests {
             .collect();
         let mut depacketizer = H264Depacketizer::new(Some(96), parameter_sets);
 
-        let mut decoder = monitor_codec::create_decoder();
+        let mut decoder = monitor_codec::create_decoder(monitor_codec::Codec::H264);
         let config = monitor_codec::DecoderConfig {
             codec: monitor_codec::Codec::H264,
             width: 0,

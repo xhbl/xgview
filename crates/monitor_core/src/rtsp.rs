@@ -898,6 +898,16 @@ impl RtspClient {
         if response.is_success() {
             return Ok(response);
         }
+        // A server may take one transport and refuse the other. go2rtc answers
+        // this to every UDP `SETUP` on purpose, so that a client asking for UDP
+        // first falls back, and naming it apart from the other failures is what
+        // lets the pipeline do exactly that.
+        if response.status == 461 {
+            return Err(CoreError::transport(format!(
+                "{method} refused the transport: {} {}",
+                response.status, response.reason
+            )));
+        }
         if response.status == 401 {
             let scheme = match &self.challenge {
                 Some(challenge) => format!("{} authentication", challenge.scheme),
@@ -1519,6 +1529,56 @@ a=control:trackID=1\r\n";
         assert_eq!(transport_ports(header, "SERVER_PORT"), Some((5004, 5005)));
         assert_eq!(transport_ports(header, "mode"), None);
         assert_eq!(transport_ports("RTP/AVP;unicast", "server_port"), None);
+    }
+
+    /// A server that takes one transport and refuses the other, the way go2rtc
+    /// does on purpose, has to be reported apart from every other failure: the
+    /// pipeline has somewhere to go with that answer and nowhere with a
+    /// generic one.
+    #[tokio::test]
+    async fn reports_a_refused_transport_apart_from_other_failures() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let sdp = "v=0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 JPEG/90000\r\na=control:trackID=1\r\n";
+            loop {
+                let request = read_request(&mut reader).await;
+                if request.is_empty() {
+                    break;
+                }
+                let method = request[0].clone();
+                if method.starts_with("OPTIONS") {
+                    write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
+                } else if method.starts_with("DESCRIBE") {
+                    write_response(
+                        &mut write_half,
+                        &format!(
+                            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
+                             Content-Length: {}\r\n\r\n{sdp}",
+                            sdp.len()
+                        ),
+                    )
+                    .await;
+                } else if method.starts_with("SETUP") {
+                    write_response(
+                        &mut write_half,
+                        "RTSP/1.0 461 Unsupported transport\r\nCSeq: 3\r\n\r\n",
+                    )
+                    .await;
+                } else {
+                    write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 4\r\n\r\n").await;
+                }
+            }
+        });
+
+        let url = format!("rtsp://127.0.0.1:{port}/live");
+        let mut client = RtspClient::connect(&url).await.unwrap();
+        let error = client.start_with_transport(RtspTransport::Udp).await.unwrap_err();
+        assert!(matches!(error, CoreError::Transport(_)), "got {error}");
     }
 
     /// Full UDP handshake against a minimal RTSP server: the client has to bind

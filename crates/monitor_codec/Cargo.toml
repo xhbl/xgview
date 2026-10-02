@@ -11,6 +11,9 @@ readme = "../../README.md"
 
 [dependencies]
 bytes = "1"
+# The MJPEG decoder. Pure Rust, so it needs no toolchain of its own and is the
+# one backend every target can carry - see `src/jpeg.rs`.
+jpeg-decoder = "0.3"
 thiserror = "2"
 tracing = "0.1"
 

@@ -18,13 +18,14 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
-use monitor_codec::{Codec, DecoderConfig, VideoDecoder};
+use monitor_codec::{Codec, DecodedFrame, DecoderConfig, VideoDecoder};
 
 use crate::config::ReconnectPolicy;
 use crate::error::Result;
-use crate::h264::{nal_unit_type, H264Depacketizer, START_CODE};
-use crate::model::{CameraSource, ConnectionState, RtspTransport, StreamKind};
-use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient};
+use crate::h264::{nal_unit_type, AccessUnit, H264Depacketizer, START_CODE};
+use crate::mjpeg::{JpegDepacketizer, MjpegClient};
+use crate::model::{is_http_url, CameraSource, ConnectionState, RtspTransport, StreamKind};
+use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtpHeader};
 use crate::scheduler::ScheduleChange;
 
 /// Time without any RTP payload after which the session is considered dead.
@@ -39,6 +40,15 @@ const FIRST_PICTURE_CEILING: Duration = Duration::from_secs(20);
 /// Shortest interval between two key frames taken for a group of pictures rather
 /// than for two key frames of one session start.
 const MIN_PLAUSIBLE_GROUP: Duration = Duration::from_millis(500);
+/// Time an MJPEG stream may go without a picture before it is considered dead.
+///
+/// A deadline counted in pictures, the way [`StallDeadline`] counts them, has
+/// nothing to work with here: the stream is a slideshow by nature, running at
+/// about one frame per second, so the only fault worth catching is a stream
+/// that has stopped altogether. It is given a long leash for that reason - a
+/// stall detector tuned to a frame rate this low would fire on the stream's
+/// ordinary behaviour.
+const MJPEG_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Interval of the statistics reported to the UI.
 const STATS_INTERVAL: Duration = Duration::from_secs(2);
 /// Interval between RTCP receiver reports, RFC 3550's value for a unicast session.
@@ -287,6 +297,15 @@ impl Endpoint {
             && self.credentials == other.credentials
             && self.transport == other.transport
     }
+
+    /// True when the stream is an MJPEG endpoint rather than an RTSP session.
+    ///
+    /// A device can carry both: a Synology camera has its main stream on RTSP
+    /// and its sub stream on HTTP MJPEG, so one `Endpoint` shape has to serve
+    /// either and the URL is what picks the session it opens.
+    fn is_mjpeg(&self) -> bool {
+        is_http_url(&self.uri)
+    }
 }
 
 struct ChannelRuntime {
@@ -441,8 +460,16 @@ async fn run_channel(
             },
         );
 
-        // Each attempt opens its own session, so it is handed its own copy.
-        match run_session(endpoint.clone(), prefer_hardware, &events, &frames).await {
+        // Each attempt opens its own session, so it is handed its own copy. The
+        // two transports have nothing in common beyond the backoff around them,
+        // so the endpoint picks the one it needs rather than a single session
+        // branching on it statement by statement.
+        let outcome = if endpoint.is_mjpeg() {
+            run_mjpeg_session(endpoint.clone(), &events, &frames).await
+        } else {
+            run_session(endpoint.clone(), prefer_hardware, &events, &frames).await
+        };
+        match outcome {
             Ok(()) => failure = "stream closed by peer".to_string(),
             Err(err) => {
                 // A failing session is the only clue the user gets about a
@@ -614,6 +641,46 @@ impl StallDeadline {
     }
 }
 
+/// The RTP depacketizer a session pulls its pictures out of.
+///
+/// A session picks one when it opens, from the codec the SDP named, and the
+/// loop around it is the same for both: a packet goes in, zero or more complete
+/// pictures come out. Only these two codecs reach a decoder, so only these two
+/// reassemblies are needed.
+enum Depacketizer {
+    /// H.264, the NAL units of an access unit spread over RTP packets.
+    H264(H264Depacketizer),
+    /// MJPEG, the fragments of one JPEG scan spread over RTP packets.
+    Jpeg(JpegDepacketizer),
+}
+
+impl Depacketizer {
+    fn push(&mut self, header: &RtpHeader, payload: &[u8]) -> Vec<AccessUnit> {
+        match self {
+            Depacketizer::H264(depacketizer) => depacketizer.push(header, payload),
+            Depacketizer::Jpeg(depacketizer) => depacketizer.push(header, payload),
+        }
+    }
+
+    /// Writes off the picture being assembled, after a gap in the RTP sequence
+    /// numbers.
+    fn invalidate(&mut self) {
+        match self {
+            Depacketizer::H264(depacketizer) => depacketizer.invalidate_current(),
+            Depacketizer::Jpeg(depacketizer) => depacketizer.invalidate(),
+        }
+    }
+
+    /// Cached parameter sets, which only an H.264 stream has: a JPEG carries
+    /// its tables in the stream rather than in a cache.
+    fn parameter_sets(&self) -> Vec<(u8, usize)> {
+        match self {
+            Depacketizer::H264(depacketizer) => sets(depacketizer),
+            Depacketizer::Jpeg(_) => Vec::new(),
+        }
+    }
+}
+
 /// One RTSP session: negotiation then packet pumping.
 async fn run_session(
     endpoint: Endpoint,
@@ -624,8 +691,28 @@ async fn run_session(
     let Endpoint { index, camera_id, uri, credentials, stream, transport } = endpoint;
     let camera_id = camera_id.as_str();
     let uri = uri.as_str();
-    let mut client = RtspClient::connect_with_auth(uri, credentials).await?;
-    let tracks = client.start_with_transport(transport).await?;
+    let mut client = RtspClient::connect_with_auth(uri, credentials.clone()).await?;
+    // A server may take one transport and refuse the other, which is worth a
+    // second attempt rather than a failed session: go2rtc answers every UDP
+    // `SETUP` with 461 on purpose, so that a client asking for UDP first falls
+    // back, and a preference must never cost a channel its picture. The session
+    // is opened afresh rather than patched, because the refused attempt left
+    // the old one half set up.
+    let mut transport = transport;
+    let tracks = match client.start_with_transport(transport).await {
+        Ok(tracks) => tracks,
+        Err(crate::error::CoreError::Transport(_)) if transport.is_udp() => {
+            tracing::debug!(
+                target: "xgview::pipeline",
+                index,
+                "the server turned udp down, reopening the session over tcp"
+            );
+            client = RtspClient::connect_with_auth(uri, credentials).await?;
+            transport = RtspTransport::Tcp;
+            client.start_with_transport(transport).await?
+        }
+        Err(err) => return Err(err),
+    };
     let video = tracks.iter().find(|track| track.is_video());
     let codec = video.and_then(|track| track.encoding.clone());
     // The SDP only guesses the resolution: `a=framesize` is optional, so the
@@ -636,8 +723,13 @@ async fn run_session(
     let parameter_sets = video.map(|track| track.parameter_sets.clone()).unwrap_or_default();
     let kind = Codec::from_encoding(codec.as_deref().unwrap_or_default());
 
-    let mut decoder = h264_decoder(kind, width, height, index, prefer_hardware);
-    let mut depacketizer = H264Depacketizer::new(payload_type, parameter_sets);
+    let mut decoder = video_decoder(kind, width, height, index, prefer_hardware);
+    // Each codec arrives in its own shape over RTP: an H.264 access unit spread
+    // over NAL units, or the fragments of a single JPEG scan.
+    let mut depacketizer = match kind {
+        Codec::Mjpeg => Depacketizer::Jpeg(JpegDepacketizer::new(payload_type)),
+        _ => Depacketizer::H264(H264Depacketizer::new(payload_type, parameter_sets)),
+    };
     let mut sequence: u64 = 0;
     let mut decode_errors: u64 = 0;
 
@@ -650,7 +742,7 @@ async fn run_session(
         // The parameter sets the SDP advertised, by NAL type and length. A
         // camera whose SDP carries none is served from the stream, which has to
         // reach a key frame before the first picture decodes.
-        sets = ?sets(&depacketizer),
+        sets = ?depacketizer.parameter_sets(),
         "session negotiated"
     );
 
@@ -793,7 +885,7 @@ async fn run_session(
                             // together and decoded into a screenful of
                             // corruption.
                             window_lost += u64::from(delta) - 1;
-                            depacketizer.invalidate_current();
+                            depacketizer.invalidate();
                         }
                     }
                     last_sequence = Some(header.sequence);
@@ -856,29 +948,11 @@ async fn run_session(
                                     stall.picture(Instant::now());
                                 }
                                 window_decoded += decoded.len() as u64;
-                                for frame in decoded {
-                                    // A luma plane and an interleaved chroma
-                                    // plane. A backend that hands over anything
-                                    // else - a decoder rendering straight into a
-                                    // GPU buffer, say - has nothing the renderer
-                                    // can take yet.
-                                    let mut planes = frame.planes.into_iter();
-                                    let (Some(y), Some(uv)) = (planes.next(), planes.next()) else {
-                                        continue;
-                                    };
-                                    width = Some(frame.width);
-                                    height = Some(frame.height);
-                                    sequence += 1;
-                                    frames.publish(
-                                        index,
-                                        Arc::new(VideoFrame {
-                                            sequence,
-                                            width: frame.width,
-                                            height: frame.height,
-                                            y,
-                                            uv,
-                                        }),
-                                    );
+                                if let Some((picture_width, picture_height)) =
+                                    publish_frames(frames, index, &mut sequence, decoded)
+                                {
+                                    width = Some(picture_width);
+                                    height = Some(picture_height);
                                 }
                             }
                             // One damaged picture is not worth a new session:
@@ -897,7 +971,7 @@ async fn run_session(
                                         types = ?nal_types(&unit.data),
                                         keyframe = unit.keyframe,
                                         au = %hex(&unit.data, 24),
-                                        cached = ?sets(&depacketizer),
+                                        cached = ?depacketizer.parameter_sets(),
                                         "access unit rejected by the decoder"
                                     );
                                 }
@@ -990,23 +1064,222 @@ async fn run_session(
     }
 }
 
-/// Creates the decoder for a negotiated codec.
+/// Publishes the pictures a decoder produced, in order, and reports the size of
+/// the last one.
 ///
-/// Only H.264 is wired to a backend today. An unsupported codec is not an
-/// error: the session keeps running, reports its statistics and shows a
-/// placeholder, which is what a `H265` or `MJPEG` camera should look like rather
-/// than a connection that never stops reconnecting.
+/// `None` means the decoder produced nothing the renderer can take: it needs a
+/// luma plane and an interleaved chroma plane, and a backend that hands over
+/// anything else - a decoder rendering straight into a GPU buffer, say - has
+/// none yet.
+fn publish_frames(
+    frames: &FrameStore,
+    index: usize,
+    sequence: &mut u64,
+    decoded: Vec<DecodedFrame>,
+) -> Option<(u32, u32)> {
+    let mut size = None;
+    for frame in decoded {
+        let mut planes = frame.planes.into_iter();
+        let (Some(y), Some(uv)) = (planes.next(), planes.next()) else {
+            continue;
+        };
+        *sequence += 1;
+        frames.publish(
+            index,
+            Arc::new(VideoFrame {
+                sequence: *sequence,
+                width: frame.width,
+                height: frame.height,
+                y,
+                uv,
+            }),
+        );
+        size = Some((frame.width, frame.height));
+    }
+    size
+}
+
+/// One MJPEG session: one JPEG part after another, decoded as they arrive.
+///
+/// Nothing of [`run_session`] carries over. There is no RTP to depacketize and
+/// no sequence numbers to check, no RTCP to send and no session to keep alive,
+/// because the whole conversation is one HTTP response that the server keeps
+/// writing pictures into. Keeping the two apart leaves the RTSP path without a
+/// branch per statement, and this one without anything it does not need.
+///
+/// Every part is a complete JPEG and therefore a key frame, so the stream is
+/// displayable from its first picture and the decoder never waits for one.
+async fn run_mjpeg_session(
+    endpoint: Endpoint,
+    events: &Sender<StreamEvent>,
+    frames: &FrameStore,
+) -> Result<()> {
+    let Endpoint { index, camera_id, uri, stream, .. } = endpoint;
+    let camera_id = camera_id.as_str();
+
+    let mut client = MjpegClient::connect(&uri).await?;
+    let mut decoder = open_decoder(
+        &DecoderConfig {
+            codec: Codec::Mjpeg,
+            width: 0,
+            height: 0,
+            surface: None,
+            low_latency: true,
+            hardware: false,
+        },
+        index,
+    );
+
+    let mut width: Option<u32> = None;
+    let mut height: Option<u32> = None;
+    let mut sequence: u64 = 0;
+    let mut total_frames: u64 = 0;
+    let mut window_frames: u64 = 0;
+    // Pictures handed to the renderer, against `window_frames` which counts the
+    // parts read: the two differing means the decoder or the renderer is where
+    // the stream is being lost, not the network.
+    let mut window_pictures: u64 = 0;
+    let mut window_bytes: u64 = 0;
+    let mut window_errors: u64 = 0;
+    let mut window_start = Instant::now();
+    let mut announced = false;
+
+    emit(
+        events,
+        StreamEvent::Stats {
+            index,
+            camera_id: camera_id.to_string(),
+            stream,
+            codec: Some("MJPEG".to_string()),
+            width,
+            height,
+            hardware: uses_hardware(&decoder),
+            fps: 0.0,
+            bitrate_kbps: 0.0,
+            total_frames: 0,
+        },
+    );
+
+    loop {
+        // The read is bounded so that a server which stops writing is noticed.
+        // That is the only fault this stream has: a part either arrives or it
+        // does not, and there is no sequence number to miss in between.
+        let picture = match tokio::time::timeout(MJPEG_IDLE_TIMEOUT, client.next_frame()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(crate::error::CoreError::network(format!(
+                    "no picture received for {} s",
+                    MJPEG_IDLE_TIMEOUT.as_secs()
+                )))
+            }
+        };
+
+        window_frames += 1;
+        total_frames += 1;
+        window_bytes += picture.len() as u64;
+        if !announced {
+            announced = true;
+            emit(
+                events,
+                StreamEvent::State {
+                    index,
+                    camera_id: camera_id.to_string(),
+                    state: ConnectionState::Streaming,
+                    detail: format!("receiving {} stream", stream.label()),
+                },
+            );
+        }
+
+        if let Some(decoder) = decoder.as_mut() {
+            match decoder.decode(&picture, 0, true) {
+                Ok(decoded) => {
+                    window_pictures += decoded.len() as u64;
+                    if let Some((picture_width, picture_height)) =
+                        publish_frames(frames, index, &mut sequence, decoded)
+                    {
+                        width = Some(picture_width);
+                        height = Some(picture_height);
+                    }
+                }
+                // One unreadable picture is not worth a new session: the next
+                // part is a self contained JPEG and needs nothing from this one.
+                Err(err) => {
+                    window_errors += 1;
+                    tracing::debug!(
+                        target: "xgview::pipeline",
+                        index,
+                        len = picture.len(),
+                        %err,
+                        "mjpeg picture rejected by the decoder"
+                    );
+                }
+            }
+        }
+
+        let elapsed = window_start.elapsed();
+        if elapsed >= STATS_INTERVAL {
+            let seconds = elapsed.as_secs_f32().max(0.001);
+            let fps = window_frames as f32 / seconds;
+            emit(
+                events,
+                StreamEvent::Stats {
+                    index,
+                    camera_id: camera_id.to_string(),
+                    stream,
+                    codec: Some("MJPEG".to_string()),
+                    width,
+                    height,
+                    hardware: uses_hardware(&decoder),
+                    fps,
+                    bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                    total_frames,
+                },
+            );
+            tracing::debug!(
+                target: "xgview::pipeline",
+                index,
+                stream = stream.as_str(),
+                frames = window_frames,
+                pictures = window_pictures,
+                bytes = window_bytes,
+                errors = window_errors,
+                resolution = ?width.zip(height),
+                fps,
+                kbps = (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                "mjpeg window"
+            );
+            window_start = Instant::now();
+            window_frames = 0;
+            window_pictures = 0;
+            window_bytes = 0;
+            window_errors = 0;
+        }
+    }
+}
+
+/// Creates the decoder for a stream's codec.
+///
+/// H.264 and MJPEG are wired to a backend; HEVC and an unrecognised codec are
+/// not, and that is not an error: the session keeps running, reports its
+/// statistics and shows a placeholder, which is what an `H265` camera should
+/// look like rather than a connection that never stops reconnecting.
+///
+/// Either way the depacketizer has already turned the packets into whole
+/// pictures, so what reaches the decoder here is the same shape whether the
+/// codec arrived as NAL units over RTSP or as JPEG fragments.
 ///
 /// `prefer_hardware` only asks. A decoder that will not open is retried on the
-/// CPU, because a preference must never cost a channel its picture.
-fn h264_decoder(
+/// CPU, because a preference must never cost a channel its picture. It is not
+/// asked of MJPEG, whose decoder is a Rust loop over the picture whatever the
+/// setting says: asking would only open a GPU context no frame ever reaches.
+fn video_decoder(
     kind: Codec,
     width: Option<u32>,
     height: Option<u32>,
     index: usize,
     prefer_hardware: bool,
 ) -> Option<Box<dyn VideoDecoder>> {
-    if kind != Codec::H264 {
+    if !matches!(kind, Codec::H264 | Codec::Mjpeg) {
         tracing::warn!(
             target: "xgview::pipeline",
             index,
@@ -1015,6 +1288,7 @@ fn h264_decoder(
         );
         return None;
     }
+    let prefer_hardware = prefer_hardware && kind == Codec::H264;
     let config = DecoderConfig {
         codec: kind,
         width: width.unwrap_or(0),
@@ -1038,7 +1312,7 @@ fn h264_decoder(
 
 /// Opens one decoder, reporting the reason when it will not open.
 fn open_decoder(config: &DecoderConfig, index: usize) -> Option<Box<dyn VideoDecoder>> {
-    let mut decoder = monitor_codec::create_decoder();
+    let mut decoder = monitor_codec::create_decoder(config.codec);
     match decoder.configure(config) {
         Ok(()) => Some(decoder),
         Err(err) => {

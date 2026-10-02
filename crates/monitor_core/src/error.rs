@@ -18,6 +18,13 @@ pub enum CoreError {
     #[error("rtsp error: {0}")]
     Rtsp(String),
 
+    /// The server refused the transport a request asked for, without saying
+    /// anything is wrong with the request itself - a `461` to a `SETUP`. It is
+    /// apart from every other failure because the caller has somewhere to go
+    /// with it: the other transport.
+    #[error("transport refused: {0}")]
+    Transport(String),
+
     #[error("xml error: {0}")]
     Xml(String),
 
@@ -46,6 +53,10 @@ impl CoreError {
 
     pub fn rtsp(message: impl Into<String>) -> Self {
         Self::Rtsp(message.into())
+    }
+
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self::Transport(message.into())
     }
 
     pub fn xml(message: impl Into<String>) -> Self {

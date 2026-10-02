@@ -258,11 +258,20 @@ impl CameraSource {
     }
 
     /// Stream URL with credentials replaced by a mask, safe for logging / UI.
+    ///
+    /// A Synology camera keeps its sub stream on HTTP MJPEG rather than RTSP, so
+    /// the RTSP parser is only the first of two readings: an `http://` URL is
+    /// masked here instead. The stream key it carries as a query parameter is no
+    /// less of a credential than a password, and a log is where it would end up.
     pub fn masked_uri(&self, kind: StreamKind) -> String {
-        match RtspUrl::parse(self.stream_uri(kind)) {
-            Ok(uri) => uri.masked(),
-            Err(_) => "<invalid rtsp url>".to_string(),
+        let uri = self.stream_uri(kind);
+        if let Ok(parsed) = RtspUrl::parse(uri) {
+            return parsed.masked();
         }
+        if is_http_url(uri) {
+            return mask_http_url(uri);
+        }
+        "<invalid stream url>".to_string()
     }
 
     /// Derives a sub stream URL from the main stream URL using well known
@@ -296,6 +305,35 @@ impl CameraSource {
 /// Generates a stable, collision free identifier for a camera entry.
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+/// True for an `http://` or `https://` URL, which is how an MJPEG stream is
+/// addressed.
+///
+/// The scheme is what tells an MJPEG stream from an RTSP session: MJPEG is
+/// negotiated by nothing, so there is no codec or transport to read before the
+/// first picture arrives.
+pub fn is_http_url(url: &str) -> bool {
+    let url = url.trim_start().to_ascii_lowercase();
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// An `http://` stream URL with its credentials and its query masked.
+fn mask_http_url(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let (authority, tail) = match rest.find(['/', '?']) {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    };
+    let authority = match authority.rsplit_once('@') {
+        Some((_, host)) => format!("***@{host}"),
+        None => authority.to_string(),
+    };
+    let tail = match tail.split_once('?') {
+        Some((path, _)) => format!("{path}?…"),
+        None => tail.to_string(),
+    };
+    format!("{scheme}://{authority}{tail}")
 }
 
 /// Vendor specific main -> sub stream URL inference rules.
@@ -393,5 +431,18 @@ mod tests {
     fn masks_credentials() {
         let camera = CameraSource::new("Door", "rtsp://admin:secret@10.0.0.9/live");
         assert_eq!(camera.masked_uri(StreamKind::Main), "rtsp://***:***@10.0.0.9/live");
+    }
+
+    #[test]
+    fn masks_the_stream_key_of_an_mjpeg_sub_stream() {
+        // The stream key travels as a query parameter, so the query is what has
+        // to go: it authorises the stream exactly as a password would.
+        let camera = CameraSource::new("Door", "rtsp://10.0.0.9:554/Sms=13").with_sub(
+            "http://nas.local:5000/webapi/entry.cgi?api=Stream&cameraId=13&StmKey=secret",
+        );
+        assert_eq!(
+            camera.masked_uri(StreamKind::Sub),
+            "http://nas.local:5000/webapi/entry.cgi?…"
+        );
     }
 }

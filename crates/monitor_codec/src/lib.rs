@@ -8,6 +8,10 @@
 //! |               | feature, on by default), falling back to the null decoder   |
 //! |               | used by the UI skeleton when neither is enabled             |
 //!
+//! MJPEG is the exception that every target shares: it is decoded by the pure
+//! Rust backend of [`jpeg`], because JPEG gains nothing from a C library and
+//! `AMediaCodec` has no decoder for it at all.
+//!
 //! The crate never allocates GPU or CPU frames on the UI thread: a decoder is
 //! owned by the channel worker task and only pushes [`DecodedFrame`] handles to
 //! the renderer.
@@ -20,6 +24,7 @@ use thiserror::Error;
 pub mod ffmpeg;
 #[cfg(all(not(target_os = "android"), feature = "h264"))]
 pub mod h264;
+pub mod jpeg;
 pub mod null;
 
 #[cfg(target_os = "android")]
@@ -250,11 +255,20 @@ pub fn capabilities() -> DecoderCapabilities {
     }
 }
 
-/// Creates the decoder of the current platform.
+/// Creates the decoder of the current platform for a codec.
+///
+/// The codec is named because the backends do not all cover the same ones.
+/// MJPEG is answered by the pure Rust decoder whatever the target: JPEG asks
+/// for no negotiation and offers nothing to a hardware decoder, and
+/// `AMediaCodec` has no decoder for it at all, so one implementation of it
+/// beats two.
 ///
 /// The returned decoder is owned by a channel worker; it is never touched by
 /// the UI thread.
-pub fn create_decoder() -> Box<dyn VideoDecoder> {
+pub fn create_decoder(codec: Codec) -> Box<dyn VideoDecoder> {
+    if codec == Codec::Mjpeg {
+        return Box::new(jpeg::MjpegDecoder::new());
+    }
     #[cfg(target_os = "android")]
     {
         Box::new(amediacodec::AMediaCodecDecoder::new())

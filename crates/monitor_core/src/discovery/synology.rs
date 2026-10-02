@@ -259,10 +259,16 @@ impl SynologyClient {
                 )
             }
         };
-        let sub = camera
-            .sub_url
-            .clone()
-            .map(|url| self.absolute_stream_url(&url));
+        // The sub stream is the NAS's MJPEG endpoint rather than an RTSP URL.
+        // Synology transcodes it down to a low frame rate, which is what makes
+        // it worth having: a tile of a grid only needs enough of a picture to
+        // recognise a scene, and the full rate stream stays on the main channel.
+        // It is authorised by the same stream key the live view path carries as
+        // its password, so it can only be built once that path is known.
+        let sub = password
+            .as_deref()
+            .map(|key| self.mjpeg_url(camera.id, key))
+            .or_else(|| camera.sub_url.clone().map(|url| self.absolute_stream_url(&url)));
 
         CameraSource {
             id: format!("syno-{}", camera.id),
@@ -306,6 +312,20 @@ impl SynologyClient {
         format!(
             "rtsp://{}:554/SurveillanceStation/camera.cgi?id={camera_id}&streamType={stream_type}",
             self.config.host
+        )
+    }
+
+    /// The MJPEG endpoint of a Surveillance Station camera.
+    ///
+    /// `SYNO.SurveillanceStation.Stream.VideoStreaming` with `format=mjpeg`
+    /// serves the low resolution stream as `multipart/x-mixed-replace`, which is
+    /// what a grid tile is pulled from. The stream key authorises it exactly as
+    /// it authorises the RTSP path.
+    fn mjpeg_url(&self, camera_id: i64, stream_key: &str) -> String {
+        format!(
+            "{}/webapi/entry.cgi?api=SYNO.SurveillanceStation.Stream.VideoStreaming\
+             &version=1&method=Stream&format=mjpeg&cameraId={camera_id}&StmKey={stream_key}",
+            self.config.base_url()
         )
     }
 }
@@ -393,6 +413,44 @@ mod tests {
             client.absolute_stream_url("/SurveillanceStation/live?id=1"),
             "rtsp://nas.local:554/SurveillanceStation/live?id=1"
         );
+    }
+
+    #[test]
+    fn builds_the_mjpeg_endpoint_of_a_camera() {
+        let client = SynologyClient::new(config()).unwrap();
+        let url = client.mjpeg_url(13, "abc123");
+        assert!(url.starts_with("http://nas.local:5000/webapi/entry.cgi?"), "got {url}");
+        assert!(url.contains("format=mjpeg"), "got {url}");
+        assert!(url.contains("cameraId=13"), "got {url}");
+        assert!(url.contains("StmKey=abc123"), "got {url}");
+    }
+
+    #[test]
+    fn imports_the_mjpeg_endpoint_as_the_sub_stream() {
+        let client = SynologyClient::new(config()).unwrap();
+        let camera = SynologyCamera {
+            id: 13,
+            name: "Doorbell".into(),
+            host: Some("10.0.0.9".into()),
+            port: Some(554),
+            vendor: None,
+            model: None,
+            enabled: true,
+            main_url: None,
+            sub_url: None,
+        };
+        let source = client.to_source(
+            &camera,
+            Some("rtsp://syno:key123@nas.local:554/Sms=13.unicast"),
+        );
+        // The main stream stays on RTSP, and keeps the credentials the live view
+        // path embedded; the sub stream is the NAS's MJPEG endpoint, authorised
+        // by the stream key that path carried.
+        assert_eq!(source.rtsp_main, "rtsp://nas.local:554/Sms=13.unicast");
+        assert_eq!(source.username.as_deref(), Some("syno"));
+        assert_eq!(source.password.as_deref(), Some("key123"));
+        let expected = client.mjpeg_url(13, "key123");
+        assert_eq!(source.rtsp_sub.as_deref(), Some(expected.as_str()));
     }
 
     #[test]

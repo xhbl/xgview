@@ -12,6 +12,7 @@
 //! * [`digest`]     – RFC 2617 / RFC 7616 credentials, shared by the ONVIF HTTP
 //!   calls and the RTSP session.
 //! * [`h264`]       – H.264 RTP depacketization and access unit reassembly.
+//! * [`mjpeg`]      – HTTP MJPEG (`multipart/x-mixed-replace`) client.
 //! * [`rtsp`]       – asynchronous RTSP (TCP interleaved) client.
 //! * [`pipeline`]   – non blocking per channel streaming supervisor with
 //!   exponential backoff reconnection.
@@ -24,6 +25,7 @@ pub mod discovery;
 pub mod error;
 pub mod h264;
 pub mod layout;
+pub mod mjpeg;
 pub mod model;
 pub mod pipeline;
 pub mod rtcp;
