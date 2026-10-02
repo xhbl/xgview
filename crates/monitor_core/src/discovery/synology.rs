@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use crate::config::SynologyConfig;
 use crate::error::{CoreError, Result};
 use crate::model::{CameraOrigin, CameraSource};
+use crate::rtsp::RtspUrl;
 
 /// A camera as reported by `SYNO.SurveillanceStation.Camera` `List`.
 #[derive(Debug, Clone, PartialEq)]
@@ -102,7 +105,7 @@ impl SynologyClient {
                 ("version", "6"),
                 ("method", "logout"),
                 ("session", "SurveillanceStation"),
-                ("sid", session.as_str()),
+                ("_sid", session.as_str()),
             ])
             .send()
             .await;
@@ -122,7 +125,7 @@ impl SynologyClient {
             ("api", api),
             ("method", method),
             ("version", version),
-            ("sid", session),
+            ("_sid", session),
         ];
         query.extend_from_slice(params);
 
@@ -153,6 +156,38 @@ impl SynologyClient {
             .ok_or_else(|| CoreError::parse("Surveillance Station returned no camera list"))?;
 
         Ok(cameras.iter().map(|camera| self.parse_camera(camera)).collect())
+    }
+
+    /// `SYNO.SurveillanceStation.Camera.GetLiveViewPath` for a batch of cameras.
+    ///
+    /// The RTSP URL Synology hands out is dynamic: it carries a `syno` user and
+    /// a short lived stream key as the password, so it cannot be built by hand.
+    async fn get_live_view_paths(&mut self, ids: &[i64]) -> Result<HashMap<i64, String>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.ensure_session().await?;
+        let id_list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        let data = self
+            .call(
+                "SYNO.SurveillanceStation.Camera",
+                "GetLiveViewPath",
+                "9",
+                &[("idList", id_list.as_str())],
+            )
+            .await?;
+
+        let mut paths = HashMap::new();
+        if let Some(entries) = data.as_array() {
+            for entry in entries {
+                let id = entry.get("id").and_then(Value::as_i64);
+                let path = entry.get("rtspPath").and_then(Value::as_str);
+                if let (Some(id), Some(path)) = (id, path) {
+                    paths.insert(id, path.to_string());
+                }
+            }
+        }
+        Ok(paths)
     }
 
     fn parse_camera(&self, value: &Value) -> SynologyCamera {
@@ -199,20 +234,35 @@ impl SynologyClient {
     /// Surveillance Station stream URLs into RTSP URLs.
     pub async fn import_cameras(&mut self) -> Result<Vec<CameraSource>> {
         let cameras = self.list_cameras().await?;
-        Ok(cameras.iter().map(|camera| self.to_source(camera)).collect())
+        let ids: Vec<i64> = cameras.iter().map(|camera| camera.id).collect();
+        let live_paths = self.get_live_view_paths(&ids).await?;
+        Ok(cameras
+            .iter()
+            .map(|camera| self.to_source(camera, live_paths.get(&camera.id).map(String::as_str)))
+            .collect())
     }
 
-    fn to_source(&self, camera: &SynologyCamera) -> CameraSource {
-        let main = camera
-            .main_url
-            .clone()
-            .map(|url| self.absolute_stream_url(&url))
-            .unwrap_or_else(|| self.fallback_stream_url(camera.id, 0));
+    fn to_source(&self, camera: &SynologyCamera, live_path: Option<&str>) -> CameraSource {
+        // The live view path Synology hands out is preferred: it is the only URL
+        // that actually streams, and it carries the `syno`/stream-key credentials.
+        let (rtsp_main, username, password) = match live_path {
+            Some(path) => split_rtsp_path(path),
+            None => {
+                let url = camera
+                    .main_url
+                    .clone()
+                    .unwrap_or_else(|| self.fallback_stream_url(camera.id, 0));
+                (
+                    self.absolute_stream_url(&url),
+                    Some(self.config.username.clone()),
+                    Some(self.config.password.clone()),
+                )
+            }
+        };
         let sub = camera
             .sub_url
             .clone()
-            .map(|url| self.absolute_stream_url(&url))
-            .unwrap_or_else(|| self.fallback_stream_url(camera.id, 1));
+            .map(|url| self.absolute_stream_url(&url));
 
         CameraSource {
             id: format!("syno-{}", camera.id),
@@ -221,10 +271,10 @@ impl SynologyClient {
             model: camera.model.clone(),
             host: camera.host.clone().unwrap_or_else(|| self.config.host.clone()),
             onvif_port: 80,
-            rtsp_main: main,
-            rtsp_sub: Some(sub),
-            username: Some(self.config.username.clone()),
-            password: Some(self.config.password.clone()),
+            rtsp_main,
+            rtsp_sub: sub,
+            username,
+            password,
             enabled: camera.enabled,
             tags: vec!["synology".to_string()],
             origin: CameraOrigin::Synology,
@@ -256,6 +306,21 @@ impl SynologyClient {
             "rtsp://{}:554/SurveillanceStation/camera.cgi?id={camera_id}&streamType={stream_type}",
             self.config.host
         )
+    }
+}
+
+/// Splits a Synology live view path into a credential free URL plus the
+/// `syno`/stream-key credentials it embeds.
+fn split_rtsp_path(path: &str) -> (String, Option<String>, Option<String>) {
+    match RtspUrl::parse(path) {
+        Ok(uri) => {
+            let (username, password) = match uri.credentials() {
+                Some((user, pass)) => (Some(user.to_string()), Some(pass.to_string())),
+                None => (None, None),
+            };
+            (uri.request_uri(), username, password)
+        }
+        Err(_) => (path.to_string(), None, None),
     }
 }
 

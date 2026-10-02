@@ -222,6 +222,15 @@ impl H264Depacketizer {
         // middle was lost costs one concealed picture, which the encoder's next
         // IDR recovers from.
         if let Some(open) = self.frame_timestamp.filter(|open| *open != header.timestamp) {
+            // A timestamp change ends the picture. A fragment still open here
+            // is a key frame whose last end flag the sender dropped (Synology's
+            // relay does this): its data is complete, only the flag is missing,
+            // so it is closed as a whole slice instead of being thrown away.
+            if self.fragment_active && !self.fragment.is_empty() {
+                let nal = std::mem::take(&mut self.fragment);
+                self.fragment_active = false;
+                self.append_nal(&nal);
+            }
             units.extend(self.finish(open));
         }
         self.frame_timestamp = Some(header.timestamp);
@@ -777,6 +786,31 @@ mod tests {
         // in front of it: a set identical to the one the decoder already holds
         // is not read as a sequence change.
         assert_eq!(released[0].data, annex_b(&[&sps, &sps, &idr]));
+        assert!(released[0].keyframe);
+    }
+
+    #[test]
+    fn a_key_frame_whose_end_flag_was_dropped_is_released_by_the_next_timestamp() {
+        let sps = sps(0, &[0x11]);
+        let pps = pps(0, &[0x22]);
+        let mut depacketizer = H264Depacketizer::new(Some(96), vec![sps.clone(), pps.clone()]);
+        let body = [0xaa; 6];
+        // Synology's relay drops the end flag on the key frame's last fragment:
+        // the slice is complete, but never marked finished.
+        let first = [[0x7c, 0x80 | NAL_IDR].as_slice(), &body[..2]].concat();
+        let middle = [[0x7c, 0x00 | NAL_IDR].as_slice(), &body[2..4]].concat();
+        let last = [[0x7c, 0x00 | NAL_IDR].as_slice(), &body[4..]].concat();
+
+        assert!(depacketizer.push(&header(96, 1, false), &first).is_empty());
+        assert!(depacketizer.push(&header(96, 1, false), &middle).is_empty());
+        assert!(depacketizer.push(&header(96, 1, false), &last).is_empty());
+
+        // The next picture's timestamp closes the key frame; the missing end
+        // flag is supplied here so the whole slice survives.
+        let released = depacketizer.push(&header(96, 2, false), &[0x7c, 0x80 | NAL_SLICE, 9]);
+        assert_eq!(released.len(), 1);
+        let idr = [[0x60 | NAL_IDR].as_slice(), &body[..]].concat();
+        assert_eq!(released[0].data, annex_b(&[&sps, &pps, &idr]));
         assert!(released[0].keyframe);
     }
 
