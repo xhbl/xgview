@@ -1,5 +1,5 @@
 use crate::layout::{self, Direction, GridLayout, NavigateOutcome, PageInfo};
-use crate::model::{CameraSource, StreamKind};
+use crate::model::{CameraSource, RtspTransport, StreamKind};
 
 /// Decoding decision for a single channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +45,9 @@ pub struct ChannelPlan {
     /// plan changes: filling in a sub stream from the settings must re-target
     /// the channel, otherwise it keeps streaming the URL it was started with.
     pub uri: Option<String>,
+    /// Transport the worker opens the stream with. Part of the plan too, so
+    /// switching a camera between TCP and UDP reconnects it.
+    pub transport: RtspTransport,
 }
 
 /// The complete decoding plan derived from layout, page, zoom and focus.
@@ -119,12 +122,21 @@ impl Schedule {
                 continue;
             }
             match plan.mode {
-                ChannelMode::Decode(stream) => changes.push(ScheduleChange::Activate {
-                    index: plan.index,
-                    camera_id: plan.camera_id.clone(),
-                    stream,
-                    previous_stream: previous_plan.and_then(|item| item.mode.stream()),
-                }),
+                ChannelMode::Decode(stream) => {
+                    // Only a real stream change keeps the last frame as a
+                    // placeholder: a plan that changed for another reason - the
+                    // transport of the camera, say - reconnects without a
+                    // transition, because the stream being pulled is the same.
+                    let previous_stream = previous_plan
+                        .and_then(|item| item.mode.stream())
+                        .filter(|previous| *previous != stream);
+                    changes.push(ScheduleChange::Activate {
+                        index: plan.index,
+                        camera_id: plan.camera_id.clone(),
+                        stream,
+                        previous_stream,
+                    });
+                }
                 ChannelMode::Suspend => changes.push(ScheduleChange::Suspend {
                     index: plan.index,
                     camera_id: plan.camera_id.clone(),
@@ -397,7 +409,7 @@ impl Scheduler {
                     ChannelMode::Suspend
                 };
                 let uri = mode.stream().map(|stream| camera.stream_uri(stream).to_string());
-                ChannelPlan { index, camera_id: camera.id.clone(), mode, uri }
+                ChannelPlan { index, camera_id: camera.id.clone(), mode, uri, transport: camera.transport }
             })
             .collect();
 

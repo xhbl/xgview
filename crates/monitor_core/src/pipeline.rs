@@ -23,8 +23,8 @@ use monitor_codec::{Codec, DecoderConfig, VideoDecoder};
 use crate::config::ReconnectPolicy;
 use crate::error::Result;
 use crate::h264::{nal_unit_type, H264Depacketizer, START_CODE};
-use crate::model::{CameraSource, ConnectionState, StreamKind};
-use crate::rtsp::{parse_rtp_header, RtspClient};
+use crate::model::{CameraSource, ConnectionState, RtspTransport, StreamKind};
+use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient};
 use crate::scheduler::ScheduleChange;
 
 /// Time without any RTP payload after which the session is considered dead.
@@ -274,16 +274,18 @@ struct Endpoint {
     uri: String,
     credentials: Option<(String, String)>,
     stream: StreamKind,
+    transport: RtspTransport,
 }
 
 impl Endpoint {
     /// True when this is the same stream as the one already running, so that a
     /// revisit of a channel does not reopen it. The camera is not compared: the
-    /// URI it contributes is.
+    /// URI it contributes is, and so is the transport it is pulled with.
     fn is_same_stream(&self, other: &Endpoint) -> bool {
         self.stream == other.stream
             && self.uri == other.uri
             && self.credentials == other.credentials
+            && self.transport == other.transport
     }
 }
 
@@ -329,6 +331,7 @@ async fn supervisor(
                     uri: source.stream_uri(stream).to_string(),
                     credentials: credentials_of(&source),
                     stream,
+                    transport: source.transport,
                 };
                 if let Some(existing) = channels.get(&index) {
                     if existing.endpoint.is_same_stream(&endpoint) {
@@ -618,11 +621,11 @@ async fn run_session(
     events: &Sender<StreamEvent>,
     frames: &FrameStore,
 ) -> Result<()> {
-    let Endpoint { index, camera_id, uri, credentials, stream } = endpoint;
+    let Endpoint { index, camera_id, uri, credentials, stream, transport } = endpoint;
     let camera_id = camera_id.as_str();
     let uri = uri.as_str();
     let mut client = RtspClient::connect_with_auth(uri, credentials).await?;
-    let tracks = client.start().await?;
+    let tracks = client.start_with_transport(transport).await?;
     let video = tracks.iter().find(|track| track.is_video());
     let codec = video.and_then(|track| track.encoding.clone());
     // The SDP only guesses the resolution: `a=framesize` is optional, so the
@@ -687,6 +690,13 @@ async fn run_session(
     // indistinguishable without these counters.
     let mut window_dropped: u64 = 0;
     let mut window_foreign: u64 = 0;
+    // Duplicate or late RTP packets dropped on a UDP session. Neither happens
+    // on TCP, so the counter stays zero there.
+    let mut window_reordered: u64 = 0;
+    // RTP packets the sequence numbers say were lost on a UDP session.
+    let mut window_lost: u64 = 0;
+    // Sequence number of the last RTP packet accepted on a UDP session.
+    let mut last_sequence: Option<u16> = None;
     let mut slowest_decode = Duration::ZERO;
     let mut window_start = Instant::now();
     let mut announced = false;
@@ -729,7 +739,7 @@ async fn run_session(
             // and then nothing but `SEI` until a receiver report arrived, which
             // a viewer shows as a slideshow whose timecode jumps.
             let report = crate::rtcp::receiver_report(RECEIVER_SSRC, source_ssrc, highest_sequence, 0, 0);
-            client.send_interleaved(1, &report).await?;
+            client.send_rtcp(&report).await?;
             last_report = Instant::now();
         }
 
@@ -737,9 +747,15 @@ async fn run_session(
         // gone quiet is noticed on time rather than at the next packet. A
         // deadline already past asks for an immediate answer from the read.
         let wait = READ_TIMEOUT.min(patience.saturating_sub(since_picture));
-        let packet = tokio::time::timeout(wait, client.read_interleaved()).await;
+        let packet = tokio::time::timeout(wait, client.read_media()).await;
+        // Channel 0 carries RTP, channel 1 carries RTCP, on the interleaved
+        // transport. UDP has no channels: `read_media` returns RTP only and
+        // drains the control socket itself, so only RTP reaches here.
         let (channel, payload) = match packet {
-            Ok(result) => result?,
+            Ok(result) => match result? {
+                MediaPacket::Rtp(payload) => (0u8, payload),
+                MediaPacket::Rtcp(payload) => (1u8, payload),
+            },
             Err(_) => {
                 // A wait that the picture deadline cut short is not silence on
                 // the wire, and reporting it as such would name the wrong fault
@@ -757,6 +773,31 @@ async fn run_session(
         // Channel 0 carries RTP, channel 1 carries RTCP.
         if channel == 0 {
             if let Some(header) = parse_rtp_header(&payload) {
+                // UDP reorders and duplicates. A stale fragment fed to the
+                // depacketizer would be spliced into the picture being
+                // assembled, so such a packet is dropped before it reaches it.
+                // The interleaved transport never does either.
+                if transport.is_udp() {
+                    if let Some(previous) = last_sequence {
+                        let delta = header.sequence.wrapping_sub(previous);
+                        if delta == 0 || delta > 0x8000 {
+                            // A duplicate, or a straggler that belongs to a
+                            // picture already handed over.
+                            window_reordered += 1;
+                            continue;
+                        }
+                        if delta > 1 {
+                            // A gap: the packets in between were lost, so the
+                            // unit being assembled is missing part of its
+                            // picture. It is written off rather than stitched
+                            // together and decoded into a screenful of
+                            // corruption.
+                            window_lost += u64::from(delta) - 1;
+                            depacketizer.invalidate_current();
+                        }
+                    }
+                    last_sequence = Some(header.sequence);
+                }
                 window_bytes += payload.len() as u64;
                 // The receiver report counts sequence numbers the way RFC 3550
                 // does: the 16 bit RTP field folded with the number of times it
@@ -926,6 +967,8 @@ async fn run_session(
                 errors = window_errors,
                 dropped = window_dropped,
                 foreign = window_foreign,
+                reordered = window_reordered,
+                lost = window_lost,
                 slowest_decode_ms = slowest_decode.as_millis() as u64,
                 fps = window_frames as f32 / seconds,
                 kbps = (window_bytes as f32 * 8.0 / 1000.0) / seconds,
@@ -940,6 +983,8 @@ async fn run_session(
             window_errors = 0;
             window_dropped = 0;
             window_foreign = 0;
+            window_reordered = 0;
+            window_lost = 0;
             slowest_decode = Duration::ZERO;
         }
     }
@@ -1039,6 +1084,7 @@ mod tests {
             enabled: true,
             tags: Vec::new(),
             origin: CameraOrigin::Manual,
+            transport: RtspTransport::default(),
             main_profile: None,
             sub_profile: None,
         }

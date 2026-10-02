@@ -277,7 +277,10 @@ impl AppConfig {
             let id = existing.id.clone();
             let origin = existing.origin;
             let enabled = existing.enabled;
-            *existing = CameraSource { id: id.clone(), origin, enabled, ..camera };
+            // The transport is a user choice, not something a re-import may
+            // reset: a camera kept on UDP stays on UDP.
+            let transport = existing.transport;
+            *existing = CameraSource { id: id.clone(), origin, enabled, transport, ..camera };
             return id;
         }
         let id = camera.id.clone();

@@ -100,6 +100,43 @@ impl CameraOrigin {
     }
 }
 
+/// Transport used to receive the RTP stream of a camera.
+///
+/// The interleaved (TCP) transport is the default: it crosses firewalls and
+/// loses no packet. A relay that damages the interleaved framing - a Synology
+/// Surveillance Station has been measured doing exactly that on its high
+/// resolution stream - can be bypassed by switching that one camera to UDP,
+/// where every RTP packet travels as a datagram of its own and a mangled packet
+/// cannot shift the ones behind it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RtspTransport {
+    #[default]
+    Tcp,
+    Udp,
+}
+
+impl RtspTransport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RtspTransport::Tcp => "TCP",
+            RtspTransport::Udp => "UDP",
+        }
+    }
+
+    pub fn is_udp(self) -> bool {
+        matches!(self, RtspTransport::Udp)
+    }
+
+    /// The other transport, used by the settings panel toggle.
+    pub fn toggled(self) -> Self {
+        match self {
+            RtspTransport::Tcp => RtspTransport::Udp,
+            RtspTransport::Udp => RtspTransport::Tcp,
+        }
+    }
+}
+
 fn default_onvif_port() -> u16 {
     80
 }
@@ -137,6 +174,10 @@ pub struct CameraSource {
     pub tags: Vec<String>,
     #[serde(default)]
     pub origin: CameraOrigin,
+    /// Transport used to pull both streams of this camera. Kept per camera so
+    /// that a device whose TCP relay damages the stream can be singled out.
+    #[serde(default)]
+    pub transport: RtspTransport,
     /// ONVIF profile token of the main stream, kept for later re-negotiation.
     #[serde(default)]
     pub main_profile: Option<String>,
@@ -167,6 +208,7 @@ impl CameraSource {
             enabled: true,
             tags: Vec::new(),
             origin: CameraOrigin::Manual,
+            transport: RtspTransport::default(),
             main_profile: None,
             sub_profile: None,
         }

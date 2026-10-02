@@ -15,7 +15,7 @@ use tokio::runtime::Handle;
 use monitor_core::autostart::{self, AutostartStatus};
 use monitor_core::config::AppConfig;
 use monitor_core::layout::{GridLayout, NavigateOutcome};
-use monitor_core::model::{ConnectionState, StreamKind};
+use monitor_core::model::{ConnectionState, RtspTransport, StreamKind};
 use monitor_core::pipeline::{ChannelManager, StreamEvent};
 use monitor_core::scheduler::Scheduler;
 use monitor_core::{CameraSource, Direction};
@@ -833,6 +833,7 @@ impl XgViewApp {
         let mut toggle: Option<(usize, bool)> = None;
         let mut remove: Option<String> = None;
         let mut infer: Option<usize> = None;
+        let mut transport_change: Option<(usize, RtspTransport)> = None;
         for (slot, camera) in self.config.cameras.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 let mut camera_enabled = camera.enabled;
@@ -851,6 +852,21 @@ impl XgViewApp {
                     if ui.small_button("infer sub").clicked() {
                         infer = Some(slot);
                     }
+                }
+                let transport = camera.transport;
+                if ui
+                    .small_button(RichText::new(transport.as_str()).small().color(if transport.is_udp() {
+                        theme::ACCENT
+                    } else {
+                        theme::TEXT_DIM
+                    }))
+                    .on_hover_text(
+                        "RTSP transport for this camera. UDP bypasses a relay that damages \
+                         the TCP interleaved framing.",
+                    )
+                    .clicked()
+                {
+                    transport_change = Some((slot, transport.toggled()));
                 }
                 ui.label(RichText::new(camera.masked_uri(StreamKind::Main)).small().color(theme::TEXT_DIM));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -883,6 +899,15 @@ impl XgViewApp {
                 self.needs_sync = true;
                 dirty = true;
             }
+        }
+        if let Some((slot, transport)) = transport_change {
+            if let Some(camera) = self.config.cameras.get_mut(slot) {
+                camera.transport = transport;
+            }
+            // The transport is part of the schedule plan, so the channel is
+            // reopened with the new one on the next sync.
+            self.needs_sync = true;
+            dirty = true;
         }
 
         ui.separator();

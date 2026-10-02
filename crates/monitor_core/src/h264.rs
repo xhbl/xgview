@@ -179,6 +179,9 @@ pub struct H264Depacketizer {
     fragment: Vec<u8>,
     /// A `FU-A` sequence was started and can still be appended to.
     fragment_active: bool,
+    /// Packets of the access unit under assembly were lost, so it must not
+    /// reach the decoder. Set by [`H264Depacketizer::invalidate_current`].
+    damaged: bool,
 }
 
 impl H264Depacketizer {
@@ -197,6 +200,21 @@ impl H264Depacketizer {
     /// Parameter sets known so far, SPS ahead of PPS.
     pub fn parameter_sets(&self) -> impl Iterator<Item = &[u8]> {
         self.parameter_sets.values().map(Vec::as_slice)
+    }
+
+    /// Writes off the access unit being assembled.
+    ///
+    /// Called when a gap in the RTP sequence numbers shows that packets of the
+    /// picture were lost. The fragments that did arrive can no longer be stitched
+    /// back together: a slice with a hole in the middle of its macroblock rows is
+    /// painted as corruption over that whole region, and the decoder may keep it
+    /// as a reference for the pictures that follow, which spreads the damage
+    /// until the next key frame. The unit is dropped whole instead, so a loss
+    /// costs one missing picture rather than a screenful of garbage.
+    pub fn invalidate_current(&mut self) {
+        self.damaged = true;
+        self.fragment.clear();
+        self.fragment_active = false;
     }
 
     /// Feeds one RTP packet, appending the access units it completed.
@@ -383,12 +401,19 @@ impl H264Depacketizer {
         let has_sps = std::mem::take(&mut self.frame_has_sps);
         let has_pps = std::mem::take(&mut self.frame_has_pps);
         let has_slice = std::mem::take(&mut self.frame_has_slice);
+        let damaged = std::mem::take(&mut self.damaged);
 
         // A unit that holds no slice is not a picture. Several cameras send SPS
         // and PPS as their own marker terminated packets, and handing those to
         // the decoder only earns a `dsNoParamSets` error: the sets are already
         // cached for the picture that follows.
         if !has_slice {
+            return None;
+        }
+
+        // A unit that lost packets never reaches the decoder: see
+        // `invalidate_current`.
+        if damaged {
             return None;
         }
 
@@ -553,6 +578,22 @@ mod tests {
         let middle = [0x7c, NAL_IDR, 1, 2];
         assert!(depacketizer.push(&header(96, 7, false), &middle).is_empty());
         assert!(depacketizer.push(&header(96, 7, true), &middle).is_empty());
+    }
+
+    #[test]
+    fn drops_the_access_unit_a_sequence_gap_was_reported_in() {
+        let (mut depacketizer, _sps, _pps) = running(&[0x11], &[0x22]);
+        let idr = nal(NAL_IDR, &[1, 2, 3]);
+
+        // A picture that would complete normally is written off once the
+        // sequence numbers said part of it was lost.
+        depacketizer.invalidate_current();
+        assert!(depacketizer.push(&header(96, 9000, true), &idr).is_empty());
+
+        // The next picture arrives whole and is released again: the damage does
+        // not carry over.
+        let unit = completed(&mut depacketizer, &header(96, 18000, true), &idr);
+        assert!(unit.keyframe);
     }
 
     #[test]

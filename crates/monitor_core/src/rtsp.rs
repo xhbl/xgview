@@ -11,14 +11,16 @@
 //! through [`crate::digest`] and the request replayed once.
 
 use std::fmt;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 
 use crate::digest::{self, Challenge};
 use crate::error::{CoreError, Result};
+use crate::model::RtspTransport;
 
 /// Default RTSP port.
 pub const RTSP_DEFAULT_PORT: u16 = 554;
@@ -258,6 +260,20 @@ pub enum RtspPacket {
     Interleaved { channel: u8, payload: Vec<u8> },
 }
 
+/// One item read from the media transport, whichever it is.
+///
+/// The interleaved transport multiplexes RTP and RTCP on the TCP connection and
+/// both reach the caller. UDP binds a socket per direction, so only RTP is ever
+/// returned: the control datagrams are drained inside [`RtspClient::read_media`]
+/// so that their receive buffer never fills up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaPacket {
+    /// A complete RTP packet, header included.
+    Rtp(Vec<u8>),
+    /// An RTCP packet (interleaved transport only).
+    Rtcp(Vec<u8>),
+}
+
 /// A video (or audio) track described by the session SDP.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SdpTrack {
@@ -460,6 +476,46 @@ pub fn parse_rtp_header(data: &[u8]) -> Option<RtpHeader> {
     })
 }
 
+/// Binds a consecutive pair of local UDP ports for RTP and RTCP.
+///
+/// RFC 3550 asks for an even RTP port followed by its odd neighbour. A socket
+/// bound to port 0 is handed a random one, so the pair is retried until the
+/// kernel returns an even number and the neighbour turns out to be free.
+async fn bind_rtp_pair(ipv6: bool) -> std::io::Result<(UdpSocket, UdpSocket)> {
+    let (any, host) = if ipv6 {
+        ("[::]:0", "[::]")
+    } else {
+        ("0.0.0.0:0", "0.0.0.0")
+    };
+    for _ in 0..32 {
+        let rtp = UdpSocket::bind(any).await?;
+        let port = rtp.local_addr()?.port();
+        if port % 2 != 0 {
+            continue;
+        }
+        if let Ok(rtcp) = UdpSocket::bind(format!("{host}:{}", port + 1)).await {
+            return Ok((rtp, rtcp));
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AddrNotAvailable,
+        "no consecutive RTP / RTCP port pair available",
+    ))
+}
+
+/// Reads a `name=low-high` parameter out of an RTSP `Transport` header, e.g.
+/// `server_port=5004-5005`.
+fn transport_ports(header: &str, name: &str) -> Option<(u16, u16)> {
+    header.split(';').find_map(|part| {
+        let (key, value) = part.trim().split_once('=')?;
+        if !key.trim().eq_ignore_ascii_case(name) {
+            return None;
+        }
+        let (first, second) = value.trim().split_once('-')?;
+        Some((first.trim().parse().ok()?, second.trim().parse().ok()?))
+    })
+}
+
 /// Connection state of the RTSP session as seen by the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RtspSessionState {
@@ -492,6 +548,24 @@ pub struct RtspClient {
     /// Challenge advertised by the server, cached so that only the first
     /// request pays for the `401` round trip.
     challenge: Option<Challenge>,
+    /// Address of the RTSP server. With the UDP transport the TCP connection
+    /// carries only the control plane, and the media is delivered here.
+    peer_addr: Option<SocketAddr>,
+    /// RTP / RTCP sockets of the UDP transport, `None` while the interleaved
+    /// transport is in use.
+    rtp: Option<UdpSocket>,
+    rtcp: Option<UdpSocket>,
+    rtp_server: Option<SocketAddr>,
+    rtcp_server: Option<SocketAddr>,
+    /// Receive buffers reused by [`RtspClient::read_media`].
+    ///
+    /// A datagram larger than the buffer is silently truncated by the kernel:
+    /// no error is raised, but the tail of an H.264 fragment is lost and the
+    /// picture it belongs to is corrupted. The RTP one is therefore sized for
+    /// the largest datagram UDP can carry, which is what a camera sending large
+    /// fragments on a high resolution stream relies on.
+    rtp_buffer: Box<[u8; 65536]>,
+    rtcp_buffer: Box<[u8; 8192]>,
 }
 
 impl RtspClient {
@@ -530,6 +604,7 @@ impl RtspClient {
             .map_err(|_| CoreError::rtsp(format!("connect to {address} timed out")))?
             .map_err(|err| CoreError::rtsp(format!("connect to {address} failed: {err}")))?;
         stream.set_nodelay(true).ok();
+        let peer_addr = stream.peer_addr().ok();
         let (read_half, write_half) = stream.into_split();
         tracing::debug!(target: "xgview::rtsp", url = %parsed.masked(), "rtsp connection established");
         Ok(Self {
@@ -545,6 +620,13 @@ impl RtspClient {
             timeout,
             credentials,
             challenge: None,
+            peer_addr,
+            rtp: None,
+            rtcp: None,
+            rtp_server: None,
+            rtcp_server: None,
+            rtp_buffer: Box::new([0u8; 65536]),
+            rtcp_buffer: Box::new([0u8; 8192]),
         })
     }
 
@@ -871,6 +953,53 @@ impl RtspClient {
         Ok(rtp_channel)
     }
 
+    /// `SETUP` using RTP over UDP.
+    ///
+    /// A pair of consecutive local ports is bound first - even for RTP, the next
+    /// one for RTCP, as RFC 3550 requires - and advertised in `client_port`. The
+    /// server answers with the pair it will send from, which is where the
+    /// receiver reports go.
+    pub async fn setup_udp(&mut self, control: &str) -> Result<()> {
+        let ipv6 = self.peer_addr.map(|addr| addr.is_ipv6()).unwrap_or(false);
+        let (rtp, rtcp) = bind_rtp_pair(ipv6)
+            .await
+            .map_err(|err| CoreError::rtsp(format!("cannot bind RTP / RTCP ports: {err}")))?;
+        let client_port = rtp
+            .local_addr()
+            .map_err(|err| CoreError::rtsp(format!("cannot read the RTP port: {err}")))?
+            .port();
+        let track_uri = self.resolve_control(control);
+        let transport = format!("RTP/AVP;unicast;client_port={client_port}-{}", client_port + 1);
+        let response = self
+            .request("SETUP", &track_uri, &[("Transport", transport)], None)
+            .await?;
+        self.update_session(&response);
+        let response = self.expect_success(response, "SETUP")?;
+        let header = response
+            .header("Transport")
+            .ok_or_else(|| CoreError::rtsp("SETUP answered without a Transport header"))?;
+        let (server_rtp, server_rtcp) = transport_ports(header, "server_port").ok_or_else(|| {
+            CoreError::rtsp(format!("SETUP Transport header carries no server_port: {header}"))
+        })?;
+        let ip = self
+            .peer_addr
+            .map(|addr| addr.ip())
+            .ok_or_else(|| CoreError::rtsp("the RTSP peer address is unknown"))?;
+        self.rtp_server = Some(SocketAddr::new(ip, server_rtp));
+        self.rtcp_server = Some(SocketAddr::new(ip, server_rtcp));
+        self.rtp = Some(rtp);
+        self.rtcp = Some(rtcp);
+        self.state = RtspSessionState::Setup;
+        tracing::debug!(
+            target: "xgview::rtsp",
+            client_port,
+            server_rtp,
+            server_rtcp,
+            "rtp over udp session"
+        );
+        Ok(())
+    }
+
     /// `PLAY`. `range` defaults to `npt=0.000-` (live).
     pub async fn play(&mut self, range: &str) -> Result<()> {
         let uri = self.session_uri();
@@ -927,8 +1056,10 @@ impl RtspClient {
 
     /// Convenience helper: `OPTIONS` + `DESCRIBE` + `SETUP` + `PLAY`.
     ///
-    /// Returns the parsed SDP tracks of the session.
-    pub async fn start(&mut self) -> Result<Vec<SdpTrack>> {
+    /// Returns the parsed SDP tracks of the session. Only the video track is set
+    /// up: an audio track the SDP advertises is left alone, so nothing of it is
+    /// ever sent to the client.
+    pub async fn start_with_transport(&mut self, transport: RtspTransport) -> Result<Vec<SdpTrack>> {
         self.options().await?;
         let sdp = self.describe().await?;
         let tracks = parse_sdp(&sdp);
@@ -937,9 +1068,21 @@ impl RtspClient {
             .find(|track| track.is_video())
             .ok_or_else(|| CoreError::rtsp("no video track in session description"))?;
         let control = video.control.clone().unwrap_or_default();
-        self.setup_interleaved(&control, 0).await?;
+        match transport {
+            RtspTransport::Tcp => {
+                self.setup_interleaved(&control, 0).await?;
+            }
+            RtspTransport::Udp => {
+                self.setup_udp(&control).await?;
+            }
+        }
         self.play("npt=0.000-").await?;
         Ok(tracks)
+    }
+
+    /// [`RtspClient::start_with_transport`] over the interleaved transport.
+    pub async fn start(&mut self) -> Result<Vec<SdpTrack>> {
+        self.start_with_transport(RtspTransport::Tcp).await
     }
 
     /// Writes one interleaved packet.
@@ -962,6 +1105,19 @@ impl RtspClient {
             .await
             .map_err(|err| CoreError::rtsp(format!("flush interleaved failed: {err}")))?;
         Ok(())
+    }
+
+    /// Sends a control packet (a receiver report) on whichever transport is in
+    /// use: the RTCP socket on UDP, interleaved channel 1 on TCP.
+    pub async fn send_rtcp(&mut self, payload: &[u8]) -> Result<()> {
+        match (self.rtcp.as_ref(), self.rtcp_server) {
+            (Some(socket), Some(target)) => socket
+                .send_to(payload, target)
+                .await
+                .map(|_| ())
+                .map_err(|err| CoreError::rtsp(format!("send rtcp failed: {err}"))),
+            _ => self.send_interleaved(1, payload).await,
+        }
     }
 
     /// Reads the next interleaved payload, ignoring control responses.
@@ -991,6 +1147,58 @@ impl RtspClient {
                             "discarded a failed control response, the session keeps streaming"
                         );
                     }
+                }
+            }
+        }
+    }
+
+    /// Reads the next media packet from the transport in use.
+    ///
+    /// On the interleaved transport this maps the channel onto [`MediaPacket`];
+    /// on UDP the RTP socket is read and the RTCP one is drained, because a
+    /// sender report that is never read would eventually fill its buffer.
+    pub async fn read_media(&mut self) -> Result<MediaPacket> {
+        if self.rtp.is_none() {
+            let (channel, payload) = self.read_interleaved().await?;
+            return Ok(if channel == 0 {
+                MediaPacket::Rtp(payload)
+            } else {
+                MediaPacket::Rtcp(payload)
+            });
+        }
+
+        let rtp = self.rtp.as_ref().expect("bound by setup_udp");
+        let rtcp = self.rtcp.as_ref().expect("bound by setup_udp");
+        let buffer = &mut self.rtp_buffer;
+        let scratch = &mut self.rtcp_buffer;
+        loop {
+            tokio::select! {
+                result = rtp.recv(&mut buffer[..]) => {
+                    let length =
+                        result.map_err(|err| CoreError::rtsp(format!("read rtp failed: {err}")))?;
+                    if length == buffer.len() {
+                        tracing::warn!(
+                            target: "xgview::rtsp",
+                            length,
+                            "an rtp datagram filled the receive buffer, it was truncated"
+                        );
+                    }
+                    return Ok(MediaPacket::Rtp(buffer[..length].to_vec()));
+                }
+                result = rtcp.recv(&mut scratch[..]) => {
+                    result.map_err(|err| CoreError::rtsp(format!("read rtcp failed: {err}")))?;
+                }
+                result = self.reader.fill_buf() => {
+                    // Media travels on UDP, but the TCP connection still carries
+                    // the keep alive answers. They are read here and dropped so
+                    // that the socket does not fill up over an unattended run.
+                    let length = result
+                        .map_err(|err| CoreError::rtsp(format!("read control failed: {err}")))?
+                        .len();
+                    if length == 0 {
+                        return Err(CoreError::rtsp("connection closed by peer"));
+                    }
+                    self.reader.consume(length);
                 }
             }
         }
@@ -1261,5 +1469,116 @@ a=control:trackID=1\r\n";
         assert!(header.marker);
         assert_eq!(header.sequence, 10);
         assert_eq!(header.header_len, 12);
+    }
+
+    #[test]
+    fn reads_transport_ports() {
+        let header =
+            "RTP/AVP;unicast;client_port=34567-34568;server_port=5004-5005;ssrc=1234ABCD";
+        assert_eq!(transport_ports(header, "server_port"), Some((5004, 5005)));
+        assert_eq!(transport_ports(header, "client_port"), Some((34567, 34568)));
+        // Header parameter names are case insensitive on the wire.
+        assert_eq!(transport_ports(header, "SERVER_PORT"), Some((5004, 5005)));
+        assert_eq!(transport_ports(header, "mode"), None);
+        assert_eq!(transport_ports("RTP/AVP;unicast", "server_port"), None);
+    }
+
+    /// Full UDP handshake against a minimal RTSP server: the client has to bind
+    /// a port pair, advertise it in `SETUP`, read the server pair back and then
+    /// receive a datagram on the RTP socket.
+    #[tokio::test]
+    async fn sets_up_rtp_over_udp_and_reads_a_datagram() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let sdp = "v=0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=control:trackID=1\r\n";
+            let mut client_port = 0u16;
+
+            loop {
+                let request = read_request(&mut reader).await;
+                if request.is_empty() {
+                    break;
+                }
+                let method = request[0].clone();
+                if method.starts_with("OPTIONS") {
+                    write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
+                } else if method.starts_with("DESCRIBE") {
+                    write_response(
+                        &mut write_half,
+                        &format!(
+                            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
+                             Content-Length: {}\r\n\r\n{sdp}",
+                            sdp.len()
+                        ),
+                    )
+                    .await;
+                } else if method.starts_with("SETUP") {
+                    let transport = request
+                        .iter()
+                        .find(|line| line.starts_with("Transport:"))
+                        .cloned()
+                        .unwrap_or_default();
+                    let value = transport
+                        .split_once(':')
+                        .map(|(_, value)| value.trim().to_string())
+                        .unwrap_or_default();
+                    client_port = transport_ports(&value, "client_port")
+                        .map(|(rtp, _)| rtp)
+                        .unwrap_or(0);
+                    write_response(
+                        &mut write_half,
+                        &format!(
+                            "RTSP/1.0 200 OK\r\nCSeq: 3\r\nSession: 1234\r\n\
+                             Transport: RTP/AVP;unicast;client_port={client_port}-{};\
+                             server_port=5004-5005\r\n\r\n",
+                            client_port + 1
+                        ),
+                    )
+                    .await;
+                } else if method.starts_with("PLAY") {
+                    write_response(
+                        &mut write_half,
+                        "RTSP/1.0 200 OK\r\nCSeq: 4\r\nSession: 1234\r\n\r\n",
+                    )
+                    .await;
+                    let rtp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                    // Deliberately larger than any MTU: a receive buffer that is
+                    // too small truncates it silently, and the assertion below
+                    // would then see a shorter packet - which is exactly what
+                    // corrupts the picture of a large high resolution stream.
+                    let mut packet = vec![0u8; 5000];
+                    packet[..12].copy_from_slice(&[
+                        0x80, 0x60, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0,
+                    ]);
+                    rtp.send_to(&packet, ("127.0.0.1", client_port)).await.unwrap();
+                    // Hold the control connection open long enough for the
+                    // client to read the datagram, so closing it cannot win the
+                    // race against the RTP socket.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    break;
+                } else {
+                    write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 5\r\n\r\n").await;
+                }
+            }
+        });
+
+        let url = format!("rtsp://127.0.0.1:{port}/live");
+        let mut client = RtspClient::connect(&url).await.unwrap();
+        let tracks = client.start_with_transport(RtspTransport::Udp).await.unwrap();
+        assert!(tracks.iter().any(|track| track.is_video()));
+
+        let packet = tokio::time::timeout(Duration::from_secs(2), client.read_media())
+            .await
+            .expect("a datagram arrives")
+            .unwrap();
+        match packet {
+            MediaPacket::Rtp(payload) => assert_eq!(payload.len(), 5000),
+            other => panic!("expected an rtp packet, got {other:?}"),
+        }
+        server.await.unwrap();
     }
 }
