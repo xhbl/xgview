@@ -54,8 +54,9 @@ xgview/
 * **Non blocking UI** – the egui thread never touches a socket or a decoder. All
   network I/O and decoding run on a tokio runtime; results reach the UI through
   lock free channels (`crossbeam-channel` upward, `tokio::sync::mpsc` downward).
-* **Zero copy decoding** – on Android the `AMediaCodec` output is rendered through
-  `ANativeWindow` / `AHardwareBuffer` instead of being copied back to the CPU.
+* **Hardware decoding on every target** – Android decodes with `AMediaCodec` and
+  reads the pictures back through an `AImageReader`, so they reach the renderer
+  as the same NV12 planes the Windows/Linux backends produce.
 * **Conditional compilation** – `#[cfg(target_os = "android")]` /
   `#[cfg(target_os = "windows")]` select the decoder and the start on boot
   mechanism. A plain `cargo run` on Windows is enough to get going.

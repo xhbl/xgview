@@ -48,8 +48,8 @@ use ffmpeg::util::frame::video::Video as Picture;
 use ffmpeg::Packet;
 
 use crate::{
-    plane_stride, Codec, CodecError, DecodedFrame, DecoderConfig, PixelFormat, Result, VideoDecoder,
-    VideoStreamInfo,
+    plane_stride, Codec, CodecError, ColorMatrix, ColorRange, ColorSpace, DecodedFrame,
+    DecoderConfig, PixelFormat, Result, VideoDecoder, VideoStreamInfo,
 };
 
 /// Decoder backed by FFmpeg's `libavcodec`.
@@ -140,7 +140,19 @@ impl FfmpegDecoder {
                 _ => &picture,
             };
             let ready = to_nv12(&mut self.scaler, &mut self.scaler_key, source, &mut converted)?;
-            let Some(frame) = pack(ready, pts_us, keyframe) else {
+            // The matrix is the one the stream announced, and stays the stream's
+            // whatever happens here. The range does not: a picture that went
+            // through libswscale came out in the studio range the NV12 planes
+            // carry, so only that case can change it.
+            let colorspace = ColorSpace {
+                matrix: color_matrix(picture.color_space()),
+                range: if std::ptr::eq(ready, source) {
+                    color_range(picture.color_range())
+                } else {
+                    ColorRange::Limited
+                },
+            };
+            let Some(frame) = pack(ready, pts_us, keyframe, colorspace) else {
                 continue;
             };
             if self.info.is_none() {
@@ -448,7 +460,12 @@ fn copy_back(destination: &mut Picture, source: &Picture) -> Result<()> {
 }
 
 /// Copies the two planes of an NV12 picture out of their strided buffers.
-fn pack(nv12: &Picture, pts_us: i64, keyframe: bool) -> Option<DecodedFrame> {
+fn pack(
+    nv12: &Picture,
+    pts_us: i64,
+    keyframe: bool,
+    colorspace: ColorSpace,
+) -> Option<DecodedFrame> {
     let width = nv12.width() as usize;
     let height = nv12.height() as usize;
     if width == 0 || height == 0 {
@@ -463,11 +480,35 @@ fn pack(nv12: &Picture, pts_us: i64, keyframe: bool) -> Option<DecodedFrame> {
         width: width as u32,
         height: height as u32,
         format: PixelFormat::Nv12,
+        colorspace,
         pts_us,
         keyframe,
         buffer: None,
         planes: vec![luma, chroma],
     })
+}
+
+/// The matrix coefficients libavcodec reported for a picture.
+///
+/// The standard family does not matter to the shader, only the numbers do, so
+/// the ones that share a matrix are grouped. Anything unrecognised takes the
+/// renderer's default, which is what the picture would have been decoded with
+/// before the stream could be asked.
+fn color_matrix(space: ffmpeg::color::Space) -> ColorMatrix {
+    use ffmpeg::color::Space;
+    match space {
+        Space::BT470BG | Space::SMPTE170M | Space::SMPTE240M | Space::FCC => ColorMatrix::Bt601,
+        Space::BT2020NCL | Space::BT2020CL => ColorMatrix::Bt2020,
+        _ => ColorMatrix::Bt709,
+    }
+}
+
+/// The range libavcodec reported for a picture.
+fn color_range(range: ffmpeg::color::Range) -> ColorRange {
+    match range {
+        ffmpeg::color::Range::JPEG => ColorRange::Full,
+        _ => ColorRange::Limited,
+    }
 }
 
 /// Copies the leading `columns` bytes of `rows` rows out of one strided plane,

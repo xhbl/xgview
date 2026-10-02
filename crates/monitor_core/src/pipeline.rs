@@ -18,7 +18,8 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
-use monitor_codec::{Codec, DecodedFrame, DecoderConfig, VideoDecoder};
+use monitor_codec::sps::picture_size;
+use monitor_codec::{Codec, ColorSpace, DecodedFrame, DecoderConfig, VideoDecoder};
 
 use crate::config::ReconnectPolicy;
 use crate::error::Result;
@@ -124,6 +125,8 @@ pub struct VideoFrame {
     pub sequence: u64,
     pub width: u32,
     pub height: u32,
+    /// How the two planes are to be read back as colour.
+    pub colorspace: ColorSpace,
     /// Luma plane: `height` rows, each padded to the alignment a texture
     /// upload wants, of which the leading `width` bytes hold the picture.
     pub y: Vec<u8>,
@@ -716,13 +719,27 @@ async fn run_session(
     };
     let video = tracks.iter().find(|track| track.is_video());
     let codec = video.and_then(|track| track.encoding.clone());
-    // The SDP only guesses the resolution: `a=framesize` is optional, so the
-    // real size is taken from the first decoded picture.
+    // The SDP's resolution is a hint: `a=framesize` is optional, and where it
+    // is missing the size comes from the sequence parameter set below.
     let mut width = video.and_then(|track| track.width);
     let mut height = video.and_then(|track| track.height);
     let payload_type = video.and_then(|track| track.payload_type);
     let parameter_sets = video.map(|track| track.parameter_sets.clone()).unwrap_or_default();
     let kind = Codec::from_encoding(codec.as_deref().unwrap_or_default());
+
+    // `a=framesize` is optional, but a decoder has to be sized before its first
+    // picture arrives: Android builds its image reader to that size, and a
+    // reader that does not match the stream cannot be read back at all. The
+    // sequence parameter set the SDP advertises carries the real size, so it is
+    // read from there when the SDP itself did not name one.
+    if width.is_none() || height.is_none() {
+        if let Some((sps_width, sps_height)) =
+            parameter_sets.iter().find_map(|nal| picture_size(nal))
+        {
+            width = width.or(Some(sps_width));
+            height = height.or(Some(sps_height));
+        }
+    }
 
     let mut decoder = video_decoder(kind, width, height, index, prefer_hardware);
     // Each codec arrives in its own shape over RTP: an H.264 access unit spread
@@ -1120,6 +1137,7 @@ fn publish_frames(
                 sequence: *sequence,
                 width: frame.width,
                 height: frame.height,
+                colorspace: frame.colorspace,
                 y,
                 uv,
             }),

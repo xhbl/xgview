@@ -18,7 +18,9 @@ tracing = "0.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
-eframe = { version = "0.32", features = ["wgpu", "android-native-activity"] }
+# Default features are not taken: `accesskit`, one of them, will not build with
+# the `android-native-activity` backend the manifest selects.
+eframe = { version = "0.32", default-features = false, features = ["wgpu", "android-native-activity"] }
 jni = "0.21"
 
 monitor_core = { path = "../monitor_core" }

@@ -350,3 +350,94 @@ stream that had begun to dribble would widen its own deadline until it never
 fired. On the cameras to hand it reads five seconds for three of them and six for
 the MCS2020, whose group is three seconds - the camera that a fixed five second
 deadline was quietly cutting off whenever it waited for a key frame.
+
+---
+
+## 9. Android: the `AMediaCodec` path, and a vendor abort that blocks it
+
+Measured on a SHIELD Android TV (Android 11), against the same eight cameras.
+Everything below was found by running on the device; the Android target had
+never been built before, so the build chain came first.
+
+**The target had never been built.** Two blockers, both silent until someone
+tried:
+
+- eframe's `accesskit` feature refuses to build with `android-native-activity`,
+  which is the backend the manifest's `NativeActivity` needs (`compile_error!`
+  in eframe's `lib.rs`). eframe's default features are therefore not taken and
+  are split per target: `wgpu` + `default_fonts` everywhere, `accesskit` +
+  `glow` + `wayland` + `x11` on the desktop, `android-native-activity` on
+  Android.
+- `scripts/build-android.sh` passes the API level as `-p`, which cargo-ndk read
+  as "package" once it reached 4.x, where the platform is `-P`.
+
+**A codec built per packet never reaches steady state.** The backend created an
+`AMediaCodec`, configured it, started it, ran one access unit and deleted it
+again - every frame. The session is opened once now, from the first access unit,
+and closed when the channel ends.
+
+**`AImageReader_getWindow` does not return the window.** The NDK signature is
+`(AImageReader*, /*out*/ ANativeWindow**)`. Declaring it as returning
+`ANativeWindow*` and calling it with one argument writes the window through the
+second register's garbage address: a SIGSEGV on one run, a null window on the
+next. Every FFI signature was then checked against the NDK headers rather than
+recalled.
+
+**The usage decides whether the planes can be read at all.** A reader built with
+`GPU_SAMPLED_IMAGE | CPU_READ_OFTEN` hands out buffers owned by the GPU;
+`AImage_getPlaneData` fails with `-30003 AMEDIA_IMGREADER_CANNOT_LOCK_IMAGE`,
+and the channel shows nothing while `units` climbs and `errors` stays at zero.
+With `CPU_READ_OFTEN` alone the planes are readable. The decoder takes the
+surface either way.
+
+**The reader has to be the stream's own size.** `AMediaCodec` renders the
+picture at its **native size whatever the format's `width`/`height` say** - it
+does not scale to the surface - and an image reader of any other size produces
+`-30003` on every picture. The SDP is not a source for that size: `a=framesize`
+is optional, and for two of these cameras its `sprop-parameter-sets` describe a
+size the stream does not send. The size is taken from the stream's own sequence
+parameter set instead (`monitor_codec::sps`, read on the first access unit that
+carries one, which is why the codec is opened lazily). *Known gap:* the
+depacketizer prepends the sets it has cached from the SDP to a picture that
+arrives without its own, so those two cameras still get the SDP's size; sizing
+from the codec's reported output and reopening would close it.
+
+**The vendor abort.** As soon as a decoder renders into an image reader while
+the process also drives the wgpu surface, the process aborts within seconds:
+
+```text
+Abort message: 'fdsan: attempted to close file descriptor N, expected to be
+                unowned, actually owned by unique_fd 0x...'
+#01 libc.so (android_fdsan_close_with_tag)
+#02 libc.so (close)
+#03 /vendor/lib64/libnvrm_sync.so (NvRmSyncFdLegacyClose)
+```
+
+Three ruled out, each by experiment rather than by reading:
+
+| Not the cause | How it was ruled out |
+| --- | --- |
+| The image reader's configuration | Five variants - CPU-only, GPU-only, both, `AImageReader_new`, `acquireNextImage` - all abort identically |
+| Vulkan on its own | Pinning wgpu to the GL backend fails to start at all: `WGPU error: Parent device is lost` |
+| `MediaCodec` into an image reader | A control app running the same path with **no GPU surface** in the process decodes and hands images over normally |
+
+What is left is the combination: this process's GPU surface and MediaCodec's
+surface rendering, meeting in NVIDIA's sync fence handling. It is the driver
+closing a descriptor the framework still owns.
+
+**The NDK leaves no way around it, and no zero copy.** `AMediaCodec_getOutputImage`
+does not exist in the C API - it is Java only - so a hardware buffer can only be
+reached through an image reader, which is the path that aborts. Byte-buffer mode
+(`AMediaCodec_getOutputBuffer`) is the only surface-free way to get pictures out
+of the codec, and it costs the copy a zero copy design exists to avoid. On this
+device the choice is: the surface path with zero copy and an abort, or byte
+buffers and a copy.
+
+**Rust's logging is invisible on Android unless it is carried to logcat.** A
+`NativeActivity` throws stdout away, so every `tracing` line the viewer emits
+was lost, and a start that failed looked exactly like a start that never
+happened. `monitor_gui::run_android` installs a subscriber that writes to
+logcat (`adb logcat -s xgview`), and `monitor_android` no longer drops
+`run_android`'s error: the GL attempt above failed silently for exactly that
+reason before the logger existed.
+

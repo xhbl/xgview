@@ -13,7 +13,11 @@ readme = "../../README.md"
 anyhow = "1"
 crossbeam-channel = "0.5"
 egui = "0.32"
-eframe = { version = "0.32", features = ["wgpu"] }
+# eframe's default features are not taken wholesale, because one of them -
+# `accesskit` - refuses to build with the `android-native-activity` backend the
+# Android manifest selects. What every target needs is asked for here, and the
+# rest is added per target below.
+eframe = { version = "0.32", default-features = false, features = ["wgpu", "default_fonts"] }
 # The decoded planes are uploaded as textures and turned into colour by a WGSL
 # shader, which needs the renderer eframe already runs and its wgpu.
 egui-wgpu = "0.32"
@@ -24,5 +28,16 @@ tracing = "0.1"
 monitor_core = { path = "../monitor_core" }
 monitor_codec = { path = "../monitor_codec" }
 
+# Desktop keeps the rest of eframe's defaults: the accessibility support and the
+# glow backend it would otherwise turn on itself.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.32", features = ["accesskit", "glow", "wayland", "x11"] }
+
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
+# The activity declared in AndroidManifest.xml is a NativeActivity, so this is
+# the backend eframe has to be built with - and the reason `accesskit` above
+# cannot be enabled for Android.
+eframe = { version = "0.32", default-features = false, features = ["android-native-activity"] }
+# The viewer's own logging goes to logcat on Android; see `init_android_logging`.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }

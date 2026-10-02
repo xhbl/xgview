@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use monitor_codec::plane_stride;
+use monitor_codec::{plane_stride, ColorSpace};
 use monitor_core::pipeline::VideoFrame;
 
 /// The format egui reads a picture in.
@@ -33,6 +33,16 @@ const SHADER: &str = r#"
 @group(0) @binding(0) var luma_plane: texture_2d<f32>;
 @group(0) @binding(1) var chroma_plane: texture_2d<f32>;
 @group(0) @binding(2) var plane_sampler: sampler;
+
+// The colour description of the stream, carried on every frame rather than
+// assumed: matrices differ (BT.601 for SD, BT.709 for HD) and so do ranges.
+struct Colour {
+    // x: luma scale, y: luma offset, z: chroma scale, w: unused.
+    range: vec4<f32>,
+    // x: R/Cr, y: G/Cb, z: G/Cr, w: B/Cb.
+    matrix: vec4<f32>,
+};
+@group(0) @binding(3) var<uniform> colour: Colour;
 
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
@@ -57,23 +67,19 @@ fn vertex(@builtin(vertex_index) index: u32) -> VertexOut {
 
 @fragment
 fn fragment(in: VertexOut) -> @location(0) vec4<f32> {
-    // BT.601 limited range, which is what both decoders hand over: whatever
-    // range the camera announced was already folded into these planes.
-    let luma = (textureSample(luma_plane, plane_sampler, in.uv).r - 16.0 / 255.0) * (255.0 / 219.0);
+    // Whatever range a decoder could fold away it already did; what is left is
+    // expanded here, then the matrix turns the difference signals into colour.
+    let luma = (textureSample(luma_plane, plane_sampler, in.uv).r - colour.range.y) * colour.range.x;
     let chroma = textureSample(chroma_plane, plane_sampler, in.uv).rg;
-    let blue = (chroma.x - 0.5) * (255.0 / 224.0);
-    let red = (chroma.y - 0.5) * (255.0 / 224.0);
+    let blue = (chroma.x - 0.5) * colour.range.z;
+    let red = (chroma.y - 0.5) * colour.range.z;
 
-    let colour = clamp(
-        vec3<f32>(
-            luma + 1.5748 * red,
-            luma - 0.1873 * blue - 0.4681 * red,
-            luma + 1.8556 * blue,
-        ),
-        vec3<f32>(0.0),
-        vec3<f32>(1.0),
+    let rgb = vec3<f32>(
+        luma + colour.matrix.x * red,
+        luma - colour.matrix.y * blue - colour.matrix.z * red,
+        luma + colour.matrix.w * blue,
     );
-    return vec4<f32>(colour, 1.0);
+    return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 "#;
 
@@ -90,6 +96,8 @@ struct Channel {
     planes: [wgpu::Texture; 2],
     /// The picture the conversion pass writes and egui draws.
     output: wgpu::TextureView,
+    /// Colour description of the newest picture, read by the shader.
+    colour: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     surface: VideoSurface,
     /// Picture size in pixels; `surface.size` is the same, rounded for egui.
@@ -135,6 +143,16 @@ impl VideoRenderer {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -224,6 +242,10 @@ impl VideoRenderer {
 
         write_plane(&self.state.queue, &channel.planes[0], size, stride, &frame.y);
         write_plane(&self.state.queue, &channel.planes[1], chroma, stride, &frame.uv);
+        // The colour description travels with the picture, so the shader reads
+        // the matrix and range this stream was coded with rather than a fixed
+        // pair. It is 32 bytes, cheap enough to write every frame.
+        self.state.queue.write_buffer(&channel.colour, 0, &colour_uniform(frame.colorspace));
 
         self.convert(index);
     }
@@ -267,6 +289,12 @@ impl VideoRenderer {
         let output_view = output.create_view(&Default::default());
         let luma_view = planes[0].create_view(&Default::default());
         let chroma_view = planes[1].create_view(&Default::default());
+        let colour = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("xgview-nv12-colour"),
+            size: COLOUR_UNIFORM_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("xgview-nv12-planes"),
             layout: &self.layout,
@@ -282,6 +310,10 @@ impl VideoRenderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: colour.as_entire_binding(),
                 },
             ],
         });
@@ -300,6 +332,7 @@ impl VideoRenderer {
             Channel {
                 planes,
                 output: output_view,
+                colour,
                 bind_group,
                 surface: VideoSurface { id, size: egui::vec2(size.0 as f32, size.1 as f32) },
                 size,
@@ -378,4 +411,21 @@ fn write_plane(
         },
         wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
     );
+}
+
+/// Size of the shader's colour uniform block, in bytes.
+const COLOUR_UNIFORM_BYTES: u64 = 32;
+
+/// Packs a frame's colour description the way the shader's block reads it:
+/// `[luma scale, luma offset, chroma scale, unused]` followed by
+/// `[R/Cr, G/Cb, G/Cr, B/Cb]`.
+fn colour_uniform(colorspace: ColorSpace) -> [u8; 32] {
+    let [luma_scale, luma_offset, chroma_scale] = colorspace.range.scales();
+    let [r_cr, g_cb, g_cr, b_cb] = colorspace.matrix.coefficients();
+    let values = [luma_scale, luma_offset, chroma_scale, 0.0, r_cr, g_cb, g_cr, b_cb];
+    let mut bytes = [0u8; 32];
+    for (slot, value) in bytes.chunks_exact_mut(4).zip(values) {
+        slot.copy_from_slice(&value.to_ne_bytes());
+    }
+    bytes
 }

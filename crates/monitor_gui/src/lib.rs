@@ -97,9 +97,82 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
     .map_err(|err| anyhow::anyhow!("cannot start the viewer: {err}"))
 }
 
+#[cfg(target_os = "android")]
+#[link(name = "log")]
+extern "C" {
+    fn __android_log_print(
+        priority: std::ffi::c_int,
+        tag: *const std::ffi::c_char,
+        format: *const std::ffi::c_char,
+        ...
+    ) -> std::ffi::c_int;
+}
+
+/// Sends the viewer's own `tracing` output to logcat.
+///
+/// Rust's logging goes to stdout, which a `NativeActivity` throws away, so
+/// without this every line the viewer emits on Android - the codec diagnostics,
+/// the session windows, the errors - is lost. `adb logcat -s xgview` reads it
+/// instead, and nothing else is needed to debug a start that goes wrong.
+#[cfg(target_os = "android")]
+fn init_android_logging() {
+    use std::ffi::CString;
+    use std::io::Write;
+
+    // `ANDROID_LOG_DEBUG`
+    const ANDROID_LOG_DEBUG: std::ffi::c_int = 3;
+
+    struct Logcat;
+
+    impl Write for Logcat {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            for line in buf.split(|byte| *byte == b'\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                let Ok(text) = CString::new(line) else {
+                    continue;
+                };
+                // Safety: a NUL terminated format string with no conversions,
+                // fed one `char *` for its single `%s`.
+                unsafe {
+                    __android_log_print(
+                        ANDROID_LOG_DEBUG,
+                        c"xgview".as_ptr(),
+                        c"%s".as_ptr(),
+                        text.as_ptr(),
+                    );
+                }
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logcat {
+        type Writer = Logcat;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            Logcat
+        }
+    }
+
+    // An already installed subscriber is left alone: failing to install only
+    // means the process was started twice, which is not worth an error.
+    let _ = tracing_subscriber::fmt()
+        .with_writer(Logcat)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_target(true)
+        .try_init();
+}
+
 /// Starts the viewer from the Android `android_main` entry point.
 #[cfg(target_os = "android")]
 pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
+    init_android_logging();
     let runtime = build_runtime()?;
     let handle = runtime.handle().clone();
 

@@ -6,10 +6,9 @@
 //! Android build: it would put a C toolchain into a cross compilation that
 //! needs none today.
 //!
-//! It is also the only path that produces CPU readable planes on Android. The
-//! `AMediaCodec` path renders into an `ANativeWindow`, which leaves nothing for
-//! the renderer to take; a decoded JPEG here is the very NV12 the renderer
-//! wants, so a tile is drawn from it without anything else changing.
+//! It is the one Android path that reaches the renderer without a codec output
+//! surface in between: a decoded JPEG is already the very NV12 the renderer
+//! wants, so a tile is drawn from it with nothing else changing.
 //!
 //! One implementation serves every platform rather than two, because JPEG is
 //! the one codec that gains nothing from libavcodec: it needs no negotiation,
@@ -33,8 +32,8 @@
 use jpeg_decoder::{Decoder as JpegDecoder, PixelFormat as JpegPixelFormat};
 
 use crate::{
-    plane_stride, Codec, CodecError, DecodedFrame, DecoderConfig, PixelFormat, Result, VideoDecoder,
-    VideoStreamInfo,
+    plane_stride, Codec, CodecError, ColorMatrix, ColorRange, ColorSpace, DecodedFrame,
+    DecoderConfig, PixelFormat, Result, VideoDecoder, VideoStreamInfo,
 };
 
 /// Decoder for an MJPEG stream, one JPEG per picture.
@@ -113,6 +112,9 @@ impl VideoDecoder for MjpegDecoder {
             width: width as u32,
             height: height as u32,
             format: PixelFormat::Nv12,
+            // The conversion above writes BT.601 studio range, regardless of
+            // what the JPEG carried.
+            colorspace: ColorSpace { matrix: ColorMatrix::Bt601, range: ColorRange::Limited },
             pts_us,
             keyframe,
             buffer: None,

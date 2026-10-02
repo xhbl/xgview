@@ -4,6 +4,12 @@
 # cargo-ndk output
 /android-build/
 
+# Gradle / Android Studio output
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+
 # Local configuration
 /config.json
 

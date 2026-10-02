@@ -24,8 +24,8 @@ use openh264_sys2::{
 };
 
 use crate::{
-    plane_stride, Codec, CodecError, DecodedFrame, DecoderConfig, PixelFormat, Result, VideoDecoder,
-    VideoStreamInfo,
+    plane_stride, Codec, CodecError, ColorSpace, DecodedFrame, DecoderConfig, PixelFormat, Result,
+    VideoDecoder, VideoStreamInfo,
 };
 
 /// H.264 decoder backed by OpenH264.
@@ -95,6 +95,9 @@ fn to_frame(
         width: width as u32,
         height: height as u32,
         format: PixelFormat::Nv12,
+        // OpenH264 hands the planes over as they were coded and exposes no
+        // colour description to ask, so the renderer's default is reported.
+        colorspace: ColorSpace::default(),
         pts_us,
         keyframe,
         buffer: None,

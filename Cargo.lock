@@ -2220,6 +2220,7 @@ dependencies = [
  "monitor_core",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "wgpu",
 ]
 
