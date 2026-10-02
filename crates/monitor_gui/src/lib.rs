@@ -43,10 +43,26 @@ impl RunOptions {
     }
 }
 
+/// Worker threads of the streaming runtime.
+///
+/// Every channel reads its socket and decodes on whichever worker it is
+/// scheduled to, and decoding is a blocking call: while a worker is inside
+/// `decode` it cannot read any other channel's socket. Two workers were enough
+/// to keep up on average and still left a socket unread long enough for the
+/// kernel to drop the tail of a burst, which is what a high bitrate UDP stream
+/// arrives as. The pool therefore follows the CPU count, bounded so that a
+/// machine with many cores does not spawn threads the decoding load cannot use.
+fn worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(2)
+        .clamp(2, 8)
+}
+
 /// Builds the tokio runtime used by every background job.
 fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(worker_threads())
         .thread_name("xgview-io")
         .enable_all()
         .build()?)

@@ -11,9 +11,10 @@
 //! through [`crate::digest`] and the request replayed once.
 
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, UdpSocket};
@@ -476,25 +477,63 @@ pub fn parse_rtp_header(data: &[u8]) -> Option<RtpHeader> {
     })
 }
 
+/// Receive buffer requested for an RTP or RTCP socket, in bytes.
+///
+/// A camera, or the relay in front of it, hands a high bitrate stream over in
+/// bursts: a key frame arrives as hundreds of datagrams back to back and the
+/// line then goes quiet until the next picture. The kernel default - some 64 KiB
+/// on Windows - holds a few tens of milliseconds of that, so any moment the
+/// reader is away from the socket costs the tail of the burst. Every datagram
+/// lost that way shows up as a sequence gap, and a gap writes the whole picture
+/// its packets belonged to off, which is what a tile stuttering every few
+/// seconds looks like. The buffer is therefore sized to hold a burst rather than
+/// a moment. The kernel clamps the request to its own ceiling, so asking for
+/// more than it will grant is harmless.
+const UDP_RECEIVE_BUFFER: usize = 4 * 1024 * 1024;
+
+/// Binds one UDP socket with the receive buffer a video stream needs.
+///
+/// The buffer cannot be set on a socket that tokio has already taken over, so
+/// the socket is built with `socket2` and handed to tokio once it is ready.
+fn bind_udp(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+    // Best effort: a socket that only got the default is still a working socket.
+    // What was granted is logged because a stutter that survives this change is
+    // worth being able to read back as "the buffer never grew".
+    if let Err(err) = socket.set_recv_buffer_size(UDP_RECEIVE_BUFFER) {
+        tracing::debug!(target: "xgview::rtsp", %err, "cannot enlarge the udp receive buffer");
+    } else if let Ok(granted) = socket.recv_buffer_size() {
+        tracing::debug!(
+            target: "xgview::rtsp",
+            requested = UDP_RECEIVE_BUFFER,
+            granted,
+            "udp receive buffer"
+        );
+    }
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    Ok(socket.into())
+}
+
 /// Binds a consecutive pair of local UDP ports for RTP and RTCP.
 ///
 /// RFC 3550 asks for an even RTP port followed by its odd neighbour. A socket
 /// bound to port 0 is handed a random one, so the pair is retried until the
 /// kernel returns an even number and the neighbour turns out to be free.
-async fn bind_rtp_pair(ipv6: bool) -> std::io::Result<(UdpSocket, UdpSocket)> {
-    let (any, host) = if ipv6 {
-        ("[::]:0", "[::]")
+fn bind_rtp_pair(ipv6: bool) -> std::io::Result<(UdpSocket, UdpSocket)> {
+    let any = if ipv6 {
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
     } else {
-        ("0.0.0.0:0", "0.0.0.0")
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
     };
     for _ in 0..32 {
-        let rtp = UdpSocket::bind(any).await?;
+        let rtp = bind_udp(any)?;
         let port = rtp.local_addr()?.port();
         if port % 2 != 0 {
             continue;
         }
-        if let Ok(rtcp) = UdpSocket::bind(format!("{host}:{}", port + 1)).await {
-            return Ok((rtp, rtcp));
+        if let Ok(rtcp) = bind_udp(SocketAddr::new(any.ip(), port + 1)) {
+            return Ok((UdpSocket::from_std(rtp)?, UdpSocket::from_std(rtcp)?));
         }
     }
     Err(std::io::Error::new(
@@ -962,7 +1001,6 @@ impl RtspClient {
     pub async fn setup_udp(&mut self, control: &str) -> Result<()> {
         let ipv6 = self.peer_addr.map(|addr| addr.is_ipv6()).unwrap_or(false);
         let (rtp, rtcp) = bind_rtp_pair(ipv6)
-            .await
             .map_err(|err| CoreError::rtsp(format!("cannot bind RTP / RTCP ports: {err}")))?;
         let client_port = rtp
             .local_addr()
