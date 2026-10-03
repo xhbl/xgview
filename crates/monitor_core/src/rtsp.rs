@@ -762,15 +762,26 @@ impl RtspClient {
 
     /// Reads the next packet from the connection.
     pub async fn next_packet(&mut self) -> Result<RtspPacket> {
+        Self::read_packet(&mut self.reader, &mut self.state).await
+    }
+
+    /// Reads one packet from an interleaved stream, framed.
+    ///
+    /// An associated function rather than a method so that the UDP path, which
+    /// holds borrows of the media sockets, can read the control connection
+    /// through the same framing instead of dropping bytes it cannot frame.
+    async fn read_packet(
+        reader: &mut BufReader<OwnedReadHalf>,
+        state: &mut RtspSessionState,
+    ) -> Result<RtspPacket> {
         loop {
             let first = {
-                let buffered = self
-                    .reader
+                let buffered = reader
                     .fill_buf()
                     .await
                     .map_err(|err| CoreError::rtsp(format!("read failed: {err}")))?;
                 if buffered.is_empty() {
-                    self.state = RtspSessionState::Closed;
+                    *state = RtspSessionState::Closed;
                     return Err(CoreError::rtsp("connection closed by peer"));
                 }
                 buffered[0]
@@ -778,7 +789,7 @@ impl RtspClient {
 
             if first == b'$' {
                 let mut header = [0u8; 4];
-                self.reader
+                reader
                     .read_exact(&mut header)
                     .await
                     .map_err(|err| CoreError::rtsp(format!("read interleaved header: {err}")))?;
@@ -788,21 +799,22 @@ impl RtspClient {
                     return Err(CoreError::rtsp(format!("interleaved payload too large: {length}")));
                 }
                 let mut payload = vec![0u8; length];
-                self.reader
+                reader
                     .read_exact(&mut payload)
                     .await
                     .map_err(|err| CoreError::rtsp(format!("read interleaved payload: {err}")))?;
-                self.state = RtspSessionState::Playing;
+                *state = RtspSessionState::Playing;
                 return Ok(RtspPacket::Interleaved { channel, payload });
             }
 
-            return Ok(RtspPacket::Response(self.read_response_headers().await?));
+            return Ok(RtspPacket::Response(Self::read_response_headers(reader).await?));
         }
     }
 
-    async fn read_response_headers(&mut self) -> Result<RtspResponse> {
+    /// Reads one response, body included.
+    async fn read_response_headers(reader: &mut BufReader<OwnedReadHalf>) -> Result<RtspResponse> {
         let mut status_line = String::new();
-        self.reader
+        reader
             .read_line(&mut status_line)
             .await
             .map_err(|err| CoreError::rtsp(format!("read status line: {err}")))?;
@@ -818,7 +830,7 @@ impl RtspClient {
         let mut headers = Vec::new();
         loop {
             let mut line = String::new();
-            self.reader
+            reader
                 .read_line(&mut line)
                 .await
                 .map_err(|err| CoreError::rtsp(format!("read header line: {err}")))?;
@@ -838,7 +850,7 @@ impl RtspClient {
             .unwrap_or(0);
         let mut body = vec![0u8; content_length];
         if content_length > 0 {
-            self.reader
+            reader
                 .read_exact(&mut body)
                 .await
                 .map_err(|err| CoreError::rtsp(format!("read body: {err}")))?;
@@ -1238,8 +1250,13 @@ impl RtspClient {
                 }
                 result = self.reader.fill_buf() => {
                     // Media travels on UDP, but the TCP connection still carries
-                    // the keep alive answers. They are read here and dropped so
-                    // that the socket does not fill up over an unattended run.
+                    // the keep alive answers, and on some servers the RTCP they
+                    // interleave. One whole packet is read here and dropped so
+                    // that the socket does not fill up over an unattended run -
+                    // dropped as a packet, not as "whatever the buffer happened
+                    // to hold", because the buffer can end in the middle of one,
+                    // and everything after a half-read packet is read at the
+                    // wrong offset.
                     let length = result
                         .map_err(|err| CoreError::rtsp(format!("read control failed: {err}")))?
                         .len();
@@ -1249,6 +1266,36 @@ impl RtspClient {
                     self.reader.consume(length);
                 }
             }
+        }
+    }
+
+    /// Waits until the transport has something to read.
+    ///
+    /// A peek rather than a read, so that a caller which gives up waiting can
+    /// drop this future without a packet being half consumed behind it: a read
+    /// cancelled part way through one takes the bytes it has already taken with
+    /// it, and every packet after them is read at the wrong offset, which ends
+    /// the session rather than the wait.
+    pub async fn wait_for_media(&mut self) -> Result<()> {
+        let (Some(rtp), Some(rtcp)) = (self.rtp.as_ref(), self.rtcp.as_ref()) else {
+            return match self.reader.fill_buf().await {
+                Ok(buffered) if !buffered.is_empty() => Ok(()),
+                Ok(_) => Err(CoreError::rtsp("connection closed by peer")),
+                Err(err) => Err(CoreError::rtsp(format!("read failed: {err}"))),
+            };
+        };
+        tokio::select! {
+            result = rtp.readable() => {
+                result.map_err(|err| CoreError::rtsp(format!("rtp socket failed: {err}")))
+            }
+            result = rtcp.readable() => {
+                result.map_err(|err| CoreError::rtsp(format!("rtcp socket failed: {err}")))
+            }
+            result = self.reader.fill_buf() => match result {
+                Ok(buffered) if !buffered.is_empty() => Ok(()),
+                Ok(_) => Err(CoreError::rtsp("connection closed by peer")),
+                Err(err) => Err(CoreError::rtsp(format!("read failed: {err}"))),
+            },
         }
     }
 }

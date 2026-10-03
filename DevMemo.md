@@ -634,3 +634,61 @@ to stderr, which a `NativeActivity` throws away. `install_panic_hook` sends the
 message and the source location to logcat, and is what produced the three lines
 above.
 
+## 13. Two bugs behind "the first and the eighth tile stay black"
+
+On a Galaxy S22+ (Android 16, Qualcomm) two of eight channels never showed a
+picture, and their tiles restarted the session every ~21 s. Both causes were
+ours, and neither was where the symptom pointed.
+
+**A read cancelled part way through a packet loses the framing.** `run_session`
+bounded its wait for media with `tokio::time::timeout(wait, client.read_media())`,
+and `wait` collapses towards zero as a session goes without a picture. A timeout
+that fires while `read_exact` is half way through an interleaved payload takes the
+bytes it has already consumed with it: the stream is then read at the wrong
+offset, the next `next_packet` finds a byte that is not `$`, tries to parse the
+payload as a status line and reports
+
+```text
+rtsp error: read status line: stream did not contain valid UTF-8
+```
+
+which is why the session restarted at ~21 s - the pre-first-picture stall
+deadline - for as long as the channel had no decoder to show a picture. The
+fix separates waiting from reading: `RtspClient::wait_for_media` peeks
+(`fill_buf`, and the RTP socket's `readable` on the datagram transport), which is
+cancel-safe, and only then is a packet read, with no timeout around it. Nothing
+is ever half consumed, so the wait can be cut wherever it lands.
+
+**A codec configured without parameter sets is refused.** The other half was
+that the two streams carried no `sprop-parameter-sets` in their `SDP`, and the
+decoder was configured from the session rather than from the stream:
+
+| | |
+| --- | --- |
+| the two that failed | `session negotiated ... sets=[]` |
+| the ones that worked | `session negotiated ... sets=[(7, 11), (8, 4)]` |
+| the refusal | `AMediaCodec_configure failed with status -10000` |
+
+With the format reduced to a mime, `low-latency` and `color-format` - no size,
+no `csd-0`/`csd-1` - Qualcomm refuses to configure at all rather than reading
+either from the bitstream; NVIDIA answers the same format fine, which is why the
+same two streams are healthy on the Shield TV and were never the camera's fault.
+The codec is now opened from the first access unit instead, which is what the
+pipeline has prepended the cached sets to: `csd-0` and `csd-1` come from the
+NAL units it carries, and the size from `sps::picture_size`, so the geometry
+reported for the channel is the stream's own rather than a guess.
+
+**The measurement that mattered was the reduced one.** The full grid looked like
+a device refusing eight hardware decoders - two of eight channels failing is
+exactly what a concurrent-instance limit looks like, and that was written down
+here as the cause before it was checked. Re-running with *only* those two
+channels enabled failed identically, in a process with no other decoder in it,
+which is what ruled the limit out and pointed at the configuration instead. A
+symptom that scales with the grid is not evidence that the grid is the cause;
+narrow the input until it stops.
+
+After both fixes, on the phone over Wi-Fi: 150 s with no session failure (eight
+before), and with all eight cameras the grid shows eight pictures - `cannot
+configure` none, `session failed` none, every channel decoding 27-49 pictures
+per two second window, plus the two MJPEG substreams.
+

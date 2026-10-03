@@ -27,6 +27,7 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::ptr;
 use std::time::{Duration, Instant};
 
+use crate::sps::picture_size;
 use crate::{
     plane_stride, CodecError, ColorMatrix, ColorRange, ColorSpace, DecodedFrame, DecoderConfig,
     PixelFormat, Result, VideoDecoder, VideoStreamInfo,
@@ -101,6 +102,12 @@ extern "C" {
     fn AMediaFormat_delete(format: *mut AMediaFormat);
     fn AMediaFormat_setString(format: *mut AMediaFormat, key: *const c_char, value: *const c_char);
     fn AMediaFormat_setInt32(format: *mut AMediaFormat, key: *const c_char, value: i32);
+    fn AMediaFormat_setBuffer(
+        format: *mut AMediaFormat,
+        key: *const c_char,
+        data: *const c_void,
+        size: usize,
+    );
     fn AMediaFormat_getInt32(
         format: *const AMediaFormat,
         key: *const c_char,
@@ -108,11 +115,58 @@ extern "C" {
     ) -> bool;
 }
 
+/// The parameter sets an Annex-B access unit carries: sequence first, then
+/// picture, each without its start code.
+///
+/// A decoder is configured with these, and the pipeline has prepended the sets
+/// it cached to every key frame by the time one reaches the decoder, so they are
+/// here even when the session's `SDP` announced none.
+fn parameter_sets(access_unit: &[u8]) -> (Option<&[u8]>, Option<&[u8]>) {
+    let mut sps = None;
+    let mut pps = None;
+    let mut offset = 0;
+    while offset + 3 <= access_unit.len() {
+        let code = if access_unit[offset..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else if access_unit[offset..].starts_with(&[0, 0, 1]) {
+            3
+        } else {
+            offset += 1;
+            continue;
+        };
+        let start = offset + code;
+        if start >= access_unit.len() {
+            break;
+        }
+        // The NAL runs to the next start code, less the zeros a four byte one
+        // leaves in front of it.
+        let mut end = start;
+        while end + 3 <= access_unit.len() && !access_unit[end..].starts_with(&[0, 0, 1]) {
+            end += 1;
+        }
+        let mut nal = &access_unit[start..end];
+        while nal.last() == Some(&0) {
+            nal = &nal[..nal.len() - 1];
+        }
+        match nal.first().map(|byte| byte & 0x1f) {
+            Some(7) => sps = Some(nal),
+            Some(8) => pps = Some(nal),
+            _ => {}
+        }
+        offset = end.max(offset + 1);
+    }
+    (sps, pps)
+}
+
 /// `AMediaCodec` decoder reading its pictures back as byte buffers.
 #[derive(Debug, Default)]
 pub struct AMediaCodecDecoder {
     /// The codec, alive from the first access unit to the end of the session.
     handle: Option<*mut AMediaCodec>,
+    /// Configuration remembered from [`VideoDecoder::configure`], which is the
+    /// only thing known before the stream is: the parameter sets the codec has
+    /// to be opened with come with the first access unit.
+    config: DecoderConfig,
     info: Option<VideoStreamInfo>,
     /// Colour description of the stream, read from the output format and used
     /// for every picture; the renderer's default until the codec announces its
@@ -141,12 +195,22 @@ impl AMediaCodecDecoder {
         Self::default()
     }
 
-    /// Opens the codec session. It is given no surface, so it decodes into byte
-    /// buffers rather than rendering.
-    fn open(&mut self, config: &DecoderConfig) -> Result<()> {
+    /// Opens the codec session, which is given no surface and therefore decodes
+    /// into byte buffers rather than rendering.
+    ///
+    /// `access_unit` is the first one to reach the decoder, and it is what
+    /// carries the parameter sets.
+    ///
+    /// It is opened from there rather than from `configure` because a session
+    /// whose `SDP` announced no `sprop-parameter-sets` - which is what the two
+    /// streams that failed on a Qualcomm decoder had in common - leaves neither
+    /// a size nor the `csd-0`/`csd-1` that decoder insists on: it refuses the
+    /// configuration with `-10000` rather than reading either from the bitstream.
+    fn open(&mut self, access_unit: &[u8]) -> Result<()> {
         if self.handle.is_some() {
             return Ok(());
         }
+        let config = self.config.clone();
         let mime = CString::new(config.codec.mime())
             .map_err(|err| CodecError::Configure(err.to_string()))?;
         let codec = unsafe { AMediaCodec_createDecoderByType(mime.as_ptr()) };
@@ -157,19 +221,43 @@ impl AMediaCodecDecoder {
             )));
         }
 
+        let (sps, pps) = parameter_sets(access_unit);
+        // What the stream describes beats what the session announced, which is
+        // only a hint for the buffers the decoder sizes up front.
+        let size = sps
+            .and_then(picture_size)
+            .or(Some((config.width, config.height)).filter(|(w, h)| *w > 0 && *h > 0));
+
         let format = unsafe { AMediaFormat_new() };
         unsafe {
             AMediaFormat_setString(format, c"mime".as_ptr(), mime.as_ptr());
-            // The size is a hint for the buffers the decoder sizes up front; the
-            // stream's own parameter sets correct it.
-            AMediaFormat_setInt32(format, c"width".as_ptr(), config.width as i32);
-            AMediaFormat_setInt32(format, c"height".as_ptr(), config.height as i32);
+            if let Some((width, height)) = size {
+                AMediaFormat_setInt32(format, c"width".as_ptr(), width as i32);
+                AMediaFormat_setInt32(format, c"height".as_ptr(), height as i32);
+            }
+            // The parameter sets themselves, which is what a decoder that will
+            // not take a bare format is waiting for.
+            if let Some(sps) = sps {
+                AMediaFormat_setBuffer(format, c"csd-0".as_ptr(), sps.as_ptr().cast(), sps.len());
+            }
+            if let Some(pps) = pps {
+                AMediaFormat_setBuffer(format, c"csd-1".as_ptr(), pps.as_ptr().cast(), pps.len());
+            }
             // Low latency: do not buffer more than one frame in the codec.
             let latency = if config.low_latency { 1 } else { 0 };
             AMediaFormat_setInt32(format, c"low-latency".as_ptr(), latency);
             AMediaFormat_setInt32(format, c"color-format".as_ptr(), COLOR_FORMAT_FLEXIBLE);
         }
 
+        tracing::debug!(
+            target: "xgview::codec",
+            codec = config.codec.as_str(),
+            width = config.width,
+            height = config.height,
+            sps = sps.map(|nal| nal.len()).unwrap_or(0),
+            pps = pps.map(|nal| nal.len()).unwrap_or(0),
+            "configuring the decoder"
+        );
         // A null window is what asks for byte buffers instead of a surface.
         // `AMEDIACODEC_CONFIGURE_FLAG_ENCODE` is 0 for the decoder direction.
         let configured = unsafe { AMediaCodec_configure(codec, format, ptr::null_mut(), ptr::null_mut(), 0) };
@@ -187,6 +275,12 @@ impl AMediaCodecDecoder {
 
         self.handle = Some(codec);
         self.started = true;
+        // The size the stream describes is the one to report, not the one the
+        // session guessed at before any of it arrived.
+        if let (Some((width, height)), Some(info)) = (size, self.info.as_mut()) {
+            info.width = width;
+            info.height = height;
+        }
         tracing::debug!(
             target: "xgview::codec",
             codec = config.codec.as_str(),
@@ -388,7 +482,10 @@ impl VideoDecoder for AMediaCodecDecoder {
             fps: None,
             hardware: true,
         });
-        self.open(config)
+        // Remembered, not acted on: the codec session is opened on the first
+        // access unit, which is the first thing that can describe the stream.
+        self.config = config.clone();
+        Ok(())
     }
 
     fn decode(
@@ -397,6 +494,9 @@ impl VideoDecoder for AMediaCodecDecoder {
         pts_us: i64,
         keyframe: bool,
     ) -> Result<Vec<DecodedFrame>> {
+        if self.handle.is_none() {
+            self.open(access_unit)?;
+        }
         let Some(codec) = self.handle else {
             return Err(CodecError::Configure("decoder was never configured".to_string()));
         };

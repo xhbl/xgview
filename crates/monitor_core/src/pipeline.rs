@@ -924,18 +924,15 @@ async fn run_session(
         }
 
         // Waiting no longer than the picture deadline allows, so that a session
-        // gone quiet is noticed on time rather than at the next packet. A
-        // deadline already past asks for an immediate answer from the read.
+        // gone quiet is noticed on time rather than at the next packet. The wait
+        // is a peek at the transport and the packet is only read once something
+        // has arrived: a read cancelled part way through a packet takes the bytes
+        // it has already consumed with it, and every packet after them is then
+        // read at the wrong offset, which costs the session where the wait would
+        // only have cost a wait.
         let wait = READ_TIMEOUT.min(patience.saturating_sub(since_picture));
-        let packet = tokio::time::timeout(wait, client.read_media()).await;
-        // Channel 0 carries RTP, channel 1 carries RTCP, on the interleaved
-        // transport. UDP has no channels: `read_media` returns RTP only and
-        // drains the control socket itself, so only RTP reaches here.
-        let (channel, payload) = match packet {
-            Ok(result) => match result? {
-                MediaPacket::Rtp(payload) => (0u8, payload),
-                MediaPacket::Rtcp(payload) => (1u8, payload),
-            },
+        match tokio::time::timeout(wait, client.wait_for_media()).await {
+            Ok(result) => result?,
             Err(_) => {
                 // A wait that the picture deadline cut short is not silence on
                 // the wire, and reporting it as such would name the wrong fault
@@ -948,6 +945,13 @@ async fn run_session(
                     READ_TIMEOUT.as_secs()
                 )));
             }
+        }
+        // Channel 0 carries RTP, channel 1 carries RTCP, on the interleaved
+        // transport. UDP has no channels: `read_media` returns RTP only and
+        // drains the control socket itself, so only RTP reaches here.
+        let (channel, payload) = match client.read_media().await? {
+            MediaPacket::Rtp(payload) => (0u8, payload),
+            MediaPacket::Rtcp(payload) => (1u8, payload),
         };
 
         // Channel 0 carries RTP, channel 1 carries RTCP.
