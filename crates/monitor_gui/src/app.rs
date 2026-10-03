@@ -22,6 +22,7 @@ use monitor_core::{CameraSource, Direction};
 
 use crate::dialogs::{self, BackgroundEvent, DiscoveryUi, Tab};
 use crate::grid::{self, Tile, TileActions};
+use crate::icons::{self, Icon};
 use crate::theme;
 use crate::video::{VideoRenderer, VideoSurface};
 use crate::RunOptions;
@@ -53,6 +54,39 @@ const TOOLBAR_MIN_SCALE: f32 = 0.6;
 /// the controls that need tapping are at that end of the row - the left end is
 /// the title.
 const EDGE_MARGIN: i8 = 40;
+
+/// How long the bars stay on screen in full screen after the last input.
+const CHROME_IDLE: Duration = Duration::from_millis(3500);
+
+/// Width of the settings side panel, and the narrowest it may be dragged to.
+///
+/// A phone in landscape is barely wider than the panel at its default, which is
+/// why it is a side panel and not a window: it can be dragged narrow, and on a
+/// narrow screen the viewer mostly has it closed.
+const SETTINGS_WIDTH: f32 = 360.0;
+const SETTINGS_MIN_WIDTH: f32 = 300.0;
+
+/// Auto-hide state of the top and bottom bars.
+///
+/// A wall left running is nothing but pictures, so in full screen the bars get
+/// out of the way on their own. They come back on the first sign of a viewer,
+/// and the settings panel and the device window hold them on screen: hiding
+/// the bar of a panel that was just opened would strand the panel.
+#[derive(Debug, Clone, Copy)]
+struct Chrome {
+    visible: bool,
+    /// When input was last seen, which is what the fade is timed from.
+    last_input: Instant,
+    /// Set by a request for the picture and nothing else - entering full screen
+    /// - and consumed by the next `chrome_visible` call, which takes the bars
+    /// away at once. The click that asks for full screen is itself input, so
+    /// without this it would be read as a request to see the bars.
+    hide_now: bool,
+    /// Whether the viewer did something this frame. Read before the keys are
+    /// handed out, because the application takes the ones it acts on out of the
+    /// queue. See [`XgViewApp::viewer_active`].
+    input_seen: bool,
+}
 
 /// The picture of one channel currently on the GPU, with the frame it came from.
 pub struct ChannelTexture {
@@ -184,6 +218,85 @@ struct Toast {
     at: Instant,
 }
 
+/// Page of the settings side panel.
+///
+/// The panel used to be one long column. Five sections of it are read by five
+/// different people - the wall's layout, the camera list, the stream policy,
+/// the machine it runs on, and the version - and scrolling past four of them to
+/// reach the fifth is what the tabs remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    #[default]
+    Display,
+    Cameras,
+    Streams,
+    System,
+    About,
+}
+
+impl SettingsTab {
+    const ALL: [Self; 5] = [Self::Display, Self::Cameras, Self::Streams, Self::System, Self::About];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Display => "Display",
+            Self::Cameras => "Cameras",
+            Self::Streams => "Streams",
+            Self::System => "System",
+            Self::About => "About",
+        }
+    }
+}
+
+/// Who answers a direction press.
+///
+/// egui walks the focusable widgets of the bars, the settings panel and the
+/// windows with the same four directions a remote control sends, and it does so
+/// before the application runs; the wall is not made of widgets and answers
+/// them here. Exactly one of the two is in charge of a given press, and which
+/// one is decided by where the remote's focus was when the frame began - since
+/// that is what the viewer can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owner {
+    /// The wall: the arrows move the channel focus, Enter magnifies.
+    Grid,
+    /// One of the widgets in the bars, the settings panel or a window.
+    Controls,
+}
+
+/// Detects the frame a panel appears on.
+///
+/// The remote's focus starts on the wall, and a panel that opens without taking
+/// it is unreachable: the arrows would go on walking channels behind it. This
+/// is what hands it over, once, as the panel appears.
+#[derive(Debug, Default)]
+struct Handoff {
+    open: bool,
+}
+
+impl Handoff {
+    /// True on the single frame `open` goes from false to true.
+    fn entering(&mut self, open: bool) -> bool {
+        let entering = open && !self.open;
+        self.open = open;
+        entering
+    }
+}
+
+/// What the status line calls a grid layout.
+///
+/// [`GridLayout::label`] is the button's own text: right on the bar, where the
+/// neighbouring buttons are the context, and too terse on its own in a line of
+/// status.
+fn layout_hint(layout: GridLayout) -> &'static str {
+    match layout {
+        GridLayout::G1x1 => "Grid 1×1",
+        GridLayout::G2x2 => "Grid 2×2",
+        GridLayout::G3x3 => "Grid 3×3",
+        GridLayout::G4x4 => "Grid 4×4",
+    }
+}
+
 /// Keyboard / DPAD keys consumed during one frame.
 #[derive(Debug, Clone, Copy, Default)]
 struct Keys {
@@ -225,6 +338,14 @@ pub struct XgViewApp {
     /// apply - rather than offered and ignored.
     decoder_selectable: bool,
     show_settings: bool,
+    /// Tab the settings panel is on.
+    settings_tab: SettingsTab,
+    /// First control of the settings panel, so the panel can be handed the
+    /// remote's focus the moment it opens.
+    settings_anchor: Option<Id>,
+    /// The panel and the device window, watched for the frame they appear on.
+    settings_handoff: Handoff,
+    dialog_handoff: Handoff,
     show_stats: bool,
     discovery: DiscoveryUi,
     slide: Slide,
@@ -233,6 +354,28 @@ pub struct XgViewApp {
     dirty_since: Option<Instant>,
     toast: Option<Toast>,
     fullscreen: bool,
+    /// Whether the top and bottom bars are on screen right now.
+    chrome: Chrome,
+    /// The controls of the top bar with the rectangle each was drawn in, left to
+    /// right, as of the last frame the bar was on screen.
+    toolbar_items: Vec<(Id, Rect)>,
+    /// Horizontal centre of the focused tile, which is where the arrow that
+    /// walks off the top of the wall comes back down from.
+    grid_focus_x: Option<f32>,
+    /// Who answered the last frame's direction presses.
+    owner: Owner,
+    /// What each control is called, for the status line.
+    ///
+    /// The bar is made of shapes, and a remote control has no pointer to hover
+    /// for a tooltip, so the status line is where a viewer reads what the shape
+    /// under the focus does. Rebuilt every frame: a name is only worth showing
+    /// while the control it belongs to is on screen.
+    focus_names: HashMap<Id, &'static str>,
+    /// Name of the focused control, resolved one frame behind.
+    ///
+    /// The status bar is drawn before the panels that fill the names in, so this
+    /// is read at the end of a frame and shown at the start of the next.
+    focused_name: Option<&'static str>,
     from_autostart: bool,
     time: f64,
 }
@@ -282,6 +425,10 @@ impl XgViewApp {
             hardware_decoder: capabilities.hardware,
             decoder_selectable: capabilities.selectable,
             show_settings: false,
+            settings_tab: SettingsTab::default(),
+            settings_anchor: None,
+            settings_handoff: Handoff::default(),
+            dialog_handoff: Handoff::default(),
             show_stats: true,
             discovery,
             slide: Slide::default(),
@@ -290,6 +437,17 @@ impl XgViewApp {
             dirty_since: None,
             toast: None,
             fullscreen,
+            chrome: Chrome {
+                visible: true,
+                last_input: Instant::now(),
+                hide_now: false,
+                input_seen: false,
+            },
+            toolbar_items: Vec::new(),
+            grid_focus_x: None,
+            owner: Owner::Grid,
+            focus_names: HashMap::new(),
+            focused_name: None,
             from_autostart,
             time: 0.0,
         };
@@ -312,6 +470,11 @@ impl XgViewApp {
     fn mark_dirty(&mut self) {
         self.dirty = true;
         self.dirty_since = Some(Instant::now());
+    }
+
+    /// Says what a control is called, for the status line. See [`Self::focus_names`].
+    fn name(&mut self, response: &egui::Response, name: &'static str) {
+        self.focus_names.insert(response.id, name);
     }
 
     /// Recomputes the decoding schedule and hands the transitions to the
@@ -438,13 +601,13 @@ impl XgViewApp {
         changed
     }
 
-    fn navigate(&mut self, dir: Direction) {
+    fn navigate(&mut self, dir: Direction) -> NavigateOutcome {
         let previous_page = self.scheduler.page();
         let previous_focus = self.scheduler.focus();
         let zoomed = self.scheduler.is_zoomed();
         let outcome = self.scheduler.navigate(dir);
         if matches!(outcome, NavigateOutcome::Blocked) {
-            return;
+            return outcome;
         }
 
         let sign = if dir == Direction::Left { -1.0 } else { 1.0 };
@@ -462,6 +625,43 @@ impl XgViewApp {
         }
         self.needs_sync = true;
         self.mark_dirty();
+        outcome
+    }
+
+    /// Hands the remote's focus from the wall to the top bar.
+    ///
+    /// The bar is where the settings panel and the device window are opened
+    /// from, and a television remote has no F1: the arrow that walks off the top
+    /// of the wall is the only way in. The focus lands above the tile the viewer
+    /// was on rather than at one end of the row, because the row is long and the
+    /// walk back to the other end is one press per control.
+    fn enter_toolbar(&mut self, ctx: &egui::Context) {
+        let nearest = match self.grid_focus_x {
+            Some(x) => self
+                .toolbar_items
+                .iter()
+                .min_by(|(_, left), (_, right)| {
+                    (left.center().x - x).abs().total_cmp(&(right.center().x - x).abs())
+                })
+                .map(|(id, _)| *id),
+            None => self.toolbar_items.first().map(|(id, _)| *id),
+        };
+        if let Some(id) = nearest {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+    }
+
+    /// Hands the remote's focus back to the wall.
+    fn leave_controls(&mut self, ctx: &egui::Context) {
+        if let Some(id) = ctx.memory(|memory| memory.focused()) {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+    }
+
+    /// Whether the top bar is what currently has the remote's focus.
+    fn toolbar_has_focus(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|memory| memory.focused())
+            .is_some_and(|focused| self.toolbar_items.iter().any(|(id, _)| *id == focused))
     }
 
     fn zoom_in(&mut self) {
@@ -486,14 +686,96 @@ impl XgViewApp {
     fn set_fullscreen(&mut self, ctx: &egui::Context, enabled: bool) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enabled));
         self.fullscreen = enabled;
+        // Leaving full screen brings the bars back on an explicit action, not
+        // on a timer: the viewer is about to use them. Entering it is the
+        // opposite request - the picture and nothing else - so they go at once
+        // rather than after the idle delay.
+        self.chrome.visible = !enabled;
+        self.chrome.hide_now = enabled;
+        self.chrome.last_input = Instant::now();
+    }
+
+    /// Whether the viewer did something this frame.
+    ///
+    /// Only what a person does counts. The window being resized or focused is
+    /// the system, and entering full screen makes both happen; a key or a button
+    /// coming back up is the tail of a press that has already counted. Reading
+    /// any of it as "a viewer is here" would undo the hiding that the press
+    /// itself asked for - which is exactly what entering full screen means - so
+    /// the bars would come straight back.
+    ///
+    /// The two mouse-motion events egui sends have to be told apart, because
+    /// egui sends both for one movement of the mouse:
+    ///
+    /// * `PointerMoved` carries a position relative to the window, so a resize
+    ///   moves it under a cursor that never moved, and it cannot be trusted;
+    /// * `MouseMoved` carries the raw hardware delta, which no resize produces,
+    ///   and which is therefore what lets a desktop wake the bars by moving the
+    ///   mouse without a change of the window's shape doing it too.
+    ///
+    /// Called before the keys are handed out: the application takes the ones it
+    /// acts on out of the queue, and the bars still have to hear about them.
+    fn viewer_active(ctx: &egui::Context) -> bool {
+        ctx.input(|input| {
+            input.pointer.any_down()
+                || input.events.iter().any(|event| match event {
+                    egui::Event::Key { pressed, .. } => *pressed,
+                    egui::Event::PointerButton { pressed, .. } => *pressed,
+                    // The window's own geometry, and the integration's own
+                    // bookkeeping, rather than anything the viewer did.
+                    egui::Event::PointerMoved(_)
+                    | egui::Event::WindowFocused(_)
+                    | egui::Event::Screenshot { .. }
+                    | egui::Event::PointerGone => false,
+                    // Raw mouse motion, the wheel, a touch, a key's text, a
+                    // dropped file: the viewer.
+                    _ => true,
+                })
+        })
+    }
+
+    /// Whether the top and bottom bars are drawn this frame.
+    ///
+    /// Outside full screen they always are - the window has a frame around it
+    /// anyway, and the bars are where the controls live. In full screen they
+    /// fade once the wall has been left alone for [`CHROME_IDLE`], which is the
+    /// difference between a monitor and a television.
+    fn chrome_visible(&mut self) -> bool {
+        // An open panel owns the bars: taking away the bar of a panel the
+        // viewer just opened would strand it.
+        if self.show_settings || self.discovery.open {
+            self.chrome.visible = true;
+            self.chrome.hide_now = false;
+            self.chrome.last_input = Instant::now();
+            return true;
+        }
+        if !self.fullscreen {
+            self.chrome.visible = true;
+            self.chrome.hide_now = false;
+            return true;
+        }
+        if std::mem::take(&mut self.chrome.hide_now) {
+            self.chrome.visible = false;
+            return false;
+        }
+        if self.chrome.input_seen {
+            self.chrome.last_input = Instant::now();
+            self.chrome.visible = true;
+        } else if self.chrome.last_input.elapsed() >= CHROME_IDLE {
+            self.chrome.visible = false;
+        }
+        self.chrome.visible
     }
 
     fn back(&mut self, ctx: &egui::Context) {
-        // BACK / Esc leaves the magnified viewport, then the full screen mode.
+        // BACK / Esc unwinds one layer at a time: the magnified viewport, then
+        // whatever was opened over the wall, then the full screen mode.
         if self.scheduler.is_zoomed() {
             self.zoom_out();
         } else if self.discovery.open {
             self.discovery.open = false;
+        } else if self.show_settings {
+            self.show_settings = false;
         } else if self.fullscreen {
             self.set_fullscreen(ctx, false);
         }
@@ -552,19 +834,68 @@ impl XgViewApp {
 
     // ---------------------------------------------------------------- update
 
+    /// Whether a text field is being typed into.
+    ///
+    /// egui does not answer this question directly, but a text field is the only
+    /// widget that keeps a [`egui::text_edit::TextEditState`], so a focused
+    /// widget with that state under its id is one.
+    fn typing(ctx: &egui::Context) -> bool {
+        ctx.memory(|memory| memory.focused())
+            .is_some_and(|focused| egui::TextEdit::load_state(ctx, focused).is_some())
+    }
+
+    /// Routes one frame of keys to whoever owns them.
+    ///
+    /// The four directions, Enter and Escape have two possible owners, and the
+    /// choice is made by where the remote's focus was when the frame began -
+    /// which is the only thing the viewer can see. A widget of the bars, the
+    /// settings panel or a window owning them means egui's own focus walk does
+    /// the work; it has already run by the time the application is called, and
+    /// it runs on the very events read here, which is why they are *not* taken
+    /// out of the queue in that case. The wall is not made of widgets, so it
+    /// answers the same keys itself.
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() {
+        // A text field being typed into owns the keys: it wants the arrows for
+        // its caret, Enter to commit and Backspace to erase, and the application
+        // must not act on any of them.
+        //
+        // This is deliberately *not* `Context::wants_keyboard_input`, which is
+        // true for any focused widget at all. The bars hand the focus to a
+        // button whenever a panel opens, so asking that question would leave a
+        // viewer unable to press anything - F1, F2, BACK, anything - from the
+        // moment a panel appeared.
+        if Self::typing(ctx) {
             return;
         }
+        let grid_owns = self.owner == Owner::Grid;
         let keys = ctx.input_mut(|input| {
             let none = Modifiers::NONE;
             let mut keys = Keys::default();
-            keys.left = input.consume_key(none, Key::ArrowLeft);
-            keys.right = input.consume_key(none, Key::ArrowRight);
-            keys.up = input.consume_key(none, Key::ArrowUp);
-            keys.down = input.consume_key(none, Key::ArrowDown);
-            keys.enter = input.consume_key(none, Key::Enter) || input.consume_key(none, Key::Space);
-            keys.back = input.consume_key(none, Key::Escape) || input.consume_key(none, Key::Backspace);
+            // Back is Escape on a keyboard and `BrowserBack` from an Android
+            // remote: winit maps `AKEYCODE_BACK` onto that, not onto Escape, so
+            // a remote that only ever sends BACK would otherwise have no way out
+            // of anything.
+            if grid_owns {
+                keys.left = input.consume_key(none, Key::ArrowLeft);
+                keys.right = input.consume_key(none, Key::ArrowRight);
+                keys.up = input.consume_key(none, Key::ArrowUp);
+                keys.down = input.consume_key(none, Key::ArrowDown);
+                keys.enter = input.consume_key(none, Key::Enter) || input.consume_key(none, Key::Space);
+                keys.back = input.consume_key(none, Key::Escape)
+                    || input.consume_key(none, Key::Backspace)
+                    || input.consume_key(none, Key::BrowserBack);
+            } else {
+                keys.left = input.key_pressed(Key::ArrowLeft);
+                keys.right = input.key_pressed(Key::ArrowRight);
+                keys.up = input.key_pressed(Key::ArrowUp);
+                keys.down = input.key_pressed(Key::ArrowDown);
+                keys.enter = input.key_pressed(Key::Enter) || input.key_pressed(Key::Space);
+                keys.back = input.key_pressed(Key::Escape)
+                    || input.key_pressed(Key::Backspace)
+                    || input.key_pressed(Key::BrowserBack);
+            }
+            // The rest belong to the application whatever has the focus, and
+            // are consumed so that nothing downstream acts on them as well.
             keys.page_prev = input.consume_key(none, Key::PageUp);
             keys.page_next = input.consume_key(none, Key::PageDown);
             keys.settings = input.consume_key(none, Key::F1);
@@ -579,34 +910,8 @@ impl XgViewApp {
             keys
         });
 
-        if keys.left {
-            self.navigate(Direction::Left);
-        }
-        if keys.right {
-            self.navigate(Direction::Right);
-        }
-        if keys.up {
-            self.navigate(Direction::Up);
-        }
-        if keys.down {
-            self.navigate(Direction::Down);
-        }
-        if keys.enter {
-            if self.scheduler.is_zoomed() {
-                self.zoom_out();
-            } else {
-                self.zoom_in();
-            }
-        }
-        if keys.back {
-            self.back(ctx);
-        }
-        if keys.page_prev {
-            self.turn_page(false);
-        }
-        if keys.page_next {
-            self.turn_page(true);
-        }
+        // Application keys first: they are how a keyboard, and whatever button
+        // a remote offers beside the DPAD, reach the panels at all.
         if keys.settings {
             self.show_settings = !self.show_settings;
         }
@@ -617,12 +922,62 @@ impl XgViewApp {
             let enabled = !self.fullscreen;
             self.set_fullscreen(ctx, enabled);
         }
+        if keys.page_prev {
+            self.turn_page(false);
+        }
+        if keys.page_next {
+            self.turn_page(true);
+        }
         for (slot, pressed) in keys.layout.iter().enumerate() {
             if *pressed {
                 if let Some(layout) = GridLayout::ALL.get(slot) {
                     self.set_layout(*layout);
                 }
             }
+        }
+
+        if !grid_owns {
+            // egui has walked the focus already - and dropped it, if this was
+            // Escape. Back is therefore one step out of the controls and not
+            // two: a panel opened over the wall closes, and otherwise the wall
+            // takes the keys back.
+            if keys.back {
+                if self.discovery.open {
+                    self.discovery.open = false;
+                } else if self.show_settings {
+                    self.show_settings = false;
+                } else {
+                    self.leave_controls(ctx);
+                }
+            } else if keys.down && !self.show_settings && self.toolbar_has_focus(ctx) {
+                // Below the bar there is only the wall, so the arrow that walks
+                // off the bottom of it hands the keys back.
+                self.leave_controls(ctx);
+            }
+            return;
+        }
+
+        if keys.left {
+            self.navigate(Direction::Left);
+        }
+        if keys.right {
+            self.navigate(Direction::Right);
+        }
+        if keys.down {
+            self.navigate(Direction::Down);
+        }
+        if keys.up && self.navigate(Direction::Up) == NavigateOutcome::Blocked {
+            self.enter_toolbar(ctx);
+        }
+        if keys.enter {
+            if self.scheduler.is_zoomed() {
+                self.zoom_out();
+            } else {
+                self.zoom_in();
+            }
+        }
+        if keys.back {
+            self.back(ctx);
         }
     }
 
@@ -674,56 +1029,112 @@ impl XgViewApp {
             style.spacing.interact_size.x *= scale;
             style.spacing.item_spacing.x = (style.spacing.item_spacing.x * scale).max(2.0);
         }
+        // Every control the remote may land on is recorded with the rectangle
+        // it was drawn in: egui's focus walk needs nothing from us, but the
+        // wall does, to know which control is above the tile it is leaving.
+        let mut items: Vec<(Id, Rect)> = Vec::new();
         ui.horizontal(|ui| {
             ui.label(RichText::new(monitor_core::APP_DISPLAY_NAME).heading().strong());
             ui.separator();
 
+            // Layout and page are the two things a viewer changes while
+            // watching, so they stay on the bar whatever its width.
             for layout in GridLayout::ALL {
                 let selected = self.scheduler.layout() == layout && !self.scheduler.is_zoomed();
-                if ui.selectable_label(selected, layout.label()).clicked() {
+                let response = ui.selectable_label(selected, layout.label());
+                items.push((response.id, response.rect));
+                self.name(&response, layout_hint(layout));
+                if response.clicked() {
                     self.set_layout(layout);
+                }
+            }
+
+            // Only while magnified, and only there: the arrow on a tile, Enter
+            // and a double click all magnify, but a touch screen has no keyboard
+            // and no arrow, so this is the one way back it can offer.
+            if self.scheduler.is_zoomed() {
+                let back = icons::button(ui, Icon::Grid, false, "Back to the grid (Esc / Back)");
+                items.push((back.id, back.rect));
+                self.name(&back, "Back to the grid");
+                if back.clicked() {
+                    self.zoom_out();
                 }
             }
 
             ui.separator();
             let info = self.scheduler.page_info();
-            if ui.add_enabled(info.has_previous(), egui::Button::new("◀")).clicked() {
+            let previous = ui.add_enabled(info.has_previous(), egui::Button::new("◀"));
+            if info.has_previous() {
+                items.push((previous.id, previous.rect));
+                self.name(&previous, "Previous page");
+            }
+            if previous.clicked() {
                 self.turn_page(false);
             }
             ui.label(format!("page {} / {}", info.page + 1, info.page_count));
-            if ui.add_enabled(info.has_next(), egui::Button::new("▶")).clicked() {
+            let next = ui.add_enabled(info.has_next(), egui::Button::new("▶"));
+            if info.has_next() {
+                items.push((next.id, next.rect));
+                self.name(&next, "Next page");
+            }
+            if next.clicked() {
                 self.turn_page(true);
             }
 
-            ui.separator();
-            if self.scheduler.is_zoomed() {
-                if ui.button("Back to grid (Esc)").clicked() {
-                    self.zoom_out();
-                }
-            } else if ui.button("Zoom 1x1 (Enter)").clicked() {
-                self.zoom_in();
-            }
-
+            // The right end of the row is the three things a viewer reaches for
+            // while watching, and each of them is a shape a remote control, a
+            // mouse and a finger all understand without a word of English.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.selectable_label(self.show_settings, "Settings").clicked() {
+                let fullscreen = icons::button(
+                    ui,
+                    if self.fullscreen { Icon::Collapse } else { Icon::Expand },
+                    self.fullscreen,
+                    if self.fullscreen { "Leave full screen (F11)" } else { "Full screen (F11)" },
+                );
+                items.push((fullscreen.id, fullscreen.rect));
+                self.name(
+                    &fullscreen,
+                    if self.fullscreen { "Leave full screen" } else { "Full screen" },
+                );
+                if fullscreen.clicked() {
+                    let enabled = !self.fullscreen;
+                    self.set_fullscreen(ui.ctx(), enabled);
+                }
+
+                let settings = icons::button(ui, Icon::Gear, self.show_settings, "Settings (F1)");
+                items.push((settings.id, settings.rect));
+                self.name(&settings, "Settings");
+                if settings.clicked() {
                     self.show_settings = !self.show_settings;
                 }
-                if ui.selectable_label(self.discovery.open, "Add devices").clicked() {
+
+                let devices = icons::button(ui, Icon::Plus, self.discovery.open, "Add devices (F2)");
+                items.push((devices.id, devices.rect));
+                self.name(&devices, "Add devices");
+                if devices.clicked() {
                     self.discovery.open = !self.discovery.open;
                 }
-                let live = self.channels.values().filter(|channel| channel.state.is_live()).count();
-                ui.label(
-                    RichText::new(format!("{live}/{} live", self.config.enabled_count()))
-                        .color(if live > 0 { theme::LIVE } else { theme::TEXT_DIM }),
-                );
             });
         });
+
+        // A right to left group is laid out - and so recorded - from the right
+        // end backwards; the reader and the remote both want it left to right.
+        items.sort_by(|(_, left), (_, right)| left.center().x.total_cmp(&right.center().x));
+        self.toolbar_items = items;
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let info = self.scheduler.page_info();
-            ui.label(format!("{} channel(s)", info.total));
+            // How many of the configured channels are actually on the wall, and
+            // how many there are to be: the one number that says at a glance
+            // whether anything is missing. It reads better down here than in the
+            // bar, where it was competing with the controls.
+            let live = self.channels.values().filter(|channel| channel.state.is_live()).count();
+            ui.label(
+                RichText::new(format!("{live}/{} live", self.config.enabled_count()))
+                    .color(if live > 0 { theme::LIVE } else { theme::TEXT_DIM }),
+            );
             ui.separator();
             ui.label(format!("{} · page {}/{}", self.scheduler.layout().label(), info.page + 1, info.page_count));
             if self.scheduler.is_zoomed() {
@@ -735,24 +1146,65 @@ impl XgViewApp {
                 Some(focus) => ui.label(format!("focus #{focus}")),
                 None => ui.label("no focus"),
             };
-            if let Some(toast) = &self.toast {
-                if toast.at.elapsed() < Duration::from_secs(6) {
-                    ui.separator();
-                    let color = if toast.kind == ToastKind::Error { theme::ERROR } else { theme::LIVE };
-                    ui.label(RichText::new(theme::truncate(&toast.text, 96)).color(color));
-                }
+            // What the remote control is on, for the controls that carry a shape
+            // instead of a word and have no pointer to hover for a tooltip.
+            if let Some(name) = self.focused_name {
+                ui.separator();
+                ui.label(RichText::new(name).color(theme::FOCUS));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(RichText::new(format!("decoder: {}", self.decoder)).small().color(theme::TEXT_DIM));
-                ui.label(RichText::new(self.config_path.display().to_string()).small().color(theme::TEXT_DIM));
             });
         });
     }
 
-    fn settings_body(&mut self, ui: &mut egui::Ui) {
+    /// The settings side panel: a tab strip that stays put, and the tab's body
+    /// scrolling underneath it.
+    fn settings_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            for tab in SettingsTab::ALL {
+                let selected = self.settings_tab == tab;
+                let label = match tab {
+                    SettingsTab::Cameras => format!("Cameras ({})", self.config.cameras.len()),
+                    other => other.label().to_string(),
+                };
+                let response = ui.selectable_label(selected, label);
+                self.name(&response, tab.label());
+                if selected {
+                    // The frame the panel opens on, this is what the remote's
+                    // focus is handed to.
+                    self.settings_anchor = Some(response.id);
+                }
+                if response.clicked() {
+                    self.settings_tab = tab;
+                }
+            }
+        });
+        ui.separator();
+
+        let dirty = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| match self.settings_tab {
+                SettingsTab::Display => self.settings_display(ui),
+                SettingsTab::Cameras => self.settings_cameras(ui),
+                SettingsTab::Streams => self.settings_streams(ui),
+                SettingsTab::System => self.settings_system(ui),
+                SettingsTab::About => {
+                    self.settings_about(ui);
+                    false
+                }
+            })
+            .inner;
+        if dirty {
+            self.mark_dirty();
+        }
+    }
+
+    /// The wall itself: the grid, what the tiles show, and how the window opens.
+    fn settings_display(&mut self, ui: &mut egui::Ui) -> bool {
         let mut dirty = false;
 
-        ui.heading("Display");
+        ui.label(RichText::new("Grid").strong());
         ui.horizontal_wrapped(|ui| {
             for layout in GridLayout::ALL {
                 let selected = self.scheduler.layout() == layout;
@@ -761,6 +1213,7 @@ impl XgViewApp {
                 }
             }
         });
+        ui.add_space(theme::space::S);
         ui.checkbox(&mut self.show_stats, "Show fps and bitrate on the tiles");
         let mut fullscreen = self.fullscreen;
         if ui.checkbox(&mut fullscreen, "Full screen (F11)").changed() {
@@ -772,8 +1225,15 @@ impl XgViewApp {
             dirty = true;
         }
 
-        ui.separator();
-        ui.heading("Start-up");
+        dirty
+    }
+
+    /// What the box does around the viewer: it starts it at boot, and it is the
+    /// machine the decoder is chosen for.
+    fn settings_system(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut dirty = false;
+
+        ui.label(RichText::new("Start-up").strong());
         let supported = self.autostart.supported;
         let mut enabled = self.config.autostart;
         ui.add_enabled_ui(supported, |ui| {
@@ -801,32 +1261,44 @@ impl XgViewApp {
         ui.label(RichText::new(format!("mechanism: {}", self.autostart.mechanism)).small().color(theme::TEXT_DIM));
         ui.label(RichText::new(&self.autostart.detail).small().color(theme::TEXT_DIM));
 
-        ui.separator();
-        ui.heading("Streams");
+        dirty
+    }
+
+    /// What the viewer pulls off each camera, and what turns it into pictures.
+    fn settings_streams(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut dirty = false;
+
         ui.label(
-            RichText::new("Multi grid pulls the sub stream, 1x1 (or a magnified viewport) pulls the main stream.")
+            RichText::new("The multi grid pulls the sub stream; 1x1 - and a magnified viewport - pull the main stream.")
                 .small()
                 .color(theme::TEXT_DIM),
         );
+
+        ui.add_space(theme::space::M);
+        ui.label(RichText::new("Reconnect").strong());
         let reconnect = &mut self.config.reconnect;
         ui.horizontal(|ui| {
-            ui.label("reconnect delay");
+            ui.label("first retry after");
             dirty |= ui.add(egui::DragValue::new(&mut reconnect.initial_delay_ms).range(100..=10_000).suffix(" ms")).changed();
-            ui.label("max");
+            ui.label("then at most");
             dirty |= ui.add(egui::DragValue::new(&mut reconnect.max_delay_ms).range(1_000..=300_000).suffix(" ms")).changed();
         });
-        ui.horizontal(|ui| {
-            ui.label("factor");
-            dirty |= ui.add(egui::DragValue::new(&mut reconnect.multiplier).speed(0.05).range(1.0..=5.0)).changed();
-            ui.label("jitter");
-            dirty |= ui.add(egui::DragValue::new(&mut reconnect.jitter).speed(0.02).range(0.0..=1.0)).changed();
-            ui.label("attempts (0 = forever)");
-            dirty |= ui.add(egui::DragValue::new(&mut reconnect.max_attempts).range(0..=100)).changed();
-        });
         ui.label(RichText::new("a change applies to the connections opened afterwards").small().color(theme::TEXT_DIM));
+        // The shape of the curve is settled once, by whoever sized the network,
+        // and never looked at again: it belongs behind a fold, not on the tab.
+        egui::CollapsingHeader::new("Backoff shape").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("factor");
+                dirty |= ui.add(egui::DragValue::new(&mut reconnect.multiplier).speed(0.05).range(1.0..=5.0)).changed();
+                ui.label("jitter");
+                dirty |= ui.add(egui::DragValue::new(&mut reconnect.jitter).speed(0.02).range(0.0..=1.0)).changed();
+                ui.label("attempts (0 = forever)");
+                dirty |= ui.add(egui::DragValue::new(&mut reconnect.max_attempts).range(0..=100)).changed();
+            });
+        });
 
-        ui.separator();
-        ui.heading("Decoding");
+        ui.add_space(theme::space::M);
+        ui.label(RichText::new("Decoding").strong());
         let mut prefer_hardware = self.config.prefer_hardware_decode;
         ui.add_enabled_ui(self.decoder_selectable, |ui| {
             if ui.checkbox(&mut prefer_hardware, "Prefer hardware decoding").changed() {
@@ -854,11 +1326,17 @@ impl XgViewApp {
         };
         ui.label(RichText::new(summary).small().color(theme::TEXT_DIM));
 
-        ui.separator();
-        ui.heading(format!("Cameras ({})", self.config.cameras.len()));
+        dirty
+    }
+
+    /// The cameras the wall shows, and the way to add more.
+    fn settings_cameras(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut dirty = false;
+
         ui.horizontal(|ui| {
             if ui.button("Add devices…").clicked() {
                 self.discovery.open = true;
+                self.discovery.tab = Tab::Onvif;
             }
             if ui.button("Add manually…").clicked() {
                 self.discovery.open = true;
@@ -866,6 +1344,7 @@ impl XgViewApp {
             }
         });
         ui.label(RichText::new(dialogs::discovery_summary(&self.config.discovery)).small().color(theme::TEXT_DIM));
+        ui.add_space(theme::space::S);
 
         let mut toggle: Option<(usize, bool)> = None;
         let mut remove: Option<String> = None;
@@ -947,8 +1426,11 @@ impl XgViewApp {
             dirty = true;
         }
 
-        ui.separator();
-        ui.heading("About");
+        dirty
+    }
+
+    /// Version, decoder, and where the configuration lives.
+    fn settings_about(&mut self, ui: &mut egui::Ui) {
         ui.label(format!("{} {}", monitor_core::APP_DISPLAY_NAME, env!("CARGO_PKG_VERSION")));
         ui.label(format!("author: {}", monitor_core::APP_AUTHOR));
         ui.label(format!(
@@ -957,11 +1439,8 @@ impl XgViewApp {
             if self.hardware_decoder { "hardware decoding available" } else { "software decoding only" }
         ));
         ui.label(format!("config: {}", self.config_path.display()));
-        ui.label(RichText::new("DPAD / arrows: move · Enter: 1x1 · Esc: back · PgUp/PgDn: page · F1: settings · F2: devices · F11: full screen").small().color(theme::TEXT_DIM));
-
-        if dirty {
-            self.mark_dirty();
-        }
+        ui.add_space(theme::space::M);
+        ui.label(RichText::new("DPAD, or the arrow keys: move · Enter: 1x1 · Esc or Back: back · PgUp / PgDn: page · F1: settings · F2: devices · F11: full screen").small().color(theme::TEXT_DIM));
     }
 
     fn current_view(&self, total: usize) -> PageView {
@@ -1017,7 +1496,10 @@ impl XgViewApp {
                 camera: index.and_then(|index| cameras.get(index)),
                 channel: index.and_then(|index| self.channels.get(&index)),
                 video: index.and_then(|index| self.textures.get(&index)).map(|entry| entry.surface),
-                focused: interactive && *index == focus,
+                // The ring is a cursor, and in full screen with the bars faded
+                // out there is nothing to move it with: it would be marking a
+                // channel nobody is choosing between.
+                focused: interactive && self.chrome.visible && *index == focus,
                 interactive,
                 dim: !interactive,
                 show_stats: self.show_stats,
@@ -1064,6 +1546,14 @@ impl XgViewApp {
 
         let view = self.current_view(total);
 
+        // Where the focused tile is: the arrow that walks off the top of the
+        // wall should come down into the bar above that tile rather than at one
+        // end of the row.
+        self.grid_focus_x = self.scheduler.focus().and_then(|index| {
+            let cell = view.cells.iter().position(|slot| *slot == Some(index))?;
+            Some(grid::tile_rect(area, view.layout, cell, grid::GAP).center().x)
+        });
+
         // Page sliding out, or the neighbour page revealed by a finger drag.
         if let Some(outgoing) = self.slide.outgoing.clone() {
             let dx = (self.slide.offset - self.slide.dir) * area.width() + self.slide.drag;
@@ -1096,6 +1586,10 @@ impl XgViewApp {
             }
         }
         if let Some(index) = actions.focus {
+            // A press on the wall is the viewer pointing at what they are
+            // watching, so whatever control of the bars was holding the
+            // remote's focus gives it up and the arrows move channels again.
+            self.leave_controls(ui.ctx());
             if self.scheduler.focus() != Some(index) {
                 self.scheduler.set_focus(Some(index));
                 self.needs_sync = true;
@@ -1134,30 +1628,49 @@ impl eframe::App for XgViewApp {
             self.manager.shutdown();
         }
 
+        // Read before the keys are handed out: `handle_keys` takes the ones the
+        // application acts on out of the queue, and the bars still have to know
+        // a viewer was there. See `viewer_active`.
+        self.chrome.input_seen = Self::viewer_active(ctx);
+
         self.poll_events();
         self.handle_keys(ctx);
         self.advance_animations(ctx);
         self.sync();
         self.upload_frames();
 
+        // Rebuilt as the frame is drawn: a control that is gone has no name to
+        // offer the status line. See `focus_names`.
+        self.focus_names.clear();
+
         // The right of a touch screen is not ours to draw controls in: see
         // `EDGE_MARGIN`. The margin is set on the panel rather than inside the
         // row so that it holds wherever the row is laid out from.
-        let mut margin = egui::Frame::side_top_panel(&ctx.style()).inner_margin;
-        margin.right = EDGE_MARGIN;
-        egui::TopBottomPanel::top("xgview-toolbar")
-            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(margin))
-            .show(ctx, |ui| self.toolbar(ui));
-        egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| self.status_bar(ui));
+        //
+        // In full screen the bars fade out when the wall is left alone; see
+        // `chrome_visible`.
+        if self.chrome_visible() {
+            let mut margin = egui::Frame::side_top_panel(&ctx.style()).inner_margin;
+            margin.right = EDGE_MARGIN;
+            egui::TopBottomPanel::top("xgview-toolbar")
+                .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(margin))
+                .show(ctx, |ui| self.toolbar(ui));
+            egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| self.status_bar(ui));
+        } else {
+            // The bar is gone, and with it anything it could hand the remote's
+            // focus to: keeping the list would point the focus at a control
+            // that is not on screen.
+            self.toolbar_items.clear();
+            // A wall nobody is operating is a picture, and a pointer sitting on
+            // it is the last thing left that is not part of it. Any input brings
+            // the bars back, and the pointer with them.
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
         if self.show_settings {
             egui::SidePanel::right("xgview-settings")
-                .default_width(360.0)
-                .min_width(300.0)
-                .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        self.settings_body(ui);
-                    });
-                });
+                .default_width(SETTINGS_WIDTH)
+                .min_width(SETTINGS_MIN_WIDTH)
+                .show(ctx, |ui| self.settings_panel(ui));
         }
 
         egui::CentralPanel::default()
@@ -1175,6 +1688,44 @@ impl eframe::App for XgViewApp {
 
         self.draw_toast(ctx);
         self.autosave();
+
+        // A panel that appears takes the remote's focus, once: without it the
+        // arrows would go on walking the wall behind it, which is the one thing
+        // a viewer cannot see happening. See `Handoff`.
+        if self.settings_handoff.entering(self.show_settings) {
+            if let Some(id) = self.settings_anchor {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
+        if self.dialog_handoff.entering(self.discovery.open) {
+            if let Some(id) = self.discovery.focus_anchor {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
+
+        // An open panel is never left without something focused. The arrows
+        // have nowhere to walk from otherwise, and a panel the remote can reach
+        // when it opens but not one press later is worse than no panel at all.
+        let anchor = if self.discovery.open {
+            self.discovery.focus_anchor
+        } else if self.show_settings {
+            self.settings_anchor
+        } else {
+            None
+        };
+        if let Some(id) = anchor {
+            if ctx.memory(|memory| memory.focused()).is_none() {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
+
+        // Where the next frame's direction presses go, and what the status line
+        // will call them. Both are read after everything has been drawn,
+        // including the hand-offs above, because that is the focus the viewer is
+        // looking at - and the names only exist once their controls have been.
+        let focused = ctx.memory(|memory| memory.focused());
+        self.owner = if focused.is_some() { Owner::Controls } else { Owner::Grid };
+        self.focused_name = focused.and_then(|focused| self.focus_names.get(&focused).copied());
 
         let animation = self.needs_animation();
         ctx.request_repaint_after(if animation { LIVE_REPAINT } else { Duration::from_millis(500) });

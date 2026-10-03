@@ -44,6 +44,33 @@ pub const TEXT: Color32 = Color32::from_rgb(227, 233, 240);
 /// Secondary text.
 pub const TEXT_DIM: Color32 = Color32::from_rgb(146, 158, 175);
 
+/// Spacing scale, in points.
+///
+/// Every gap in the interface comes from these four values. A layout built
+/// from loose numbers - `10.0` here, `7.0` there - is what makes a screen look
+/// assembled rather than drawn, and it is also what makes changing the density
+/// later impossible.
+pub mod space {
+    /// Inside one control: the gap between an icon and its label, a chip's pad.
+    pub const XS: f32 = 4.0;
+    /// Between two controls of the same group.
+    pub const S: f32 = 8.0;
+    /// Between two groups of controls.
+    pub const M: f32 = 12.0;
+    /// Between two regions, and along a panel's inner edge.
+    pub const L: f32 = 16.0;
+}
+
+/// Corner radii, in points.
+pub mod radius {
+    /// Chips, badges, the strip behind an overlay.
+    pub const S: u8 = 4;
+    /// Tiles, buttons, fields.
+    pub const M: u8 = 6;
+    /// Windows and panels.
+    pub const L: u8 = 10;
+}
+
 /// Installs the dark theme and the larger TV friendly typography.
 pub fn install(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
@@ -54,23 +81,32 @@ pub fn install(ctx: &egui::Context) {
     visuals.override_text_color = Some(TEXT);
     visuals.hyperlink_color = ACCENT;
     visuals.selection.bg_fill = ACCENT.gamma_multiply(0.45);
+    visuals.selection.stroke = Stroke::new(FOCUS_WIDTH, FOCUS);
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, TILE_BORDER);
     visuals.widgets.inactive.bg_fill = Color32::from_rgb(31, 36, 45);
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(45, 52, 64);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.6));
     visuals.widgets.active.bg_fill = ACCENT.gamma_multiply(0.5);
+    // A remote control acts on whatever has the keyboard focus, so that is the
+    // one state that must be unmistakable from a couch. egui paints
+    // `widgets.active` for a widget that has focus - `WidgetVisuals::style`
+    // treats `has_focus` like a held pointer button - which is therefore where
+    // the ring goes. It is the same cyan, and the same 2 px, as the tile focus
+    // ring, because the two mean the same thing.
+    visuals.widgets.active.bg_stroke = Stroke::new(FOCUS_WIDTH, FOCUS);
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
     style.text_styles = [
-        (TextStyle::Heading, FontId::new(22.0, FontFamily::Proportional)),
+        (TextStyle::Heading, FontId::new(19.0, FontFamily::Proportional)),
         (TextStyle::Body, FontId::new(15.0, FontFamily::Proportional)),
         (TextStyle::Button, FontId::new(15.0, FontFamily::Proportional)),
         (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
         (TextStyle::Monospace, FontId::new(14.0, FontFamily::Monospace)),
     ]
     .into();
-    style.spacing.item_spacing = egui::vec2(8.0, 7.0);
-    style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    style.spacing.item_spacing = egui::vec2(space::S, space::S);
+    style.spacing.button_padding = egui::vec2(space::M, space::XS + 2.0);
     style.spacing.slider_width = 140.0;
     ctx.set_style(style);
 }

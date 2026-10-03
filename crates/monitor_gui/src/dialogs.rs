@@ -1,4 +1,4 @@
-﻿//! Device discovery / camera management dialogs.
+//! Device discovery / camera management dialogs.
 //!
 //! The dialog never blocks: every scan, ONVIF import and Synology request runs
 //! on the tokio runtime and reports back through a `crossbeam-channel`, which
@@ -202,6 +202,9 @@ pub struct DiscoveryUi {
     pub message: Option<String>,
     pub manual: CameraDraft,
     pub synology_busy: bool,
+    /// First control of the window, so that a remote control can be handed the
+    /// focus as the window opens rather than leaving it on the wall behind.
+    pub focus_anchor: Option<egui::Id>,
 }
 
 impl DiscoveryUi {
@@ -352,7 +355,8 @@ pub fn add_devices_window(
         .min_width(520.0)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut state.tab, Tab::Onvif, "ONVIF / network scan");
+                let onvif = ui.selectable_value(&mut state.tab, Tab::Onvif, "ONVIF / network scan");
+                state.focus_anchor = Some(onvif.id);
                 ui.selectable_value(&mut state.tab, Tab::Manual, "Manual entry");
                 ui.selectable_value(&mut state.tab, Tab::Synology, "Synology NAS");
             });
