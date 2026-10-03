@@ -113,14 +113,17 @@ impl ScopeDef {
 /// keeps for itself rather than giving to the focus.
 ///
 /// A slider is moved with Left and Right and a [`egui::DragValue`] with Up and
-/// Down; the other axis is the one that moves the focus. A plain control keeps
-/// neither, and all four arrows walk the scope.
+/// Down; the other axis is the one that moves the focus. A text field keeps
+/// Left and Right for its caret, which a form - a column - never needs for the
+/// walk. A plain control keeps neither, and all four arrows walk the scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Kind {
     #[default]
     Plain,
     Slider,
     DragValue,
+    /// A text field: Left and Right move its caret, Up and Down walk the form.
+    Text,
 }
 
 /// Where a registered control lives.
@@ -208,6 +211,19 @@ impl Nav {
         self.reveal(response);
     }
 
+    /// Registers a plain control by [`Id`], in the order this is called.
+    ///
+    /// [`item`](Self::item) is the usual entry point - a control registering
+    /// itself as it is drawn, in draw order. This one is for a scope that
+    /// decides its order *after* its controls have been drawn: the toolbar
+    /// sorts what it drew left to right before handing it over, because the
+    /// group it lays out right to left would otherwise register, and be
+    /// walked, backwards. Nothing is revealed - see [`reveal`](Self::reveal)
+    /// for a scope that scrolls.
+    pub fn item_id(&mut self, id: Id) {
+        self.push(id, Kind::Plain);
+    }
+
     /// How many controls the innermost open scope has registered so far.
     ///
     /// This is the seat a control that is drawn *later* but belongs *here* takes
@@ -277,6 +293,18 @@ impl Nav {
         if self.revealed == Some(response.id) {
             response.scroll_to_me(None);
             self.revealed = None;
+        }
+    }
+
+    /// Arms [`reveal`](Self::reveal) for `id` on this frame.
+    ///
+    /// For a control that was given the focus after it had already been drawn -
+    /// the next of a form, chosen at the end of the frame it was drawn in. A
+    /// control outside a scrolling scope is ignored, for the reason given on
+    /// [`reveal`](Self::reveal).
+    pub fn arm_reveal(&mut self, id: Id) {
+        if self.scrolling(id) {
+            self.revealed = Some(id);
         }
     }
 
@@ -368,6 +396,18 @@ impl Nav {
         let revealed = target.filter(|target| self.scrolling(*target));
         self.revealed = revealed;
         target
+    }
+
+    /// The control after `focused` in its own scope, or `None` at the end.
+    ///
+    /// This is where a value control that confirms with Enter hands the focus:
+    /// to the next control of the form, rather than back to the tab strip. Read
+    /// from the previous frame's layout, like [`step`](Self::step), and named
+    /// as the layer knows it - a control that is not registered has no next.
+    pub fn next_in_scope(&self, focused: Id) -> Option<Id> {
+        let slot = self.prev.get(&focused)?;
+        let members = self.prev_scopes.get(slot.scope)?;
+        members.get(slot.pos + 1).copied()
     }
 
     /// Ends a frame: keeps egui's own walk off the arrows of whatever this
@@ -519,6 +559,37 @@ mod tests {
 
         assert_eq!(nav.step(a, Dir::Right), Some(b));
         assert_eq!(nav.revealed, None);
+    }
+
+    /// A value control that confirms with Enter hands the focus to the control
+    /// after it in the same scope; the last one has nowhere to hand it.
+    #[test]
+    fn the_next_control_is_the_one_after_it_in_its_scope() {
+        let (a, b, c) = (Id::new("a"), Id::new("b"), Id::new("c"));
+        let mut nav = nav();
+        frame(&mut nav, &[], &[a, b, c]);
+
+        assert_eq!(nav.next_in_scope(a), Some(b));
+        assert_eq!(nav.next_in_scope(b), Some(c));
+        assert_eq!(nav.next_in_scope(c), None, "the last control has no next");
+        assert_eq!(nav.next_in_scope(Id::new("elsewhere")), None);
+    }
+
+    /// The reveal for the control the form handed the focus to is armed on the
+    /// frame it is drawn in, and only for a member of a scrolling scope.
+    #[test]
+    fn arming_a_reveal_waits_for_a_control_that_scrolls() {
+        let (a, x) = (Id::new("a"), Id::new("x"));
+        let mut nav = Nav::new(&[
+            ("tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("body"))),
+            ("body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("tabs"))),
+        ]);
+        frame(&mut nav, &[a], &[x]);
+
+        nav.arm_reveal(x);
+        assert_eq!(nav.revealed, Some(x));
+        nav.arm_reveal(a);
+        assert_eq!(nav.revealed, Some(x), "a tab is not in a scrolling scope");
     }
 
     /// A fold is drawn header first and hands back a response only after its

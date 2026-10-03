@@ -516,14 +516,14 @@ fn onvif_tab(
             nav.tracked(ui.checkbox(&mut state.scan.broadcast, "Multicast probe (local subnet)"));
             nav.tracked(ui.checkbox(&mut state.scan.subnet_scan, "Unicast probe over the ranges below (VLAN / cross subnet)"));
             ui.label(RichText::new("IP ranges — one per line, e.g. 192.168.1.1-254 or 10.0.0.0/24").small());
-            nav.tracked(ui.add(egui::TextEdit::multiline(&mut state.scan.ip_ranges).desired_rows(3).desired_width(f32::INFINITY)));
+            nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::multiline(&mut state.scan.ip_ranges).desired_rows(3).desired_width(f32::INFINITY)));
             ui.horizontal(|ui| {
                 let targets = state.scan.target_count();
                 ui.label(RichText::new(format!("{targets} target address(es)")).small().color(theme::TEXT_DIM));
             });
             ui.horizontal(|ui| {
                 nav.tracked(ui.checkbox(&mut state.scan.tcp_probe, "TCP fallback scan"));
-                nav.tracked(ui.add(egui::TextEdit::singleline(&mut state.scan.tcp_ports).desired_width(140.0).hint_text("554, 80, 8000")));
+                nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut state.scan.tcp_ports).desired_width(140.0).hint_text(theme::hint("554, 80, 8000"))));
             });
             // The two value controls: the slider keeps Left / Right for its
             // thumb, the drag value keeps Up / Down for its step, and each walks
@@ -535,9 +535,9 @@ fn onvif_tab(
             ui.label(RichText::new("ONVIF credentials (used by GetProfiles / GetStreamUri)").small());
             ui.horizontal(|ui| {
                 ui.label("User");
-                nav.tracked(ui.add(egui::TextEdit::singleline(&mut state.scan.username).desired_width(140.0)));
+                nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut state.scan.username).desired_width(140.0)));
                 ui.label("Password");
-                nav.tracked(ui.add(egui::TextEdit::singleline(&mut state.scan.password).password(true).desired_width(140.0)));
+                nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut state.scan.password).password(true).desired_width(140.0)));
             });
         },
     );
@@ -610,24 +610,24 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
     egui::Grid::new("manual-camera").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label("Name");
         // The first control of this tab, and the one the strip's Down lands on.
-        nav.tracked(ui.add(
-            egui::TextEdit::singleline(&mut state.manual.name).hint_text("Front door").desired_width(f32::INFINITY),
+        nav.tracked_kind(Kind::Text, ui.add(
+            egui::TextEdit::singleline(&mut state.manual.name).hint_text(theme::hint("Front door")).desired_width(f32::INFINITY),
         ));
         ui.end_row();
 
         ui.label("Main stream");
-        nav.tracked(ui.add(
+        nav.tracked_kind(Kind::Text, ui.add(
             egui::TextEdit::singleline(&mut state.manual.main)
-                .hint_text("rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101")
+                .hint_text(theme::hint("rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101"))
                 .desired_width(f32::INFINITY),
         ));
         ui.end_row();
 
         ui.label("Sub stream");
         ui.horizontal(|ui| {
-            nav.tracked(ui.add(
+            nav.tracked_kind(Kind::Text, ui.add(
                 egui::TextEdit::singleline(&mut state.manual.sub)
-                    .hint_text("optional, derived from the main url")
+                    .hint_text(theme::hint("optional, derived from the main url"))
                     .desired_width(320.0),
             ));
             if nav.tracked(ui.button("Infer")).clicked() {
@@ -646,18 +646,18 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
         // two are never confused for one another the way a geometric walk did,
         // which used to drop the caret into the password from the sub stream box.
         ui.label("User");
-        nav.tracked(ui.add(
+        nav.tracked_kind(Kind::Text, ui.add(
             egui::TextEdit::singleline(&mut state.manual.username)
-                .hint_text("user")
+                .hint_text(theme::hint("user"))
                 .desired_width(f32::INFINITY),
         ));
         ui.end_row();
 
         ui.label("Password");
-        nav.tracked(ui.add(
+        nav.tracked_kind(Kind::Text, ui.add(
             egui::TextEdit::singleline(&mut state.manual.password)
                 .password(true)
-                .hint_text("password")
+                .hint_text(theme::hint("password"))
                 .desired_width(f32::INFINITY),
         ));
         ui.end_row();
@@ -708,7 +708,7 @@ fn synology_tab(
     egui::Grid::new("synology").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label("Host");
         // The first control of this tab, and the one the strip's Down lands on.
-        nav.tracked(ui.add(egui::TextEdit::singleline(&mut synology.host).hint_text("192.168.1.10").desired_width(220.0)));
+        nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut synology.host).hint_text(theme::hint("192.168.1.10")).desired_width(220.0)));
         ui.end_row();
         ui.label("Port");
         // A drag value: Up / Down step it, Left / Right walk the column.
@@ -718,10 +718,10 @@ fn synology_tab(
         nav.tracked(ui.checkbox(&mut synology.https, "https"));
         ui.end_row();
         ui.label("Account");
-        nav.tracked(ui.add(egui::TextEdit::singleline(&mut synology.username).desired_width(220.0)));
+        nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut synology.username).desired_width(220.0)));
         ui.end_row();
         ui.label("Password");
-        nav.tracked(ui.add(egui::TextEdit::singleline(&mut synology.password).password(true).desired_width(220.0)));
+        nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut synology.password).password(true).desired_width(220.0)));
         ui.end_row();
     });
     if *synology != before {

@@ -43,6 +43,12 @@ pub const ERROR: Color32 = Color32::from_rgb(255, 99, 99);
 pub const TEXT: Color32 = Color32::from_rgb(227, 233, 240);
 /// Secondary text.
 pub const TEXT_DIM: Color32 = Color32::from_rgb(146, 158, 175);
+/// Hint / placeholder text of an empty field.
+///
+/// A third tier below [`TEXT_DIM`] on purpose: an empty field shows its hint
+/// where a value would be, and on a television a hint only 40% dimmer than the
+/// text is read as a value that is already in the box.
+pub const TEXT_HINT: Color32 = Color32::from_rgb(92, 101, 116);
 
 /// Fill of a control the remote control is on.
 ///
@@ -127,6 +133,17 @@ pub fn install(ctx: &egui::Context) {
     style.spacing.button_padding = egui::vec2(space::M, space::XS + 2.0);
     style.spacing.slider_width = 140.0;
     ctx.set_style(style);
+}
+
+/// A text field's hint, in [`TEXT_HINT`].
+///
+/// The colour has to be put on the text itself: a plain `&str` hint is laid
+/// out with [`egui::Visuals::override_text_color`] baked in - the normal text
+/// colour - and the weaker colour [`egui::TextEdit`] would otherwise ask for
+/// is then ignored, because a galley that already carries a colour is painted
+/// as it is.
+pub fn hint(text: &str) -> egui::RichText {
+    egui::RichText::new(text).color(TEXT_HINT)
 }
 
 /// Truncates a label to `max` characters, adding an ellipsis when needed.

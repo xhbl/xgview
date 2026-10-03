@@ -372,6 +372,10 @@ pub struct XgViewApp {
     /// see [`crate::nav`]. Empty until a window registers its controls, and the
     /// wall and the bars keep egui's own walk.
     nav: Nav,
+    /// The control a form handed the focus to at the end of the last frame, to
+    /// be scrolled into view on this one: it had already been drawn when the
+    /// focus reached it. See [`Nav::next_in_scope`].
+    reveal_next: Option<Id>,
     /// What each control is called, for the status line.
     ///
     /// The bar is made of shapes, and a remote control has no pointer to hover
@@ -453,10 +457,10 @@ impl XgViewApp {
             },
             toolbar_items: Vec::new(),
             grid_focus_x: None,
-            // The "Add devices" window and the settings panel are on this
-            // layer: each is a row of tabs over a column of controls, which is
-            // the shape egui's walk handles worst. The wall and the top bar
-            // keep their own navigation. The two bodies are the scopes that
+            // The "Add devices" window, the settings panel and the top bar are
+            // on this layer: each is a row (of tabs, or of controls) over a
+            // column, which is the shape egui's walk handles worst. The wall
+            // keeps its own navigation. The two bodies are the scopes that
             // scroll - a tab strip is always in view, and a scope that asked to
             // be revealed from outside a scroll area would leave the request
             // for the next one in the pass to consume.
@@ -465,7 +469,9 @@ impl XgViewApp {
                 ("dialog-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("dialog-tabs"))),
                 ("settings-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("settings-body"))),
                 ("settings-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("settings-tabs"))),
+                ("toolbar", ScopeDef::new(Axis::Row)),
             ]),
+            reveal_next: None,
             owner: Owner::Grid,
             focus_names: HashMap::new(),
             focused_name: None,
@@ -982,6 +988,13 @@ impl XgViewApp {
                             keys.left = input.consume_key(none, Key::ArrowLeft);
                             keys.right = input.consume_key(none, Key::ArrowRight);
                         }
+                        Some(Kind::Text) => {
+                            // The caret is the field's, so the sideways keys are
+                            // left in the queue for it. The vertical ones still
+                            // walk the form.
+                            keys.up = input.consume_key(none, Key::ArrowUp);
+                            keys.down = input.consume_key(none, Key::ArrowDown);
+                        }
                         _ => {
                             // A plain control: all four arrows move the focus.
                             keys.left = input.consume_key(none, Key::ArrowLeft);
@@ -1060,11 +1073,11 @@ impl XgViewApp {
                     self.nav.step_value(1);
                 }
             }
-            // Up and Down always move the focus. A value control - slider or
-            // drag value - answers its sideways keys itself, so they never
-            // reach here; a plain control walks with all four.
+            // Up and Down always move the focus. A value control - slider, drag
+            // value or text field - answers its sideways keys itself, so they
+            // never reach here; a plain control walks with all four.
             let dir = match nav_kind {
-                Some(Kind::Slider) | Some(Kind::DragValue) => {
+                Some(Kind::Slider) | Some(Kind::DragValue) | Some(Kind::Text) => {
                     if keys.up {
                         Some(Dir::Up)
                     } else if keys.down {
@@ -1187,9 +1200,16 @@ impl XgViewApp {
             style.spacing.interact_size.x *= scale;
             style.spacing.item_spacing.x = (style.spacing.item_spacing.x * scale).max(2.0);
         }
+        // The bar is one row of the navigation layer: the arrows move by
+        // declaration from here on, one control per press. The controls are
+        // registered after they are drawn rather than as they are, in the
+        // order sorted out below - the right hand group is laid out right to
+        // left, so registering it as it is drawn would walk it backwards.
+        self.nav.open("toolbar");
+
         // Every control the remote may land on is recorded with the rectangle
-        // it was drawn in: egui's focus walk needs nothing from us, but the
-        // wall does, to know which control is above the tile it is leaving.
+        // it was drawn in: the layer needs the order, but the wall needs the
+        // geometry too, to know which control is above the tile it is leaving.
         let mut items: Vec<(Id, Rect)> = Vec::new();
         ui.horizontal(|ui| {
             ui.label(RichText::new(monitor_core::APP_DISPLAY_NAME).heading().strong());
@@ -1278,6 +1298,11 @@ impl XgViewApp {
         // A right to left group is laid out - and so recorded - from the right
         // end backwards; the reader and the remote both want it left to right.
         items.sort_by(|(_, left), (_, right)| left.center().x.total_cmp(&right.center().x));
+        // Registered in that order, which is the order of the layer's row.
+        for (id, _) in &items {
+            self.nav.item_id(*id);
+        }
+        self.nav.close();
         self.toolbar_items = items;
     }
 
@@ -1850,7 +1875,16 @@ impl eframe::App for XgViewApp {
         // while the widgets are drawn below becomes the one the next frame's
         // arrows read. The keys handed out just above used the previous one.
         self.nav.begin();
+        // The next control of a form was chosen after it had been drawn, so the
+        // scroll it asked for is armed now: the frame it is drawn in.
+        if let Some(next) = self.reveal_next.take() {
+            self.nav.arm_reveal(next);
+        }
         self.handle_keys(ctx);
+        // Who holds the focus as the frame is drawn. A value control confirms
+        // with Enter and gives the focus up while it is drawn, and the form
+        // hands it on - see the anchor at the end of the frame.
+        let focus_before = ctx.memory(|memory| memory.focused());
         self.advance_animations(ctx);
         self.sync();
         self.upload_frames();
@@ -1938,7 +1972,23 @@ impl eframe::App for XgViewApp {
         };
         if let Some(id) = anchor {
             if ctx.memory(|memory| memory.focused()).is_none() {
-                ctx.memory_mut(|memory| memory.request_focus(id));
+                // A value control confirms with Enter and gives the focus up as
+                // the form is drawn. The form hands it to the next control
+                // rather than back to the tab strip, and only the last control
+                // falls through to the anchor.
+                let confirmed = ctx.input(|input| input.key_pressed(Key::Enter));
+                let next = focus_before
+                    .filter(|_| confirmed)
+                    .and_then(|before| self.nav.next_in_scope(before));
+                match next {
+                    Some(next) => {
+                        ctx.memory_mut(|memory| memory.request_focus(next));
+                        // It was drawn before the focus reached it: the reveal
+                        // is armed at the start of the next frame.
+                        self.reveal_next = Some(next);
+                    }
+                    None => ctx.memory_mut(|memory| memory.request_focus(id)),
+                }
             }
         }
 
