@@ -169,10 +169,34 @@ fn init_android_logging() {
         .try_init();
 }
 
+/// Sends a Rust panic to logcat.
+///
+/// A panic that leaves `android_main` cannot unwind - it is an `extern "C"`
+/// entry point - so the process is aborted and the activity finishes with
+/// nothing in the log but a `SIGABRT` whose backtrace ends inside the library.
+/// The hook is what turns that into the message and the source location.
+#[cfg(target_os = "android")]
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|panic| {
+        let message = panic
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_string())
+            .or_else(|| panic.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panic without a message".to_string());
+        let location = panic
+            .location()
+            .map(|at| format!("{}:{}:{}", at.file(), at.line(), at.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+        tracing::error!(target: "xgview", %message, %location, "panicked");
+    }));
+}
+
 /// Starts the viewer from the Android `android_main` entry point.
 #[cfg(target_os = "android")]
 pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
     init_android_logging();
+    install_panic_hook();
     let runtime = build_runtime()?;
     let handle = runtime.handle().clone();
 

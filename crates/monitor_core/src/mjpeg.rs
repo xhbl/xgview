@@ -89,6 +89,13 @@ impl MjpegClient {
                 response.status().canonical_reason().unwrap_or("")
             )));
         }
+        tracing::debug!(
+            target: "xgview::mjpeg",
+            status = response.status().as_u16(),
+            version = ?response.version(),
+            headers = ?response.headers(),
+            "mjpeg response"
+        );
         let boundary = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)

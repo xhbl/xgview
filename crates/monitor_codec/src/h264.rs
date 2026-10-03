@@ -262,7 +262,6 @@ mod tests {
             codec: Codec::H264,
             width: 0,
             height: 0,
-            surface: None,
             low_latency: true,
             hardware: false,
         }

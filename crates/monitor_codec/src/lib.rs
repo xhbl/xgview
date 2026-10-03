@@ -2,8 +2,8 @@
 //!
 //! | Target        | Backend                                                    |
 //! |---------------|------------------------------------------------------------|
-//! | Android       | `AMediaCodec` (NDK media) decoding into the window of an  |
-//! |               | `AImageReader`, whose planes the renderer uploads          |
+//! | Android       | `AMediaCodec` (NDK media), decoding into byte buffers whose |
+//! |               | planes the renderer uploads                                 |
 //! | Windows/Linux | FFmpeg (`ffmpeg` feature) or Cisco OpenH264 (`h264`        |
 //! |               | feature, on by default), falling back to the null decoder   |
 //! |               | used by the UI skeleton when neither is enabled             |
@@ -113,14 +113,10 @@ impl VideoStreamInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecoderConfig {
     pub codec: Codec,
-    /// Expected width, used to size the output buffers.
+    /// Expected width, used to size the output buffers. The stream's own
+    /// parameter sets are what really decide the picture.
     pub width: u32,
     pub height: u32,
-    /// Surface the decoder may be asked to render into instead of returning CPU
-    /// frames. No backend uses it today: the Android path reads its pictures
-    /// back through an `AImageReader` so that they reach the renderer as planes,
-    /// the same shape every other backend produces.
-    pub surface: Option<usize>,
     /// Keep only the newest frame, dropping the ones that pile up.
     pub low_latency: bool,
     /// Run the decoding itself on the GPU. This is a preference and not a
@@ -135,7 +131,6 @@ impl Default for DecoderConfig {
             codec: Codec::H264,
             width: 1280,
             height: 720,
-            surface: None,
             low_latency: true,
             hardware: true,
         }

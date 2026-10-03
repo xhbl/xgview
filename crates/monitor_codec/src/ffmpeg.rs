@@ -710,7 +710,7 @@ mod tests {
     use super::*;
 
     fn config(codec: Codec) -> DecoderConfig {
-        DecoderConfig { codec, width: 0, height: 0, surface: None, low_latency: true, hardware: false }
+        DecoderConfig { codec, width: 0, height: 0, low_latency: true, hardware: false }
     }
 
     #[test]

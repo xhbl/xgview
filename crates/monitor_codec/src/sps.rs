@@ -1,10 +1,13 @@
 //! Sequence parameter set fields that matter before a picture is decoded.
 //!
-//! A decoder has to be told a size before its first picture, and the size the
-//! SDP advertises is not always the one the stream carries. Android builds an
-//! `AImageReader` to that size and a reader that does not match the stream
-//! cannot be read back at all, so the size is taken from the sequence parameter
-//! set the stream itself carries whenever one is in hand.
+//! A decoder is told a size before its first picture, and the size the SDP
+//! advertises is not always the one the stream carries: the pipeline prepends
+//! the parameter sets an SDP carried to a first picture that arrived without
+//! its own, and the size then comes from the SDP rather than the camera. The
+//! size is only a hint - the picture decides - but a decoder sized for 640x360
+//! that is handed 640x480 makes its buffers twice, and the reported stream size
+//! is wrong until the pictures arrive. So the size is taken from the sequence
+//! parameter set the stream itself carries whenever one is in hand.
 
 /// Sequence parameter set NAL unit type.
 const NAL_SPS: u8 = 7;
