@@ -10,6 +10,10 @@
   Design notes:
     * The activity is a `NativeActivity`, so the whole UI (egui + wgpu) runs
       inside the native library produced by `monitor_android`.
+    * It is a subclass - `MainActivity` - rather than the platform class, so
+      that the system bars can be hidden from Java: a window that only fills
+      the screen still has the navigation bar drawn over it, and on a phone in
+      landscape that bar lies along the right edge, over the toolbar.
     * `android.app.lib_name` must match the `[lib] name` of the crate, which is
       `monitor_android`.
     * No launcher icon is referenced on purpose: the sample does not ship
@@ -52,7 +56,7 @@
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 
         <activity
-            android:name="android.app.NativeActivity"
+            android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
             android:launchMode="singleTask"

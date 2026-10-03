@@ -43,6 +43,17 @@ const TOOLBAR_REFERENCE_WIDTH: f32 = 1280.0;
 /// Smallest the toolbar is allowed to shrink to, as a fraction of its text size.
 const TOOLBAR_MIN_SCALE: f32 = 0.6;
 
+/// Space left between the right of the toolbar and the right of the window.
+///
+/// A touch on the outermost band of a touch screen is the system's, not ours: a
+/// device using gesture navigation keeps a back-gesture band along each edge,
+/// and a control inside it never sees the tap. The navigation bar itself is a
+/// different case and is hidden on Android (see `MainActivity`); this margin is
+/// for the band that no window flag removes. It is on the right only, because
+/// the controls that need tapping are at that end of the row - the left end is
+/// the title.
+const EDGE_MARGIN: i8 = 40;
+
 /// The picture of one channel currently on the GPU, with the frame it came from.
 pub struct ChannelTexture {
     /// Sequence number of the frame currently uploaded.
@@ -1129,7 +1140,14 @@ impl eframe::App for XgViewApp {
         self.sync();
         self.upload_frames();
 
-        egui::TopBottomPanel::top("xgview-toolbar").show(ctx, |ui| self.toolbar(ui));
+        // The right of a touch screen is not ours to draw controls in: see
+        // `EDGE_MARGIN`. The margin is set on the panel rather than inside the
+        // row so that it holds wherever the row is laid out from.
+        let mut margin = egui::Frame::side_top_panel(&ctx.style()).inner_margin;
+        margin.right = EDGE_MARGIN;
+        egui::TopBottomPanel::top("xgview-toolbar")
+            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(margin))
+            .show(ctx, |ui| self.toolbar(ui));
         egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| self.status_bar(ui));
         if self.show_settings {
             egui::SidePanel::right("xgview-settings")
