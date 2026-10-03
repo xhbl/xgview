@@ -46,10 +46,12 @@ if [ -z "${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}" ]; then
 fi
 
 echo "==> building monitor_android (${PROFILE}) for ${ABIS} at API ${API}"
+# `-P` is cargo-ndk's own platform flag. The lowercase `-p` is passed through to
+# cargo as `--package`, so it takes a crate name and not an API level.
 # shellcheck disable=SC2086
 cargo ndk \
     -t ${ABIS} \
-    -p "${API}" \
+    -P "${API}" \
     -o "${OUT_DIR}" \
     build ${PROFILE_FLAG} -p monitor_android
 
