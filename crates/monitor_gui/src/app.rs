@@ -32,6 +32,17 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(700);
 /// Repaint interval while at least one channel is showing video.
 const LIVE_REPAINT: Duration = Duration::from_millis(33);
 
+/// Width the toolbar is laid out for at its full size.
+///
+/// A television and the desktop window are at least this wide; a phone in
+/// landscape is narrower, and the row has to stay one row - a second one would
+/// push the grid down, and the grid is what the viewer is for. Below this the
+/// bar's text is scaled down until it fits.
+const TOOLBAR_REFERENCE_WIDTH: f32 = 1280.0;
+
+/// Smallest the toolbar is allowed to shrink to, as a fraction of its text size.
+const TOOLBAR_MIN_SCALE: f32 = 0.6;
+
 /// The picture of one channel currently on the GPU, with the frame it came from.
 pub struct ChannelTexture {
     /// Sequence number of the frame currently uploaded.
@@ -637,6 +648,21 @@ impl XgViewApp {
     // --------------------------------------------------------------- drawing
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
+        // The row is laid out for a television. A phone in landscape has less
+        // room than that, and wrapping would cost the grid a row, so the bar
+        // gives up text size instead: at 1280 and above nothing changes, and
+        // below it the labels, the buttons' padding and the gaps shrink
+        // together, down to the floor where they stop being readable.
+        let scale = (ui.available_width() / TOOLBAR_REFERENCE_WIDTH).clamp(TOOLBAR_MIN_SCALE, 1.0);
+        if scale < 1.0 {
+            let style = ui.style_mut();
+            for font in style.text_styles.values_mut() {
+                font.size *= scale;
+            }
+            style.spacing.button_padding.x *= scale;
+            style.spacing.interact_size.x *= scale;
+            style.spacing.item_spacing.x = (style.spacing.item_spacing.x * scale).max(2.0);
+        }
         ui.horizontal(|ui| {
             ui.label(RichText::new(monitor_core::APP_DISPLAY_NAME).heading().strong());
             ui.separator();

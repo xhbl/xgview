@@ -496,4 +496,141 @@ an opinion about them:
   channel - and the software path, which is what a machine without a device
   falls back to, would not gain from it at all.
 
+## 11. MJPEG streams the NAS resets, and the delay that hid it
+
+On the Android box over Wi-Fi the two Synology MJPEG substreams (cameras 13 and
+14, `multipart/x-mixed-replace` over `http://192.168.17.88:5000`) reconnect
+every few seconds, while the desktop - same eight cameras, same configuration,
+wired - never does. The report was "the picture is unstable", and the first
+thing to fix was that the log did not say why: `reqwest` names only the stage
+an HTTP request failed at, so the session failures read `http error: error
+decoding response body`. It keeps the reason in the source chain, and walking
+that is what turned the stage into the answer:
+
+```text
+error decoding response body
+  <- error reading a body from connection
+    <- Connection reset by peer (os error 104)
+```
+
+The peer resets the connection, sometimes before the response starts
+(`error sending request ... <- connection error <- Connection reset by peer`).
+The NAS's nginx answers the MJPEG request with `transfer-encoding: chunked`,
+`connection: keep-alive` and `keep-alive: timeout=20`, and the sessions end
+after 7-55 s, so the timeout in that header is not what ends them.
+
+**It is not the client.** Each of these was measured, not assumed:
+
+| Ruled out | How |
+| --- | --- |
+| Our MJPEG client | The same `MjpegClient` held one session for 120 s on the desktop, and 100 s in a standalone process on the same device (a temporary `examples/mjpeg_soak.rs`, since deleted, which also reported the longest gap between pictures) |
+| A server-side session lifetime or an expired `StmKey` | `nc` pulling both URLs from the device ran 90 s in one session, twice, and two concurrent pulls ran 90 s |
+| A reader too slow for the server | On the failing sessions: `longest gap 1.22s, quiet for 0.00s before the reset` - the reset arrives immediately after a picture, so the peer kills a live stream, not a stalled one |
+| Worker starvation in the runtime | Two MJPEG channels with four CPU-burning loops on the device: 357 windows, zero failures |
+| Duplicate sessions for one channel | `/proc/net/tcp` during a failing run shows exactly one connection per channel to port 5000, plus the `TIME_WAIT` of the previous process |
+
+**What does reproduce it** is the app streaming RTSP from `192.168.27.x` at the
+same time. The device is on Wi-Fi at `192.168.17.104` (the NAS's own subnet) and
+reaches those cameras through the gateway `192.168.17.1`:
+
+| Channels running | Result |
+| --- | --- |
+| MJPEG only | stable |
+| MJPEG + two RTSP from `192.168.17.88:8554` | stable |
+| MJPEG + two RTSP from `192.168.27.x` | reset every 7-38 s |
+| Two RTSP from `192.168.27.x`, MJPEG pulled by a separate process | that process is reset too; the same pulls with `nc` are not |
+
+So the trigger is the Wi-Fi path carrying routed camera traffic while the app
+holds HTTP streams to the NAS, and only `reqwest`-shaped connections feel it.
+The mechanism - which of the AP, the router or the NAS decides to reset - was
+never pinned down, and three things make it stop: a wired connection (the
+desktop, and the box with a cable: 150 s, zero failures), moving the two
+cameras to the NAS's own RTSP (`rtsp://192.168.17.88:554/Sms=13.unicast`), or
+living with it. It is an environment problem, not one the client can fix, and
+it is not specific to Android: what is specific is that the box is the only
+device on Wi-Fi.
+
+**The reconnection delay made it worse than it had to be.** `run_channel` had
+one `attempt` counter for both jobs - the retry budget and the index into the
+backoff - and it was only ever raised, for the life of the channel:
+
+```rust
+loop {
+    attempt += 1;                       // and never reset
+    ...
+    let delay = policy.delay_for(attempt);
+```
+
+With the default policy (1 s initial, ×1.8, 30 s ceiling) a stream that is cut
+every ten seconds walks 1 s, 1.8 s, 3.2 s, 5.8 s, 10.5 s, 18.9 s, 30 s - so
+after a minute the picture freezes for up to half a minute between two frames,
+and never returns to the short delay. That is the opposite of what the delay is
+for: it exists to space out attempts on a stream that will not come up, and
+these sessions had just been running.
+
+A session that published at least one picture now resets the counter, which is
+the distinction that matters - a time-based rule cannot tell a stream that ran
+and dropped from one that connected and never sent anything, because both can
+last longer than any threshold. `FrameStore` therefore counts the pictures each
+channel has published (`published`), since the sequence number a frame carries
+restarts with every session and cannot answer "did this one deliver". A session
+that delivered nothing keeps backing off exactly as before, so a camera that is
+down is still left alone.
+
+After the change, over Wi-Fi with the same eight cameras: every failure logged
+`attempt=1`, and the gaps between failures match a delay of about one second on
+top of the session's own lifetime (`16:57:10.891 → 16:57:18.600` is 7.7 s = a
+6.76 s session + ~0.9 s). The tiles flicker instead of freezing.
+
+## 12. An Android 5.1 box: installable, but not drawable
+
+The question was whether the Mi Box 3 Pro (Android TV 5.1, MediaTek MT8693)
+could run the viewer. Measured first, because most of the answer is in the
+device rather than in the code:
+
+| | |
+| --- | --- |
+| `ro.build.version.sdk` | 22 (Android 5.1) |
+| `ro.product.cpu.abi` | `arm64-v8a` - the artifact's ABI, no second build needed |
+| Memory / display | 1.9 GB / 1920x1080 |
+| `dumpsys SurfaceFlinger` | `PowerVR Rogue GX6250, OpenGL ES 3.1 build 1.4@3443629` |
+| `ro.opengles.version` | `0x30000` - the legacy property lags the driver |
+| `libvulkan.so` | absent from `/system/lib{,64}` and `/vendor/lib{,64}` |
+
+`readelf -d` on `libmonitor_android.so` shows only `liblog`, `libandroid`,
+`libdl`, `libmediandk`, `libm` and `libc` as `NEEDED`, all of which API 21
+ships, and no reference to `AImageReader` or any other API 24 symbol. Lowering
+`minSdk` to 22 is therefore enough to install it, and the activity does start:
+`winit: App Resumed - is running`. It then aborts:
+
+```text
+panicked: called glObjectLabel but it was not loaded
+  location=glow-0.16.0/src/gl46.rs:4515:5
+panicked: panic in a function that cannot unwind
+```
+
+With no Vulkan, wgpu takes its GL backend, which calls `glObjectLabel` on every
+resource that carries a label - `glObjectLabel` is core in GLES 3.2 and comes
+with `GL_KHR_debug` in 3.1, and the driver offers neither. wgpu asks EGL for a
+3.0 context by default (`gles_context_attributes.push(3)`, with
+`Gles3MinorVersion::Automatic`); asking for 3.1 was tried and returned the same
+panic (`WGPU_GLES_MINOR_VERSION=1`, honoured through
+`BackendOptions::from_env_or_default`), so the entry point is missing from the
+driver's contexts outright.
+
+**So the limit is the driver's GLES feature set, not the Android version.** An
+upgrade to Android 6 changes neither half of the problem: API 23 is still below
+the floor the APK installs at, and the feature set travels with the firmware's
+GPU driver, so whether a newer one offers `GL_KHR_debug` is a coin flip that
+can only be settled by upgrading and measuring again. Making this box work
+would mean a second renderer (`egui_glow` plus a GL path for the video
+textures), which is the thing the device is not worth. `minSdk` stays at 28 so
+that a device cannot install an app that aborts on its first frame.
+
+**The panic hook earned its place here.** Without it the only trace was
+`SIGABRT` with a backtrace ending inside our own `.so`: a Rust panic cannot
+unwind out of `android_main`, an `extern "C"` entry point, and its message goes
+to stderr, which a `NativeActivity` throws away. `install_panic_hook` sends the
+message and the source location to logcat, and is what produced the three lines
+above.
 
