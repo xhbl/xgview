@@ -2216,6 +2216,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-wgpu",
+ "jni 0.21.1",
  "monitor_codec",
  "monitor_core",
  "tokio",

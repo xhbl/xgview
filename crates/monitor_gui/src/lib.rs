@@ -4,6 +4,7 @@
 //! * [`dialogs`] – device discovery and camera import dialogs.
 //! * [`grid`]    – grid geometry and tile painting.
 //! * [`icons`]   – the shapes the controls carry.
+//! * [`keyboard`] – the soft keyboard on Android (Android only).
 //! * [`theme`]   – colour palette and typography.
 //! * [`video`]   – uploads the decoded planes and turns them into pictures.
 //!
@@ -16,6 +17,8 @@ pub mod app;
 pub mod dialogs;
 pub mod grid;
 pub mod icons;
+#[cfg(target_os = "android")]
+pub mod keyboard;
 pub mod theme;
 pub mod video;
 

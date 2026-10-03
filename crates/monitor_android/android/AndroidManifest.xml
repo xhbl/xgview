@@ -61,7 +61,8 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
             android:launchMode="singleTask"
             android:resizeableActivity="false"
-            android:screenOrientation="landscape">
+            android:screenOrientation="landscape"
+            android:windowSoftInputMode="stateAlwaysHidden">
 
             <!-- Entry point of the native library. Must match `[lib] name`. -->
             <meta-data

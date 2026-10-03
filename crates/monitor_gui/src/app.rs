@@ -1659,6 +1659,12 @@ impl eframe::App for XgViewApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.time = ctx.input(|input| input.time);
 
+        // Anything the soft keyboard typed has to be in the input queue before
+        // a widget is drawn: a text field reads the events of the frame it is
+        // drawn in, so a keystroke handed over later would be a frame behind.
+        #[cfg(target_os = "android")]
+        crate::keyboard::drain(ctx);
+
         if ctx.input(|input| input.viewport().close_requested()) {
             self.save_now();
             self.manager.shutdown();
@@ -1778,6 +1784,15 @@ impl eframe::App for XgViewApp {
             if Self::typing(ctx) {
                 ctx.memory_mut(|memory| memory.set_focus_lock_filter(focused, egui::EventFilter::default()));
             }
+        }
+
+        // The keyboard follows the focus: raised while a text field has it, and
+        // dropped as soon as it does not, so that it never sits over the wall
+        // taking keys the viewer meant for it.
+        #[cfg(target_os = "android")]
+        {
+            let focused = ctx.memory(|memory| memory.focused());
+            crate::keyboard::set_wanted(Self::typing(ctx), focused);
         }
 
         let animation = self.needs_animation();
