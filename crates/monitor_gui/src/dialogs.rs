@@ -205,6 +205,15 @@ pub struct DiscoveryUi {
     /// First control of the window, so that a remote control can be handed the
     /// focus as the window opens rather than leaving it on the wall behind.
     pub focus_anchor: Option<egui::Id>,
+    /// First control of the tab body, as drawn this frame.
+    ///
+    /// The strip is drawn above the body, but it is the body that knows which
+    /// control comes first, so the id only exists once the body has been laid
+    /// out. The strip's Down is answered after that, in `tab_seam`.
+    body_top: Option<egui::Id>,
+    /// Tab the focus belongs on once the walk has taken an Up press out of the
+    /// body's first control. See [`tab_seam`].
+    restore: Option<egui::Id>,
 }
 
 impl DiscoveryUi {
@@ -370,17 +379,15 @@ pub fn add_devices_window(
             // would also draw a scrim over the wall, and this does not.
             ctx.memory_mut(|memory| memory.set_modal_layer(ui.layer_id()));
 
-            ui.horizontal(|ui| {
-                // The anchor is the tab that is *on*, not the first one: a panel
-                // is never left without a focus, and that is what it comes back
-                // to when the focus lands nowhere else. Pointing it at the first
-                // tab made the focus snap back there instead of following the
-                // viewer's choice. See `tab` for why the choice itself is what
-                // has to take the focus.
-                tab(ui, state, Tab::Onvif, "ONVIF / network scan");
-                tab(ui, state, Tab::Manual, "Manual entry");
-                tab(ui, state, Tab::Synology, "Synology NAS");
-            });
+            // A crossing answered last frame that the walk has since undone;
+            // putting it back before anything is drawn means it is never seen.
+            if let Some(id) = state.restore.take() {
+                ui.memory_mut(|memory| memory.request_focus(id));
+            }
+
+            // Written by whichever body is drawn below, this frame.
+            state.body_top = None;
+            let tabs = tab_strip(ui, state);
             ui.separator();
 
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match state.tab {
@@ -394,29 +401,160 @@ pub fn add_devices_window(
                     changed |= synology_tab(ui, state, config, handle, events);
                 }
             });
+
+            tab_seam(ui, state, &tabs);
         });
 
     state.open = open;
     changed
 }
 
-/// One tab of the window: draws it, takes the choice if it was clicked, and
-/// hands it the focus.
+/// Whether an arrow was pressed this frame.
+///
+/// Read from the raw events rather than through `InputState::key_pressed`. The
+/// application drains the four arrows out of the event queue while a text field
+/// is focused, and text fields are most of what these windows are made of; a
+/// drained press is gone from everything but `raw`, which is the input the frame
+/// was built from and which nothing removes from.
+fn arrow_pressed(ui: &egui::Ui, arrow: egui::Key) -> bool {
+    ui.input(|input| {
+        input.raw.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key { key, pressed: true, .. } if *key == arrow
+            )
+        })
+    })
+}
+
+/// The window's tab strip: draws the three tabs, takes the choice when one is
+/// clicked, and walks between them with the horizontal arrows.
 ///
 /// egui does not give a button the focus when it is clicked - a press only takes
 /// the focus away from whatever had it - and the press and the release of one
-/// click can land in different frames. The anchor below therefore cannot be
-/// relied on to put the focus on the tab that was chosen: by the time the choice
-/// is known, the focus has already been put back on the tab being left. The
-/// chosen tab takes it instead, there and then.
-fn tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, value: Tab, label: &str) {
-    let response = ui.selectable_value(&mut state.tab, value, label);
-    if response.clicked() {
-        response.request_focus();
+/// click can land in different frames. The chosen tab therefore takes the focus
+/// there and then, and `focus_anchor` records the tab that is *on* - not the
+/// first one, so that a window left without a focus comes back to the tab in use
+/// instead of snapping away from the viewer's choice.
+///
+/// The strip is also fenced off from egui's own walk, with the focus lock below,
+/// and what crosses it is answered by hand: left and right here, down and up -
+/// the two presses that leave the strip and come back to it - in [`tab_seam`].
+/// The walk scores a candidate by the distances between its *ranges* and the
+/// focused widget's, which a row of tabs over a column of full width controls is
+/// exactly the wrong shape for: see [`tab_seam`] for what it did to this window.
+fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi) -> [egui::Id; 3] {
+    const TABS: [(Tab, &str); 3] = [
+        (Tab::Onvif, "ONVIF / network scan"),
+        (Tab::Manual, "Manual entry"),
+        (Tab::Synology, "Synology NAS"),
+    ];
+
+    let mut ids = [egui::Id::NULL; TABS.len()];
+
+    ui.horizontal(|ui| {
+        let mut tabs = Vec::with_capacity(TABS.len());
+        for (value, label) in TABS {
+            let response = ui.selectable_value(&mut state.tab, value, label);
+            if response.clicked() {
+                response.request_focus();
+            }
+            if state.tab == value {
+                state.focus_anchor = Some(response.id);
+            }
+            tabs.push(response);
+        }
+        for (slot, tab) in tabs.iter().enumerate() {
+            ids[slot] = tab.id;
+        }
+
+        // A press that would walk off either end stays where it is: there is
+        // nothing beside the strip but the window frame.
+        let direction = if arrow_pressed(ui, egui::Key::ArrowRight) {
+            1
+        } else if arrow_pressed(ui, egui::Key::ArrowLeft) {
+            -1
+        } else {
+            0
+        };
+        if let Some(index) = tabs.iter().position(|tab| tab.has_focus()) {
+            let next = index as isize + direction;
+            if direction != 0 && (0..tabs.len() as isize).contains(&next) {
+                let next = next as usize;
+                state.tab = TABS[next].0;
+                tabs[next].request_focus();
+                state.focus_anchor = Some(tabs[next].id);
+            }
+        }
+
+        // Re-installed every frame, as a text field re-installs its own: what is
+        // left behind here is what the next frame reads when it decides whether
+        // to offer a press to the walk at all. All four arrows, because all four
+        // crossing this strip are answered by hand.
+        if let Some(focused) = ui.memory(|memory| memory.focused()) {
+            if tabs.iter().any(|tab| tab.id == focused) {
+                ui.memory_mut(|memory| {
+                    memory.set_focus_lock_filter(
+                        focused,
+                        egui::EventFilter { horizontal_arrows: true, vertical_arrows: true, ..Default::default() },
+                    );
+                });
+            }
+        }
+    });
+
+    ids
+}
+
+/// The two presses that cross between the strip and the tab body.
+///
+/// Both were being spent badly. Down out of the strip went to whichever control
+/// the walk's 45 degree cone happened to admit, and the shape of this window
+/// makes that the wrong one: with the rightmost tab focused its distance to the
+/// body's first field is mostly *sideways*, which puts the field outside the cone
+/// while a field four rows further down - steeper, so inside it - is taken
+/// instead. The Synology tab focused therefore sent Down to `Password` instead of
+/// `Host`. Up out of the body is the mirror image: a field spans most of the
+/// window, so it overlaps two tabs by more than half their width, scores them
+/// identically, and the focus lands on whichever the hash order picks - never
+/// reliably the tab in use.
+///
+/// So the crossings are answered here: down from the strip goes to the body's
+/// first control, and up from that control goes back to the tab in use. Neither
+/// can be asked of the walk, and neither can be kept from it either, because a
+/// press is offered to the walk as the frame begins - long before any of this
+/// runs. What is left is this: the strip is locked in `tab_strip`, so its own
+/// presses never reach the walk, and the one press the walk may still take - an
+/// Up out of a field, which keeps no lock of its own against the cursor keys -
+/// is asked for now and, should the walk have overruled it, again at the start of
+/// the next frame.
+fn tab_seam(ui: &egui::Ui, state: &mut DiscoveryUi, tabs: &[egui::Id]) {
+    let Some(focused) = ui.memory(|memory| memory.focused()) else {
+        state.restore = None;
+        return;
+    };
+
+    if tabs.contains(&focused) {
+        if arrow_pressed(ui, egui::Key::ArrowDown) {
+            if let Some(top) = state.body_top {
+                ui.memory_mut(|memory| memory.request_focus(top));
+            }
+        }
+        state.restore = None;
+        return;
     }
-    if state.tab == value {
-        state.focus_anchor = Some(response.id);
+
+    if Some(focused) == state.body_top {
+        if arrow_pressed(ui, egui::Key::ArrowUp) {
+            if let Some(tab) = state.focus_anchor {
+                ui.memory_mut(|memory| memory.request_focus(tab));
+            }
+            state.restore = state.focus_anchor;
+        }
+        return;
     }
+
+    state.restore = None;
 }
 
 fn onvif_tab(
@@ -430,10 +568,10 @@ fn onvif_tab(
 
     ui.horizontal(|ui| {
         let busy = state.running;
-        if ui
-            .add_enabled(!busy, egui::Button::new("Probe 239.255.255.250:3702"))
-            .clicked()
-        {
+        let probe = ui.add_enabled(!busy, egui::Button::new("Probe 239.255.255.250:3702"));
+        // The first control of this tab: where the strip's Down goes.
+        state.body_top = Some(probe.id);
+        if probe.clicked() {
             let mut scan = state.scan.clone();
             scan.broadcast = true;
             scan.subnet_scan = false;
@@ -563,7 +701,12 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
     let mut changed = false;
     egui::Grid::new("manual-camera").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label("Name");
-        ui.add(egui::TextEdit::singleline(&mut state.manual.name).hint_text("Front door").desired_width(f32::INFINITY));
+        let name = ui.add(
+            egui::TextEdit::singleline(&mut state.manual.name).hint_text("Front door").desired_width(f32::INFINITY),
+        );
+        // The first control of this tab: where the strip's Down goes, and from
+        // where Up goes back to the strip.
+        state.body_top = Some(name.id);
         ui.end_row();
 
         ui.label("Main stream");
@@ -593,11 +736,28 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
         });
         ui.end_row();
 
-        ui.label("Credentials");
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut state.manual.username).hint_text("user").desired_width(120.0));
-            ui.add(egui::TextEdit::singleline(&mut state.manual.password).password(true).hint_text("password").desired_width(120.0));
-        });
+        // One field per row, not two side by side: the focus walk scores a
+        // candidate by how far its axis ranges are from the focused widget's,
+        // and two ranges count as aligned once they overlap by half of the
+        // shorter one. Both fields sat under the wide sub stream box, so both
+        // scored the same and the walk picked between them by hash order -
+        // which put the caret in the password. Rows are ordered vertically and
+        // never tie: the nearer row wins.
+        ui.label("User");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.manual.username)
+                .hint_text("user")
+                .desired_width(f32::INFINITY),
+        );
+        ui.end_row();
+
+        ui.label("Password");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.manual.password)
+                .password(true)
+                .hint_text("password")
+                .desired_width(f32::INFINITY),
+        );
         ui.end_row();
     });
 
@@ -644,7 +804,10 @@ fn synology_tab(
     let before = synology.clone();
     egui::Grid::new("synology").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label("Host");
-        ui.add(egui::TextEdit::singleline(&mut synology.host).hint_text("192.168.1.10").desired_width(220.0));
+        let host = ui.add(egui::TextEdit::singleline(&mut synology.host).hint_text("192.168.1.10").desired_width(220.0));
+        // The first control of this tab: where the strip's Down goes, and from
+        // where Up goes back to the strip.
+        state.body_top = Some(host.id);
         ui.end_row();
         ui.label("Port");
         ui.add(egui::DragValue::new(&mut synology.port).range(1..=65535));
