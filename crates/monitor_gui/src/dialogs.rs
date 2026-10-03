@@ -184,6 +184,19 @@ impl CameraDraft {
     pub fn reset(&mut self) {
         *self = Self { infer_sub: true, ..Default::default() };
     }
+
+    /// The form filled in from a camera already configured, for editing it.
+    pub fn from_source(camera: &CameraSource) -> Self {
+        Self {
+            name: camera.name.clone(),
+            main: camera.rtsp_main.clone(),
+            sub: camera.rtsp_sub.clone().unwrap_or_default(),
+            username: camera.username.clone().unwrap_or_default(),
+            password: camera.password.clone().unwrap_or_default(),
+            // A sub stream already there is not to be overwritten by inference.
+            infer_sub: camera.rtsp_sub.is_none(),
+        }
+    }
 }
 
 /// State of the "Add devices" window.
@@ -196,14 +209,17 @@ pub struct DiscoveryUi {
     pub phase: String,
     pub devices: Vec<DiscoveredDevice>,
     pub ports: Vec<PortHit>,
-    /// Hosts already imported into the configuration.
-    pub imported: Vec<String>,
     /// Name of the device currently being resolved.
     pub busy: Option<String>,
     pub error: Option<String>,
     pub message: Option<String>,
     pub manual: CameraDraft,
     pub synology_busy: bool,
+    /// Cameras the last Synology fetch returned, waiting to be picked.
+    ///
+    /// Kept rather than imported on arrival, so the viewer chooses what comes
+    /// onto the wall - see [`synology_tab`].
+    pub synology_cameras: Vec<CameraSource>,
     /// First control of the window, so that a remote control can be handed the
     /// focus as the window opens rather than leaving it on the wall behind.
     pub focus_anchor: Option<egui::Id>,
@@ -262,7 +278,6 @@ impl DiscoveryUi {
             }
             BackgroundEvent::Imported(camera) => {
                 self.busy = None;
-                self.imported.push(camera.host.clone());
                 self.message = Some(format!("imported {} ({})", camera.name, camera.display_address()));
             }
             BackgroundEvent::ImportFailed { name, error } => {
@@ -271,7 +286,8 @@ impl DiscoveryUi {
             }
             BackgroundEvent::SynologyDone(cameras) => {
                 self.synology_busy = false;
-                self.message = Some(format!("imported {} camera(s) from Surveillance Station", cameras.len()));
+                self.message = Some(format!("{} camera(s) on the NAS - pick the ones to add", cameras.len()));
+                self.synology_cameras = cameras;
             }
             BackgroundEvent::SynologyFailed(error) => {
                 self.synology_busy = false;
@@ -339,7 +355,7 @@ pub fn start_synology(handle: &Handle, events: &Sender<BackgroundEvent>, config:
     });
 }
 
-/// Draws the "Add devices" window. Returns `true` when the configuration changed.
+/// Draws the "Add devices" dialog. Returns `true` when the configuration changed.
 pub fn add_devices_window(
     ctx: &egui::Context,
     state: &mut DiscoveryUi,
@@ -348,55 +364,49 @@ pub fn add_devices_window(
     events: &Sender<BackgroundEvent>,
     nav: &mut Nav,
 ) -> bool {
-    let mut open = state.open;
     let mut changed = false;
+    let mut close = false;
 
-    egui::Window::new("Add devices")
-        .open(&mut open)
-        .collapsible(false)
-        // Not resizable on purpose. A resizable window carries resize grips, and
-        // egui's grips are focusable: the remote control's arrows and its Tab
-        // both land on them instead of on the controls, and the form becomes
-        // impossible to walk. The window is sized for the screen it opens on.
-        .resizable(false)
-        .default_size([640.0, 560.0])
-        .min_width(520.0)
-        .show(ctx, |ui| {
-            // Keep the remote control's focus inside the window.
-            //
-            // The navigation layer answers the arrows between the window's own
-            // controls; a modal layer is what keeps egui's walk - which still
-            // runs, and still serves whatever is not registered with the layer -
-            // from landing on a control of the bar behind.
-            ctx.memory_mut(|memory| memory.set_modal_layer(ui.layer_id()));
+    // A modal, not a window: it centres itself, and its backdrop swallows the
+    // presses that would otherwise land behind it. As a plain window the bar
+    // stayed live underneath, so a second press on "Add devices" toggled the
+    // dialog shut and the settings panel could be rearranged from under it.
+    egui::Modal::new(egui::Id::new("xgview-add-devices")).show(ctx, |ui| {
+        ui.set_width(620.0);
+        ui.label(RichText::new("Add devices").heading());
+        ui.add_space(theme::space::S);
 
-            tab_strip(ui, state, nav);
-            ui.separator();
+        if tab_strip(ui, state, nav) {
+            close = true;
+        }
+        ui.separator();
 
-            // The body is one column: Up and Down walk its controls in the
-            // order they are drawn, and Up off the first one leaves the scope,
-            // which the definition sends back to the tab in use.
-            //
-            // Left and Right are spent inside the body on purpose. On a remote
-            // the form is walked up and down, and sideways belongs to the tab
-            // strip; a row of controls drawn side by side is walked as its
-            // consecutive stops, one Down apart, never a sideways jump.
-            nav.open("dialog-body");
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match state.tab {
-                Tab::Onvif => {
-                    changed |= onvif_tab(ui, state, config, handle, events, nav);
-                }
-                Tab::Manual => {
-                    changed |= manual_tab(ui, state, config, nav);
-                }
-                Tab::Synology => {
-                    changed |= synology_tab(ui, state, config, handle, events, nav);
-                }
+        // The body is one column: Up and Down walk its controls in the
+        // order they are drawn, and Up off the first one leaves the scope,
+        // which the definition sends back to the tab in use.
+        //
+        // Left and Right are spent inside the body on purpose. On a remote
+        // the form is walked up and down, and sideways belongs to the tab
+        // strip; a row of controls drawn side by side is walked as its
+        // consecutive stops, one Down apart, never a sideways jump.
+        nav.open("dialog-body");
+        egui::ScrollArea::vertical()
+            .max_height(420.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| match state.tab {
+                Tab::Onvif => changed |= onvif_tab(ui, state, config, handle, events, nav),
+                Tab::Manual => changed |= manual_tab(ui, state, config, nav),
+                Tab::Synology => changed |= synology_tab(ui, state, config, handle, events, nav),
             });
-            nav.close();
-        });
+        nav.close();
+    });
 
-    state.open = open;
+    // Only its own Close (or Back) leaves the dialog. A press on the backdrop
+    // does nothing: the form behind is not reachable, and a stray click cannot
+    // take the dialog away in the middle of filling it in.
+    if close {
+        state.open = false;
+    }
     changed
 }
 
@@ -415,7 +425,10 @@ pub fn add_devices_window(
 /// through the scope's exit. Moving the focus onto a tab also selects it, so a
 /// viewer arrow-keying across the strip sees the body follow, exactly as it did
 /// when a click selected one.
-fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) {
+///
+/// The dialog's way out - its Close button - ends the same row, so the remote
+/// reaches it with the arrows. Returns `true` when it was pressed.
+fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) -> bool {
     const TABS: [(Tab, &str); 3] = [
         (Tab::Onvif, "ONVIF / network scan"),
         (Tab::Manual, "Manual entry"),
@@ -424,6 +437,7 @@ fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) {
 
     let mut ids = [egui::Id::NULL; TABS.len()];
     let mut focused = None;
+    let mut close = false;
 
     ui.horizontal(|ui| {
         nav.open("dialog-tabs");
@@ -444,12 +458,19 @@ fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) {
             state.tab = value;
         }
         // The tab in use is where an Up out of the body comes back to, and what
-        // a window reopened without a focus returns to.
+        // a dialog reopened without a focus returns to.
         let slot = TABS.iter().position(|(value, _)| *value == state.tab).unwrap_or(0);
         state.focus_anchor = Some(ids[slot]);
         nav.set_entry("dialog-tabs", ids[slot]);
+        // The way out, at the far end of the strip.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if nav.tracked(ui.button("Close")).clicked() {
+                close = true;
+            }
+        });
         nav.close();
     });
+    close
 }
 
 fn onvif_tab(
@@ -550,11 +571,14 @@ fn onvif_tab(
     let mut to_import: Option<DiscoveredDevice> = None;
     for device in &state.devices {
         let host = device.host().unwrap_or_default();
-        let imported = state.imported.iter().any(|known| *known == host);
+        // Only the address is known until the device is resolved, so that is
+        // what "already on the wall" is judged on here: an approximate check,
+        // where the Synology list can compare the whole camera.
+        let added = config.cameras.iter().any(|known| known.host.eq_ignore_ascii_case(&host));
         ui.horizontal(|ui| {
             let busy = state.busy.is_some();
-            let label = if imported { "Added" } else { "Add" };
-            let add = nav.tracked(ui.add_enabled(!imported && !busy, egui::Button::new(label)));
+            let label = if added { "Added" } else { "Add" };
+            let add = nav.tracked(ui.add_enabled(!added && !busy, egui::Button::new(label)));
             if add.clicked() {
                 to_import = Some(device.clone());
             }
@@ -605,19 +629,35 @@ fn onvif_tab(
     changed
 }
 
-fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {
-    let mut changed = false;
-    egui::Grid::new("manual-camera").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+/// What [`camera_fields`] reports back to its caller.
+pub struct CameraFields {
+    /// The first control of the form, for a window that opens on it.
+    pub first: Option<egui::Id>,
+    /// Whether the "Infer" button was pressed.
+    pub inferred: bool,
+}
+
+/// The camera fields, as the "Manual entry" tab and the settings panel's edit
+/// window both lay them out.
+///
+/// `grid_id` names the grid - egui keys a grid's state on it, so the two must
+/// not share one. See [`CameraFields`] for what comes back.
+pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mut CameraDraft) -> CameraFields {
+    let mut first = None;
+    let mut inferred = false;
+    egui::Grid::new(grid_id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label("Name");
-        // The first control of this tab, and the one the strip's Down lands on.
-        nav.tracked_kind(Kind::Text, ui.add(
-            egui::TextEdit::singleline(&mut state.manual.name).hint_text(theme::hint("Front door")).desired_width(f32::INFINITY),
-        ));
+        // The first control of the form, and the one a window opens on.
+        let name = ui.add(
+            egui::TextEdit::singleline(&mut draft.name).hint_text(theme::hint("Front door")).desired_width(f32::INFINITY),
+        );
+        first = Some(name.id);
+        nav.item_kind(Kind::Text, &name);
         ui.end_row();
 
         ui.label("Main stream");
         nav.tracked_kind(Kind::Text, ui.add(
-            egui::TextEdit::singleline(&mut state.manual.main)
+            egui::TextEdit::singleline(&mut draft.main)
                 .hint_text(theme::hint("rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101"))
                 .desired_width(f32::INFINITY),
         ));
@@ -626,17 +666,17 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
         ui.label("Sub stream");
         ui.horizontal(|ui| {
             nav.tracked_kind(Kind::Text, ui.add(
-                egui::TextEdit::singleline(&mut state.manual.sub)
+                egui::TextEdit::singleline(&mut draft.sub)
                     .hint_text(theme::hint("optional, derived from the main url"))
                     .desired_width(320.0),
             ));
             if nav.tracked(ui.button("Infer")).clicked() {
-                state.manual.infer_sub = true;
-                let mut probe = state.manual.clone();
+                draft.infer_sub = true;
+                inferred = true;
+                let mut probe = draft.clone();
                 probe.sub.clear();
                 if let Ok(source) = probe.build() {
-                    state.manual.sub = source.rtsp_sub.unwrap_or_default();
-                    state.message = Some("sub stream url derived from the main url".to_string());
+                    draft.sub = source.rtsp_sub.unwrap_or_default();
                 }
             }
         });
@@ -647,23 +687,28 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
         // which used to drop the caret into the password from the sub stream box.
         ui.label("User");
         nav.tracked_kind(Kind::Text, ui.add(
-            egui::TextEdit::singleline(&mut state.manual.username)
-                .hint_text(theme::hint("user"))
-                .desired_width(f32::INFINITY),
+            egui::TextEdit::singleline(&mut draft.username).hint_text(theme::hint("user")).desired_width(f32::INFINITY),
         ));
         ui.end_row();
 
         ui.label("Password");
         nav.tracked_kind(Kind::Text, ui.add(
-            egui::TextEdit::singleline(&mut state.manual.password)
+            egui::TextEdit::singleline(&mut draft.password)
                 .password(true)
                 .hint_text(theme::hint("password"))
                 .desired_width(f32::INFINITY),
         ));
         ui.end_row();
     });
+    nav.tracked(ui.checkbox(&mut draft.infer_sub, "Derive the sub stream from the main url when it is empty"));
+    CameraFields { first, inferred }
+}
 
-    nav.tracked(ui.checkbox(&mut state.manual.infer_sub, "Derive the sub stream from the main url when it is empty"));
+fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {
+    let mut changed = false;
+    if camera_fields(ui, nav, "manual-camera", &mut state.manual).inferred {
+        state.message = Some("sub stream url derived from the main url".to_string());
+    }
 
     ui.horizontal(|ui| {
         if nav.tracked(ui.button("Add camera")).clicked() {
@@ -685,6 +730,50 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
 
     status_lines(ui, state);
     changed
+}
+
+/// What the button of a listed camera should offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddOffer {
+    /// Not on the wall yet.
+    Add,
+    /// The same camera is there, with settings an import would refresh.
+    Update,
+    /// The same camera, the same settings: nothing to add.
+    Added,
+}
+
+/// Whether a listed camera is already on the wall, and whether importing it
+/// would change anything.
+///
+/// "The same camera" is [`CameraSource::identity`] - scheme, host, port and
+/// path, with the way the address is written taken out - so a camera added by
+/// hand, by ONVIF or by Synology is all recognised, and not only the ones this
+/// tab imported.
+fn add_offer(config: &AppConfig, camera: &CameraSource) -> AddOffer {
+    let Some(known) = config.cameras.iter().find(|known| known.identity() == camera.identity()) else {
+        return AddOffer::Add;
+    };
+    if same_settings(known, camera) {
+        AddOffer::Added
+    } else {
+        AddOffer::Update
+    }
+}
+
+/// The fields an import writes, compared for [`add_offer`].
+///
+/// The ones [`AppConfig::upsert_camera`] keeps from the camera already there -
+/// id, origin, enabled, transport - are left out: an import never touches
+/// them, so a difference there is no reason to offer a refresh.
+fn same_settings(a: &CameraSource, b: &CameraSource) -> bool {
+    a.name == b.name
+        && a.rtsp_main == b.rtsp_main
+        && a.rtsp_sub == b.rtsp_sub
+        && a.username == b.username
+        && a.password == b.password
+        && a.main_profile == b.main_profile
+        && a.sub_profile == b.sub_profile
 }
 
 fn synology_tab(
@@ -734,6 +823,9 @@ fn synology_tab(
         if nav.tracked(ui.add_enabled(ready, egui::Button::new("Fetch cameras"))).clicked() {
             state.synology_busy = true;
             state.error = None;
+            // The list is about to be replaced; a stale one under a running
+            // fetch would invite a press on a camera the NAS may not return.
+            state.synology_cameras.clear();
             start_synology(handle, events, config.synology.clone());
         }
         if state.synology_busy {
@@ -741,6 +833,45 @@ fn synology_tab(
             ui.label(RichText::new("contacting the NAS…").color(theme::ACCENT));
         }
     });
+
+    // What the NAS answered, one row per camera: added on the viewer's press,
+    // like the ONVIF device list, rather than all at once as they arrive.
+    ui.add_space(6.0);
+    ui.label(RichText::new(format!("Cameras on the NAS ({})", state.synology_cameras.len())).strong());
+    if state.synology_cameras.is_empty() {
+        ui.label(RichText::new("nothing fetched yet").small().color(theme::TEXT_DIM));
+    }
+    let mut to_add: Option<(CameraSource, AddOffer)> = None;
+    for camera in &state.synology_cameras {
+        let offer = add_offer(config, camera);
+        ui.horizontal(|ui| {
+            let (label, enabled) = match offer {
+                AddOffer::Add => ("Add", true),
+                AddOffer::Update => ("Update", true),
+                AddOffer::Added => ("Added", false),
+            };
+            if nav.tracked(ui.add_enabled(enabled, egui::Button::new(label))).clicked() {
+                to_add = Some((camera.clone(), offer));
+            }
+            ui.label(RichText::new(camera.short_label(24)).strong());
+            ui.label(RichText::new(&camera.host).monospace().color(theme::TEXT_DIM));
+            if camera.rtsp_sub.is_some() {
+                ui.label(RichText::new("sub").small().color(theme::ACCENT));
+            }
+            if offer == AddOffer::Update {
+                ui.label(RichText::new("already added, settings differ").small().color(theme::WARN));
+            }
+        });
+    }
+    if let Some((camera, offer)) = to_add {
+        let name = camera.name.clone();
+        config.upsert_camera(camera);
+        state.message = Some(format!(
+            "{} {name}",
+            if offer == AddOffer::Update { "updated" } else { "added" }
+        ));
+        changed = true;
+    }
 
     status_lines(ui, state);
     changed

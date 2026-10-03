@@ -27,6 +27,10 @@ pub enum Icon {
     Collapse,
     /// Back to the wall: four tiles.
     Grid,
+    /// Edit something: a pencil.
+    Edit,
+    /// Remove something: a bin.
+    Trash,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -45,7 +49,13 @@ const GLYPH: f32 = 0.5;
 /// `selected` paints the button as held down, the state the bar uses for the
 /// panels that are open.
 pub fn button(ui: &mut Ui, icon: Icon, selected: bool, tooltip: &str) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(BUTTON), Sense::click());
+    button_sized(ui, icon, selected, tooltip, BUTTON)
+}
+
+/// An icon button of a given side, for a row where a control the size of the
+/// toolbar's would dwarf the text beside it.
+pub fn button_sized(ui: &mut Ui, icon: Icon, selected: bool, tooltip: &str, side: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
     if ui.is_rect_visible(rect) {
         let visuals = ui.style().interact_selectable(&response, selected);
         let corner = CornerRadius::same(theme::radius::M);
@@ -56,7 +66,7 @@ pub fn button(ui: &mut Ui, icon: Icon, selected: bool, tooltip: &str) -> Respons
             // whatever has the keyboard focus, and that state carries a stroke.
             ui.painter().rect_stroke(frame, corner, visuals.bg_stroke, StrokeKind::Inside);
         }
-        let glyph = Rect::from_center_size(rect.center(), Vec2::splat(BUTTON * GLYPH));
+        let glyph = Rect::from_center_size(rect.center(), Vec2::splat(side * GLYPH));
         paint(ui.painter(), glyph, icon, Stroke::new(1.6_f32, visuals.text_color()));
     }
     response.on_hover_text(tooltip)
@@ -104,6 +114,22 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke) {
                 let outward = centre + vec2(cos, sin) * rect.width() * 0.50;
                 painter.line_segment([inward, outward], stroke);
             }
+        }
+        Icon::Edit => {
+            // A pencil: a barrel lying at 45 degrees, and the tip that writes.
+            let near_top = at(0.26, 0.74);
+            let near_bottom = at(0.18, 0.66);
+            let far_bottom = at(0.68, 0.16);
+            let far_top = at(0.76, 0.24);
+            painter.add(line(&[near_bottom, far_bottom, far_top, near_top, near_bottom]));
+            painter.add(line(&[near_bottom, at(0.10, 0.90)]));
+            painter.add(line(&[near_top, at(0.10, 0.90)]));
+        }
+        Icon::Trash => {
+            // A bin: the lid, the handle above it, and the body below.
+            painter.add(line(&[at(0.14, 0.28), at(0.86, 0.28)]));
+            painter.add(line(&[at(0.40, 0.28), at(0.40, 0.17), at(0.60, 0.17), at(0.60, 0.28)]));
+            painter.add(line(&[at(0.24, 0.28), at(0.30, 0.88), at(0.70, 0.88), at(0.76, 0.28)]));
         }
     }
 }

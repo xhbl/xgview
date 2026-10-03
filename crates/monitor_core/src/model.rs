@@ -300,11 +300,86 @@ impl CameraSource {
             out
         }
     }
+
+    /// A key that identifies the stream this camera pulls, used to recognise
+    /// the same device being imported twice.
+    ///
+    /// Built from the main stream URL and nothing else. The credentials are
+    /// stored on the camera, so the same address written with them in the URL
+    /// and without them is the same camera; so are a host's letter case, a
+    /// default port left implicit, and a trailing slash.
+    pub fn identity(&self) -> String {
+        normalize_stream_url(&self.rtsp_main)
+    }
 }
 
 /// Generates a stable, collision free identifier for a camera entry.
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+/// The normalised form of a stream URL: `scheme://host:port/path?query`.
+///
+/// Everything a duplicate check must not be fooled by is taken out - the
+/// credentials in the user info, the host's letter case, a default port left
+/// implicit, a trailing slash - while the parts that name the stream stay,
+/// the query of an MJPEG url included. `rtsps` folds onto `rtsp`: TLS is a
+/// transport, not another stream.
+fn normalize_stream_url(url: &str) -> String {
+    let url = url.trim();
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let scheme = scheme.to_ascii_lowercase();
+    let scheme = match scheme.as_str() {
+        "rtsps" => "rtsp",
+        other => other,
+    };
+    let (authority, tail) = match rest.find(['/', '?']) {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    };
+    // The user info names who may connect, not which camera it is.
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let (host, port) = split_host_port(authority);
+    let default_port = match scheme {
+        "rtsp" => 554,
+        "https" => 443,
+        "http" => 80,
+        _ => 0,
+    };
+    let host = host.to_ascii_lowercase();
+    // An IPv6 literal keeps its brackets, or the port would read as a group.
+    let host = if host.contains(':') { format!("[{host}]") } else { host };
+    let (path, query) = match tail.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (tail, None),
+    };
+    let mut key = format!(
+        "{scheme}://{host}:{}{}",
+        port.unwrap_or(default_port),
+        path.trim_end_matches('/')
+    );
+    if let Some(query) = query {
+        key.push('?');
+        key.push_str(query);
+    }
+    key
+}
+
+/// Splits `host`, `host:port` or `[ipv6]:port` into its two parts.
+fn split_host_port(authority: &str) -> (&str, Option<u16>) {
+    if let Some(rest) = authority.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            let port = rest[end + 1..].strip_prefix(':').and_then(|port| port.parse().ok());
+            return (&rest[..end], port);
+        }
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) => match port.parse::<u16>() {
+            Ok(port) => (host, Some(port)),
+            Err(_) => (authority, None),
+        },
+        None => (authority, None),
+    }
 }
 
 /// True for an `http://` or `https://` URL, which is how an MJPEG stream is

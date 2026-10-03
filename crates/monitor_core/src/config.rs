@@ -269,10 +269,11 @@ impl AppConfig {
     /// Adds a camera, or refreshes the streams of an already imported one.
     /// Returns the identifier of the stored entry.
     pub fn upsert_camera(&mut self, camera: CameraSource) -> String {
+        let identity = camera.identity();
         if let Some(existing) = self
             .cameras
             .iter_mut()
-            .find(|existing| existing.id == camera.id || existing.rtsp_main == camera.rtsp_main)
+            .find(|existing| existing.id == camera.id || existing.identity() == identity)
         {
             let id = existing.id.clone();
             let origin = existing.origin;
@@ -415,5 +416,31 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(config.cameras.len(), 1);
         assert_eq!(config.cameras[0].name, "door renamed");
+    }
+
+    /// The same camera reached with its credentials in the URL, a default port
+    /// spelled out and a trailing slash is still the same camera.
+    #[test]
+    fn upsert_matches_the_same_stream_written_differently() {
+        let mut config = AppConfig::default();
+        let first = config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
+        let second =
+            config.upsert_camera(CameraSource::new("door renamed", "rtsp://admin:secret@10.0.0.1:554/live/"));
+
+        assert_eq!(first, second);
+        assert_eq!(config.cameras.len(), 1);
+        assert_eq!(config.cameras[0].name, "door renamed");
+    }
+
+    /// Two streams of one device are two cameras: the normalisation must not
+    /// collapse them onto the device's address.
+    #[test]
+    fn upsert_keeps_two_streams_of_one_host_apart() {
+        let mut config = AppConfig::default();
+        let main = config.upsert_camera(CameraSource::new("main", "rtsp://10.0.0.1/Streaming/Channels/101"));
+        let sub = config.upsert_camera(CameraSource::new("sub", "rtsp://10.0.0.1/Streaming/Channels/102"));
+
+        assert_ne!(main, sub);
+        assert_eq!(config.cameras.len(), 2);
     }
 }

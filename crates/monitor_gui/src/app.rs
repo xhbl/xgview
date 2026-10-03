@@ -20,7 +20,7 @@ use monitor_core::pipeline::{ChannelManager, StreamEvent};
 use monitor_core::scheduler::Scheduler;
 use monitor_core::{CameraSource, Direction};
 
-use crate::dialogs::{self, BackgroundEvent, DiscoveryUi, Tab};
+use crate::dialogs::{self, BackgroundEvent, CameraDraft, DiscoveryUi, Tab};
 use crate::grid::{self, Tile, TileActions};
 use crate::icons::{self, Icon};
 use crate::controls;
@@ -67,6 +67,12 @@ const CHROME_IDLE: Duration = Duration::from_millis(3500);
 /// narrow screen the viewer mostly has it closed.
 const SETTINGS_WIDTH: f32 = 360.0;
 const SETTINGS_MIN_WIDTH: f32 = 300.0;
+
+/// Side of the edit / remove buttons of a camera row, in points.
+///
+/// Smaller than a toolbar button: a row is read as a line of text, and a
+/// control the size of the bar's would dwarf the name it sits beside.
+const ROW_ICON: f32 = 24.0;
 
 /// Auto-hide state of the top and bottom bars.
 ///
@@ -285,6 +291,26 @@ impl Handoff {
     }
 }
 
+/// A camera the settings panel is editing, and the form bound to it.
+#[derive(Debug)]
+struct CameraEdit {
+    /// Identifier of the entry being edited. The update keeps it, so that a
+    /// changed url repoints the camera instead of adding a second one.
+    id: String,
+    draft: CameraDraft,
+    /// The edit button that opened the window, to give it back its focus.
+    from: Id,
+}
+
+/// A camera the settings panel is asking about removing.
+#[derive(Debug)]
+struct RemoveConfirm {
+    id: String,
+    name: String,
+    /// The remove button that opened the window, to give it back its focus.
+    from: Id,
+}
+
 /// What the status line calls a grid layout.
 ///
 /// [`GridLayout::label`] is the button's own text: right on the bar, where the
@@ -376,6 +402,36 @@ pub struct XgViewApp {
     /// be scrolled into view on this one: it had already been drawn when the
     /// focus reached it. See [`Nav::next_in_scope`].
     reveal_next: Option<Id>,
+    /// Frames left in which an Enter is discarded.
+    ///
+    /// The Enter that opened a window is still in flight for a frame or two -
+    /// the soft keyboard the window raises may carry one of its own - and it
+    /// would confirm or activate the control the window has just put under the
+    /// focus, before the viewer has read the form.
+    swallow_enter: u8,
+    /// A control to hand the focus back to as the next frame begins.
+    ///
+    /// A window gives the focus back to the button it was opened from, and
+    /// that button is behind the window: asking for it on the frame the window
+    /// closes would be a frame too late, once the panel has had its say. The
+    /// request is kept and applied at the start of the next frame instead.
+    restore_focus: Option<Id>,
+    /// The camera the settings panel is editing, while its window is up.
+    camera_edit: Option<CameraEdit>,
+    /// First control of the edit window, to hand it the focus as it opens.
+    camera_edit_anchor: Option<Id>,
+    /// Watches the edit window for the frame it appears on.
+    camera_edit_handoff: Handoff,
+    /// Camera waiting for the remove button to be confirmed.
+    ///
+    /// Asked for in a window, so that a press on a bin icon - a shape, one
+    /// press away from its neighbour - cannot drop a camera on its own, and so
+    /// that the question cannot be walked past and left open.
+    remove_confirm: Option<RemoveConfirm>,
+    /// First control of the remove window, to hand it the focus as it opens.
+    remove_confirm_anchor: Option<Id>,
+    /// Watches the remove window for the frame it appears on.
+    remove_confirm_handoff: Handoff,
     /// What each control is called, for the status line.
     ///
     /// The bar is made of shapes, and a remote control has no pointer to hover
@@ -470,8 +526,18 @@ impl XgViewApp {
                 ("settings-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("settings-body"))),
                 ("settings-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("settings-tabs"))),
                 ("toolbar", ScopeDef::new(Axis::Row)),
+                ("edit-body", ScopeDef::new(Axis::Column)),
+                ("confirm-body", ScopeDef::new(Axis::Column)),
             ]),
             reveal_next: None,
+            swallow_enter: 0,
+            restore_focus: None,
+            camera_edit: None,
+            camera_edit_anchor: None,
+            camera_edit_handoff: Handoff::default(),
+            remove_confirm: None,
+            remove_confirm_anchor: None,
+            remove_confirm_handoff: Handoff::default(),
             owner: Owner::Grid,
             focus_names: HashMap::new(),
             focused_name: None,
@@ -829,14 +895,10 @@ impl XgViewApp {
                     toast = Some((format!("{name}: {error}"), ToastKind::Error));
                 }
                 BackgroundEvent::SynologyDone(cameras) => {
-                    if !cameras.is_empty() {
-                        for camera in cameras {
-                            self.config.upsert_camera(camera.clone());
-                        }
-                        touched_config = true;
-                    }
+                    // The cameras are listed in the dialog for the viewer to
+                    // pick from, not imported on arrival - see `synology_tab`.
                     toast = Some((
-                        format!("{} camera(s) imported from Surveillance Station", cameras.len()),
+                        format!("{} camera(s) found on Surveillance Station", cameras.len()),
                         ToastKind::Info,
                     ));
                 }
@@ -871,6 +933,41 @@ impl XgViewApp {
             .is_some_and(|focused| egui::TextEdit::load_state(ctx, focused).is_some())
     }
 
+    /// The room to leave before a row of buttons to put it in the middle.
+    ///
+    /// egui hands a nested row the full width and lays its widgets out from the
+    /// left, so a row that wants to be centred measures itself and pads its
+    /// left side. The button labels are the only thing that decides the width:
+    /// button padding is the theme's, and a label wider than the minimum size
+    /// is the usual case here.
+    fn center_offset(ui: &egui::Ui, labels: &[&str]) -> f32 {
+        let padding = ui.spacing().button_padding.x * 2.0;
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let mut total = 0.0;
+        for label in labels {
+            total += ui.fonts(|fonts| {
+                fonts
+                    .layout_no_wrap((*label).to_owned(), font.clone(), egui::Color32::PLACEHOLDER)
+                    .size()
+                    .x
+            }) + padding;
+        }
+        total += ui.spacing().item_spacing.x * labels.len().saturating_sub(1) as f32;
+        ((ui.available_width() - total) * 0.5).max(0.0)
+    }
+
+    /// Takes Back out of the queue, if it was pressed.
+    ///
+    /// Escape on a keyboard, `BrowserBack` from an Android remote. Backspace is
+    /// left alone: it belongs to a field's caret, and the alternative owner of
+    /// Back only claims it when no field is being typed into.
+    fn back_pressed(ctx: &egui::Context) -> bool {
+        ctx.input_mut(|input| {
+            let none = Modifiers::NONE;
+            input.consume_key(none, Key::Escape) || input.consume_key(none, Key::BrowserBack)
+        })
+    }
+
     /// Routes one frame of keys to whoever owns them.
     ///
     /// The four directions, Enter and Escape have two possible owners, and the
@@ -882,6 +979,21 @@ impl XgViewApp {
     /// out of the queue in that case. The wall is not made of widgets, so it
     /// answers the same keys itself.
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // A window this application opened is the innermost layer: Back closes
+        // it, whatever inside it has the focus. A field's caret must not hold it
+        // open - Back on the first field would otherwise hand the focus back to
+        // that same field, and the window could never be left.
+        if (self.camera_edit.is_some() || self.remove_confirm.is_some()) && Self::back_pressed(ctx) {
+            if let Some(confirm) = self.remove_confirm.take() {
+                self.remove_confirm_anchor = None;
+                self.restore_focus = Some(confirm.from);
+            } else if let Some(edit) = self.camera_edit.take() {
+                self.camera_edit_anchor = None;
+                self.restore_focus = Some(edit.from);
+            }
+            return;
+        }
+
         // A text field being typed into owns the letters, the paste and the
         // caret keys. Two kinds of key are taken away from it here.
         //
@@ -1034,10 +1146,14 @@ impl XgViewApp {
 
         // Application keys first: they are how a keyboard, and whatever button
         // a remote offers beside the DPAD, reach the panels at all.
-        if keys.settings {
+        // A dialog owns the screen while it is up: nothing behind it answers the
+        // pointer, and the keys that open a panel are spent the same way, so one
+        // dialog can never be stacked on another.
+        let dialog_open = self.discovery.open || self.camera_edit.is_some() || self.remove_confirm.is_some();
+        if keys.settings && !dialog_open {
             self.show_settings = !self.show_settings;
         }
-        if keys.devices {
+        if keys.devices && !dialog_open {
             self.discovery.open = !self.discovery.open;
         }
         if keys.fullscreen {
@@ -1572,7 +1688,8 @@ impl XgViewApp {
         ui.add_space(theme::space::S);
 
         let mut toggle: Option<(usize, bool)> = None;
-        let mut remove: Option<String> = None;
+        let mut ask_remove: Option<(String, String, Id)> = None;
+        let mut edit: Option<(String, Id)> = None;
         let mut infer: Option<usize> = None;
         let mut transport_change: Option<(usize, RtspTransport)> = None;
         for (slot, camera) in self.config.cameras.iter_mut().enumerate() {
@@ -1583,7 +1700,7 @@ impl XgViewApp {
                 if enable.changed() {
                     toggle = Some((slot, camera_enabled));
                 }
-                ui.label(RichText::new(camera.short_label(20)).strong());
+                ui.label(RichText::new(camera.short_label(18)).strong());
                 if let Some(sub) = camera.rtsp_sub.as_deref() {
                     let inferred = sub == monitor_core::model::infer_sub_stream(&camera.rtsp_main).unwrap_or_default();
                     ui.label(
@@ -1613,16 +1730,36 @@ impl XgViewApp {
                 if transport_button.clicked() {
                     transport_change = Some((slot, transport.toggled()));
                 }
-                ui.label(RichText::new(camera.masked_uri(StreamKind::Main)).small().color(theme::TEXT_DIM));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let remove_button = ui.small_button("remove");
+                    // Drawn right to left so the pair reads edit, remove;
+                    // registered edit first, so the walk reaches the control
+                    // that changes before the one that deletes.
+                    let remove_button = icons::button_sized(ui, Icon::Trash, false, "Remove this camera", ROW_ICON);
+                    let edit_button = icons::button_sized(ui, Icon::Edit, false, "Edit this camera", ROW_ICON);
+                    self.nav.item(&edit_button);
+                    self.focus_names.insert(edit_button.id, "Edit camera");
                     self.nav.item(&remove_button);
+                    self.focus_names.insert(remove_button.id, "Remove camera");
                     if remove_button.clicked() {
-                        remove = Some(camera.id.clone());
+                        ask_remove = Some((camera.id.clone(), camera.name.clone(), remove_button.id));
                     }
-                    ui.label(RichText::new(camera.origin.label()).small().color(theme::TEXT_DIM));
+                    if edit_button.clicked() {
+                        edit = Some((camera.id.clone(), edit_button.id));
+                    }
                 });
             });
+            // The address and where the camera came from, on a line of their
+            // own: squeezed onto the row above, they ran into each other.
+            ui.horizontal(|ui| {
+                ui.add_space(theme::space::S);
+                let address = theme::truncate(&camera.masked_uri(StreamKind::Main), 30);
+                ui.label(RichText::new(address).small().monospace().color(theme::TEXT_DIM));
+                ui.label(RichText::new(camera.origin.label()).small().color(theme::TEXT_DIM));
+            });
+            ui.add_space(theme::space::XS);
+        }
+        if let Some((id, name, from)) = ask_remove {
+            self.remove_confirm = Some(RemoveConfirm { id, name, from });
         }
         if let Some((slot, enabled)) = toggle {
             if let Some(camera) = self.config.cameras.get_mut(slot) {
@@ -1641,10 +1778,15 @@ impl XgViewApp {
                 }
             }
         }
-        if let Some(id) = remove {
-            if self.config.remove_camera(&id) {
-                self.needs_sync = true;
-                dirty = true;
+        if let Some((id, from)) = edit {
+            let draft = self
+                .config
+                .cameras
+                .iter()
+                .find(|camera| camera.id == id)
+                .map(CameraDraft::from_source);
+            if let Some(draft) = draft {
+                self.camera_edit = Some(CameraEdit { id, draft, from });
             }
         }
         if let Some((slot, transport)) = transport_change {
@@ -1658,6 +1800,131 @@ impl XgViewApp {
         }
 
         dirty
+    }
+
+    /// The window one camera of the settings panel is edited in.
+    ///
+    /// It lays out the same form as the "Manual entry" tab - see
+    /// [`dialogs::camera_fields`] - and writes back under the identifier of the
+    /// entry it is editing, so a changed url repoints the camera instead of
+    /// adding a second one. Returns `true` when the configuration changed.
+    fn camera_edit_window(&mut self, ctx: &egui::Context) -> bool {
+        // Taken for the frame, so the form and the navigation layer can be
+        // borrowed apart; put back unless the window was closed or saved.
+        let Some(CameraEdit { id, mut draft, from }) = self.camera_edit.take() else {
+            return false;
+        };
+        let mut save = false;
+        let mut cancel = false;
+
+        // A modal: centred, and its backdrop swallows the presses that would
+        // otherwise reach the panel it was opened from. It is left only by its
+        // own buttons (or Back) - a press on the backdrop does nothing.
+        egui::Modal::new(Id::new("xgview-edit-camera")).show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.label(RichText::new("Edit camera").heading());
+            ui.add_space(theme::space::S);
+            self.nav.open("edit-body");
+            let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft);
+            // The dialog opens on the first control of the form.
+            self.camera_edit_anchor = fields.first;
+            if fields.inferred {
+                ui.label(RichText::new("sub stream url derived from the main url").small().color(theme::LIVE));
+            }
+            ui.add_space(theme::space::M);
+            ui.horizontal(|ui| {
+                ui.add_space(Self::center_offset(ui, &["Save", "Cancel"]));
+                if self.nav.tracked(ui.button("Save")).clicked() {
+                    save = true;
+                }
+                if self.nav.tracked(ui.button("Cancel")).clicked() {
+                    cancel = true;
+                }
+            });
+            self.nav.close();
+        });
+
+        if save {
+            match draft.build() {
+                Ok(mut source) => {
+                    // The entry keeps its identifier: the update repoints the
+                    // camera, and leaves enabled / transport as they were set.
+                    source.id = id;
+                    self.config.upsert_camera(source);
+                    self.needs_sync = true;
+                    self.camera_edit_anchor = None;
+                    // The focus goes back to the button the window was opened
+                    // from, not to the first control of the panel.
+                    self.restore_focus = Some(from);
+                    return true;
+                }
+                Err(error) => self.flash(error, ToastKind::Error),
+            }
+        }
+        if !cancel {
+            self.camera_edit = Some(CameraEdit { id, draft, from });
+        } else {
+            self.camera_edit_anchor = None;
+            self.restore_focus = Some(from);
+        }
+        false
+    }
+
+    /// The window the settings panel asks about removing a camera in.
+    ///
+    /// A window rather than a question drawn into the row: a row that turns
+    /// into its own question can be walked past and left that way, while a
+    /// window has one way out. Returns `true` when the configuration changed.
+    fn remove_confirm_window(&mut self, ctx: &egui::Context) -> bool {
+        // Taken for the frame, like the edit window, so the layer and the
+        // question can be borrowed apart.
+        let Some(RemoveConfirm { id, name, from }) = self.remove_confirm.take() else {
+            return false;
+        };
+        let mut remove = false;
+        let mut cancel = false;
+
+        // A modal, like the edit window: centred, and nothing behind it answers.
+        // Its own buttons (or Back) are the only way out.
+        egui::Modal::new(Id::new("xgview-remove-camera")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(RichText::new(format!("Remove \"{name}\"?")).heading());
+            ui.label(
+                RichText::new("It leaves the wall and the configuration; the camera itself is untouched.")
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+            ui.add_space(theme::space::M);
+            ui.horizontal(|ui| {
+                ui.add_space(Self::center_offset(ui, &["Keep", "Remove"]));
+                let keep_button = self.nav.tracked(ui.button("Keep"));
+                // The dialog opens on the answer that changes nothing.
+                self.remove_confirm_anchor = Some(keep_button.id);
+                if keep_button.clicked() {
+                    cancel = true;
+                }
+                if self.nav.tracked(ui.button(RichText::new("Remove").color(theme::ERROR))).clicked() {
+                    remove = true;
+                }
+            });
+        });
+
+        if remove {
+            if self.config.remove_camera(&id) {
+                // The row is gone, so there is no button to hand the focus
+                // back to; the panel anchor picks it up.
+                self.needs_sync = true;
+                self.remove_confirm_anchor = None;
+                return true;
+            }
+        }
+        if !cancel {
+            self.remove_confirm = Some(RemoveConfirm { id, name, from });
+        } else {
+            self.remove_confirm_anchor = None;
+            self.restore_focus = Some(from);
+        }
+        false
     }
 
     /// Version, decoder, and where the configuration lives.
@@ -1880,6 +2147,18 @@ impl eframe::App for XgViewApp {
         if let Some(next) = self.reveal_next.take() {
             self.nav.arm_reveal(next);
         }
+        // A window handed the focus back to the button it was opened from:
+        // applied here, before anything this frame has a chance to move it.
+        if let Some(id) = self.restore_focus.take() {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+        // The Enter that opened a window is still in flight for a frame or two:
+        // taken out before any control is drawn, so it cannot land on the one
+        // the window has just put under the focus.
+        if self.swallow_enter > 0 {
+            self.swallow_enter -= 1;
+            ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
+        }
         self.handle_keys(ctx);
         // Who holds the focus as the frame is drawn. A value control confirms
         // with Enter and gives the focus up while it is drawn, and the form
@@ -1943,6 +2222,13 @@ impl eframe::App for XgViewApp {
             }
         }
 
+        if self.camera_edit_window(ctx) {
+            self.mark_dirty();
+        }
+        if self.remove_confirm_window(ctx) {
+            self.mark_dirty();
+        }
+
         self.draw_toast(ctx);
         self.autosave();
 
@@ -1959,11 +2245,27 @@ impl eframe::App for XgViewApp {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
+        if self.camera_edit_handoff.entering(self.camera_edit.is_some()) {
+            self.swallow_enter = 10;
+            if let Some(id) = self.camera_edit_anchor {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
+        if self.remove_confirm_handoff.entering(self.remove_confirm.is_some()) {
+            self.swallow_enter = 10;
+            if let Some(id) = self.remove_confirm_anchor {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
 
         // An open panel is never left without something focused. The arrows
         // have nowhere to walk from otherwise, and a panel the remote can reach
         // when it opens but not one press later is worse than no panel at all.
-        let anchor = if self.discovery.open {
+        let anchor = if self.remove_confirm.is_some() {
+            self.remove_confirm_anchor
+        } else if self.camera_edit.is_some() {
+            self.camera_edit_anchor
+        } else if self.discovery.open {
             self.discovery.focus_anchor
         } else if self.show_settings {
             self.settings_anchor
