@@ -5,6 +5,7 @@
 //! * [`grid`]    – grid geometry and tile painting.
 //! * [`icons`]   – the shapes the controls carry.
 //! * [`keyboard`] – the soft keyboard on Android (Android only).
+//! * [`nav`]     – explicit directional navigation for a remote control.
 //! * [`theme`]   – colour palette and typography.
 //! * [`video`]   – uploads the decoded planes and turns them into pictures.
 //!
@@ -19,6 +20,7 @@ pub mod grid;
 pub mod icons;
 #[cfg(target_os = "android")]
 pub mod keyboard;
+pub mod nav;
 pub mod theme;
 pub mod video;
 

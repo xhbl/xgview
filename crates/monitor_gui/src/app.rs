@@ -23,6 +23,7 @@ use monitor_core::{CameraSource, Direction};
 use crate::dialogs::{self, BackgroundEvent, DiscoveryUi, Tab};
 use crate::grid::{self, Tile, TileActions};
 use crate::icons::{self, Icon};
+use crate::nav::{Axis, Dir, Exit, Nav, ScopeDef};
 use crate::theme;
 use crate::video::{VideoRenderer, VideoSurface};
 use crate::RunOptions;
@@ -364,6 +365,12 @@ pub struct XgViewApp {
     grid_focus_x: Option<f32>,
     /// Who answered the last frame's direction presses.
     owner: Owner,
+    /// Explicit directional navigation for the windows that opted into it.
+    ///
+    /// Keeps egui's geometric walk off the arrows of the registered controls;
+    /// see [`crate::nav`]. Empty until a window registers its controls, and the
+    /// wall and the bars keep egui's own walk.
+    nav: Nav,
     /// What each control is called, for the status line.
     ///
     /// The bar is made of shapes, and a remote control has no pointer to hover
@@ -445,6 +452,13 @@ impl XgViewApp {
             },
             toolbar_items: Vec::new(),
             grid_focus_x: None,
+            // The "Add devices" window is the first window on this layer: a row
+            // of tabs over a column of controls, which is the shape egui's walk
+            // handles worst. The wall keeps its own geometric navigation.
+            nav: Nav::new(&[
+                ("dialog-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("dialog-body"))),
+                ("dialog-body", ScopeDef::new(Axis::Column).exit(Dir::Up, Exit::Scope("dialog-tabs"))),
+            ]),
             owner: Owner::Grid,
             focus_names: HashMap::new(),
             focused_name: None,
@@ -874,13 +888,28 @@ impl XgViewApp {
         // button whenever a panel opens, so asking that question would leave a
         // viewer unable to press anything - F1, F2, BACK, anything - from the
         // moment a panel appeared.
-        if Self::typing(ctx) {
+        //
+        // A control on the navigation layer is the exception: its arrows are
+        // answered by [`crate::nav`], a field among them included, because a
+        // field in the middle of a form still has to be walkable past. Only the
+        // keys that are not the arrows - the letters, Back - fall through to
+        // the field.
+        let nav_owns =
+            ctx.memory(|memory| memory.focused()).is_some_and(|focused| self.nav.owns(focused));
+        let typing = Self::typing(ctx);
+        if typing {
+            // Back leaves the field; the arrows walk the form. Where a field
+            // keeps its caret keys for itself - the bars and the wall - the
+            // arrows are taken out of the queue here, as before; on the
+            // navigation layer they are left for the layer to move the focus.
             let leave = ctx.input_mut(|input| {
                 let none = Modifiers::NONE;
                 let leave = input.consume_key(none, Key::Escape)
                     || input.consume_key(none, Key::BrowserBack);
-                for key in [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown] {
-                    input.consume_key(none, key);
+                if !nav_owns {
+                    for key in [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown] {
+                        input.consume_key(none, key);
+                    }
                 }
                 leave
             });
@@ -888,8 +917,11 @@ impl XgViewApp {
                 if let Some(focused) = ctx.memory(|memory| memory.focused()) {
                     ctx.memory_mut(|memory| memory.surrender_focus(focused));
                 }
+                return;
             }
-            return;
+            if !nav_owns {
+                return;
+            }
         }
         let grid_owns = self.owner == Owner::Grid;
         let keys = ctx.input_mut(|input| {
@@ -909,13 +941,26 @@ impl XgViewApp {
                     || input.consume_key(none, Key::Backspace)
                     || input.consume_key(none, Key::BrowserBack);
             } else {
-                keys.left = input.key_pressed(Key::ArrowLeft);
-                keys.right = input.key_pressed(Key::ArrowRight);
-                keys.up = input.key_pressed(Key::ArrowUp);
-                keys.down = input.key_pressed(Key::ArrowDown);
+                // A control of the navigation layer has its arrows taken out of
+                // the queue here: the layer decides where they go, and the
+                // widget must not also read them. Everything else is left in
+                // the queue for egui's own walk, which ran already.
+                if nav_owns {
+                    keys.left = input.consume_key(none, Key::ArrowLeft);
+                    keys.right = input.consume_key(none, Key::ArrowRight);
+                    keys.up = input.consume_key(none, Key::ArrowUp);
+                    keys.down = input.consume_key(none, Key::ArrowDown);
+                } else {
+                    keys.left = input.key_pressed(Key::ArrowLeft);
+                    keys.right = input.key_pressed(Key::ArrowRight);
+                    keys.up = input.key_pressed(Key::ArrowUp);
+                    keys.down = input.key_pressed(Key::ArrowDown);
+                }
                 keys.enter = input.key_pressed(Key::Enter) || input.key_pressed(Key::Space);
+                // Backspace is the field's own when a field has the focus: it
+                // deletes a character rather than unwinding a window.
                 keys.back = input.key_pressed(Key::Escape)
-                    || input.key_pressed(Key::Backspace)
+                    || (!typing && input.key_pressed(Key::Backspace))
                     || input.key_pressed(Key::BrowserBack);
             }
             // The rest belong to the application whatever has the focus, and
@@ -956,6 +1001,28 @@ impl XgViewApp {
             if *pressed {
                 if let Some(layout) = GridLayout::ALL.get(slot) {
                     self.set_layout(*layout);
+                }
+            }
+        }
+
+        // A control of the navigation layer: the arrow moves by declaration -
+        // the scope's order, then its exits - and not by geometry. Answered
+        // before the Back handling below, so that Back still unwinds a window.
+        if nav_owns {
+            let dir = if keys.up {
+                Some(Dir::Up)
+            } else if keys.down {
+                Some(Dir::Down)
+            } else if keys.left {
+                Some(Dir::Left)
+            } else if keys.right {
+                Some(Dir::Right)
+            } else {
+                None
+            };
+            if let (Some(dir), Some(focused)) = (dir, ctx.memory(|memory| memory.focused())) {
+                if let Some(target) = self.nav.step(focused, dir) {
+                    ctx.memory_mut(|memory| memory.request_focus(target));
                 }
             }
         }
@@ -1676,6 +1743,10 @@ impl eframe::App for XgViewApp {
         self.chrome.input_seen = Self::viewer_active(ctx);
 
         self.poll_events();
+        // The navigation layer starts its frame here: the layout it collects
+        // while the widgets are drawn below becomes the one the next frame's
+        // arrows read. The keys handed out just above used the previous one.
+        self.nav.begin();
         self.handle_keys(ctx);
         self.advance_animations(ctx);
         self.sync();
@@ -1722,7 +1793,14 @@ impl eframe::App for XgViewApp {
         if self.discovery.open {
             let handle = self.handle.clone();
             let events = self.events_tx.clone();
-            if dialogs::add_devices_window(ctx, &mut self.discovery, &mut self.config, &handle, &events) {
+            if dialogs::add_devices_window(
+                ctx,
+                &mut self.discovery,
+                &mut self.config,
+                &handle,
+                &events,
+                &mut self.nav,
+            ) {
                 self.needs_sync = true;
                 self.mark_dirty();
             }
@@ -1785,6 +1863,12 @@ impl eframe::App for XgViewApp {
                 ctx.memory_mut(|memory| memory.set_focus_lock_filter(focused, egui::EventFilter::default()));
             }
         }
+
+        // The navigation layer ends its frame: it keeps the walk off the arrows
+        // of whatever it has focused, and makes this frame's layout the one the
+        // next frame's arrows read. After the field's own lock above, so that a
+        // form field of a window on this layer is walked, not held.
+        self.nav.finish(ctx);
 
         // The keyboard follows the focus: raised while a text field has it, and
         // dropped as soon as it does not, so that it never sits over the wall
