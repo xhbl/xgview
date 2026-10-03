@@ -23,7 +23,8 @@ use monitor_core::{CameraSource, Direction};
 use crate::dialogs::{self, BackgroundEvent, DiscoveryUi, Tab};
 use crate::grid::{self, Tile, TileActions};
 use crate::icons::{self, Icon};
-use crate::nav::{Axis, Dir, Exit, Nav, ScopeDef};
+use crate::controls;
+use crate::nav::{Axis, Dir, Exit, Kind, Nav, ScopeDef};
 use crate::theme;
 use crate::video::{VideoRenderer, VideoSurface};
 use crate::RunOptions;
@@ -452,12 +453,18 @@ impl XgViewApp {
             },
             toolbar_items: Vec::new(),
             grid_focus_x: None,
-            // The "Add devices" window is the first window on this layer: a row
-            // of tabs over a column of controls, which is the shape egui's walk
-            // handles worst. The wall keeps its own geometric navigation.
+            // The "Add devices" window and the settings panel are on this
+            // layer: each is a row of tabs over a column of controls, which is
+            // the shape egui's walk handles worst. The wall and the top bar
+            // keep their own navigation. The two bodies are the scopes that
+            // scroll - a tab strip is always in view, and a scope that asked to
+            // be revealed from outside a scroll area would leave the request
+            // for the next one in the pass to consume.
             nav: Nav::new(&[
                 ("dialog-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("dialog-body"))),
-                ("dialog-body", ScopeDef::new(Axis::Column).exit(Dir::Up, Exit::Scope("dialog-tabs"))),
+                ("dialog-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("dialog-tabs"))),
+                ("settings-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("settings-body"))),
+                ("settings-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("settings-tabs"))),
             ]),
             owner: Owner::Grid,
             focus_names: HashMap::new(),
@@ -896,6 +903,14 @@ impl XgViewApp {
         // the field.
         let nav_owns =
             ctx.memory(|memory| memory.focused()).is_some_and(|focused| self.nav.owns(focused));
+        // What the focused control keeps for itself: a slider is moved with
+        // Left and Right, a drag value with Up and Down, and only the other
+        // axis moves the focus. A plain control keeps neither.
+        let nav_kind = if nav_owns {
+            ctx.memory(|memory| memory.focused()).map(|focused| self.nav.kind(focused))
+        } else {
+            None
+        };
         let typing = Self::typing(ctx);
         if typing {
             // Back leaves the field; the arrows walk the form. Where a field
@@ -946,10 +961,35 @@ impl XgViewApp {
                 // widget must not also read them. Everything else is left in
                 // the queue for egui's own walk, which ran already.
                 if nav_owns {
-                    keys.left = input.consume_key(none, Key::ArrowLeft);
-                    keys.right = input.consume_key(none, Key::ArrowRight);
-                    keys.up = input.consume_key(none, Key::ArrowUp);
-                    keys.down = input.consume_key(none, Key::ArrowDown);
+                    // On a remote Up and Down always move the focus. The two
+                    // value controls are adjusted sideways instead: the slider
+                    // reads the sideways keys itself, and a drag value has them
+                    // recorded on the layer for the widget to apply as it is
+                    // drawn (see `controls::drag_value`), because it steps with
+                    // Up / Down and those are the focus's.
+                    match nav_kind {
+                        Some(Kind::Slider) => {
+                            keys.left = input.key_pressed(Key::ArrowLeft);
+                            keys.right = input.key_pressed(Key::ArrowRight);
+                            keys.up = input.consume_key(none, Key::ArrowUp);
+                            keys.down = input.consume_key(none, Key::ArrowDown);
+                        }
+                        Some(Kind::DragValue) => {
+                            // Taken so the field's caret does not move on them;
+                            // the value change happens at the widget.
+                            keys.up = input.consume_key(none, Key::ArrowUp);
+                            keys.down = input.consume_key(none, Key::ArrowDown);
+                            keys.left = input.consume_key(none, Key::ArrowLeft);
+                            keys.right = input.consume_key(none, Key::ArrowRight);
+                        }
+                        _ => {
+                            // A plain control: all four arrows move the focus.
+                            keys.left = input.consume_key(none, Key::ArrowLeft);
+                            keys.right = input.consume_key(none, Key::ArrowRight);
+                            keys.up = input.consume_key(none, Key::ArrowUp);
+                            keys.down = input.consume_key(none, Key::ArrowDown);
+                        }
+                    }
                 } else {
                     keys.left = input.key_pressed(Key::ArrowLeft);
                     keys.right = input.key_pressed(Key::ArrowRight);
@@ -1009,16 +1049,43 @@ impl XgViewApp {
         // the scope's order, then its exits - and not by geometry. Answered
         // before the Back handling below, so that Back still unwinds a window.
         if nav_owns {
-            let dir = if keys.up {
-                Some(Dir::Up)
-            } else if keys.down {
-                Some(Dir::Down)
-            } else if keys.left {
-                Some(Dir::Left)
-            } else if keys.right {
-                Some(Dir::Right)
-            } else {
-                None
+            // A drag value takes its value from the sideways presses recorded
+            // here; the widget applies the step as it is drawn this frame.
+            // Left steps down and Right up, the way a slider reads them.
+            if nav_kind == Some(Kind::DragValue) {
+                if keys.left {
+                    self.nav.step_value(-1);
+                }
+                if keys.right {
+                    self.nav.step_value(1);
+                }
+            }
+            // Up and Down always move the focus. A value control - slider or
+            // drag value - answers its sideways keys itself, so they never
+            // reach here; a plain control walks with all four.
+            let dir = match nav_kind {
+                Some(Kind::Slider) | Some(Kind::DragValue) => {
+                    if keys.up {
+                        Some(Dir::Up)
+                    } else if keys.down {
+                        Some(Dir::Down)
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    if keys.up {
+                        Some(Dir::Up)
+                    } else if keys.down {
+                        Some(Dir::Down)
+                    } else if keys.left {
+                        Some(Dir::Left)
+                    } else if keys.right {
+                        Some(Dir::Right)
+                    } else {
+                        None
+                    }
+                }
             };
             if let (Some(dir), Some(focused)) = (dir, ctx.memory(|memory| memory.focused())) {
                 if let Some(target) = self.nav.step(focused, dir) {
@@ -1252,39 +1319,49 @@ impl XgViewApp {
     /// The settings side panel: a tab strip that stays put, and the tab's body
     /// scrolling underneath it.
     fn settings_panel(&mut self, ui: &mut egui::Ui) {
+        // The tab strip is a row of the navigation layer: Left and Right move
+        // between the tabs and select as they land - the panel follows the
+        // focus the way it follows a click - and Down drops into the body.
         ui.horizontal_wrapped(|ui| {
-            for tab in SettingsTab::ALL {
+            let mut ids = [Id::NULL; 5];
+            let mut focused = None;
+            self.nav.open("settings-tabs");
+            for (slot, tab) in SettingsTab::ALL.into_iter().enumerate() {
                 let selected = self.settings_tab == tab;
                 let label = match tab {
                     SettingsTab::Cameras => format!("Cameras ({})", self.config.cameras.len()),
                     other => other.label().to_string(),
                 };
-                let response = ui.selectable_label(selected, label);
+                let response = self.nav.tracked(ui.selectable_label(selected, label));
                 self.name(&response, tab.label());
                 if response.clicked() {
                     self.settings_tab = tab;
-                    // A press takes the focus away from whatever had it and never
-                    // gives it to what was pressed, and the press and the release
-                    // of one click can land in different frames - so by the time
-                    // the tab is chosen, the focus has already been put back on
-                    // the tab being left and nothing is left to move it. The tab
-                    // that was just chosen takes it, here and now.
+                    // A press takes the focus away from whatever had it and
+                    // never gives it to what was pressed, so the tab just
+                    // chosen takes it here and now.
                     response.request_focus();
                 }
-                // The anchor is the tab that ends up on, and it has to be decided
-                // *after* the click above: egui takes the focus away from
-                // whatever had it when anything is clicked and never gives it to
-                // what was clicked, so the anchor is what puts the focus back
-                // somewhere sensible. Read before the click, it still named the
-                // tab being left, and the focus snapped back to that one while
-                // the selection moved on.
-                if self.settings_tab == tab {
-                    self.settings_anchor = Some(response.id);
+                if response.has_focus() {
+                    focused = Some(tab);
                 }
+                ids[slot] = response.id;
             }
+            // An arrow lands on a tab without a press; the panel has to follow
+            // it, or the body would keep showing the old tab under the focus.
+            if let Some(tab) = focused {
+                self.settings_tab = tab;
+            }
+            // The tab in use is where an Up out of the body comes back to.
+            let slot = SettingsTab::ALL.iter().position(|tab| *tab == self.settings_tab).unwrap_or(0);
+            self.settings_anchor = Some(ids[slot]);
+            self.nav.set_entry("settings-tabs", ids[slot]);
+            self.nav.close();
         });
         ui.separator();
 
+        // The body is one column of the navigation layer. See the "Add
+        // devices" window for why sideways is spent inside a body.
+        self.nav.open("settings-body");
         let dirty = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| match self.settings_tab {
@@ -1298,6 +1375,7 @@ impl XgViewApp {
                 }
             })
             .inner;
+        self.nav.close();
         if dirty {
             self.mark_dirty();
         }
@@ -1311,19 +1389,23 @@ impl XgViewApp {
         ui.horizontal_wrapped(|ui| {
             for layout in GridLayout::ALL {
                 let selected = self.scheduler.layout() == layout;
-                if ui.selectable_label(selected, layout.label()).clicked() {
+                let response = self.nav.tracked(ui.selectable_label(selected, layout.label()));
+                if response.clicked() {
                     self.set_layout(layout);
                 }
             }
         });
         ui.add_space(theme::space::S);
-        ui.checkbox(&mut self.show_stats, "Show fps and bitrate on the tiles");
+        let stats = ui.checkbox(&mut self.show_stats, "Show fps and bitrate on the tiles");
+        self.nav.item(&stats);
         let mut fullscreen = self.fullscreen;
-        if ui.checkbox(&mut fullscreen, "Full screen (F11)").changed() {
+        let full = self.nav.tracked(ui.checkbox(&mut fullscreen, "Full screen (F11)"));
+        if full.changed() {
             self.set_fullscreen(ui.ctx(), fullscreen);
         }
         let mut start_fullscreen = self.config.start_fullscreen;
-        if ui.checkbox(&mut start_fullscreen, "Open in full screen at start-up").changed() {
+        let start = self.nav.tracked(ui.checkbox(&mut start_fullscreen, "Open in full screen at start-up"));
+        if start.changed() {
             self.config.start_fullscreen = start_fullscreen;
             dirty = true;
         }
@@ -1340,7 +1422,9 @@ impl XgViewApp {
         let supported = self.autostart.supported;
         let mut enabled = self.config.autostart;
         ui.add_enabled_ui(supported, |ui| {
-            if ui.checkbox(&mut enabled, "Start with the system boot").changed() {
+            let boot = ui.checkbox(&mut enabled, "Start with the system boot");
+            self.nav.item(&boot);
+            if boot.changed() {
                 match autostart::set_enabled(enabled) {
                     Ok(()) => {
                         self.config.autostart = enabled;
@@ -1382,21 +1466,28 @@ impl XgViewApp {
         let reconnect = &mut self.config.reconnect;
         ui.horizontal(|ui| {
             ui.label("first retry after");
-            dirty |= ui.add(egui::DragValue::new(&mut reconnect.initial_delay_ms).range(100..=10_000).suffix(" ms")).changed();
+            let first = controls::drag_value(&mut self.nav, ui, &mut reconnect.initial_delay_ms, 100..=10_000, 100.0, " ms");
+            dirty |= first.changed();
             ui.label("then at most");
-            dirty |= ui.add(egui::DragValue::new(&mut reconnect.max_delay_ms).range(1_000..=300_000).suffix(" ms")).changed();
+            let second = controls::drag_value(&mut self.nav, ui, &mut reconnect.max_delay_ms, 1_000..=300_000, 1000.0, " ms");
+            dirty |= second.changed();
         });
         ui.label(RichText::new("a change applies to the connections opened afterwards").small().color(theme::TEXT_DIM));
         // The shape of the curve is settled once, by whoever sized the network,
         // and never looked at again: it belongs behind a fold, not on the tab.
-        egui::CollapsingHeader::new("Backoff shape").show(ui, |ui| {
+        // The fold is a stop of its own, ahead of the controls it hides; see
+        // `controls::fold`.
+        controls::fold(&mut self.nav, ui, "Backoff shape", false, |ui, nav| {
             ui.horizontal(|ui| {
                 ui.label("factor");
-                dirty |= ui.add(egui::DragValue::new(&mut reconnect.multiplier).speed(0.05).range(1.0..=5.0)).changed();
+                let factor = controls::drag_value(nav, ui, &mut reconnect.multiplier, 1.0..=5.0, 0.05, "");
+                dirty |= factor.changed();
                 ui.label("jitter");
-                dirty |= ui.add(egui::DragValue::new(&mut reconnect.jitter).speed(0.02).range(0.0..=1.0)).changed();
+                let jitter = controls::drag_value(nav, ui, &mut reconnect.jitter, 0.0..=1.0, 0.02, "");
+                dirty |= jitter.changed();
                 ui.label("attempts (0 = forever)");
-                dirty |= ui.add(egui::DragValue::new(&mut reconnect.max_attempts).range(0..=100)).changed();
+                let attempts = controls::drag_value(nav, ui, &mut reconnect.max_attempts, 0..=100, 1.0, "");
+                dirty |= attempts.changed();
             });
         });
 
@@ -1404,7 +1495,9 @@ impl XgViewApp {
         ui.label(RichText::new("Decoding").strong());
         let mut prefer_hardware = self.config.prefer_hardware_decode;
         ui.add_enabled_ui(self.decoder_selectable, |ui| {
-            if ui.checkbox(&mut prefer_hardware, "Prefer hardware decoding").changed() {
+            let hardware = ui.checkbox(&mut prefer_hardware, "Prefer hardware decoding");
+            self.nav.item(&hardware);
+            if hardware.changed() {
                 self.config.prefer_hardware_decode = prefer_hardware;
                 // A decoder is chosen when a session opens, so the change is applied
                 // by reopening the channels rather than on the next connection.
@@ -1437,11 +1530,15 @@ impl XgViewApp {
         let mut dirty = false;
 
         ui.horizontal(|ui| {
-            if ui.button("Add devices…").clicked() {
+            let devices = ui.button("Add devices…");
+            self.nav.item(&devices);
+            if devices.clicked() {
                 self.discovery.open = true;
                 self.discovery.tab = Tab::Onvif;
             }
-            if ui.button("Add manually…").clicked() {
+            let manual = ui.button("Add manually…");
+            self.nav.item(&manual);
+            if manual.clicked() {
                 self.discovery.open = true;
                 self.discovery.tab = Tab::Manual;
             }
@@ -1456,7 +1553,9 @@ impl XgViewApp {
         for (slot, camera) in self.config.cameras.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 let mut camera_enabled = camera.enabled;
-                if ui.checkbox(&mut camera_enabled, "").changed() {
+                let enable = ui.checkbox(&mut camera_enabled, "");
+                self.nav.item(&enable);
+                if enable.changed() {
                     toggle = Some((slot, camera_enabled));
                 }
                 ui.label(RichText::new(camera.short_label(20)).strong());
@@ -1468,12 +1567,14 @@ impl XgViewApp {
                             .color(theme::ACCENT),
                     );
                 } else {
-                    if ui.small_button("infer sub").clicked() {
+                    let infer_button = ui.small_button("infer sub");
+                    self.nav.item(&infer_button);
+                    if infer_button.clicked() {
                         infer = Some(slot);
                     }
                 }
                 let transport = camera.transport;
-                if ui
+                let transport_button = ui
                     .small_button(RichText::new(transport.as_str()).small().color(if transport.is_udp() {
                         theme::ACCENT
                     } else {
@@ -1482,14 +1583,16 @@ impl XgViewApp {
                     .on_hover_text(
                         "RTSP transport for this camera. UDP bypasses a relay that damages \
                          the TCP interleaved framing.",
-                    )
-                    .clicked()
-                {
+                    );
+                self.nav.item(&transport_button);
+                if transport_button.clicked() {
                     transport_change = Some((slot, transport.toggled()));
                 }
                 ui.label(RichText::new(camera.masked_uri(StreamKind::Main)).small().color(theme::TEXT_DIM));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("remove").clicked() {
+                    let remove_button = ui.small_button("remove");
+                    self.nav.item(&remove_button);
+                    if remove_button.clicked() {
                         remove = Some(camera.id.clone());
                     }
                     ui.label(RichText::new(camera.origin.label()).small().color(theme::TEXT_DIM));

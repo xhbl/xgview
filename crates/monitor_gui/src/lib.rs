@@ -1,6 +1,7 @@
 //! XGView GUI: egui + wgpu grid viewer.
 //!
 //! * [`app`]     – application state, navigation, render loop.
+//! * [`controls`] – value controls that adjust with the sideways keys.
 //! * [`dialogs`] – device discovery and camera import dialogs.
 //! * [`grid`]    – grid geometry and tile painting.
 //! * [`icons`]   – the shapes the controls carry.
@@ -15,6 +16,7 @@
 //! Neither socket nor decoder ever runs on the UI thread.
 
 pub mod app;
+pub mod controls;
 pub mod dialogs;
 pub mod grid;
 pub mod icons;

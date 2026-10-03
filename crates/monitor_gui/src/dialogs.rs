@@ -16,7 +16,8 @@ use monitor_core::discovery::{
 };
 use monitor_core::model::CameraSource;
 
-use crate::nav::Nav;
+use crate::controls;
+use crate::nav::{Kind, Nav};
 use crate::theme;
 
 /// Everything a background job reports to the UI thread.
@@ -503,11 +504,15 @@ fn onvif_tab(
     });
 
     ui.add_space(4.0);
-    // The fold is not a stop of its own: the controls inside register as the
-    // fold is open, and walk in the order drawn like the rest of the column.
-    egui::CollapsingHeader::new("Scan settings")
-        .default_open(state.scan.ip_ranges.trim().is_empty())
-        .show(ui, |ui| {
+    // The fold is a stop of its own, ahead of the controls it hides: Down from
+    // the buttons above reaches the header, and Enter - or a click - folds it
+    // away. See `controls::fold` for what that takes.
+    controls::fold(
+        nav,
+        ui,
+        "Scan settings",
+        state.scan.ip_ranges.trim().is_empty(),
+        |ui, nav| {
             nav.tracked(ui.checkbox(&mut state.scan.broadcast, "Multicast probe (local subnet)"));
             nav.tracked(ui.checkbox(&mut state.scan.subnet_scan, "Unicast probe over the ranges below (VLAN / cross subnet)"));
             ui.label(RichText::new("IP ranges — one per line, e.g. 192.168.1.1-254 or 10.0.0.0/24").small());
@@ -520,8 +525,12 @@ fn onvif_tab(
                 nav.tracked(ui.checkbox(&mut state.scan.tcp_probe, "TCP fallback scan"));
                 nav.tracked(ui.add(egui::TextEdit::singleline(&mut state.scan.tcp_ports).desired_width(140.0).hint_text("554, 80, 8000")));
             });
-            nav.tracked(ui.add(egui::Slider::new(&mut state.scan.timeout_ms, 200..=8000).text("probe timeout (ms)")));
-            nav.tracked(ui.add(egui::DragValue::new(&mut state.scan.concurrency).range(1..=512).suffix(" concurrent probes")));
+            // The two value controls: the slider keeps Left / Right for its
+            // thumb, the drag value keeps Up / Down for its step, and each walks
+            // the column with the other axis.
+            let timeout = ui.add(egui::Slider::new(&mut state.scan.timeout_ms, 200..=8000).text("probe timeout (ms)"));
+            nav.item_kind(Kind::Slider, &timeout);
+            controls::drag_value(nav, ui, &mut state.scan.concurrency, 1..=512, 1.0, " concurrent probes");
             ui.separator();
             ui.label(RichText::new("ONVIF credentials (used by GetProfiles / GetStreamUri)").small());
             ui.horizontal(|ui| {
@@ -530,7 +539,8 @@ fn onvif_tab(
                 ui.label("Password");
                 nav.tracked(ui.add(egui::TextEdit::singleline(&mut state.scan.password).password(true).desired_width(140.0)));
             });
-        });
+        },
+    );
 
     ui.add_space(6.0);
     ui.label(RichText::new(format!("ONVIF devices ({})", state.devices.len())).strong());
@@ -701,7 +711,8 @@ fn synology_tab(
         nav.tracked(ui.add(egui::TextEdit::singleline(&mut synology.host).hint_text("192.168.1.10").desired_width(220.0)));
         ui.end_row();
         ui.label("Port");
-        nav.tracked(ui.add(egui::DragValue::new(&mut synology.port).range(1..=65535)));
+        // A drag value: Up / Down step it, Left / Right walk the column.
+        controls::drag_value(nav, ui, &mut synology.port, 1..=65535, 1.0, "");
         ui.end_row();
         ui.label("Scheme");
         nav.tracked(ui.checkbox(&mut synology.https, "https"));
