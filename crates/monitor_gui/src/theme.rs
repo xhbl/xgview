@@ -44,6 +44,20 @@ pub const TEXT: Color32 = Color32::from_rgb(227, 233, 240);
 /// Secondary text.
 pub const TEXT_DIM: Color32 = Color32::from_rgb(146, 158, 175);
 
+/// Fill of a control the remote control is on.
+///
+/// Deliberately not the accent. Two different things have to be told apart at a
+/// glance from a couch, and they can happen at once:
+///
+/// * a control that is *on* - the layout in use, a panel that is open - which
+///   carries the accent fill, and
+/// * the control the remote control is *on*, which carries this fill and the
+///   cyan ring.
+///
+/// Sharing one colour between them is what made a focused button look switched
+/// on, and a switched-on button look focused.
+pub const FOCUS_FILL: Color32 = Color32::from_rgb(56, 66, 82);
+
 /// Spacing scale, in points.
 ///
 /// Every gap in the interface comes from these four values. A layout built
@@ -81,18 +95,22 @@ pub fn install(ctx: &egui::Context) {
     visuals.override_text_color = Some(TEXT);
     visuals.hyperlink_color = ACCENT;
     visuals.selection.bg_fill = ACCENT.gamma_multiply(0.45);
-    visuals.selection.stroke = Stroke::new(FOCUS_WIDTH, FOCUS);
+    // The stroke of a selected control is its *text*, not a border: egui hands
+    // `selection.stroke` to the widget as `fg_stroke`. The focus ring is a
+    // different thing and comes from `widgets.active` below.
+    visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(228, 242, 255));
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, TILE_BORDER);
     visuals.widgets.inactive.bg_fill = Color32::from_rgb(31, 36, 45);
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(45, 52, 64);
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.6));
-    visuals.widgets.active.bg_fill = ACCENT.gamma_multiply(0.5);
     // A remote control acts on whatever has the keyboard focus, so that is the
     // one state that must be unmistakable from a couch. egui paints
     // `widgets.active` for a widget that has focus - `WidgetVisuals::style`
     // treats `has_focus` like a held pointer button - which is therefore where
-    // the ring goes. It is the same cyan, and the same 2 px, as the tile focus
-    // ring, because the two mean the same thing.
+    // the ring goes. Its fill stays neutral so that it cannot be mistaken for
+    // the accent of a control that is on; see [`FOCUS_FILL`].
+    visuals.widgets.active.bg_fill = FOCUS_FILL;
+    visuals.widgets.active.weak_bg_fill = FOCUS_FILL;
     visuals.widgets.active.bg_stroke = Stroke::new(FOCUS_WIDTH, FOCUS);
     ctx.set_visuals(visuals);
 

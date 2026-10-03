@@ -350,15 +350,36 @@ pub fn add_devices_window(
     egui::Window::new("Add devices")
         .open(&mut open)
         .collapsible(false)
-        .resizable(true)
+        // Not resizable on purpose. A resizable window carries resize grips, and
+        // egui's grips are focusable: the remote control's arrows and its Tab
+        // both land on them instead of on the controls, and the form becomes
+        // impossible to walk. The window is sized for the screen it opens on.
+        .resizable(false)
         .default_size([640.0, 560.0])
         .min_width(520.0)
         .show(ctx, |ui| {
+            // Keep the remote control's focus inside the window.
+            //
+            // egui picks the next widget to focus by geometry, and this window
+            // sits right under the top bar while being nearly as tall as the
+            // screen. From its tab strip there is a control of the bar within
+            // reach and closer to the right than the next tab is, so a press of
+            // right walks the focus out of the dialog and there is no way back
+            // into it from up there. A layer marked modal is the only one whose
+            // widgets may take focus, which is the fence wanted here; `Modal`
+            // would also draw a scrim over the wall, and this does not.
+            ctx.memory_mut(|memory| memory.set_modal_layer(ui.layer_id()));
+
             ui.horizontal(|ui| {
-                let onvif = ui.selectable_value(&mut state.tab, Tab::Onvif, "ONVIF / network scan");
-                state.focus_anchor = Some(onvif.id);
-                ui.selectable_value(&mut state.tab, Tab::Manual, "Manual entry");
-                ui.selectable_value(&mut state.tab, Tab::Synology, "Synology NAS");
+                // The anchor is the tab that is *on*, not the first one: a panel
+                // is never left without a focus, and that is what it comes back
+                // to when the focus lands nowhere else. Pointing it at the first
+                // tab made the focus snap back there instead of following the
+                // viewer's choice. See `tab` for why the choice itself is what
+                // has to take the focus.
+                tab(ui, state, Tab::Onvif, "ONVIF / network scan");
+                tab(ui, state, Tab::Manual, "Manual entry");
+                tab(ui, state, Tab::Synology, "Synology NAS");
             });
             ui.separator();
 
@@ -377,6 +398,25 @@ pub fn add_devices_window(
 
     state.open = open;
     changed
+}
+
+/// One tab of the window: draws it, takes the choice if it was clicked, and
+/// hands it the focus.
+///
+/// egui does not give a button the focus when it is clicked - a press only takes
+/// the focus away from whatever had it - and the press and the release of one
+/// click can land in different frames. The anchor below therefore cannot be
+/// relied on to put the focus on the tab that was chosen: by the time the choice
+/// is known, the focus has already been put back on the tab being left. The
+/// chosen tab takes it instead, there and then.
+fn tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, value: Tab, label: &str) {
+    let response = ui.selectable_value(&mut state.tab, value, label);
+    if response.clicked() {
+        response.request_focus();
+    }
+    if state.tab == value {
+        state.focus_anchor = Some(response.id);
+    }
 }
 
 fn onvif_tab(

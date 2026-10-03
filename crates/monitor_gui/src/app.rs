@@ -855,9 +855,19 @@ impl XgViewApp {
     /// out of the queue in that case. The wall is not made of widgets, so it
     /// answers the same keys itself.
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        // A text field being typed into owns the keys: it wants the arrows for
-        // its caret, Enter to commit and Backspace to erase, and the application
-        // must not act on any of them.
+        // A text field being typed into owns the letters, the paste and the
+        // caret keys. Two kinds of key are taken away from it here.
+        //
+        // Back, because it is the remote control's only way out of a field: it
+        // leaves the field and not the panel - one step - and the press after it
+        // closes the panel.
+        //
+        // And the four directions, because a form with a field in the middle has
+        // to be walkable past it. `TextEdit` reads its input through
+        // `filtered_events`, so taking the arrows out of the queue before the
+        // field is drawn keeps it from spending them on its caret. The focus
+        // still moves: egui read the same events for its focus walk in
+        // `begin_pass`, which happens before the keys are handed out.
         //
         // This is deliberately *not* `Context::wants_keyboard_input`, which is
         // true for any focused widget at all. The bars hand the focus to a
@@ -865,6 +875,20 @@ impl XgViewApp {
         // viewer unable to press anything - F1, F2, BACK, anything - from the
         // moment a panel appeared.
         if Self::typing(ctx) {
+            let leave = ctx.input_mut(|input| {
+                let none = Modifiers::NONE;
+                let leave = input.consume_key(none, Key::Escape)
+                    || input.consume_key(none, Key::BrowserBack);
+                for key in [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown] {
+                    input.consume_key(none, key);
+                }
+                leave
+            });
+            if leave {
+                if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+                    ctx.memory_mut(|memory| memory.surrender_focus(focused));
+                }
+            }
             return;
         }
         let grid_owns = self.owner == Owner::Grid;
@@ -1170,13 +1194,25 @@ impl XgViewApp {
                 };
                 let response = ui.selectable_label(selected, label);
                 self.name(&response, tab.label());
-                if selected {
-                    // The frame the panel opens on, this is what the remote's
-                    // focus is handed to.
-                    self.settings_anchor = Some(response.id);
-                }
                 if response.clicked() {
                     self.settings_tab = tab;
+                    // A press takes the focus away from whatever had it and never
+                    // gives it to what was pressed, and the press and the release
+                    // of one click can land in different frames - so by the time
+                    // the tab is chosen, the focus has already been put back on
+                    // the tab being left and nothing is left to move it. The tab
+                    // that was just chosen takes it, here and now.
+                    response.request_focus();
+                }
+                // The anchor is the tab that ends up on, and it has to be decided
+                // *after* the click above: egui takes the focus away from
+                // whatever had it when anything is clicked and never gives it to
+                // what was clicked, so the anchor is what puts the focus back
+                // somewhere sensible. Read before the click, it still named the
+                // tab being left, and the focus snapped back to that one while
+                // the selection moved on.
+                if self.settings_tab == tab {
+                    self.settings_anchor = Some(response.id);
                 }
             }
         });
@@ -1726,6 +1762,23 @@ impl eframe::App for XgViewApp {
         let focused = ctx.memory(|memory| memory.focused());
         self.owner = if focused.is_some() { Owner::Controls } else { Owner::Grid };
         self.focused_name = focused.and_then(|focused| self.focus_names.get(&focused).copied());
+
+        // A focused text field keeps the arrow keys for its caret and tells
+        // `Memory` so, which is what stops the focus walk from taking them. On a
+        // remote control that is backwards: the arrows are the only way across a
+        // form, and a field in the middle of one would hold the focus for good.
+        //
+        // The field re-installs its lock every frame as it is drawn, so this has
+        // to be undone *after* that - here, at the end of the frame, where the
+        // value it leaves behind is what the next frame's `begin_pass` reads to
+        // decide whether a press is offered to the walk at all. The keys
+        // themselves are already taken away from the field in `handle_keys`, so
+        // its caret stays where it is either way.
+        if let Some(focused) = focused {
+            if Self::typing(ctx) {
+                ctx.memory_mut(|memory| memory.set_focus_lock_filter(focused, egui::EventFilter::default()));
+            }
+        }
 
         let animation = self.needs_animation();
         ctx.request_repaint_after(if animation { LIVE_REPAINT } else { Duration::from_millis(500) });
