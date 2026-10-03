@@ -9,7 +9,7 @@
 
 use egui::{Align2, Color32, CornerRadius, FontId, Id, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, vec2};
 
-use monitor_core::model::{CameraSource, ConnectionState, StreamKind};
+use monitor_core::model::{CameraSource, ConnectionState, StreamKind, TileAspect};
 use monitor_core::GridLayout;
 
 use crate::app::ChannelUi;
@@ -112,6 +112,8 @@ pub struct Tile<'a> {
     pub dim: bool,
     pub show_stats: bool,
     pub time: f64,
+    /// How the picture is fitted into the tile.
+    pub aspect: TileAspect,
 }
 
 /// Interaction reported by [`paint`].
@@ -119,13 +121,19 @@ pub struct Tile<'a> {
 pub struct TileActions {
     pub focus: Option<usize>,
     pub zoom: Option<usize>,
+    /// The aspect button of this channel was pressed.
+    pub cycle_aspect: Option<usize>,
     pub drag_started: bool,
     pub drag_delta: f32,
     pub drag_stopped: bool,
 }
 
 /// Paints one cell and reports the user interaction.
-pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
+///
+/// The second value of the pair is `true` when the tile's aspect button was
+/// pressed this frame - it is a control of its own, on top of the tile, and is
+/// reported apart from the tile's own response.
+pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> (Response, bool) {
     // Clickable and draggable, but deliberately *not* focusable. egui walks the
     // focusable widgets with the four directions on its own, and a tile is not
     // one of them: on the wall it is a channel that moves, not a widget, and
@@ -144,7 +152,7 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
         if tile.focused {
             ring(&painter, rect, radius);
         }
-        return response;
+        return (response, false);
     };
 
     let canvas = rect.shrink(1.0);
@@ -275,11 +283,15 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
         }
     }
 
+    // The aspect button, over the picture: a press on it cycles the tile's
+    // display mode rather than touching the channel.
+    let cycle_aspect = aspect_chip(ui, body, tile.id, tile.aspect, tile.interactive);
+
     if tile.focused {
         ring(&painter, rect, radius);
     }
 
-    response
+    (response, cycle_aspect)
 }
 
 /// Paints the newest decoded pictures of a live channel, or a placeholder while
@@ -292,12 +304,11 @@ fn live_canvas(painter: &egui::Painter, rect: Rect, tile: &Tile<'_>, tier: Tier)
         return;
     };
 
-    // The picture is letterboxed, never stretched: a non uniform scale would
-    // distort faces and make the tile useless for an identification.
+    // Where the picture lands depends on the tile's display mode: see
+    // [`fitted`] for the shapes, and why the default distorts nothing.
     let size = surface.size;
     if size.x > 0.0 && size.y > 0.0 {
-        let scale = (rect.width() / size.x).min(rect.height() / size.y);
-        let dest = Rect::from_center_size(rect.center(), size * scale);
+        let dest = fitted(size, rect, tile.aspect);
         painter.image(
             surface.id,
             dest,
@@ -348,6 +359,57 @@ fn live_chip(painter: &egui::Painter, rect: Rect, tier: Tier) {
     painter.rect_filled(chip, CornerRadius::same(theme::radius::S - 1), Color32::from_black_alpha(150));
     painter.circle_filled(chip.left_center() + vec2(10.0, 0.0), 3.5, theme::LIVE);
     painter.text(chip.left_center() + vec2(19.0, 0.0), Align2::LEFT_CENTER, "LIVE", FontId::monospace(11.0), theme::LIVE);
+}
+
+/// Where a picture lands inside its tile, for the tile's display mode.
+///
+/// `Original` keeps the shape the stream sends - nothing is distorted, and the
+/// bands left over are the price of a wall whose cameras do not all agree on a
+/// shape. `Stretch` fills the tile whole. A fixed ratio gives the picture that
+/// shape, stretched into it wherever the two disagree.
+///
+/// `source` is the decoded picture's size; the caller checks it is not empty.
+fn fitted(source: Vec2, tile: Rect, aspect: TileAspect) -> Rect {
+    match aspect.ratio() {
+        Some(ratio) => {
+            let (width, height) = if tile.width() / tile.height() > ratio {
+                (tile.height() * ratio, tile.height())
+            } else {
+                (tile.width(), tile.width() / ratio)
+            };
+            Rect::from_center_size(tile.center(), vec2(width, height))
+        }
+        None if aspect == TileAspect::Stretch => tile,
+        None => {
+            let scale = (tile.width() / source.x).min(tile.height() / source.y);
+            Rect::from_center_size(tile.center(), source * scale)
+        }
+    }
+}
+
+/// The aspect button: the mode this tile is drawn in, and the press that moves
+/// it to the next one.
+///
+/// It is painted like the rest of the wall - a shape over the picture - and its
+/// interaction is registered after the tile's own, so a press on it cycles the
+/// mode instead of touching the channel. Returns `true` when it was pressed.
+fn aspect_chip(ui: &mut Ui, body: Rect, id: Id, aspect: TileAspect, interactive: bool) -> bool {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(aspect.label().to_owned(), FontId::monospace(11.0), Color32::PLACEHOLDER);
+    let size = galley.size() + vec2(2.0 * theme::space::S, 6.0);
+    let corner = body.left_bottom() + vec2(theme::space::S, -theme::space::S - size.y);
+    // A tile can be shorter than the chip: keep it inside the picture.
+    let chip = Rect::from_min_size(egui::pos2(corner.x, corner.y.max(body.top() + theme::space::S)), size);
+    {
+        let painter = ui.painter();
+        painter.rect_filled(chip, CornerRadius::same(theme::radius::S - 1), Color32::from_black_alpha(150));
+        painter.galley(chip.center() - galley.size() * 0.5, galley, theme::TEXT_DIM);
+    }
+    if !interactive {
+        return false;
+    }
+    ui.interact(chip, Id::new((id, "aspect")), Sense::click()).clicked()
 }
 
 /// Placeholder shown between `PLAY` and the first decoded picture.

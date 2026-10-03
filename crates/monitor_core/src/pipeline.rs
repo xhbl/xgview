@@ -1457,7 +1457,7 @@ fn emit(events: &Sender<StreamEvent>, event: StreamEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CameraOrigin;
+    use crate::model::{CameraOrigin, TileAspect};
 
     fn camera(id: &str, uri: &str) -> CameraSource {
         CameraSource {
@@ -1475,6 +1475,7 @@ mod tests {
             tags: Vec::new(),
             origin: CameraOrigin::Manual,
             transport: RtspTransport::default(),
+            aspect: TileAspect::default(),
             main_profile: None,
             sub_profile: None,
         }

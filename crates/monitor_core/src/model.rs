@@ -145,6 +145,67 @@ fn default_true() -> bool {
     true
 }
 
+/// How a channel's picture is fitted into its tile on the wall.
+///
+/// The choice belongs to the camera and follows it across pages and layouts: a
+/// 4:3 camera letterboxed among 16:9 ones can be made to fill, and a wall of
+/// mixed sizes can be forced to one shape.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TileAspect {
+    /// The picture keeps the shape it arrives with, letterboxed in the tile.
+    #[default]
+    Original,
+    /// Filled to the tile whole, stretched where the shapes differ.
+    Stretch,
+    /// Drawn at 16:9, whatever shape the stream sends.
+    #[serde(rename = "16x9")]
+    Ratio16x9,
+    /// Drawn at 4:3.
+    #[serde(rename = "4x3")]
+    Ratio4x3,
+    /// Drawn square.
+    #[serde(rename = "1x1")]
+    Ratio1x1,
+}
+
+impl TileAspect {
+    /// Every mode, in the order the cycle button walks them.
+    pub const ALL: [TileAspect; 5] = [
+        TileAspect::Original,
+        TileAspect::Stretch,
+        TileAspect::Ratio16x9,
+        TileAspect::Ratio4x3,
+        TileAspect::Ratio1x1,
+    ];
+
+    /// The mode a press on the cycle button selects next.
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    /// The name shown on the button and on the tile.
+    pub fn label(self) -> &'static str {
+        match self {
+            TileAspect::Original => "Original",
+            TileAspect::Stretch => "Stretch",
+            TileAspect::Ratio16x9 => "16:9",
+            TileAspect::Ratio4x3 => "4:3",
+            TileAspect::Ratio1x1 => "1:1",
+        }
+    }
+
+    /// The shape the picture is drawn in, for the modes that fix one.
+    pub fn ratio(self) -> Option<f32> {
+        match self {
+            TileAspect::Original | TileAspect::Stretch => None,
+            TileAspect::Ratio16x9 => Some(16.0 / 9.0),
+            TileAspect::Ratio4x3 => Some(4.0 / 3.0),
+            TileAspect::Ratio1x1 => Some(1.0),
+        }
+    }
+}
+
 /// A single surveillance camera / NVR channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CameraSource {
@@ -178,6 +239,9 @@ pub struct CameraSource {
     /// that a device whose TCP relay damages the stream can be singled out.
     #[serde(default)]
     pub transport: RtspTransport,
+    /// How this camera's picture is fitted into its tile on the wall.
+    #[serde(default)]
+    pub aspect: TileAspect,
     /// ONVIF profile token of the main stream, kept for later re-negotiation.
     #[serde(default)]
     pub main_profile: Option<String>,
@@ -209,6 +273,7 @@ impl CameraSource {
             tags: Vec::new(),
             origin: CameraOrigin::Manual,
             transport: RtspTransport::default(),
+            aspect: TileAspect::default(),
             main_profile: None,
             sub_profile: None,
         }
@@ -462,6 +527,24 @@ pub fn infer_sub_stream(main: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cycle button walks every mode once and comes back to the first.
+    #[test]
+    fn the_aspect_button_walks_every_mode() {
+        let mut mode = TileAspect::default();
+        assert_eq!(mode, TileAspect::Original, "a new camera is left as it arrives");
+        let mut seen = vec![mode];
+        for _ in 1..TileAspect::ALL.len() {
+            mode = mode.next();
+            seen.push(mode);
+        }
+        assert_eq!(seen, TileAspect::ALL.to_vec());
+        assert_eq!(TileAspect::Ratio1x1.next(), TileAspect::Original);
+        assert_eq!(TileAspect::Stretch.ratio(), None, "stretch is the tile's own shape");
+        assert_eq!(TileAspect::Original.ratio(), None, "the stream's own shape");
+        assert_eq!(TileAspect::Ratio16x9.ratio(), Some(16.0 / 9.0));
+        assert_eq!(TileAspect::Ratio1x1.ratio(), Some(1.0));
+    }
 
     #[test]
     fn infers_hikvision_sub_stream() {

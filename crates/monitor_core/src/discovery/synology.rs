@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::config::SynologyConfig;
 use crate::error::{CoreError, Result};
-use crate::model::{CameraOrigin, CameraSource, RtspTransport};
+use crate::model::{CameraOrigin, CameraSource, RtspTransport, TileAspect};
 use crate::rtsp::RtspUrl;
 
 /// A camera as reported by `SYNO.SurveillanceStation.Camera` `List`.
@@ -285,6 +285,7 @@ impl SynologyClient {
             tags: vec!["synology".to_string()],
             origin: CameraOrigin::Synology,
             transport: RtspTransport::default(),
+            aspect: TileAspect::default(),
             main_profile: None,
             sub_profile: None,
         }

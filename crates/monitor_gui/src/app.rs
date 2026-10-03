@@ -15,7 +15,7 @@ use tokio::runtime::Handle;
 use monitor_core::autostart::{self, AutostartStatus};
 use monitor_core::config::AppConfig;
 use monitor_core::layout::{GridLayout, NavigateOutcome};
-use monitor_core::model::{ConnectionState, RtspTransport, StreamKind};
+use monitor_core::model::{ConnectionState, RtspTransport, StreamKind, TileAspect};
 use monitor_core::pipeline::{ChannelManager, StreamEvent};
 use monitor_core::scheduler::Scheduler;
 use monitor_core::{CameraSource, Direction};
@@ -1690,6 +1690,7 @@ impl XgViewApp {
         let mut toggle: Option<(usize, bool)> = None;
         let mut ask_remove: Option<(String, String, Id)> = None;
         let mut edit: Option<(String, Id)> = None;
+        let mut aspect_change: Option<(usize, TileAspect)> = None;
         let mut infer: Option<usize> = None;
         let mut transport_change: Option<(usize, RtspTransport)> = None;
         for (slot, camera) in self.config.cameras.iter_mut().enumerate() {
@@ -1748,15 +1749,34 @@ impl XgViewApp {
                     }
                 });
             });
-            // The address and where the camera came from, on a line of their
-            // own: squeezed onto the row above, they ran into each other.
+            // The address, the display mode and where the camera came from, on
+            // a line of their own: squeezed onto the row above, they ran into
+            // each other. The mode is a button - a press moves it on to the
+            // next one - and the tile carries the same mode in its corner.
             ui.horizontal(|ui| {
                 ui.add_space(theme::space::S);
-                let address = theme::truncate(&camera.masked_uri(StreamKind::Main), 30);
+                let aspect = camera.aspect;
+                let aspect_button = ui
+                    .small_button(RichText::new(aspect.label()).small().color(theme::ACCENT))
+                    .on_hover_text("How the picture is fitted into its tile");
+                self.nav.item(&aspect_button);
+                self.focus_names.insert(aspect_button.id, "Display aspect");
+                if aspect_button.clicked() {
+                    aspect_change = Some((slot, aspect.next()));
+                }
+                let address = theme::truncate(&camera.masked_uri(StreamKind::Main), 26);
                 ui.label(RichText::new(address).small().monospace().color(theme::TEXT_DIM));
                 ui.label(RichText::new(camera.origin.label()).small().color(theme::TEXT_DIM));
             });
             ui.add_space(theme::space::XS);
+        }
+        if let Some((slot, aspect)) = aspect_change {
+            if let Some(camera) = self.config.cameras.get_mut(slot) {
+                camera.aspect = aspect;
+            }
+            // A display choice: nothing is reopened, the tiles just paint
+            // differently from this frame on.
+            dirty = true;
         }
         if let Some((id, name, from)) = ask_remove {
             self.remove_confirm = Some(RemoveConfirm { id, name, from });
@@ -2002,9 +2022,16 @@ impl XgViewApp {
                 dim: !interactive,
                 show_stats: self.show_stats,
                 time: self.time,
+                aspect: index
+                    .and_then(|index| cameras.get(index))
+                    .map(|camera| camera.aspect)
+                    .unwrap_or_default(),
             };
-            let response = grid::paint(ui, rect, &tile);
+            let (response, cycle_aspect) = grid::paint(ui, rect, &tile);
             if interactive {
+                if cycle_aspect {
+                    actions.cycle_aspect = *index;
+                }
                 if response.clicked() {
                     actions.focus = *index;
                 }
@@ -2096,6 +2123,18 @@ impl XgViewApp {
         }
         if let Some(index) = actions.zoom {
             self.zoom_to(index);
+        }
+        if let Some(index) = actions.cycle_aspect {
+            // The mode came back from the tile as an index into the enabled
+            // cameras; the entry it belongs to is found by its identifier, so
+            // that a wall showing a subset still moves the right camera.
+            let id = cameras.get(index).map(|camera| camera.id.clone());
+            if let Some(id) = id {
+                if let Some(camera) = self.config.cameras.iter_mut().find(|camera| camera.id == id) {
+                    camera.aspect = camera.aspect.next();
+                    self.mark_dirty();
+                }
+            }
         }
     }
 
