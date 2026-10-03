@@ -11,6 +11,12 @@ pub const BACKGROUND: Color32 = Color32::from_rgb(10, 12, 16);
 pub const PANEL: Color32 = Color32::from_rgb(19, 22, 28);
 /// Tile border.
 pub const TILE_BORDER: Color32 = Color32::from_rgb(40, 46, 58);
+/// The grid line between two tiles, and around the wall.
+///
+/// It is the colour the wall itself is painted: the tiles leave one pixel
+/// around and between themselves and this shows through, which is what keeps
+/// every line - the outer ring included - exactly one pixel wide.
+pub const GRID_LINE: Color32 = Color32::from_rgb(190, 196, 204);
 /// Tile header strip.
 pub const TILE_HEADER: Color32 = Color32::from_rgb(33, 39, 49);
 /// Empty grid cell.

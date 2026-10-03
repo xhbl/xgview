@@ -497,7 +497,9 @@ impl XgViewApp {
             settings_anchor: None,
             settings_handoff: Handoff::default(),
             dialog_handoff: Handoff::default(),
-            show_stats: true,
+            // Off: a tile is its picture. The decoder's numbers are there for
+            // whoever asks for them in the settings panel.
+            show_stats: false,
             discovery,
             slide: Slide::default(),
             needs_sync: true,
@@ -2004,7 +2006,7 @@ impl XgViewApp {
         let focus = self.scheduler.focus();
 
         for (cell, index) in view.cells.iter().enumerate() {
-            let rect = grid::tile_rect(origin, view.layout, cell, grid::GAP);
+            let rect = grid::tile_rect(origin, view.layout, cell, grid::LINE);
             if rect.max.x < area.min.x - 4.0 || rect.min.x > area.max.x + 4.0 {
                 continue;
             }
@@ -2069,6 +2071,14 @@ impl XgViewApp {
             return;
         }
 
+        // The wall's own colour is the grid line: the tiles leave one line's
+        // width around and between themselves, and it shows through. Drawing
+        // it here rather than as a border on each tile is what keeps every line
+        // one line wide - two neighbours would otherwise double up in the
+        // middle while the outer ring stayed half as thick.
+        ui.painter().rect_filled(area, egui::CornerRadius::ZERO, theme::GRID_LINE);
+        let wall = area.shrink(grid::LINE);
+
         let view = self.current_view(total);
 
         // Where the focused tile is: the arrow that walks off the top of the
@@ -2076,23 +2086,23 @@ impl XgViewApp {
         // end of the row.
         self.grid_focus_x = self.scheduler.focus().and_then(|index| {
             let cell = view.cells.iter().position(|slot| *slot == Some(index))?;
-            Some(grid::tile_rect(area, view.layout, cell, grid::GAP).center().x)
+            Some(grid::tile_rect(wall, view.layout, cell, grid::LINE).center().x)
         });
 
         // Page sliding out, or the neighbour page revealed by a finger drag.
         if let Some(outgoing) = self.slide.outgoing.clone() {
             let dx = (self.slide.offset - self.slide.dir) * area.width() + self.slide.drag;
-            self.paint_view(ui, area, &cameras, &outgoing, dx, false, 3);
+            self.paint_view(ui, wall, &cameras, &outgoing, dx, false, 3);
         } else if self.slide.dragging && self.slide.drag.abs() > 1.0 {
             let forward = self.slide.drag < 0.0;
             if let Some(neighbour) = self.neighbour_view(forward, total) {
                 let dx = if forward { self.slide.drag + area.width() } else { self.slide.drag - area.width() };
-                self.paint_view(ui, area, &cameras, &neighbour, dx, false, 3);
+                self.paint_view(ui, wall, &cameras, &neighbour, dx, false, 3);
             }
         }
 
         let dx = self.slide.offset * area.width() + self.slide.drag;
-        let actions = self.paint_view(ui, area, &cameras, &view, dx, true, 2);
+        let actions = self.paint_view(ui, wall, &cameras, &view, dx, true, 2);
 
         if actions.drag_started {
             self.slide.dragging = true;
