@@ -86,13 +86,20 @@ fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
         .build()?)
 }
 
-fn native_options(fullscreen: bool) -> eframe::NativeOptions {
+/// Window options for the targets that run eframe: the desktop and Android.
+///
+/// Full screen is deliberately not asked for on the `ViewportBuilder`: it is
+/// applied before the window knows which monitor it is on, and on Windows that
+/// leaves the window covering a window-sized area rather than the screen - the
+/// same wrong geometry that toggling F11 twice repairs by hand. The app sends
+/// the command from its first frame instead, once the monitor is known; see the
+/// `fullscreen_pending` field on `XgViewApp`.
+fn native_options() -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(monitor_core::APP_DISPLAY_NAME)
             .with_inner_size([1280.0, 720.0])
-            .with_min_inner_size([560.0, 360.0])
-            .with_fullscreen(fullscreen),
+            .with_min_inner_size([560.0, 360.0]),
         vsync: true,
         ..Default::default()
     }
@@ -102,12 +109,11 @@ fn native_options(fullscreen: bool) -> eframe::NativeOptions {
 pub fn run(options: RunOptions) -> anyhow::Result<()> {
     let runtime = build_runtime()?;
     let handle = runtime.handle().clone();
-    let fullscreen = options.fullscreen || options.config.start_fullscreen;
     let config_path = options.config_path();
 
     eframe::run_native(
         monitor_core::APP_DISPLAY_NAME,
-        native_options(fullscreen),
+        native_options(),
         Box::new(move |cc| {
             Ok(Box::new(XgViewApp::new(cc, options, config_path, handle)) as Box<dyn eframe::App>)
         }),
@@ -239,7 +245,7 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
         export_dir,
     };
 
-    let mut native = native_options(true);
+    let mut native = native_options();
     native.android_app = Some(app);
 
     eframe::run_native(

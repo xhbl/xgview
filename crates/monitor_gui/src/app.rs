@@ -47,17 +47,6 @@ const TOOLBAR_REFERENCE_WIDTH: f32 = 1280.0;
 /// Smallest the toolbar is allowed to shrink to, as a fraction of its text size.
 const TOOLBAR_MIN_SCALE: f32 = 0.6;
 
-/// Space left between the right of the toolbar and the right of the window.
-///
-/// A touch on the outermost band of a touch screen is the system's, not ours: a
-/// device using gesture navigation keeps a back-gesture band along each edge,
-/// and a control inside it never sees the tap. The navigation bar itself is a
-/// different case and is hidden on Android (see `MainActivity`); this margin is
-/// for the band that no window flag removes. It is on the right only, because
-/// the controls that need tapping are at that end of the row - the left end is
-/// the title.
-const EDGE_MARGIN: i8 = 40;
-
 /// How long the bars stay on screen in full screen after the last input.
 const CHROME_IDLE: Duration = Duration::from_millis(3500);
 
@@ -396,6 +385,12 @@ pub struct XgViewApp {
     /// next Back inside [`EXIT_WINDOW`] leaves the program.
     exit_armed: Option<Instant>,
     fullscreen: bool,
+    /// Whether the start-up full screen still has to be applied, on the first
+    /// frame where the window knows its monitor.
+    ///
+    /// Doing it on the viewport builder instead leaves a window-sized full
+    /// screen on Windows; see `native_options` in `lib.rs`.
+    fullscreen_pending: bool,
     /// Whether the top and bottom bars are on screen right now.
     chrome: Chrome,
     /// The controls of the top bar with the rectangle each was drawn in, left to
@@ -557,6 +552,7 @@ impl XgViewApp {
             toast: None,
             exit_armed: None,
             fullscreen,
+            fullscreen_pending: fullscreen,
             chrome: Chrome {
                 visible: true,
                 last_input: Instant::now(),
@@ -1638,8 +1634,18 @@ impl XgViewApp {
 
             // The right end of the row is the three things a viewer reaches for
             // while watching, and each of them is a shape a remote control, a
-            // mouse and a finger all understand without a word of English.
+            // mouse and a finger all understand without a word of English. The
+            // version ends the row, at the very edge: a touch on the outermost
+            // band of a touch screen belongs to the system - a device using
+            // gesture navigation keeps a back-gesture band there that no window
+            // flag removes - so what sits in it must not be a control. A label
+            // is not, and it holds the shape buttons left of the band.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
                 let fullscreen = icons::button(
                     ui,
                     if self.fullscreen { Icon::Collapse } else { Icon::Expand },
@@ -2947,6 +2953,16 @@ impl eframe::App for XgViewApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.time = ctx.input(|input| input.time);
 
+        // The start-up full screen is asked for here, on the first frame the
+        // window is on its monitor, rather than on the viewport builder: asked
+        // for there it is answered before the window has a monitor to be made
+        // full screen on, and Windows then leaves it covering a window-sized
+        // area - the same wrong geometry that toggling F11 twice repairs. See
+        // `native_options` in `lib.rs`.
+        if std::mem::take(&mut self.fullscreen_pending) {
+            self.set_fullscreen(ctx, true);
+        }
+
         // Anything the soft keyboard typed has to be in the input queue before
         // a widget is drawn: a text field reads the events of the frame it is
         // drawn in, so a keystroke handed over later would be a frame behind.
@@ -3007,18 +3023,12 @@ impl eframe::App for XgViewApp {
         // offer the status line. See `focus_names`.
         self.focus_names.clear();
 
-        // The right of a touch screen is not ours to draw controls in: see
-        // `EDGE_MARGIN`. The margin is set on the panel rather than inside the
-        // row so that it holds wherever the row is laid out from.
-        //
         // In full screen the bars fade out when the wall is left alone; see
-        // `chrome_visible`.
+        // `chrome_visible`. The row is not inset on the right: the version
+        // label that ends it is what keeps the touch screen's back-gesture band
+        // clear of the controls; see `toolbar`.
         if self.chrome_visible() {
-            let mut margin = egui::Frame::side_top_panel(&ctx.style()).inner_margin;
-            margin.right = EDGE_MARGIN;
-            egui::TopBottomPanel::top("xgview-toolbar")
-                .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(margin))
-                .show(ctx, |ui| self.toolbar(ui));
+            egui::TopBottomPanel::top("xgview-toolbar").show(ctx, |ui| self.toolbar(ui));
             egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| self.status_bar(ui));
         } else {
             // The bar is gone, and with it anything it could hand the remote's
