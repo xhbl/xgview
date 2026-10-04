@@ -32,11 +32,20 @@
 .EXAMPLE
     # Install an existing build without recompiling.
     powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -NoBuild
+
+.EXAMPLE
+    # Build the distributable zip instead of installing (target\xgview-<version>.zip).
+    powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Package
 #>
 [CmdletBinding()]
 param(
     # Skip `cargo build --release` and package the existing target\release binary.
     [switch]$NoBuild,
+
+    # Build the distributable zip into `target` instead of installing: nothing
+    # is written into the install directory and no start-on-boot entry is
+    # registered. The work is `package-windows.ps1`'s.
+    [switch]$Package,
 
     # Register a scheduled task (with restart on failure) instead of the HKCU Run key.
     [switch]$TaskScheduler,
@@ -56,6 +65,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Producing a package is a different errand from installing one: it ends here,
+# before anything is copied into an install directory or registered to start at
+# boot. The packaging itself lives in `package-windows.ps1` so that the two can
+# be read and run apart.
+if ($Package) {
+    & (Join-Path $PSScriptRoot 'package-windows.ps1') -NoBuild:$NoBuild
+    exit $LASTEXITCODE
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $exeName = 'xgview.exe'
 $sourceExe = Join-Path $repoRoot "target\release\$exeName"
@@ -63,6 +81,47 @@ $targetExe = Join-Path $InstallDir $exeName
 
 function Write-Step([string]$Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
+}
+
+# The desktop decoder links FFmpeg dynamically, so the executable imports
+# `avcodec-*.dll` and its neighbours; Windows resolves those from the program's
+# own directory or from `PATH`. On the build machine vcpkg puts them on `PATH`,
+# an installed copy has neither - hence the files are copied next to the binary.
+function Get-FfmpegRuntimeDlls {
+    param([string]$Exe)
+
+    # What the executable actually imports, read out of its own bytes: a build
+    # without the `ffmpeg` feature imports none of these and copies nothing.
+    # The names carry the version (`avcodec-63`), which is the linker's answer
+    # and not something to hard-code here - the wrong version is a missing dll
+    # at launch.
+    $bytes = [IO.File]::ReadAllBytes($Exe)
+    $imports = [Text.Encoding]::ASCII.GetString($bytes) -split '[^\x20-\x7E]' |
+        Where-Object { $_ -match '^(av|sw)[a-z]+-\d+\.dll$' } |
+        Sort-Object -Unique
+    if (-not $imports) { return @() }
+
+    $candidates = @()
+    if ($env:VCPKG_ROOT) { $candidates += (Join-Path $env:VCPKG_ROOT 'installed\x64-windows\bin') }
+    if ($env:FFMPEG_DIR) { $candidates += (Join-Path $env:FFMPEG_DIR 'bin') }
+
+    $available = @{}
+    foreach ($dir in $candidates) {
+        if (-not (Test-Path $dir)) { continue }
+        Get-ChildItem -Path $dir -Filter *.dll |
+            ForEach-Object { $available[$_.Name] = $_.FullName }
+    }
+
+    foreach ($name in $imports) {
+        if (-not $available.ContainsKey($name)) {
+            throw "FFmpeg runtime '$name' is imported by the binary but was not found. Point VCPKG_ROOT or FFMPEG_DIR at the tree it was built against."
+        }
+    }
+
+    # Every av*/sw* dll of that tree, not only the ones imported directly: the
+    # imported ones pull dependencies of their own, which Windows resolves from
+    # the same directory as the executable.
+    return $available.Values | Where-Object { (Split-Path $_ -Leaf) -match '^(av|sw)[a-z]+-\d+\.dll$' }
 }
 
 # ---------------------------------------------------------------- build
@@ -87,6 +146,18 @@ Write-Step "Installing into $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item -Path $sourceExe -Destination $targetExe -Force
 Write-Host "    $targetExe"
+
+# The FFmpeg runtime the binary imports, beside it: without these the installed
+# viewer exits at launch with "dll not found", which is not a state the machine
+# should be left in after a successful-looking install.
+$runtimeDlls = Get-FfmpegRuntimeDlls -Exe $sourceExe
+foreach ($dll in $runtimeDlls) {
+    Copy-Item -Path $dll -Destination $InstallDir -Force
+    Write-Host "    $(Split-Path $dll -Leaf)"
+}
+if (-not $runtimeDlls) {
+    Write-Host '    no ffmpeg runtime dlls (built without the ffmpeg feature)'
+}
 
 # The configuration lives next to the user profile; make sure it exists so the
 # first launch finds a well known location.

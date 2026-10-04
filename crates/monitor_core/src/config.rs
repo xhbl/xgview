@@ -214,11 +214,32 @@ impl AppConfig {
 
     /// Loads the configuration from [`AppConfig::default_path`], ignoring read
     /// errors so that a corrupt file never prevents the app from starting.
+    ///
+    /// A file that is not there is written back as the defaults, so the first
+    /// run of a fresh install leaves one behind: the settings on screen then
+    /// have a file behind them, ready to be backed up, edited, or carried to the
+    /// next machine. A file that is there but unreadable is left as it is - it
+    /// is the user's, and whatever it still holds is not the defaults' to
+    /// overwrite.
     pub fn load_or_default(path: impl AsRef<Path>) -> Self {
-        Self::load(path).unwrap_or_else(|err| {
-            tracing::warn!(target: "xgview::config", %err, "falling back to default configuration");
-            Self::default()
-        })
+        let path = path.as_ref();
+        let missing = !path.exists();
+        match Self::load(path) {
+            Ok(config) => {
+                if missing {
+                    if let Err(err) = config.save(path) {
+                        tracing::warn!(target: "xgview::config", path = %path.display(), %err, "cannot write the default configuration");
+                    } else {
+                        tracing::debug!(target: "xgview::config", path = %path.display(), "wrote the default configuration");
+                    }
+                }
+                config
+            }
+            Err(err) => {
+                tracing::warn!(target: "xgview::config", %err, "falling back to default configuration");
+                Self::default()
+            }
+        }
     }
 
     /// Writes the configuration atomically (temporary file + rename).
@@ -381,6 +402,39 @@ mod tests {
         let config = AppConfig::load("does-not-exist/config.json").unwrap();
         assert_eq!(config.version, CONFIG_VERSION);
         assert!(config.cameras.is_empty());
+    }
+
+    /// The first run of a fresh install starts on the defaults and leaves them
+    /// on disk, so the settings on screen have a file behind them.
+    #[test]
+    fn a_first_run_leaves_a_configuration_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert!(!path.exists());
+
+        let config = AppConfig::load_or_default(&path);
+
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert!(path.exists(), "the run writes the file it started from");
+        assert_eq!(AppConfig::load(&path).unwrap(), config);
+    }
+
+    /// A file that is there but unreadable is the user's: the viewer starts on
+    /// the defaults, and the file is not overwritten with them.
+    #[test]
+    fn a_broken_file_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let config = AppConfig::load_or_default(&path);
+
+        assert_eq!(config, AppConfig::default());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{ not json",
+            "the file is the user's, not the defaults' to replace"
+        );
     }
 
     #[test]
