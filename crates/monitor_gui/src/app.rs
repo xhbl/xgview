@@ -1885,10 +1885,12 @@ impl XgViewApp {
             .spacing([theme::space::L, theme::space::XS])
             .show(ui, |ui| {
                 for (keys, action) in [
-                    ("DPAD / arrows", "move the focus"),
-                    ("Enter", "magnify the focused channel (1x1)"),
+                    ("DPAD / arrows", "move focus"),
+                    ("Enter (wall)", "magnify / restore"),
+                    ("Enter (panel)", "activate"),
                     ("Esc / Back", "back"),
-                    ("PgUp / PgDn", "previous / next page"),
+                    ("1-4", "grid 1x1 … 4x4"),
+                    ("PgUp / PgDn", "previous / next"),
                     ("F1", "settings"),
                     ("F2", "devices"),
                     ("F11", "full screen"),
