@@ -1074,6 +1074,22 @@ impl XgViewApp {
         })
     }
 
+    /// Back as a window reads it: Escape and BrowserBack always, and Backspace
+    /// too while no text field is being typed into.
+    ///
+    /// The wall reads Back as those three keys as well, so a remote or keyboard
+    /// whose Back arrives as Backspace has to be able to leave a window the same
+    /// way it leaves the panel - otherwise the press falls through to the panel
+    /// behind and closes that instead. A field with the focus keeps Backspace
+    /// for its own text.
+    fn dialog_back_pressed(ctx: &egui::Context) -> bool {
+        if Self::back_pressed(ctx) {
+            return true;
+        }
+        !Self::typing(ctx)
+            && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Backspace))
+    }
+
     /// Whether this frame carries input that is not a Back press.
     ///
     /// Used to cancel the exit question: a viewer who presses something else has
@@ -1123,7 +1139,7 @@ impl XgViewApp {
         // it, whatever inside it has the focus. A field's caret must not hold it
         // open - Back on the first field would otherwise hand the focus back to
         // that same field, and the window could never be left.
-        if (self.camera_edit.is_some() || self.remove_confirm.is_some()) && Self::back_pressed(ctx) {
+        if (self.camera_edit.is_some() || self.remove_confirm.is_some()) && Self::dialog_back_pressed(ctx) {
             if let Some(confirm) = self.remove_confirm.take() {
                 self.remove_confirm_anchor = None;
                 self.restore_focus = Some(confirm.from);
@@ -2282,6 +2298,11 @@ impl XgViewApp {
         // A modal, like the edit window: centred, and nothing behind it answers.
         // Its own buttons (or Back) are the only way out.
         egui::Modal::new(Id::new("xgview-remove-camera")).show(ctx, |ui| {
+            // The question is its own column of the navigation layer, as the
+            // edit window is: without it the two answers are not registered at
+            // all, and the arrows are left to egui's geometric walk - which the
+            // panel behind then takes away from them.
+            self.nav.open("confirm-body");
             ui.set_width(380.0);
             ui.label(RichText::new(format!("Remove \"{name}\"?")).heading());
             ui.label(
@@ -2302,6 +2323,7 @@ impl XgViewApp {
                     remove = true;
                 }
             });
+            self.nav.close();
         });
 
         if remove {
