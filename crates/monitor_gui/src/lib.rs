@@ -3,6 +3,7 @@
 //! * [`app`]     – application state, navigation, render loop.
 //! * [`controls`] – value controls that adjust with the sideways keys.
 //! * [`dialogs`] – device discovery and camera import dialogs.
+//! * [`fonts`]   – system font fallback for the characters egui does not ship.
 //! * [`grid`]    – grid geometry and tile painting.
 //! * [`icons`]   – the shapes the controls carry.
 //! * [`keyboard`] – the soft keyboard on Android (Android only).
@@ -18,6 +19,7 @@
 pub mod app;
 pub mod controls;
 pub mod dialogs;
+pub mod fonts;
 pub mod grid;
 pub mod icons;
 #[cfg(target_os = "android")]

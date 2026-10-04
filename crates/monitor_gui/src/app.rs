@@ -21,6 +21,7 @@ use monitor_core::scheduler::Scheduler;
 use monitor_core::{CameraSource, Direction};
 
 use crate::dialogs::{self, BackgroundEvent, CameraDraft, DiscoveryUi, Tab};
+use crate::fonts;
 use crate::grid::{self, Tile, TileActions};
 use crate::icons::{self, Icon};
 use crate::controls;
@@ -454,6 +455,7 @@ impl XgViewApp {
         config_path: PathBuf,
         handle: Handle,
     ) -> Self {
+        fonts::install(&cc.egui_ctx);
         theme::install(&cc.egui_ctx);
 
         let RunOptions { config, fullscreen, from_autostart, .. } = options;
