@@ -70,4 +70,18 @@ Copy the generated jniLibs folder into the Android project, e.g.:
 and copy crates/monitor_android/android/AndroidManifest.xml plus
 crates/monitor_android/android/java and crates/monitor_android/android/res
 into app/src/main/. Then deploy with scripts/deploy-android.sh.
+
+Start on boot (Android 10+)
+---------------------------
+Android refuses to start an activity from the boot broadcast unless the app is
+whitelisted, so a box installed by hand stays dark after a power cut until one
+of these is set once on the device:
+
+  * allow it to start over other apps - grant SYSTEM_ALERT_WINDOW, or
+  * make XGView the home app (no permission, replaces the box's launcher).
+
+The app's System tab opens the matching screen for each and shows whether it is
+in effect. From a computer, the first is:
+
+    adb shell appops set com.xhbl.xgview SYSTEM_ALERT_WINDOW allow
 EOF

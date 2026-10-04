@@ -32,20 +32,11 @@
 .EXAMPLE
     # Install an existing build without recompiling.
     powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -NoBuild
-
-.EXAMPLE
-    # Build the distributable zip instead of installing (target\xgview-<version>.zip).
-    powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Package
 #>
 [CmdletBinding()]
 param(
-    # Skip `cargo build --release` and package the existing target\release binary.
+    # Skip `cargo build --release` and install the existing target\release binary.
     [switch]$NoBuild,
-
-    # Build the distributable zip into `target` instead of installing: nothing
-    # is written into the install directory and no start-on-boot entry is
-    # registered. The work is `package-windows.ps1`'s.
-    [switch]$Package,
 
     # Register a scheduled task (with restart on failure) instead of the HKCU Run key.
     [switch]$TaskScheduler,
@@ -64,15 +55,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-
-# Producing a package is a different errand from installing one: it ends here,
-# before anything is copied into an install directory or registered to start at
-# boot. The packaging itself lives in `package-windows.ps1` so that the two can
-# be read and run apart.
-if ($Package) {
-    & (Join-Path $PSScriptRoot 'package-windows.ps1') -NoBuild:$NoBuild
-    exit $LASTEXITCODE
-}
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $exeName = 'xgview.exe'

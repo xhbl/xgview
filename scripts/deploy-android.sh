@@ -65,6 +65,14 @@ echo "==> installing $APK"
 # the unattended box never shows a permission dialog.
 adb -s "$ADB_SERIAL" install -r -g "$APK"
 
+# SYSTEM_ALERT_WINDOW is a *special* permission, so -g does not grant it, and
+# without it Android 10+ aborts the start the boot receiver asks for ("Abort
+# background activity starts"), leaving the box dark after a power cut. The adb
+# workflow can grant it here; an APK installed by hand asks the viewer to do it
+# once from the app's System tab.
+echo "==> allowing the background start at boot (SYSTEM_ALERT_WINDOW)"
+adb -s "$ADB_SERIAL" shell appops set "$APP_ID" SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || true
+
 # ---------------------------------------------------------------- launch
 echo "==> launching $APP_ID"
 adb -s "$ADB_SERIAL" shell monkey \
