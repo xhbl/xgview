@@ -61,6 +61,14 @@ const EDGE_MARGIN: i8 = 40;
 /// How long the bars stay on screen in full screen after the last input.
 const CHROME_IDLE: Duration = Duration::from_millis(3500);
 
+/// How long the question the wall asks on the first Back stands.
+///
+/// Back sits beside the arrows a remote is steered with, and a program that
+/// left on one unmeant press cannot be brought back by the press that made the
+/// mistake. The first press therefore asks, and only a second one inside this
+/// window leaves. It also bounds how long the question is drawn for.
+const EXIT_WINDOW: Duration = Duration::from_secs(2);
+
 /// Width of the settings side panel, and the narrowest it may be dragged to.
 ///
 /// A phone in landscape is barely wider than the panel at its default, which is
@@ -381,6 +389,9 @@ pub struct XgViewApp {
     dirty: bool,
     dirty_since: Option<Instant>,
     toast: Option<Toast>,
+    /// When Back was last pressed on the wall with nothing left to close. The
+    /// next Back inside [`EXIT_WINDOW`] leaves the program.
+    exit_armed: Option<Instant>,
     fullscreen: bool,
     /// Whether the top and bottom bars are on screen right now.
     chrome: Chrome,
@@ -504,6 +515,7 @@ impl XgViewApp {
             dirty: false,
             dirty_since: None,
             toast: None,
+            exit_armed: None,
             fullscreen,
             chrome: Chrome {
                 visible: true,
@@ -862,16 +874,64 @@ impl XgViewApp {
 
     fn back(&mut self, ctx: &egui::Context) {
         // BACK / Esc unwinds one layer at a time: the magnified viewport, then
-        // whatever was opened over the wall, then the full screen mode.
+        // whatever was opened over the wall. With nothing left to close the wall
+        // itself answers, and it asks before it leaves - see `arm_exit`.
+        //
+        // Full screen is not one of these layers any more: on a television the
+        // viewer is in it from the start, so it cannot have been what the press
+        // meant, and unwinding it would put an exit out of reach. F11 and the
+        // settings panel's own checkbox are what toggle it.
         if self.scheduler.is_zoomed() {
             self.zoom_out();
+            self.exit_armed = None;
         } else if self.discovery.open {
             self.discovery.open = false;
+            self.exit_armed = None;
         } else if self.show_settings {
             self.show_settings = false;
-        } else if self.fullscreen {
-            self.set_fullscreen(ctx, false);
+            self.exit_armed = None;
+        } else {
+            self.arm_exit(ctx);
         }
+    }
+
+    /// Asks before leaving the program, and leaves on the second Back.
+    ///
+    /// The question is drawn in the middle of the screen for [`EXIT_WINDOW`];
+    /// a Back inside that window ends the program, and a Back after it has
+    /// lapsed asks again rather than leaving on a press the viewer has already
+    /// forgotten making.
+    fn arm_exit(&mut self, ctx: &egui::Context) {
+        if self.exit_armed.is_some_and(|at| at.elapsed() < EXIT_WINDOW) {
+            self.quit(ctx);
+            return;
+        }
+        self.exit_armed = Some(Instant::now());
+        // The hint has to be taken down when it lapses, and a wall with no live
+        // channel is not repainting on its own.
+        ctx.request_repaint_after(EXIT_WINDOW);
+    }
+
+    /// Ends the program, once the viewer has confirmed it.
+    ///
+    /// The configuration is written and the streaming runtime stopped first:
+    /// on Android the process is ended outright, and neither would otherwise
+    /// happen. Ending the process, rather than only asking the viewport to
+    /// close, is what Android needs - the activity's event loop cannot be built
+    /// a second time in the same process, so a viewer that came back from a
+    /// closed loop could never be started again. On the desktop the viewport is
+    /// simply asked to close, and the close request saves and stops the runtime
+    /// through the path already there.
+    fn quit(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "android")]
+        {
+            let _ = ctx;
+            self.save_now();
+            self.manager.shutdown();
+            std::process::exit(0);
+        }
+        #[cfg(not(target_os = "android"))]
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     // ---------------------------------------------------------------- events
@@ -968,6 +1028,28 @@ impl XgViewApp {
         })
     }
 
+    /// Whether this frame carries input that is not a Back press.
+    ///
+    /// Used to cancel the exit question: a viewer who presses something else has
+    /// answered it by doing something else. Every key the wall answers Back to
+    /// is a Back here and not an interruption - Escape, the remote's
+    /// `BrowserBack`, and Backspace, which is the Back a keyboard offers and
+    /// what the wall already reads as one. Movement of a pointer is not input
+    /// in that sense either: a mouse nudged on a desk, or a finger resting on a
+    /// touch screen, must not take the question down.
+    fn input_other_than_back(ctx: &egui::Context) -> bool {
+        ctx.input(|input| {
+            input.events.iter().any(|event| match event {
+                egui::Event::Key { key, pressed: true, .. } => {
+                    !matches!(key, Key::Escape | Key::BrowserBack | Key::Backspace)
+                }
+                egui::Event::PointerButton { pressed: true, .. } => true,
+                egui::Event::Text(_) | egui::Event::MouseWheel { .. } => true,
+                _ => false,
+            })
+        })
+    }
+
     /// Routes one frame of keys to whoever owns them.
     ///
     /// The four directions, Enter and Escape have two possible owners, and the
@@ -979,6 +1061,18 @@ impl XgViewApp {
     /// out of the queue in that case. The wall is not made of widgets, so it
     /// answers the same keys itself.
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // The question the first Back asks on the wall is answered by a second
+        // Back and by nothing else. Any *input* between the two presses - a
+        // direction, a click, the key that opens a panel - was the viewer doing
+        // something else, and calls it off.
+        //
+        // Input, and not the frame: the wall repaints several times a second on
+        // its own, and a rule that cancelled on a frame would take the question
+        // down before it could be read.
+        if self.exit_armed.is_some() && Self::input_other_than_back(ctx) {
+            self.exit_armed = None;
+        }
+
         // A window this application opened is the innermost layer: Back closes
         // it, whatever inside it has the focus. A field's caret must not hold it
         // open - Back on the first field would otherwise hand the focus back to
@@ -1889,11 +1983,19 @@ impl XgViewApp {
 
         if save {
             match draft.build() {
-                Ok(mut source) => {
-                    // The entry keeps its identifier: the update repoints the
-                    // camera, and leaves enabled / transport as they were set.
-                    source.id = id;
-                    self.config.upsert_camera(source);
+                Ok(source) => {
+                    // Only what the form shows is written back. The entry keeps
+                    // its identifier, its origin, its transport and everything
+                    // else the form has no field for - the display aspect among
+                    // them - so an edit to a name or a url cannot reset them.
+                    match self.config.cameras.iter_mut().find(|camera| camera.id == id) {
+                        Some(camera) => camera.apply_edit(&source),
+                        None => {
+                            let mut source = source;
+                            source.id = id;
+                            self.config.upsert_camera(source);
+                        }
+                    }
                     self.needs_sync = true;
                     self.camera_edit_anchor = None;
                     // The focus goes back to the button the window was opened
@@ -2170,6 +2272,29 @@ impl XgViewApp {
                 });
             });
     }
+
+    /// The question the wall asks on the first Back, in the middle of the screen.
+    ///
+    /// Middle, and not one of the corners the toasts use: this one is not news
+    /// about a channel, it is the only thing on screen that wants an answer, and
+    /// a viewer with a remote is looking at the middle.
+    fn draw_exit_hint(&self, ctx: &egui::Context) {
+        let Some(at) = self.exit_armed else {
+            return;
+        };
+        if at.elapsed() >= EXIT_WINDOW {
+            return;
+        }
+        egui::Area::new(Id::new("xgview-exit-hint"))
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::symmetric(20, 14))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Press BACK again to quit").size(18.0).strong());
+                    });
+            });
+    }
 }
 
 impl eframe::App for XgViewApp {
@@ -2285,6 +2410,7 @@ impl eframe::App for XgViewApp {
         }
 
         self.draw_toast(ctx);
+        self.draw_exit_hint(ctx);
         self.autosave();
 
         // A panel that appears takes the remote's focus, once: without it the
