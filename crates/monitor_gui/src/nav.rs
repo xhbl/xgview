@@ -335,6 +335,16 @@ impl Nav {
         self.prev.contains_key(&id)
     }
 
+    /// Whether `id` was registered under a scope *this* frame.
+    ///
+    /// Read at the end of a frame, once everything has been drawn, to tell a
+    /// control that is on screen from one that has just gone: egui keeps a
+    /// focus it was asked for this frame even if the control was not drawn, and
+    /// a focus with no widget is a panic in the accessibility tree.
+    pub fn owns_now(&self, id: Id) -> bool {
+        self.cur.contains_key(&id)
+    }
+
     /// The kind `id` was registered with last frame, or [`Kind::Plain`].
     pub fn kind(&self, id: Id) -> Kind {
         self.prev.get(&id).map(|slot| slot.kind).unwrap_or_default()

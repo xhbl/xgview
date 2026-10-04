@@ -10,7 +10,7 @@
 //! it is asked for, which is what lets one definition serve the bar and anything
 //! else that needs it.
 
-use egui::{CornerRadius, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, vec2};
+use egui::{CornerRadius, Id, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, vec2};
 
 use crate::theme;
 
@@ -31,6 +31,10 @@ pub enum Icon {
     Edit,
     /// Remove something: a bin.
     Trash,
+    /// Move something up a list: a chevron pointing up.
+    Up,
+    /// Move something down a list: a chevron pointing down.
+    Down,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -49,27 +53,84 @@ const GLYPH: f32 = 0.5;
 /// `selected` paints the button as held down, the state the bar uses for the
 /// panels that are open.
 pub fn button(ui: &mut Ui, icon: Icon, selected: bool, tooltip: &str) -> Response {
-    button_sized(ui, icon, selected, tooltip, BUTTON)
+    button_sized(ui, icon, selected, false, tooltip, BUTTON)
 }
 
 /// An icon button of a given side, for a row where a control the size of the
 /// toolbar's would dwarf the text beside it.
-pub fn button_sized(ui: &mut Ui, icon: Icon, selected: bool, tooltip: &str, side: f32) -> Response {
+///
+/// `muted` draws the shape in the dim colour, for a button that is on screen
+/// but has nothing to do this frame - the end of a list, where a move would go
+/// nowhere. It stays focusable, so that the walk across the row does not shift
+/// under the viewer when the button loses its purpose.
+pub fn button_sized(
+    ui: &mut Ui,
+    icon: Icon,
+    selected: bool,
+    muted: bool,
+    tooltip: &str,
+    side: f32,
+) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
-    if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact_selectable(&response, selected);
-        let corner = CornerRadius::same(theme::radius::M);
-        let frame = rect.expand(visuals.expansion);
-        ui.painter().rect_filled(frame, corner, visuals.weak_bg_fill);
-        if visuals.bg_stroke.width > 0.0 {
-            // The focus ring arrives this way: egui paints `widgets.active` for
-            // whatever has the keyboard focus, and that state carries a stroke.
-            ui.painter().rect_stroke(frame, corner, visuals.bg_stroke, StrokeKind::Inside);
-        }
-        let glyph = Rect::from_center_size(rect.center(), Vec2::splat(side * GLYPH));
-        paint(ui.painter(), glyph, icon, Stroke::new(1.6_f32, visuals.text_color()));
-    }
+    paint_button(ui, rect, &response, icon, selected, muted, side);
     response.on_hover_text(tooltip)
+}
+
+/// [`button_sized`] carrying an explicit [`Id`].
+///
+/// egui's automatic ids are seeded from the widget's place among its siblings,
+/// so they change the moment a row moves. A control that is itself rearranged -
+/// a move button in the camera list - has to keep its id, or the keyboard focus
+/// is dropped as soon as its row changes place. The id is the caller's, derived
+/// from what the control belongs to rather than from where it is drawn.
+pub fn button_at(
+    ui: &mut Ui,
+    id: Id,
+    icon: Icon,
+    selected: bool,
+    muted: bool,
+    tooltip: &str,
+    side: f32,
+) -> Response {
+    // The space is allocated first - it is what lays the row out - and the
+    // interaction is then claimed under the caller's id.
+    let (_auto, rect) = ui.allocate_space(Vec2::splat(side));
+    // A muted button is inert: drawn so the row keeps its shape, but nothing
+    // can land on it - the pointer cannot click it and the keyboard walk cannot
+    // focus it, because there is nothing it could do. `Sense::hover` keeps it
+    // out of both, while `Sense::click` would put it in the focus order.
+    let sense = if muted { Sense::hover() } else { Sense::click() };
+    let response = ui.interact(rect, id, sense);
+    paint_button(ui, rect, &response, icon, selected, muted, side);
+    response.on_hover_text(tooltip)
+}
+
+/// Draws a button's frame and glyph; the allocation is the caller's, so that
+/// the automatic and the explicit id forms share one painting.
+fn paint_button(
+    ui: &Ui,
+    rect: Rect,
+    response: &Response,
+    icon: Icon,
+    selected: bool,
+    muted: bool,
+    side: f32,
+) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let visuals = ui.style().interact_selectable(response, selected);
+    let corner = CornerRadius::same(theme::radius::M);
+    let frame = rect.expand(visuals.expansion);
+    ui.painter().rect_filled(frame, corner, visuals.weak_bg_fill);
+    if visuals.bg_stroke.width > 0.0 {
+        // The focus ring arrives this way: egui paints `widgets.active` for
+        // whatever has the keyboard focus, and that state carries a stroke.
+        ui.painter().rect_stroke(frame, corner, visuals.bg_stroke, StrokeKind::Inside);
+    }
+    let glyph = Rect::from_center_size(rect.center(), Vec2::splat(side * GLYPH));
+    let color = if muted { theme::TEXT_DIM } else { visuals.text_color() };
+    paint(ui.painter(), glyph, icon, Stroke::new(1.6_f32, color));
 }
 
 /// Draws `icon` filling `rect`.
@@ -131,5 +192,60 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke) {
             painter.add(line(&[at(0.40, 0.28), at(0.40, 0.17), at(0.60, 0.17), at(0.60, 0.28)]));
             painter.add(line(&[at(0.24, 0.28), at(0.30, 0.88), at(0.70, 0.88), at(0.76, 0.28)]));
         }
+        Icon::Up => {
+            // A chevron: one stroke, so that it reads at the size of a row.
+            painter.add(line(&[at(0.22, 0.62), at(0.50, 0.34), at(0.78, 0.62)]));
+        }
+        Icon::Down => {
+            painter.add(line(&[at(0.22, 0.38), at(0.50, 0.66), at(0.78, 0.38)]));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Align, Layout};
+
+    /// The move buttons of a reorder row carry an id derived from the camera,
+    /// not from the row, so a camera that is moved keeps the same widgets - and
+    /// the focus that is on one of them. egui's automatic ids are seeded from
+    /// the sibling position and do not survive the move; this is the property
+    /// the camera list relies on.
+    #[test]
+    fn an_explicit_id_survives_a_reorder() {
+        fn draw(ui: &mut Ui, order: &[&str]) -> Vec<(String, Id)> {
+            let mut ids = Vec::new();
+            for camera in order {
+                ui.horizontal(|ui| {
+                    ui.label(*camera);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let down = button_at(ui, Id::new(camera).with("down"), Icon::Down, false, false, "down", 20.0);
+                        let up = button_at(ui, Id::new(camera).with("up"), Icon::Up, false, false, "up", 20.0);
+                        ids.push((format!("{camera}-up"), up.id));
+                        ids.push((format!("{camera}-down"), down.id));
+                    });
+                });
+                ui.add_space(4.0);
+            }
+            ids
+        }
+
+        let ctx = egui::Context::default();
+        let run = |order: &[&str]| {
+            let captured = std::cell::RefCell::new(Vec::<(String, Id)>::new());
+            let _ = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        captured.borrow_mut().extend(draw(ui, order));
+                    });
+                });
+            });
+            let mut ids = captured.into_inner();
+            ids.sort_by(|a, b| a.0.cmp(&b.0));
+            ids
+        };
+
+        assert_eq!(run(&["a", "b", "c"]), run(&["c", "a", "b"]));
     }
 }

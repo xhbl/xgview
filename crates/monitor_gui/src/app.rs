@@ -443,6 +443,25 @@ pub struct XgViewApp {
     remove_confirm_anchor: Option<Id>,
     /// Watches the remove window for the frame it appears on.
     remove_confirm_handoff: Handoff,
+    /// The camera order being arranged while the Cameras tab is in its reorder
+    /// mode.
+    ///
+    /// `None` is the ordinary list, drawn from the configuration. `Some` holds
+    /// the identifiers in the order the viewer has put them in; the
+    /// configuration is not written until the order is confirmed, so the wall
+    /// and the channels are undisturbed while the list is rearranged.
+    reorder: Option<Vec<String>>,
+    /// The button the reorder list opens on - the down arrow of its first row,
+    /// the only one of the pair with somewhere to go - to hand it the focus once
+    /// the list has been drawn. The press that opens the mode happens a frame
+    /// before there is anything to focus.
+    reorder_anchor: Option<Id>,
+    /// The button that opens the reorder mode, to hand the focus back to as it
+    /// closes. Given a fixed [`Id`], because the control it belongs to only
+    /// exists on the frames the ordinary list is drawn.
+    reorder_trigger_anchor: Option<Id>,
+    /// Set as the mode opens, cleared once its first move button has the focus.
+    reorder_focus: bool,
     /// What each control is called, for the status line.
     ///
     /// The bar is made of shapes, and a remote control has no pointer to hover
@@ -550,6 +569,10 @@ impl XgViewApp {
             remove_confirm: None,
             remove_confirm_anchor: None,
             remove_confirm_handoff: Handoff::default(),
+            reorder: None,
+            reorder_anchor: None,
+            reorder_trigger_anchor: None,
+            reorder_focus: false,
             owner: Owner::Grid,
             focus_names: HashMap::new(),
             focused_name: None,
@@ -570,6 +593,29 @@ impl XgViewApp {
 
     fn flash(&mut self, text: impl Into<String>, kind: ToastKind) {
         self.toast = Some(Toast { text: text.into(), kind, at: Instant::now() });
+    }
+
+    /// The control an open panel falls back to when nothing has the focus.
+    ///
+    /// The windows come first - only one of them is ever up - then the reorder
+    /// list, then the settings panel; `None` when nothing is open, where the
+    /// wall answers for itself. Read at the end of a frame to keep a panel from
+    /// being left without a focus, and at the start of one to give the focus
+    /// back the moment a key says the viewer is on the keyboard again.
+    fn panel_anchor(&self) -> Option<Id> {
+        if self.remove_confirm.is_some() {
+            self.remove_confirm_anchor
+        } else if self.camera_edit.is_some() {
+            self.camera_edit_anchor
+        } else if self.discovery.open {
+            self.discovery.focus_anchor
+        } else if self.reorder.is_some() {
+            self.reorder_anchor
+        } else if self.show_settings {
+            self.settings_anchor
+        } else {
+            None
+        }
     }
 
     fn mark_dirty(&mut self) {
@@ -1245,6 +1291,14 @@ impl XgViewApp {
             keys
         });
 
+        // The reorder mode owns Back: it drops the arrangement and nothing
+        // else, so a press that means "never mind" cannot also close the panel
+        // behind it.
+        if keys.back && self.reorder.is_some() {
+            self.cancel_reorder();
+            return;
+        }
+
         // Application keys first: they are how a keyboard, and whatever button
         // a remote offers beside the DPAD, reach the panels at all.
         // A dialog owns the screen while it is up: nothing behind it answers the
@@ -1792,6 +1846,25 @@ impl XgViewApp {
 
     /// The cameras the wall shows, and the way to add more.
     fn settings_cameras(&mut self, ui: &mut egui::Ui) -> bool {
+        // The reorder mode draws its own list and writes nothing back until it
+        // is confirmed. See `cameras_reorder`.
+        if let Some(order) = self.reorder.clone() {
+            self.cameras_reorder(ui, &order);
+            ui.add_space(theme::space::M);
+            let confirm = ui.button("Confirm order");
+            self.nav.item(&confirm);
+            self.name(&confirm, "Confirm order");
+            if confirm.clicked() {
+                return self.apply_reorder();
+            }
+            return false;
+        }
+        self.cameras_list(ui)
+    }
+
+    /// The camera list as configured, with the button that opens the reorder
+    /// mode at its foot. Returns `true` when the configuration changed.
+    fn cameras_list(&mut self, ui: &mut egui::Ui) -> bool {
         let mut dirty = false;
 
         ui.horizontal(|ui| {
@@ -1859,8 +1932,8 @@ impl XgViewApp {
                     // Drawn right to left so the pair reads edit, remove;
                     // registered edit first, so the walk reaches the control
                     // that changes before the one that deletes.
-                    let remove_button = icons::button_sized(ui, Icon::Trash, false, "Remove this camera", ROW_ICON);
-                    let edit_button = icons::button_sized(ui, Icon::Edit, false, "Edit this camera", ROW_ICON);
+                    let remove_button = icons::button_sized(ui, Icon::Trash, false, false, "Remove this camera", ROW_ICON);
+                    let edit_button = icons::button_sized(ui, Icon::Edit, false, false, "Edit this camera", ROW_ICON);
                     self.nav.item(&edit_button);
                     self.focus_names.insert(edit_button.id, "Edit camera");
                     self.nav.item(&remove_button);
@@ -1943,7 +2016,177 @@ impl XgViewApp {
             dirty = true;
         }
 
+        // Rearranging begins here, and changes nothing yet: the mode works on a
+        // copy of the order and the configuration is written only when it is
+        // confirmed. Hidden with fewer than two cameras - there is nothing to
+        // arrange. The identifier is fixed, so the button that opens the mode
+        // can be given the focus back when the mode closes.
+        if self.config.cameras.len() >= 2 {
+            ui.add_space(theme::space::M);
+            let trigger =
+                ui.push_id("xgview-reorder-trigger", |ui| ui.button("Reorder cameras")).inner;
+            self.nav.item(&trigger);
+            self.name(&trigger, "Reorder cameras");
+            self.reorder_trigger_anchor = Some(trigger.id);
+            if trigger.clicked() {
+                self.reorder =
+                    Some(self.config.cameras.iter().map(|camera| camera.id.clone()).collect());
+                self.reorder_focus = true;
+                self.flash("Reorder: Up / Down to move · Confirm to apply · Back to cancel", ToastKind::Info);
+            }
+        }
+
         dirty
+    }
+
+    /// The camera list in its reorder mode.
+    ///
+    /// One row per camera, with up and down buttons where the ordinary list
+    /// keeps its edit and remove buttons, and nothing else: the controls that
+    /// change a camera are hidden while the list is being arranged. The order
+    /// is the preview held in [`Self::reorder`]; it is written to the
+    /// configuration only on Confirm, so the wall is untouched while the viewer
+    /// arranges, and Back drops the whole thing.
+    fn cameras_reorder(&mut self, ui: &mut egui::Ui, order: &[String]) {
+        let last = order.len().saturating_sub(1);
+        let mut moved: Option<(usize, i32, Id)> = None;
+        let mut anchor = None;
+        for (slot, id) in order.iter().enumerate() {
+            let label = self
+                .config
+                .find_camera(id)
+                .map(|camera| camera.short_label(24))
+                .unwrap_or_default();
+            let first = slot == 0;
+            let bottom = slot == last;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).strong());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Drawn right to left so the pair reads up, down; registered
+                    // up first, so the walk reaches it first.
+                    //
+                    // The identifiers are the camera's, not the row's place.
+                    // egui's own are seeded from the sibling position and change
+                    // when the row moves, which would drop the focus on the row
+                    // the viewer was working on and hand it to the list anchor
+                    // at the top. Under a fixed id the focus follows the camera
+                    // through the list. See `icons::button_at`.
+                    let down = icons::button_at(
+                        ui,
+                        Id::new(id).with("down"),
+                        Icon::Down,
+                        false,
+                        bottom,
+                        "Move down",
+                        ROW_ICON,
+                    );
+                    let up = icons::button_at(
+                        ui,
+                        Id::new(id).with("up"),
+                        Icon::Up,
+                        false,
+                        first,
+                        "Move up",
+                        ROW_ICON,
+                    );
+                    // Only the arrows with somewhere to go join the walk: a
+                    // muted one is inert - see `icons::button_at` - and must not
+                    // be reachable either, or the viewer would land on a button
+                    // that does nothing. They are still drawn, so the row keeps
+                    // its shape.
+                    //
+                    // egui gives focus from the keyboard, not from the pointer:
+                    // a press hands the focus of whatever held it back to
+                    // nothing, and the panel anchor would then take it to the
+                    // first row while the pointer is still down on this button.
+                    // The press takes the focus here instead, as the tab strip
+                    // does after a click.
+                    if !first {
+                        self.nav.item(&up);
+                        self.name(&up, "Move camera up");
+                        if up.is_pointer_button_down_on() {
+                            up.request_focus();
+                        }
+                    }
+                    if !bottom {
+                        self.nav.item(&down);
+                        self.name(&down, "Move camera down");
+                        if down.is_pointer_button_down_on() {
+                            down.request_focus();
+                        }
+                    }
+                    if first {
+                        // The mode opens on the down arrow of the first row: the
+                        // up arrow beside it is muted - the first camera has
+                        // nowhere to go up - and a mode that opens on a dead
+                        // button reads as a mode that does not work.
+                        anchor = Some(down.id);
+                    }
+                    if up.clicked() && !first {
+                        moved = Some((slot, -1, up.id));
+                    }
+                    if down.clicked() && !bottom {
+                        moved = Some((slot, 1, down.id));
+                    }
+                });
+            });
+            ui.add_space(theme::space::XS);
+        }
+        self.reorder_anchor = anchor;
+        let Some((slot, delta, pressed)) = moved else {
+            return;
+        };
+        let to = (slot as i32 + delta).clamp(0, last as i32) as usize;
+        let Some(order) = self.reorder.as_mut() else {
+            return;
+        };
+        order.swap(slot, to);
+        let camera = order[to].clone();
+        // The button that was just pressed may have run out of room: the down
+        // arrow at the foot of the list, the up arrow at the top are drawn
+        // muted and do nothing. The focus goes to the arrow that still has
+        // somewhere to go, so a run of presses keeps moving the camera instead
+        // of landing on a dead button. Anywhere else it stays where it was.
+        let follow = if to == last && delta > 0 {
+            Id::new(&camera).with("up")
+        } else if to == 0 && delta < 0 {
+            Id::new(&camera).with("down")
+        } else {
+            pressed
+        };
+        // The focus went with the camera - to the other arrow when the pressed
+        // one is spent - and the row it is on has to be brought into view. The
+        // reveal is armed here and made next frame, as the button is drawn
+        // again. See `reveal_next`.
+        self.reveal_next = Some(follow);
+        ui.ctx().memory_mut(|memory| memory.request_focus(follow));
+    }
+
+    /// Writes the arranged order back and leaves the mode. `true` when the
+    /// order actually changed, so that the wall is only retargeted then.
+    fn apply_reorder(&mut self) -> bool {
+        let Some(order) = self.reorder.take() else {
+            return false;
+        };
+        self.reorder_focus = false;
+        self.restore_focus = self.reorder_trigger_anchor;
+        if !self.config.apply_order(&order) {
+            return false;
+        }
+        // The order is the channel order: the plan follows it on the next sync.
+        self.needs_sync = true;
+        self.mark_dirty();
+        true
+    }
+
+    /// Leaves the reorder mode without writing anything. The configuration was
+    /// never touched, so the list simply goes back to what it was.
+    fn cancel_reorder(&mut self) {
+        if self.reorder.take().is_none() {
+            return;
+        }
+        self.reorder_focus = false;
+        self.restore_focus = self.reorder_trigger_anchor;
     }
 
     /// The window one camera of the settings panel is edited in.
@@ -2347,6 +2590,15 @@ impl eframe::App for XgViewApp {
             ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
         }
         self.handle_keys(ctx);
+        // The reorder mode belongs to the Cameras tab: leaving the tab, or the
+        // panel, drops the arrangement that was being previewed. The focus is
+        // not sent back - the control it would return to is leaving too.
+        if self.reorder.is_some()
+            && (!self.show_settings || self.settings_tab != SettingsTab::Cameras)
+        {
+            self.reorder = None;
+            self.reorder_focus = false;
+        }
         // Who holds the focus as the frame is drawn. A value control confirms
         // with Enter and gives the focus up while it is drawn, and the form
         // hands it on - see the anchor at the end of the frame.
@@ -2445,39 +2697,48 @@ impl eframe::App for XgViewApp {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
+        // The reorder mode is opened by a press on one frame, and its list is
+        // drawn on the next; the first move button is only known once it has
+        // been drawn, so the hand-off waits for it here.
+        if self.reorder_focus {
+            if let Some(id) = self.reorder_anchor {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+                self.reorder_focus = false;
+            }
+        }
 
         // An open panel is never left without something focused. The arrows
         // have nowhere to walk from otherwise, and a panel the remote can reach
         // when it opens but not one press later is worse than no panel at all.
-        let anchor = if self.remove_confirm.is_some() {
-            self.remove_confirm_anchor
-        } else if self.camera_edit.is_some() {
-            self.camera_edit_anchor
-        } else if self.discovery.open {
-            self.discovery.focus_anchor
-        } else if self.show_settings {
-            self.settings_anchor
-        } else {
-            None
-        };
-        if let Some(id) = anchor {
-            if ctx.memory(|memory| memory.focused()).is_none() {
-                // A value control confirms with Enter and gives the focus up as
-                // the form is drawn. The form hands it to the next control
-                // rather than back to the tab strip, and only the last control
-                // falls through to the anchor.
-                let confirmed = ctx.input(|input| input.key_pressed(Key::Enter));
-                let next = focus_before
-                    .filter(|_| confirmed)
-                    .and_then(|before| self.nav.next_in_scope(before));
-                match next {
-                    Some(next) => {
-                        ctx.memory_mut(|memory| memory.request_focus(next));
-                        // It was drawn before the focus reached it: the reveal
-                        // is armed at the start of the next frame.
-                        self.reveal_next = Some(next);
+        //
+        // A press on a blank part of the panel drops the focus, and the frame
+        // would end with nothing to walk from. The control that held it at the
+        // start of the frame is put back instead - it is still on screen, so the
+        // keyboard stays in the panel and the ring does not jump to the top of
+        // it. The panel's anchor answers only when there was nothing to put
+        // back.
+        let anchor = self.panel_anchor();
+        if ctx.memory(|memory| memory.focused()).is_none() {
+            // A value control confirms with Enter and gives the focus up as the
+            // form is drawn. The form hands it to the next control rather than
+            // back to the tab strip, and only the last control falls through to
+            // the anchor.
+            let confirmed = ctx.input(|input| input.key_pressed(Key::Enter));
+            let next = focus_before
+                .filter(|_| confirmed)
+                .and_then(|before| self.nav.next_in_scope(before));
+            match next {
+                Some(next) => {
+                    ctx.memory_mut(|memory| memory.request_focus(next));
+                    // It was drawn before the focus reached it: the reveal is
+                    // armed at the start of the next frame.
+                    self.reveal_next = Some(next);
+                }
+                None => {
+                    let restore = focus_before.filter(|id| self.nav.owns_now(*id)).or(anchor);
+                    if let Some(id) = restore {
+                        ctx.memory_mut(|memory| memory.request_focus(id));
                     }
-                    None => ctx.memory_mut(|memory| memory.request_focus(id)),
                 }
             }
         }
@@ -2504,6 +2765,19 @@ impl eframe::App for XgViewApp {
         if let Some(focused) = focused {
             if Self::typing(ctx) {
                 ctx.memory_mut(|memory| memory.set_focus_lock_filter(focused, egui::EventFilter::default()));
+            }
+        }
+
+        // A control can be asked for the focus and then not be drawn - the
+        // anchor restored on a frame a key changed the panel under it, a row
+        // removed while it was held. egui does not clear a focus it has just
+        // been given, so the frame ends with a focus that has no widget, and the
+        // accessibility tree is built from the widgets that *were* drawn: it
+        // panics on a focus that is not among them. Let such a focus go here,
+        // where this frame's controls are all known.
+        if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+            if !self.nav.owns_now(focused) {
+                ctx.memory_mut(|memory| memory.surrender_focus(focused));
             }
         }
 

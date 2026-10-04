@@ -332,6 +332,27 @@ impl AppConfig {
         self.cameras.len() != before
     }
 
+    /// Reorders the cameras to match `order`, a list of camera identifiers.
+    ///
+    /// Identifiers that name no camera are skipped, and a camera the list does
+    /// not mention keeps its place at the end: an order built a moment ago -
+    /// before a removal or an import - therefore cannot drop an entry. The
+    /// order decides the channel index and the place on the wall, so this is
+    /// what a rearranged list is written back as. Returns `true` when the
+    /// resulting order differs from the current one.
+    pub fn apply_order(&mut self, order: &[String]) -> bool {
+        let before: Vec<String> = self.cameras.iter().map(|camera| camera.id.clone()).collect();
+        let mut ordered = Vec::with_capacity(self.cameras.len());
+        for id in order {
+            if let Some(position) = self.cameras.iter().position(|camera| &camera.id == id) {
+                ordered.push(self.cameras.remove(position));
+            }
+        }
+        ordered.append(&mut self.cameras);
+        self.cameras = ordered;
+        self.cameras.iter().map(|camera| camera.id.as_str()).ne(before.iter().map(String::as_str))
+    }
+
     /// Clamps `page` / `focus` once the camera list changed.
     pub fn normalize(&mut self) {
         if self.version == 0 {
@@ -539,5 +560,30 @@ mod tests {
         assert_eq!(camera.transport, RtspTransport::Udp, "the transport survives");
         assert_eq!(camera.tags, vec!["gate".to_string()], "the tags survive");
         assert!(!camera.enabled, "a camera switched off stays off");
+    }
+
+    /// The order a rearranged list is written back as. An identifier that names
+    /// no camera is skipped, and an entry the list forgets keeps its place at
+    /// the end rather than disappearing from the wall.
+    #[test]
+    fn apply_order_reorders_and_keeps_the_entries_it_was_not_given() {
+        let mut config = AppConfig::default();
+        let a = config.upsert_camera(CameraSource::new("a", "rtsp://10.0.0.1/live"));
+        let b = config.upsert_camera(CameraSource::new("b", "rtsp://10.0.0.2/live"));
+        let c = config.upsert_camera(CameraSource::new("c", "rtsp://10.0.0.3/live"));
+        let ids = |config: &AppConfig| -> Vec<String> {
+            config.cameras.iter().map(|camera| camera.id.clone()).collect()
+        };
+
+        assert!(config.apply_order(&[c.clone(), a.clone(), b.clone()]));
+        assert_eq!(ids(&config), vec![c.clone(), a.clone(), b.clone()]);
+
+        // The order that is already in place changes nothing.
+        assert!(!config.apply_order(&[c.clone(), a.clone(), b.clone()]));
+
+        // A list that forgets an entry, and one that names a stranger: the
+        // forgotten camera stays, at the end.
+        assert!(config.apply_order(&[b.clone(), "nobody".to_string(), c.clone()]));
+        assert_eq!(ids(&config), vec![b, c, a]);
     }
 }
