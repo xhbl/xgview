@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 use crate::layout::GridLayout;
-use crate::model::CameraSource;
+use crate::model::{CameraSource, Osd};
 use crate::{APP_NAME, CONFIG_FILE_NAME};
 
 /// Version of the configuration schema written to disk.
@@ -168,6 +168,11 @@ pub struct AppConfig {
     pub reconnect: ReconnectPolicy,
     pub discovery: DiscoveryConfig,
     pub synology: SynologyConfig,
+    /// What each corner of a tile shows. It is a property of the wall rather
+    /// than of a camera: a viewer reads the same thing in the same corner
+    /// wherever they look.
+    #[serde(default)]
+    pub osd: Osd,
     pub cameras: Vec<CameraSource>,
 }
 
@@ -184,6 +189,7 @@ impl Default for AppConfig {
             reconnect: ReconnectPolicy::default(),
             discovery: DiscoveryConfig::default(),
             synology: SynologyConfig::default(),
+            osd: Osd::default(),
             cameras: Vec::new(),
         }
     }

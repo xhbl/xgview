@@ -49,6 +49,13 @@ pub const ERROR: Color32 = Color32::from_rgb(255, 99, 99);
 pub const TEXT: Color32 = Color32::from_rgb(227, 233, 240);
 /// Secondary text.
 pub const TEXT_DIM: Color32 = Color32::from_rgb(146, 158, 175);
+/// Backdrop behind a tile's on-screen display.
+///
+/// A translucent grey scrim: the display sits over a picture whose brightness
+/// is whatever the camera happens to be pointed at, and a flat colour of its
+/// own is what keeps the lines legible on a night scene and on a sunlit one.
+pub const OSD_BACKDROP: Color32 = Color32::from_rgba_premultiplied(22, 24, 26, 100);
+
 /// Hint / placeholder text of an empty field.
 ///
 /// A third tier below [`TEXT_DIM`] on purpose: an empty field shows its hint

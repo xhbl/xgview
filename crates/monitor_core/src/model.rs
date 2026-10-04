@@ -184,11 +184,22 @@ impl TileAspect {
         Self::ALL[(index + 1) % Self::ALL.len()]
     }
 
-    /// The name shown on the button and on the tile.
+    /// The name shown on the settings button that cycles the mode.
     pub fn label(self) -> &'static str {
         match self {
             TileAspect::Original => "Original",
             TileAspect::Stretch => "Stretch",
+            TileAspect::Ratio16x9 => "16:9",
+            TileAspect::Ratio4x3 => "4:3",
+            TileAspect::Ratio1x1 => "1:1",
+        }
+    }
+
+    /// The shape, written short for a tile's on-screen display.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            TileAspect::Original => "orig",
+            TileAspect::Stretch => "fill",
             TileAspect::Ratio16x9 => "16:9",
             TileAspect::Ratio4x3 => "4:3",
             TileAspect::Ratio1x1 => "1:1",
@@ -202,6 +213,87 @@ impl TileAspect {
             TileAspect::Ratio16x9 => Some(16.0 / 9.0),
             TileAspect::Ratio4x3 => Some(4.0 / 3.0),
             TileAspect::Ratio1x1 => Some(1.0),
+        }
+    }
+}
+
+/// One corner's worth of a tile's on-screen display.
+///
+/// The list is ordered, and the settings panel walks a corner through it: what
+/// a viewer wants in a corner changes with the wall in front of them, and a
+/// remote has no room for a list of eight. The last entry is the three measured
+/// lines stacked together, for a corner with room to spare.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OsdItem {
+    /// Nothing at all.
+    #[default]
+    Off,
+    /// The camera's name.
+    Name,
+    /// Its number on the wall, then the name.
+    NumberName,
+    /// Whether the picture is moving, and which stream it comes from.
+    Stream,
+    /// Transport and the rate the stream arrives at.
+    Link,
+    /// Frame rate, and which decoder is doing the work.
+    Fps,
+    /// Picture size, the shape it is drawn in, and the decoder.
+    Format,
+    /// [`OsdItem::Link`], [`OsdItem::Fps`] and [`OsdItem::Format`], one per line.
+    Detail,
+}
+
+impl OsdItem {
+    /// Every item, in the order the settings button walks them.
+    pub const ALL: [OsdItem; 8] = [
+        OsdItem::Off,
+        OsdItem::Name,
+        OsdItem::NumberName,
+        OsdItem::Stream,
+        OsdItem::Link,
+        OsdItem::Fps,
+        OsdItem::Format,
+        OsdItem::Detail,
+    ];
+
+    /// The item a press on the settings button selects next.
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|item| *item == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    /// What the settings button says, and the only name the item has.
+    pub fn label(self) -> &'static str {
+        match self {
+            OsdItem::Off => "None",
+            OsdItem::Name => "Name",
+            OsdItem::NumberName => "Number + name",
+            OsdItem::Stream => "Status + stream",
+            OsdItem::Link => "Transport + rate",
+            OsdItem::Fps => "Frame rate",
+            OsdItem::Format => "Size + shape",
+            OsdItem::Detail => "All of the measures",
+        }
+    }
+}
+
+/// What each corner of a tile shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Osd {
+    pub top_left: OsdItem,
+    pub top_right: OsdItem,
+    pub bottom_left: OsdItem,
+    pub bottom_right: OsdItem,
+}
+
+impl Default for Osd {
+    fn default() -> Self {
+        Self {
+            top_left: OsdItem::Off,
+            top_right: OsdItem::Off,
+            bottom_left: OsdItem::Off,
+            bottom_right: OsdItem::Off,
         }
     }
 }

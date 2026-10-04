@@ -15,7 +15,7 @@ use tokio::runtime::Handle;
 use monitor_core::autostart::{self, AutostartStatus};
 use monitor_core::config::AppConfig;
 use monitor_core::layout::{GridLayout, NavigateOutcome};
-use monitor_core::model::{ConnectionState, RtspTransport, StreamKind, TileAspect};
+use monitor_core::model::{ConnectionState, OsdItem, RtspTransport, StreamKind, TileAspect};
 use monitor_core::pipeline::{ChannelManager, StreamEvent};
 use monitor_core::scheduler::Scheduler;
 use monitor_core::{CameraSource, Direction};
@@ -374,7 +374,6 @@ pub struct XgViewApp {
     /// The panel and the device window, watched for the frame they appear on.
     settings_handoff: Handoff,
     dialog_handoff: Handoff,
-    show_stats: bool,
     discovery: DiscoveryUi,
     slide: Slide,
     needs_sync: bool,
@@ -497,9 +496,6 @@ impl XgViewApp {
             settings_anchor: None,
             settings_handoff: Handoff::default(),
             dialog_handoff: Handoff::default(),
-            // Off: a tile is its picture. The decoder's numbers are there for
-            // whoever asks for them in the settings panel.
-            show_stats: false,
             discovery,
             slide: Slide::default(),
             needs_sync: true,
@@ -1539,8 +1535,31 @@ impl XgViewApp {
             }
         });
         ui.add_space(theme::space::S);
-        let stats = ui.checkbox(&mut self.show_stats, "Show fps and bitrate on the tiles");
-        self.nav.item(&stats);
+        ui.label(RichText::new("On-screen display").strong());
+        ui.label(
+            RichText::new("What each corner of a tile shows. Press a button to cycle.")
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+        let corners: [(&str, &mut OsdItem); 4] = [
+            ("Top left", &mut self.config.osd.top_left),
+            ("Top right", &mut self.config.osd.top_right),
+            ("Bottom left", &mut self.config.osd.bottom_left),
+            ("Bottom right", &mut self.config.osd.bottom_right),
+        ];
+        for (corner, item) in corners {
+            ui.horizontal(|ui| {
+                ui.label(corner);
+                let button = ui.button(item.label());
+                self.nav.item(&button);
+                self.focus_names.insert(button.id, corner);
+                if button.clicked() {
+                    *item = item.next();
+                    dirty = true;
+                }
+            });
+        }
+        ui.add_space(theme::space::S);
         let mut fullscreen = self.fullscreen;
         let full = self.nav.tracked(ui.checkbox(&mut fullscreen, "Full screen (F11)"));
         if full.changed() {
@@ -2022,18 +2041,15 @@ impl XgViewApp {
                 focused: interactive && self.chrome.visible && *index == focus,
                 interactive,
                 dim: !interactive,
-                show_stats: self.show_stats,
+                osd: self.config.osd,
                 time: self.time,
                 aspect: index
                     .and_then(|index| cameras.get(index))
                     .map(|camera| camera.aspect)
                     .unwrap_or_default(),
             };
-            let (response, cycle_aspect) = grid::paint(ui, rect, &tile);
+            let response = grid::paint(ui, rect, &tile);
             if interactive {
-                if cycle_aspect {
-                    actions.cycle_aspect = *index;
-                }
                 if response.clicked() {
                     actions.focus = *index;
                 }
@@ -2133,18 +2149,6 @@ impl XgViewApp {
         }
         if let Some(index) = actions.zoom {
             self.zoom_to(index);
-        }
-        if let Some(index) = actions.cycle_aspect {
-            // The mode came back from the tile as an index into the enabled
-            // cameras; the entry it belongs to is found by its identifier, so
-            // that a wall showing a subset still moves the right camera.
-            let id = cameras.get(index).map(|camera| camera.id.clone());
-            if let Some(id) = id {
-                if let Some(camera) = self.config.cameras.iter_mut().find(|camera| camera.id == id) {
-                    camera.aspect = camera.aspect.next();
-                    self.mark_dirty();
-                }
-            }
         }
     }
 

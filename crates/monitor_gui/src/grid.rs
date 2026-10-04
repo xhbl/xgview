@@ -9,7 +9,7 @@
 
 use egui::{Align2, Color32, CornerRadius, FontId, Id, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, vec2};
 
-use monitor_core::model::{CameraSource, ConnectionState, StreamKind, TileAspect};
+use monitor_core::model::{CameraSource, ConnectionState, Osd, OsdItem, StreamKind, TileAspect};
 use monitor_core::GridLayout;
 
 use crate::app::ChannelUi;
@@ -95,7 +95,8 @@ pub struct Tile<'a> {
     pub interactive: bool,
     /// Dim the tile (used for the page that slides out).
     pub dim: bool,
-    pub show_stats: bool,
+    /// What each corner of the tile shows.
+    pub osd: Osd,
     pub time: f64,
     /// How the picture is fitted into the tile.
     pub aspect: TileAspect,
@@ -106,19 +107,13 @@ pub struct Tile<'a> {
 pub struct TileActions {
     pub focus: Option<usize>,
     pub zoom: Option<usize>,
-    /// The aspect button of this channel was pressed.
-    pub cycle_aspect: Option<usize>,
     pub drag_started: bool,
     pub drag_delta: f32,
     pub drag_stopped: bool,
 }
 
 /// Paints one cell and reports the user interaction.
-///
-/// The second value of the pair is `true` when the tile's aspect button was
-/// pressed this frame - it is a control of its own, on top of the tile, and is
-/// reported apart from the tile's own response.
-pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> (Response, bool) {
+pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
     // Clickable and draggable, but deliberately *not* focusable. egui walks the
     // focusable widgets with the four directions on its own, and a tile is not
     // one of them: on the wall it is a channel that moves, not a widget, and
@@ -131,15 +126,14 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> (Response, bool) {
 
     // What a tile is, is its picture, drawn edge to edge: the line between two
     // tiles is the wall showing through the room the grid leaves around them,
-    // so a tile paints no border of its own and keeps no inset. The name, the
-    // stream and the decoder's numbers are read elsewhere, and whatever the
-    // wall draws over a picture is asked for with `show_stats`.
+    // so a tile paints no border of its own and keeps no inset. The only thing
+    // over the picture is the on-screen display the settings panel asked for.
     if tile.camera.is_none() {
         painter.rect_filled(rect, CornerRadius::ZERO, dim(theme::TILE_EMPTY));
         if tile.focused {
             ring(&painter, rect);
         }
-        return (response, false);
+        return response;
     }
 
     let body = rect;
@@ -212,30 +206,202 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> (Response, bool) {
         }
     }
 
-    // The decoder's own numbers, drawn over the picture and only when the
-    // viewer asked for them: a wall is watched, not read, and a small tile has
-    // no room for a line nobody is looking at. See `Tile::show_stats`.
-    if tile.show_stats && tier != Tier::Minimal {
-        if let Some(channel) = tile.channel {
-            painter.text(
-                body.right_bottom() - vec2(theme::space::S, 6.0),
-                Align2::RIGHT_BOTTOM,
-                format!("{:.1} fps  {:.0} kb/s", channel.fps, channel.bitrate_kbps),
-                FontId::monospace(11.0),
-                theme::TEXT_DIM.gamma_multiply(0.9),
-            );
-        }
-    }
-
-    // The aspect button, over the picture: a press on it cycles the tile's
-    // display mode rather than touching the channel.
-    let cycle_aspect = aspect_chip(ui, body, tile.id, tile.aspect, tile.interactive);
+    // The on-screen display, in the corners the settings panel chose. It goes
+    // over whatever the state left on the tile, so that a stream that failed
+    // still says which camera it is.
+    osd(&painter, body, tile);
 
     if tile.focused {
         ring(&painter, rect);
     }
 
-    (response, cycle_aspect)
+    response
+}
+
+/// Draws the four corners of a tile's on-screen display.
+fn osd(painter: &egui::Painter, body: Rect, tile: &Tile<'_>) {
+    let metrics = OsdMetrics::of(body);
+    for (item, align) in [
+        (tile.osd.top_left, Align2::LEFT_TOP),
+        (tile.osd.top_right, Align2::RIGHT_TOP),
+        (tile.osd.bottom_left, Align2::LEFT_BOTTOM),
+        (tile.osd.bottom_right, Align2::RIGHT_BOTTOM),
+    ] {
+        let lines = osd_lines(item, tile);
+        if !lines.is_empty() {
+            // A camera's name is what a viewer looks for first, while the
+            // measures around it are a detail: the two are not set at the same
+            // size.
+            let scale = match item {
+                OsdItem::Name | OsdItem::NumberName => NAME_SCALE,
+                _ => MEASURE_SCALE,
+            };
+            osd_corner(painter, body, align, tile.dim, &lines, &metrics, scale);
+        }
+    }
+}
+
+/// Text scale of a name, against the size the tile itself asks for.
+const NAME_SCALE: f32 = 1.2;
+/// Text scale of everything that is a measurement rather than a name.
+const MEASURE_SCALE: f32 = 0.8;
+
+/// Sizes of a tile's on-screen display, taken from the tile itself.
+///
+/// A wall is watched at every scale, from a single channel filling a television
+/// to sixteen cells on a phone: one size of text cannot serve both, and the
+/// display is the first thing to overrun a small cell. Everything scales with
+/// the tile's shorter side, capped at the size it has on a full tile so that a
+/// large screen does not end up with text across half the picture.
+struct OsdMetrics {
+    font: f32,
+    /// Distance kept from the tile's edge.
+    inset: f32,
+}
+
+impl OsdMetrics {
+    fn of(body: Rect) -> Self {
+        let min = body.width().min(body.height());
+        Self {
+            font: (min * 0.045).clamp(7.0, 12.0),
+            inset: (min * 0.0125).clamp(1.0, 4.0),
+        }
+    }
+}
+
+/// One line of a tile's on-screen display.
+struct OsdLine {
+    /// A dot drawn before the text, in a colour of its own.
+    dot: Option<Color32>,
+    text: String,
+}
+
+/// What one corner of a tile shows, in the order its lines are drawn.
+fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
+    let Some(camera) = tile.camera else {
+        return Vec::new();
+    };
+    let channel = tile.channel;
+    let hardware = if channel.is_some_and(|channel| channel.hardware) { "HW" } else { "SW" };
+    let link = || OsdLine {
+        dot: None,
+        text: format!(
+            "{} {:.0}kbps",
+            camera.transport.as_str(),
+            channel.map(|channel| channel.bitrate_kbps).unwrap_or(0.0)
+        ),
+    };
+    let fps = || OsdLine {
+        dot: None,
+        text: format!("{} {:.2}fps", hardware, channel.map(|channel| channel.fps).unwrap_or(0.0)),
+    };
+    let format = || OsdLine {
+        dot: None,
+        text: match channel.and_then(|channel| channel.width.zip(channel.height)) {
+            Some((width, height)) => format!("{}x{} {}", width, height, tile.aspect.short_label()),
+            None => format!("?x? {}", tile.aspect.short_label()),
+        },
+    };
+    match item {
+        OsdItem::Off => Vec::new(),
+        OsdItem::Name => vec![OsdLine { dot: None, text: camera.short_label(24) }],
+        OsdItem::NumberName => vec![OsdLine {
+            dot: None,
+            text: match tile.index {
+                Some(index) => format!("{} {}", index + 1, camera.short_label(22)),
+                None => camera.short_label(24),
+            },
+        }],
+        OsdItem::Stream => vec![OsdLine {
+            // The dot is the picture moving - the one question a wall of still
+            // images cannot answer from the images themselves.
+            dot: Some(match channel.map(|channel| channel.state) {
+                Some(ConnectionState::Streaming) => theme::LIVE,
+                _ => theme::TEXT_DIM,
+            }),
+            text: channel
+                .and_then(|channel| channel.stream)
+                .map(|stream| stream.tag().to_string())
+                .unwrap_or_else(|| "—".to_string()),
+        }],
+        OsdItem::Link => vec![link()],
+        OsdItem::Fps => vec![fps()],
+        OsdItem::Format => vec![format()],
+        OsdItem::Detail => vec![link(), fps(), format()],
+    }
+}
+
+/// Draws one corner's lines, growing away from the corner they belong to.
+fn osd_corner(painter: &egui::Painter, body: Rect, align: Align2, dim: bool, lines: &[OsdLine], m: &OsdMetrics, scale: f32) {
+    let size = m.font * scale;
+    let font = FontId::monospace(size);
+    // Leading and padding follow the text they belong to, so a scaled line
+    // keeps the proportions of an unscaled one.
+    let line = size * 1.25;
+    let pad = vec2(size * 0.35, size * 0.22);
+    let color = if dim { theme::TEXT.gamma_multiply(0.5) } else { theme::TEXT };
+    let left = matches!(align, Align2::LEFT_TOP | Align2::LEFT_BOTTOM);
+    let top = matches!(align, Align2::LEFT_TOP | Align2::RIGHT_TOP);
+    let anchor = if left { Align2::LEFT_TOP } else { Align2::RIGHT_TOP };
+    let corner = egui::pos2(
+        if left { body.left() + m.inset } else { body.right() - m.inset },
+        if top { body.top() + m.inset } else { body.bottom() - m.inset },
+    );
+
+    // The backdrop has to be the size of the text it sits behind, and how wide
+    // a line is only the font knows: every line is laid out once to measure it,
+    // and the room a leading dot takes is added to whichever corner has one.
+    let dot_lead = if lines.iter().any(|line| line.dot.is_some()) { size * 1.15 } else { 0.0 };
+    let text_width = lines
+        .iter()
+        .map(|line| painter.layout_no_wrap(line.text.clone(), font.clone(), color).size().x)
+        .fold(0.0_f32, f32::max);
+    let width = text_width + dot_lead;
+    let height = lines.len() as f32 * line;
+
+    // Anchored at its corner: the block hangs below the top edge or above the
+    // bottom one, so the corner keeps its place whatever the tile measures.
+    let (x0, y0) = if left {
+        (corner.x, if top { corner.y } else { corner.y - height })
+    } else {
+        (corner.x - width, if top { corner.y } else { corner.y - height })
+    };
+    let block = Rect::from_min_size(egui::pos2(x0, y0), vec2(width, height));
+    let backdrop = if dim { theme::OSD_BACKDROP.gamma_multiply(0.5) } else { theme::OSD_BACKDROP };
+    painter.rect_filled(block.expand2(pad).intersect(body), CornerRadius::same(theme::radius::S), backdrop);
+
+    for (row, entry) in lines.iter().enumerate() {
+        // The lines of a bottom corner stack upwards from the edge, so the
+        // first one keeps the corner and the rest grow into the picture.
+        let y = if top { corner.y + row as f32 * line } else { corner.y - (row as f32 + 1.0) * line };
+        let mut x = corner.x;
+        if let Some(dot) = entry.dot {
+            let lead = if left { dot_lead } else { -dot_lead };
+            painter.circle_filled(
+                egui::pos2(x + lead * 0.4, y + line * 0.5),
+                (size * 0.3).max(2.0),
+                dot,
+            );
+            x += lead;
+        }
+        outlined_text(painter, egui::pos2(x, y), anchor, &entry.text, font.clone(), color);
+    }
+}
+
+/// Text over a picture, with a dark edge so it stays readable on anything.
+fn outlined_text(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    align: Align2,
+    text: &str,
+    font: FontId,
+    color: Color32,
+) {
+    let edge = Color32::from_black_alpha(190);
+    for offset in [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0), vec2(0.0, 1.0)] {
+        painter.text(pos + offset, align, text, font.clone(), edge);
+    }
+    painter.text(pos, align, text, font, color);
 }
 
 /// Paints the newest decoded pictures of a live channel, or a placeholder while
@@ -286,31 +452,6 @@ fn fitted(source: Vec2, tile: Rect, aspect: TileAspect) -> Rect {
             Rect::from_center_size(tile.center(), source * scale)
         }
     }
-}
-
-/// The aspect button: the mode this tile is drawn in, and the press that moves
-/// it to the next one.
-///
-/// It is painted like the rest of the wall - a shape over the picture - and its
-/// interaction is registered after the tile's own, so a press on it cycles the
-/// mode instead of touching the channel. Returns `true` when it was pressed.
-fn aspect_chip(ui: &mut Ui, body: Rect, id: Id, aspect: TileAspect, interactive: bool) -> bool {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(aspect.label().to_owned(), FontId::monospace(11.0), Color32::PLACEHOLDER);
-    let size = galley.size() + vec2(2.0 * theme::space::S, 6.0);
-    let corner = body.left_bottom() + vec2(theme::space::S, -theme::space::S - size.y);
-    // A tile can be shorter than the chip: keep it inside the picture.
-    let chip = Rect::from_min_size(egui::pos2(corner.x, corner.y.max(body.top() + theme::space::S)), size);
-    {
-        let painter = ui.painter();
-        painter.rect_filled(chip, CornerRadius::ZERO, Color32::from_black_alpha(150));
-        painter.galley(chip.center() - galley.size() * 0.5, galley, theme::TEXT_DIM);
-    }
-    if !interactive {
-        return false;
-    }
-    ui.interact(chip, Id::new((id, "aspect")), Sense::click()).clicked()
 }
 
 /// Placeholder shown between `PLAY` and the first decoded picture.
