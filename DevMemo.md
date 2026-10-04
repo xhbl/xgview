@@ -781,3 +781,47 @@ before), and with all eight cameras the grid shows eight pictures - `cannot
 configure` none, `session failed` none, every channel decoding 27-49 pictures
 per two second window, plus the two MJPEG substreams.
 
+## 14. What egui remembers under a widget's id
+
+Two bugs on a SHIELD TV, both from the same property: the state egui keeps per
+widget is keyed by the widget's `Id`, and an `Id` here is a *position in the Ui
+tree*, not an identity. A form that is drawn again for other data - the camera
+edit dialog, once per camera - gives the same positions to different values.
+
+**The soft keyboard came up on a button.** It was raised by asking "is the
+focused widget a text field?" of the state egui exposes for exactly that: a
+`TextEditState` under the focused id means the widget is one -
+`TextEdit::load_state(ctx, focused).is_some()`, and a text field is the only
+widget that keeps one. But `TextEditState::store` uses
+`Data::insert_persisted`, so that state outlives the field for the whole
+process. Once a dialog with fields had been opened, the first camera row's
+transport button - an ordinary `small_button`, drawn at a position that answer
+had been stored for - said yes, and the remote raised the keyboard over the wall.
+
+It is asked of the navigation layer now, which is the application's own
+registry: a control is a field when it registered as `Kind::Text`. `Kind` is
+already the thing the arrow walk reads to know which keys a control keeps for
+itself, so the two agree by construction, and nothing else in the application
+can answer "yes" by accident. A `DragValue` has to count as well: egui hands its
+keyboard-edit mode a `TextEdit` (`widgets/drag_value.rs`), and on a device with
+no keyboard of its own that is where a number is typed.
+
+**The caret started in the middle of the next camera's name.** Same state, other
+field of it: `TextEditState` carries the cursor. egui places a caret only when
+the state has none - `default_cursor_range = CCursorRange::one(galley.end())`
+in `widgets/text_edit/builder.rs` - so the *first* dialog opened in a process
+put the caret after the last character, and every one after it inherited the
+character index the previous camera's editing had left behind: 2, in the middle
+of a longer name.
+
+The dialog drops the field's state as it appears, before the first frame the
+field is drawn with the focus. The request is made a frame earlier than that
+(the hand-off asks for the focus after the window has been drawn), so egui reads
+a clean state and applies its own default, with no frame in which the caret is
+seen to jump.
+
+The lesson both bugs share: anything egui keys on a widget's `Id` - text edit
+state, the cursor, a grid's column widths, a scroll area's offset - is shared
+between every use of that position. Reusing a form for other data reuses all of
+it, and `insert_persisted` means it is never cleaned up on its own.
+

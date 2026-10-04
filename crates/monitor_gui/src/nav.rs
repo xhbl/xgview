@@ -350,6 +350,15 @@ impl Nav {
         self.prev.get(&id).map(|slot| slot.kind).unwrap_or_default()
     }
 
+    /// The scope `id` belongs to, or `None` when this layer does not own it.
+    ///
+    /// The application asks this of the focused control when a direction press
+    /// is spent: it has to know *which* body the press died in before it can
+    /// move that body instead. See `XgViewApp::handle_keys`.
+    pub fn scope_of(&self, id: Id) -> Option<&'static str> {
+        self.prev.get(&id).map(|slot| slot.scope)
+    }
+
     /// Records a sideways press on the value control that has the focus.
     ///
     /// A value control is adjusted with Left and Right, which the arrow walk
@@ -523,6 +532,8 @@ mod tests {
 
         assert!(nav.owns(a));
         assert!(!nav.owns(Id::new("elsewhere")));
+        assert_eq!(nav.scope_of(a), Some("tabs"), "the scope a control was drawn under");
+        assert_eq!(nav.scope_of(Id::new("elsewhere")), None);
     }
 
     #[test]
@@ -627,8 +638,48 @@ mod tests {
         assert_eq!(nav.step(fold, Dir::Up), Some(above));
     }
 
-    /// A body taller than the window it is drawn in: every control the arrows
-    /// reach has to be brought into view, or the viewer walks blind.
+    /// The scroll `XgViewApp::settings_panel` asks a body for when the arrows
+    /// have nowhere left to go has to move it *down*.
+    ///
+    /// The sign is the wheel's, not the obvious one: `Ui::scroll_with_delta`
+    /// writes a value egui inverts again before it adds it to the offset, so a
+    /// positive y scrolls up and is clamped away at the top of a body - a
+    /// request that reports success and moves nothing.
+    #[test]
+    fn a_remote_scroll_of_a_body_moves_it() {
+        let ctx = Context::default();
+        let mut offset = 0.0f32;
+        let mut content = 0.0f32;
+        let mut view = 0.0f32;
+
+        for frame in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 120.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let out = egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if frame > 0 {
+                                ui.scroll_with_delta(egui::vec2(0.0, -100.0));
+                            }
+                            for line in 0..20 {
+                                ui.label(format!("line {line}"));
+                            }
+                        });
+                    offset = out.state.offset.y;
+                    content = out.content_size.y;
+                    view = out.inner_rect.height();
+                });
+            });
+        }
+
+        assert!(content > view, "nothing to scroll: content {content}, view {view}");
+        assert!(offset > 0.0, "the body did not move: offset {offset}");
+    }
+
     #[test]
     fn the_control_the_arrows_move_to_is_scrolled_into_view() {
         const CONTROLS: usize = 10;

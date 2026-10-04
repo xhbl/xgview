@@ -66,6 +66,16 @@ const EXIT_WINDOW: Duration = Duration::from_secs(2);
 const SETTINGS_WIDTH: f32 = 360.0;
 const SETTINGS_MIN_WIDTH: f32 = 300.0;
 
+/// How far a direction press scrolls the settings body when it has nowhere left
+/// to move the focus, as a fraction of the window's height.
+///
+/// The body is scrolled by moving the focus onto a control - see [`crate::nav`]
+/// - which leaves whatever follows the last control out of a remote's reach:
+/// the adb line, the table of keys. The press that walks off the end of the body
+/// moves the body instead, by a little less than a screenful so the viewer keeps
+/// the context of what has just left. See `body_scroll`.
+const REMOTE_SCROLL_FRACTION: f32 = 0.6;
+
 /// Side of the edit / remove buttons of a camera row, in points.
 ///
 /// Smaller than a toolbar button: a row is read as a line of text, and a
@@ -374,6 +384,12 @@ pub struct XgViewApp {
     settings_anchor: Option<Id>,
     /// The panel and the device window, watched for the frame they appear on.
     settings_handoff: Handoff,
+    /// A scroll asked for by a direction press that had nowhere left to move the
+    /// focus inside the settings body, in points.
+    ///
+    /// Set from `handle_keys` and spent as the body is drawn, which is the only
+    /// place egui reads a scroll request from. See [`REMOTE_SCROLL_FRACTION`].
+    body_scroll: Option<f32>,
     dialog_handoff: Handoff,
     discovery: DiscoveryUi,
     slide: Slide,
@@ -543,6 +559,7 @@ impl XgViewApp {
             settings_tab: SettingsTab::default(),
             settings_anchor: None,
             settings_handoff: Handoff::default(),
+            body_scroll: None,
             dialog_handoff: Handoff::default(),
             discovery,
             slide: Slide::default(),
@@ -1052,14 +1069,29 @@ impl XgViewApp {
 
     // ---------------------------------------------------------------- update
 
-    /// Whether a text field is being typed into.
+    /// Whether a control of this kind takes typed text while it has the focus.
     ///
-    /// egui does not answer this question directly, but a text field is the only
-    /// widget that keeps a [`egui::text_edit::TextEditState`], so a focused
-    /// widget with that state under its id is one.
-    fn typing(ctx: &egui::Context) -> bool {
+    /// A drag value is one of them: egui hands its keyboard-edit mode a
+    /// `TextEdit`, which on a device with no keyboard of its own is where a
+    /// number is typed. A slider is not - it has no text to type into.
+    fn types(kind: Kind) -> bool {
+        matches!(kind, Kind::Text | Kind::DragValue)
+    }
+
+    /// Whether a text field is being typed into, which is what the soft
+    /// keyboard follows.
+    ///
+    /// The navigation layer answers it: every text field in the application
+    /// registers itself as [`Kind::Text`], and nothing else does. The obvious
+    /// test - whether a [`egui::text_edit::TextEditState`] sits under the
+    /// focused id - is wrong, and wrong for the rest of the process: egui keeps
+    /// that state *persisted*, so an id that belonged to a field once keeps
+    /// answering yes for whatever else is drawn with it later. That is how the
+    /// keyboard came up on a television when the remote reached the transport
+    /// button of the first camera row.
+    fn typing(&self, ctx: &egui::Context) -> bool {
         ctx.memory(|memory| memory.focused())
-            .is_some_and(|focused| egui::TextEdit::load_state(ctx, focused).is_some())
+            .is_some_and(|focused| Self::types(self.nav.kind(focused)))
     }
 
     /// The room to leave before a row of buttons to put it in the middle.
@@ -1105,11 +1137,11 @@ impl XgViewApp {
     /// way it leaves the panel - otherwise the press falls through to the panel
     /// behind and closes that instead. A field with the focus keeps Backspace
     /// for its own text.
-    fn dialog_back_pressed(ctx: &egui::Context) -> bool {
+    fn dialog_back_pressed(&self, ctx: &egui::Context) -> bool {
         if Self::back_pressed(ctx) {
             return true;
         }
-        !Self::typing(ctx)
+        !self.typing(ctx)
             && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Backspace))
     }
 
@@ -1225,7 +1257,7 @@ impl XgViewApp {
         // it, whatever inside it has the focus. A field's caret must not hold it
         // open - Back on the first field would otherwise hand the focus back to
         // that same field, and the window could never be left.
-        if (self.camera_edit.is_some() || self.remove_confirm.is_some()) && Self::dialog_back_pressed(ctx) {
+        if (self.camera_edit.is_some() || self.remove_confirm.is_some()) && self.dialog_back_pressed(ctx) {
             if let Some(confirm) = self.remove_confirm.take() {
                 self.remove_confirm_anchor = None;
                 self.restore_focus = Some(confirm.from);
@@ -1271,7 +1303,10 @@ impl XgViewApp {
         } else {
             None
         };
-        let typing = Self::typing(ctx);
+        // The layer already knows what kind of control it focused, so a field
+        // is one that registered as a kind that takes typed text - the same
+        // answer `typing` gives at the end of the frame.
+        let typing = nav_kind.is_some_and(Self::types);
         if typing {
             // Back leaves the field; the arrows walk the form. Where a field
             // keeps its caret keys for itself - the bars and the wall - the
@@ -1476,6 +1511,16 @@ impl XgViewApp {
             if let (Some(dir), Some(focused)) = (dir, ctx.memory(|memory| memory.focused())) {
                 if let Some(target) = self.nav.step(focused, dir) {
                     ctx.memory_mut(|memory| memory.request_focus(target));
+                } else if dir == Dir::Down && self.nav.scope_of(focused) == Some("settings-body") {
+                    // The press had nowhere to move the focus, which is the
+                    // case at the end of a tab: what follows the last control -
+                    // the adb line, the table of keys - is text and has no
+                    // control to be walked onto. A remote has no wheel, so the
+                    // press moves the body instead. Asked for here rather than
+                    // applied here: only a scroll area that is being drawn reads
+                    // a scroll request, and this runs before anything is drawn.
+                    let points = ctx.screen_rect().height() * REMOTE_SCROLL_FRACTION;
+                    self.body_scroll = Some(points);
                 }
             }
         }
@@ -1788,19 +1833,43 @@ impl XgViewApp {
         // The body is one column of the navigation layer. See the "Add
         // devices" window for why sideways is spent inside a body.
         self.nav.open("settings-body");
-        let dirty = egui::ScrollArea::vertical()
+        let mut asked = None;
+        let output = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| match self.settings_tab {
-                SettingsTab::Display => self.settings_display(ui),
-                SettingsTab::Cameras => self.settings_cameras(ui),
-                SettingsTab::Streams => self.settings_streams(ui),
-                SettingsTab::System => self.settings_system(ui),
-                SettingsTab::About => {
-                    self.settings_about(ui);
-                    false
+            .show(ui, |ui| {
+                // The scroll a direction press asked for when it had nowhere to
+                // move the focus: it is spent here because this is the only
+                // place egui reads a scroll request from - see `body_scroll`.
+                if let Some(points) = self.body_scroll.take() {
+                    // Negative is downwards, the sign a wheel delta carries:
+                    // egui inverts the value again before adding it to the
+                    // offset, so a positive one here would scroll up and be
+                    // clamped away at the top. See the test in `crate::nav`.
+                    ui.scroll_with_delta(egui::vec2(0.0, -points));
+                    asked = Some(points);
                 }
-            })
-            .inner;
+                match self.settings_tab {
+                    SettingsTab::Display => self.settings_display(ui),
+                    SettingsTab::Cameras => self.settings_cameras(ui),
+                    SettingsTab::Streams => self.settings_streams(ui),
+                    SettingsTab::System => self.settings_system(ui),
+                    SettingsTab::About => {
+                        self.settings_about(ui);
+                        false
+                    }
+                }
+            });
+        if let Some(points) = asked {
+            tracing::debug!(
+                target: "xgview::gui",
+                points,
+                offset = output.state.offset.y,
+                content = output.content_size.y,
+                view = output.inner_rect.height(),
+                "the remote scrolled the settings body"
+            );
+        }
+        let dirty = output.inner;
         self.nav.close();
         if dirty {
             self.mark_dirty();
@@ -3094,6 +3163,14 @@ impl eframe::App for XgViewApp {
         if self.camera_edit_handoff.entering(self.camera_edit.is_some()) {
             self.swallow_enter = 10;
             if let Some(id) = self.camera_edit_anchor {
+                // The caret of a text field that has never been focused starts
+                // after its last character - but egui keeps the cursor in the
+                // *persisted* state the field's id carries, and this form's ids
+                // are the same for every camera. Left alone, the caret would sit
+                // wherever the previous camera's editing left it: in the middle
+                // of the next camera's name. Dropping the state hands the choice
+                // back to egui, which puts it at the end.
+                egui::TextEdit::store_state(ctx, id, Default::default());
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
@@ -3169,7 +3246,7 @@ impl eframe::App for XgViewApp {
         // themselves are already taken away from the field in `handle_keys`, so
         // its caret stays where it is either way.
         if let Some(focused) = focused {
-            if Self::typing(ctx) {
+            if self.typing(ctx) {
                 ctx.memory_mut(|memory| memory.set_focus_lock_filter(focused, egui::EventFilter::default()));
             }
         }
@@ -3199,7 +3276,7 @@ impl eframe::App for XgViewApp {
         #[cfg(target_os = "android")]
         {
             let focused = ctx.memory(|memory| memory.focused());
-            crate::keyboard::set_wanted(Self::typing(ctx), focused);
+            crate::keyboard::set_wanted(self.typing(ctx), focused);
         }
 
         let animation = self.needs_animation();
