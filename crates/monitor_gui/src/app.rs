@@ -1224,17 +1224,24 @@ impl XgViewApp {
             }
             // The rest belong to the application whatever has the focus, and
             // are consumed so that nothing downstream acts on them as well.
-            keys.page_prev = input.consume_key(none, Key::PageUp);
-            keys.page_next = input.consume_key(none, Key::PageDown);
             keys.settings = input.consume_key(none, Key::F1);
             keys.devices = input.consume_key(none, Key::F2);
             keys.fullscreen = input.consume_key(none, Key::F11);
-            keys.layout = [
-                input.consume_key(none, Key::Num1),
-                input.consume_key(none, Key::Num2),
-                input.consume_key(none, Key::Num3),
-                input.consume_key(none, Key::Num4),
-            ];
+            // The layout digits and the page keys are the exception: a field
+            // being typed into keeps them. An address is made of the digits -
+            // `192.168.1.4` - so consuming them changes the wall's shape under a
+            // viewer who was only naming a camera. The page keys are not text,
+            // but a page turning behind a dialog is the same surprise.
+            if !typing {
+                keys.page_prev = input.consume_key(none, Key::PageUp);
+                keys.page_next = input.consume_key(none, Key::PageDown);
+                keys.layout = [
+                    input.consume_key(none, Key::Num1),
+                    input.consume_key(none, Key::Num2),
+                    input.consume_key(none, Key::Num3),
+                    input.consume_key(none, Key::Num4),
+                ];
+            }
             keys
         });
 
