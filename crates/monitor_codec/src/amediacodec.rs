@@ -213,20 +213,72 @@ impl AMediaCodecDecoder {
         let config = self.config.clone();
         let mime = CString::new(config.codec.mime())
             .map_err(|err| CodecError::Configure(err.to_string()))?;
-        let codec = unsafe { AMediaCodec_createDecoderByType(mime.as_ptr()) };
-        if codec.is_null() {
-            return Err(CodecError::Unsupported(format!(
-                "AMediaCodec cannot create a decoder for {}",
-                config.codec
-            )));
-        }
-
         let (sps, pps) = parameter_sets(access_unit);
         // What the stream describes beats what the session announced, which is
         // only a hint for the buffers the decoder sizes up front.
         let size = sps
             .and_then(picture_size)
             .or(Some((config.width, config.height)).filter(|(w, h)| *w > 0 && *h > 0));
+
+        // Low latency is asked for first and given up only if the codec refuses
+        // the whole configuration over it. `ACodec` does not treat the option as
+        // a hint it may drop: HiSilicon's H.264 decoder answers
+        // `OMX_ErrorUndefined` to it and the configuration is lost, which the
+        // NDK reports as the same meaningless `-10000` it reports for a format
+        // the codec will not take at all. The public NDK has no way to ask a
+        // codec whether it supports the option - `AMediaCodecInfo` is not in it
+        // - so trying is what keeps the option on the decoders that do take it.
+        let mut low_latency = config.low_latency;
+        let codec = match Self::open_session(&mime, sps, pps, size, low_latency) {
+            Ok(codec) => codec,
+            Err(err) if low_latency => {
+                low_latency = false;
+                tracing::debug!(
+                    target: "xgview::codec",
+                    %err,
+                    "the decoder refused low latency; opening without it"
+                );
+                Self::open_session(&mime, sps, pps, size, false)?
+            }
+            Err(err) => return Err(err),
+        };
+
+        self.handle = Some(codec);
+        self.started = true;
+        // The size the stream describes is the one to report, not the one the
+        // session guessed at before any of it arrived.
+        if let (Some((width, height)), Some(info)) = (size, self.info.as_mut()) {
+            info.width = width;
+            info.height = height;
+        }
+        tracing::debug!(
+            target: "xgview::codec",
+            codec = config.codec.as_str(),
+            low_latency,
+            "AMediaCodec session open, decoding into byte buffers"
+        );
+        Ok(())
+    }
+
+    /// Creates, configures and starts one codec session, handing back the codec.
+    ///
+    /// A codec that failed to configure is released before the error comes back,
+    /// so a caller that wants to try again with a different format has nothing
+    /// to clean up.
+    fn open_session(
+        mime: &CString,
+        sps: Option<&[u8]>,
+        pps: Option<&[u8]>,
+        size: Option<(u32, u32)>,
+        low_latency: bool,
+    ) -> Result<*mut AMediaCodec> {
+        let codec = unsafe { AMediaCodec_createDecoderByType(mime.as_ptr()) };
+        if codec.is_null() {
+            return Err(CodecError::Unsupported(format!(
+                "AMediaCodec cannot create a decoder for {}",
+                mime.to_string_lossy()
+            )));
+        }
 
         let format = unsafe { AMediaFormat_new() };
         unsafe {
@@ -244,18 +296,20 @@ impl AMediaCodecDecoder {
                 AMediaFormat_setBuffer(format, c"csd-1".as_ptr(), pps.as_ptr().cast(), pps.len());
             }
             // Low latency: do not buffer more than one frame in the codec.
-            let latency = if config.low_latency { 1 } else { 0 };
-            AMediaFormat_setInt32(format, c"low-latency".as_ptr(), latency);
+            if low_latency {
+                AMediaFormat_setInt32(format, c"low-latency".as_ptr(), 1);
+            }
             AMediaFormat_setInt32(format, c"color-format".as_ptr(), COLOR_FORMAT_FLEXIBLE);
         }
 
         tracing::debug!(
             target: "xgview::codec",
-            codec = config.codec.as_str(),
-            width = config.width,
-            height = config.height,
+            mime = mime.to_string_lossy().as_ref(),
+            width = size.map(|(width, _)| width).unwrap_or(0),
+            height = size.map(|(_, height)| height).unwrap_or(0),
             sps = sps.map(|nal| nal.len()).unwrap_or(0),
             pps = pps.map(|nal| nal.len()).unwrap_or(0),
+            low_latency,
             "configuring the decoder"
         );
         // A null window is what asks for byte buffers instead of a surface.
@@ -272,21 +326,7 @@ impl AMediaCodecDecoder {
             unsafe { AMediaCodec_delete(codec) };
             return Err(CodecError::Configure("AMediaCodec_start failed".to_string()));
         }
-
-        self.handle = Some(codec);
-        self.started = true;
-        // The size the stream describes is the one to report, not the one the
-        // session guessed at before any of it arrived.
-        if let (Some((width, height)), Some(info)) = (size, self.info.as_mut()) {
-            info.width = width;
-            info.height = height;
-        }
-        tracing::debug!(
-            target: "xgview::codec",
-            codec = config.codec.as_str(),
-            "AMediaCodec session open, decoding into byte buffers"
-        );
-        Ok(())
+        Ok(codec)
     }
 
     /// Reads the picture geometry and colour description the codec announced.

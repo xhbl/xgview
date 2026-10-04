@@ -497,6 +497,39 @@ logcat (`adb logcat -s xgview`), and `monitor_android` no longer drops
 `run_android`'s error: the GL attempt above failed silently for exactly that
 reason before the logger existed.
 
+**A codec that will not take `low-latency` does not ignore it, it fails the whole
+configuration.** Measured on a Huawei GRL-AL10 (Kirin 970), against cameras the
+SHIELD decodes without complaint: every channel sat at `decoded=0 opening=N` with
+
+```text
+no picture yet, waiting for the first key frame index=0
+  err=decoder configuration failed: AMediaCodec_configure failed with status -10000
+```
+
+`-10000` is `AMEDIA_ERROR_UNKNOWN`, what the NDK reports for *any* refusal, so it
+names nothing - the failure had to be read out of the framework instead, with
+`log.tag.MediaCodec` and `log.tag.ACodec` set to `VERBOSE`:
+
+```text
+E OMXNodeInstance: setConfig(...:hisi.decoder.avc, ??(0x6f800006)) ERROR: Undefined(0x80001001)
+E ACodec  : decoder can not set low-latency to 1 (err -2147483648)
+E ACodec  : [OMX.hisi.video.decoder.avc] configureCodec returning error -2147483648
+```
+
+`ACodec` treats the option as part of the configuration rather than as a hint it
+may drop, and HiSilicon's decoder answers `OMX_ErrorUndefined` to it - so asking
+for low latency costs the whole session. The public NDK cannot be asked whether a
+codec supports it (`AMediaCodecInfo` is not in it; checked against NDK r27c's
+`media/` headers), so `monitor_codec::amediacodec` asks first and, when the
+configuration comes back refused, re-opens the session without the option - one
+extra failed configure per session on the devices that will not take it, logged as
+"the decoder refused low latency; opening without it". The SHIELD, whose decoder
+accepts it, keeps it: nine sessions opened with `low_latency=true` and no fallback.
+
+*Note for the next time a codec configure fails:* the verbose framework tags flood
+the logcat ring buffer within seconds, and the ordinary `tracing` lines that carry
+each channel's state are rolled out first. Set the tags back to `INFO` when done.
+
 ---
 
 ## 10. What the copies between the decoder and the GPU cost
