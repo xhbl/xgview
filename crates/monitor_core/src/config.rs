@@ -274,6 +274,15 @@ impl AppConfig {
 
     /// Adds a camera, or refreshes the streams of an already imported one.
     /// Returns the identifier of the stored entry.
+    ///
+    /// A refresh takes what the device reported - the urls, the credentials, the
+    /// vendor, the ONVIF profile tokens - and keeps what the user chose in this
+    /// application. The transport was already kept, because a camera switched to
+    /// UDP is a decision about a misbehaving relay and not something a re-import
+    /// knows better than the person who made it; the display mode and the tags
+    /// are the same kind of thing, and an import carries neither, so leaving
+    /// them to the incoming entry is what silently resets them to their
+    /// defaults. Enabled and the origin are kept for the same reason.
     pub fn upsert_camera(&mut self, camera: CameraSource) -> String {
         let identity = camera.identity();
         if let Some(existing) = self
@@ -284,10 +293,10 @@ impl AppConfig {
             let id = existing.id.clone();
             let origin = existing.origin;
             let enabled = existing.enabled;
-            // The transport is a user choice, not something a re-import may
-            // reset: a camera kept on UDP stays on UDP.
             let transport = existing.transport;
-            *existing = CameraSource { id: id.clone(), origin, enabled, transport, ..camera };
+            let aspect = existing.aspect;
+            let tags = existing.tags.clone();
+            *existing = CameraSource { id: id.clone(), origin, enabled, transport, aspect, tags, ..camera };
             return id;
         }
         let id = camera.id.clone();
@@ -448,5 +457,33 @@ mod tests {
 
         assert_ne!(main, sub);
         assert_eq!(config.cameras.len(), 2);
+    }
+
+    /// A re-import refreshes what the device reported and keeps what the user
+    /// chose here. The display mode and the tags are the ones an import carries
+    /// no value for, so they are the ones a wholesale replace reset.
+    #[test]
+    fn upsert_keeps_the_choices_an_import_cannot_make() {
+        use crate::model::{RtspTransport, TileAspect};
+
+        let mut config = AppConfig::default();
+        let id = config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
+        let camera = config.find_camera_mut(&id).unwrap();
+        camera.aspect = TileAspect::Ratio16x9;
+        camera.transport = RtspTransport::Udp;
+        camera.tags = vec!["gate".to_string()];
+        camera.enabled = false;
+
+        // What a discovery refresh hands in: the same device, its fields filled
+        // from the answer, and every choice above at its default.
+        let again = config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
+
+        assert_eq!(again, id);
+        assert_eq!(config.cameras.len(), 1);
+        let camera = config.find_camera(&id).unwrap();
+        assert_eq!(camera.aspect, TileAspect::Ratio16x9, "the display mode survives");
+        assert_eq!(camera.transport, RtspTransport::Udp, "the transport survives");
+        assert_eq!(camera.tags, vec!["gate".to_string()], "the tags survive");
+        assert!(!camera.enabled, "a camera switched off stays off");
     }
 }

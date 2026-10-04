@@ -386,6 +386,29 @@ impl CameraSource {
         self
     }
 
+    /// Writes back the fields an edit form owns, leaving the rest of the entry
+    /// as it is.
+    ///
+    /// A form is a handful of fields - name, urls, credentials - while an entry
+    /// carries more than a form shows: where it came from, the transport it was
+    /// switched to, how its picture is fitted into its tile, its tags, its ONVIF
+    /// profile tokens. Those are the user's or the device's, and the form has no
+    /// value to offer for them: it is built from [`CameraSource::new`], where
+    /// every one of them is a default. Replacing the entry wholesale with what
+    /// the form built is therefore what silently resets them.
+    ///
+    /// The host follows the main url, which is the only part of the address the
+    /// form can change. The ONVIF port is left alone: the form cannot name one,
+    /// and the entry's was discovered for this device.
+    pub fn apply_edit(&mut self, form: &CameraSource) {
+        self.name = form.name.clone();
+        self.rtsp_main = form.rtsp_main.clone();
+        self.rtsp_sub = form.rtsp_sub.clone();
+        self.username = form.username.clone();
+        self.password = form.password.clone();
+        self.host = form.host.clone();
+    }
+
     /// RTSP URL for the requested stream. Falls back to the main stream when no
     /// dedicated sub stream is configured, and vice versa.
     pub fn stream_uri(&self, kind: StreamKind) -> &str {
@@ -636,6 +659,36 @@ mod tests {
         assert_eq!(TileAspect::Original.ratio(), None, "the stream's own shape");
         assert_eq!(TileAspect::Ratio16x9.ratio(), Some(16.0 / 9.0));
         assert_eq!(TileAspect::Ratio1x1.ratio(), Some(1.0));
+    }
+
+    /// An edit form writes back only the fields it shows.
+    #[test]
+    fn an_edit_keeps_the_fields_the_form_does_not_show() {
+        let mut camera = CameraSource::new("front", "rtsp://10.0.0.1/main")
+            .with_sub("rtsp://10.0.0.1/sub")
+            .with_credentials("admin", "pw");
+        camera.aspect = TileAspect::Ratio16x9;
+        camera.transport = RtspTransport::Udp;
+        camera.tags = vec!["gate".to_string()];
+        camera.vendor = Some("FOSCAM".to_string());
+        camera.main_profile = Some("prof0".to_string());
+
+        // What the form builds on Save: a fresh camera, everything else default.
+        let mut form = CameraSource::new("front door", "rtsp://10.0.0.2/main");
+        form.rtsp_sub = Some("rtsp://10.0.0.2/sub".to_string());
+        form.username = Some("admin".to_string());
+        form.password = Some("pw".to_string());
+
+        camera.apply_edit(&form);
+
+        assert_eq!(camera.name, "front door");
+        assert_eq!(camera.rtsp_main, "rtsp://10.0.0.2/main");
+        assert_eq!(camera.host, "10.0.0.2", "the host follows the url it names");
+        assert_eq!(camera.aspect, TileAspect::Ratio16x9, "the display mode survives");
+        assert_eq!(camera.transport, RtspTransport::Udp, "the transport survives");
+        assert_eq!(camera.tags, vec!["gate".to_string()]);
+        assert_eq!(camera.vendor.as_deref(), Some("FOSCAM"));
+        assert_eq!(camera.main_profile.as_deref(), Some("prof0"));
     }
 
     #[test]
