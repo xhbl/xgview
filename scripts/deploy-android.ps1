@@ -52,19 +52,16 @@ if ($onPath) { $adb = $onPath.Source }
 if (-not (Test-Path $adb)) { throw "adb not found: $adb (put adb on PATH)" }
 
 if (-not $Apk) {
-    # The single APK of this version, whatever ABI it was built for - the name
-    # carries the ABI, and the caller should not have to repeat it here.
+    # The newest APK of this version, whatever ABI it was built for and
+    # whichever variant it is - the name carries both, and the caller should
+    # not have to repeat them. Release and debug builds can sit side by side,
+    # and the one just built is the one meant.
     $version = Get-AppVersion -Manifest (Join-Path $repoRoot 'Cargo.toml')
     $candidates = @(Get-ChildItem (Join-Path $repoRoot "target\xgview-$version-*.apk") -ErrorAction SilentlyContinue)
-    if ($candidates.Count -eq 1) {
-        $Apk = $candidates[0].FullName
-    }
-    elseif ($candidates.Count -eq 0) {
+    if ($candidates.Count -eq 0) {
         throw "no APK for version $version in target. Run scripts\build-android.ps1 first, or pass -Apk <path>."
     }
-    else {
-        throw "more than one APK for version ${version}: $($candidates.Name -join ', '). Pass -Apk <path>."
-    }
+    $Apk = ($candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
 }
 if (-not (Test-Path $Apk)) {
     throw "APK not found: $Apk."
