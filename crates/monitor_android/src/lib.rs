@@ -12,6 +12,9 @@
 /// logcat logger before anything can fail, so it reaches `adb logcat -s xgview`.
 #[cfg(target_os = "android")]
 #[no_mangle]
+// `AndroidApp` is not `repr(C)`, but this is the signature android-activity
+// looks up by name and calls; it cannot be changed from here.
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn android_main(app: android_activity::AndroidApp) {
     if let Err(error) = monitor_gui::run_android(app) {
         tracing::error!(target: "xgview", %error, "the viewer stopped");

@@ -102,7 +102,7 @@ pub fn drain(ctx: &egui::Context) {
 /// changes - see [`LAST`] for why the focused field is part of that.
 pub fn set_wanted(wanted: bool, focused: Option<Id>) {
     match LAST.lock() {
-        Ok(mut last) if *last == Some((wanted, focused)) => return,
+        Ok(last) if *last == Some((wanted, focused)) => return,
         Ok(mut last) => *last = Some((wanted, focused)),
         Err(_) => return,
     }

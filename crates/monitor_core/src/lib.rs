@@ -45,8 +45,53 @@ pub const APP_NAME: &str = "xgview";
 /// Human readable application name, used for window titles and UI labels.
 pub const APP_DISPLAY_NAME: &str = "XGView";
 
-/// Application author, shown in the about panel.
-pub const APP_AUTHOR: &str = "XHBL";
+/// Year the project started.
+///
+/// The copyright shows it on its own while the binary is built in that year,
+/// and as a range "start-build" once it is built in a later one. See
+/// [`copyright_years`].
+pub const APP_START_YEAR: i32 = 2026;
+
+/// The application author, split into the name and the address the manifest
+/// declares - `("XHBL", "newxhbl@hotmail.com")` for `XHBL <newxhbl@hotmail.com>`.
+///
+/// `CARGO_PKG_AUTHORS` joins several authors with `:`; the first one is used,
+/// which is the only one this project has. An entry without a `<address>` comes
+/// back with an empty address, so callers can fall back to plain text.
+pub fn author() -> (&'static str, &'static str) {
+    let first = env!("CARGO_PKG_AUTHORS").split(':').next().unwrap_or_default();
+    match first.split_once('<') {
+        Some((name, rest)) => (name.trim(), rest.trim().trim_end_matches('>').trim()),
+        None => (first.trim(), ""),
+    }
+}
+
+/// The `mailto:` link of the author, with a subject that names the program:
+/// `mailto:newxhbl@hotmail.com?subject=%5BXGView%5D%20Inquiry`.
+///
+/// The subject is `[XGView] Inquiry` with the brackets and the space
+/// percent-encoded. The display name it carries is plain, so it needs no
+/// escaping of its own.
+pub fn author_mailto() -> String {
+    let (_, email) = author();
+    format!("mailto:{email}?subject=%5B{APP_DISPLAY_NAME}%5D%20Inquiry")
+}
+
+/// The copyright years of this build, as one string.
+///
+/// The start year alone while the binary is built in it - `2026` - and a range
+/// once it is built later - `2026-2027`. The build year comes from `build.rs`,
+/// through `XGVIEW_BUILD_YEAR`; a build earlier than the start year (a skewed
+/// clock) still shows the start year alone.
+pub fn copyright_years() -> String {
+    let start = APP_START_YEAR;
+    let built: i32 = env!("XGVIEW_BUILD_YEAR").parse().unwrap_or(start);
+    if built <= start {
+        start.to_string()
+    } else {
+        format!("{start}-{built}")
+    }
+}
 
 /// Name of the JSON configuration file.
 pub const CONFIG_FILE_NAME: &str = "config.json";

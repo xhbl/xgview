@@ -12,7 +12,7 @@ use monitor_core::autostart;
 use monitor_core::config::AppConfig;
 use monitor_core::layout::GridLayout;
 use monitor_core::scheduler::Scheduler;
-use monitor_core::{APP_AUTHOR, APP_DISPLAY_NAME};
+use monitor_core::APP_DISPLAY_NAME;
 use monitor_gui::RunOptions;
 
 const HELP: &str = "\
@@ -42,7 +42,15 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if args.iter().any(|arg| arg == "-V" || arg == "--version") {
-        println!("{APP_DISPLAY_NAME} {} by {APP_AUTHOR}", env!("CARGO_PKG_VERSION"));
+        // Authors and version come from the manifest, the same source the about
+        // panel reads. `(c)` rather than `©`: a redirected log or a terminal
+        // without the glyph should still read.
+        println!(
+            "{APP_DISPLAY_NAME} {} by {} (c) {}",
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_AUTHORS"),
+            monitor_core::copyright_years()
+        );
         return Ok(());
     }
 
@@ -87,6 +95,8 @@ fn main() -> Result<()> {
         fullscreen,
         // Launched by the start-on-boot entry: the window is not focused.
         from_autostart: args.iter().any(|arg| arg == "--autostart"),
+        // The desktop opens a file dialog for the About tab's export / import.
+        export_dir: None,
     })
 }
 

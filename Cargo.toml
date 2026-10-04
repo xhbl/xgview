@@ -1,13 +1,16 @@
-[package]
+﻿[package]
 name = "xgview"
-version = "1.1.6"
-authors = ["XHBL <newxhbl@hotmail.com>"]
-description = "A grid viewer for surveillance cameras"
-license = "MIT"
-repository = "https://github.com/xhbl/RustApps/xgview"
+# Every value below is declared once, in `[workspace.package]`, and inherited
+# here and by each crate of the workspace. `name` and `readme` cannot be
+# inherited and stay local.
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
 readme = "README.md"
-edition = "2021"
-rust-version = "1.80"
+edition.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "xgview"
@@ -33,7 +36,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.6"
 authors = ["XHBL <newxhbl@hotmail.com>"]
 description = "A grid viewer for surveillance cameras"
 license = "MIT"
@@ -64,3 +67,4 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+

@@ -2,7 +2,9 @@
 name = "monitor_gui"
 version.workspace = true
 authors.workspace = true
-description = "XGView desktop/TV GUI: egui + wgpu grid viewer with pagination and DPAD focus navigation"
+# Inherited so that the About tab reads the application's own description from
+# the manifest, rather than keeping a copy of it in code.
+description.workspace = true
 license.workspace = true
 repository.workspace = true
 edition.workspace = true
@@ -32,6 +34,9 @@ monitor_codec = { path = "../monitor_codec" }
 # glow backend it would otherwise turn on itself.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { version = "0.32", features = ["accesskit", "glow", "wayland", "x11"] }
+# Native file dialogs for the configuration export / import of the About tab.
+# The default features are the desktop portal on Linux, so no GTK is pulled in.
+rfd = "0.17"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }

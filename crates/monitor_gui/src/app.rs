@@ -427,6 +427,16 @@ pub struct XgViewApp {
     /// closes would be a frame too late, once the panel has had its say. The
     /// request is kept and applied at the start of the next frame instead.
     restore_focus: Option<Id>,
+    /// Whether an import takes only the camera list, leaving the viewer's own
+    /// settings - layout, discovery, reconnect - as they are. Ticked by
+    /// default: taking the cameras alone is the import that cannot surprise a
+    /// machine that is already installed.
+    import_cameras_only: bool,
+    /// Directory the About tab's export and import use where there is no file
+    /// dialog to ask the viewer (Android), with
+    /// [`monitor_core::CONFIG_FILE_NAME`] inside it. `None` on the desktop,
+    /// which opens the system dialog instead.
+    export_dir: Option<PathBuf>,
     /// The camera the settings panel is editing, while its window is up.
     camera_edit: Option<CameraEdit>,
     /// First control of the edit window, to hand it the focus as it opens.
@@ -488,7 +498,7 @@ impl XgViewApp {
         fonts::install(&cc.egui_ctx);
         theme::install(&cc.egui_ctx);
 
-        let RunOptions { config, fullscreen, from_autostart, .. } = options;
+        let RunOptions { config, fullscreen, from_autostart, export_dir, .. } = options;
         let mut config = config;
         let autostart = autostart::status();
         if autostart.supported {
@@ -563,6 +573,8 @@ impl XgViewApp {
             reveal_next: None,
             swallow_enter: 0,
             restore_focus: None,
+            import_cameras_only: true,
+            export_dir,
             camera_edit: None,
             camera_edit_anchor: None,
             camera_edit_handoff: Handoff::default(),
@@ -1088,6 +1100,69 @@ impl XgViewApp {
         }
         !Self::typing(ctx)
             && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Backspace))
+    }
+
+    /// Opens a link the way the desktop does.
+    ///
+    /// egui would hand the URL to eframe, which opens it through the
+    /// `webbrowser` crate - and on Windows that crate always runs the *default
+    /// browser*, passing the URL to it as an argument. A `mailto:` therefore
+    /// reaches a browser tab instead of the mail client, because it never meets
+    /// the shell that resolves a protocol to its handler. The shell is asked
+    /// here instead: `ShellExecuteW` on Windows, and the desktop's opener
+    /// elsewhere.
+    #[cfg_attr(not(target_os = "android"), allow(unused_variables))]
+    fn open_link(ctx: &egui::Context, url: &str) {
+        #[cfg(windows)]
+        {
+            #[link(name = "shell32")]
+            extern "system" {
+                fn ShellExecuteW(
+                    hwnd: *mut core::ffi::c_void,
+                    operation: *const u16,
+                    file: *const u16,
+                    parameters: *const u16,
+                    directory: *const u16,
+                    show: i32,
+                ) -> *mut core::ffi::c_void;
+            }
+            fn wide(text: &str) -> Vec<u16> {
+                use std::os::windows::ffi::OsStrExt;
+                std::ffi::OsStr::new(text).encode_wide().chain(std::iter::once(0)).collect()
+            }
+            const SW_SHOWNORMAL: i32 = 1;
+            let operation = wide("open");
+            let file = wide(url);
+            // Safety: two NUL terminated wide strings that outlive the call,
+            // and null for the rest; the return value is only compared.
+            let opened = unsafe {
+                ShellExecuteW(
+                    std::ptr::null_mut(),
+                    operation.as_ptr(),
+                    file.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    SW_SHOWNORMAL,
+                )
+            };
+            // `ShellExecuteW` returns a value greater than 32 on success.
+            if opened as isize > 32 {
+                return;
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(url).spawn();
+            return;
+        }
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
+        {
+            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+            return;
+        }
+        // Android has no shell to ask; fall back to egui's own opener.
+        #[cfg(target_os = "android")]
+        ctx.open_url(egui::OpenUrl { url: url.to_owned(), new_tab: false });
     }
 
     /// Whether this frame carries input that is not a Back press.
@@ -1623,6 +1698,24 @@ impl XgViewApp {
                 ui.label(RichText::new(name).color(theme::FOCUS));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // Drawn right to left, so the copyright lands at the very right
+                // and the decoder just left of it. The author is a mailto link,
+                // the same one the about panel carries.
+                ui.label(
+                    RichText::new(format!("© {}", monitor_core::copyright_years()))
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                let (author, email) = monitor_core::author();
+                if email.is_empty() {
+                    ui.label(RichText::new(author).small().color(theme::TEXT_DIM));
+                } else {
+                    let link = ui.link(RichText::new(author).small());
+                    if link.clicked() {
+                        Self::open_link(ui.ctx(), &monitor_core::author_mailto());
+                    }
+                }
+                ui.separator();
                 ui.label(RichText::new(format!("decoder: {}", self.decoder)).small().color(theme::TEXT_DIM));
             });
         });
@@ -1782,6 +1875,29 @@ impl XgViewApp {
         }
         ui.label(RichText::new(format!("mechanism: {}", self.autostart.mechanism)).small().color(theme::TEXT_DIM));
         ui.label(RichText::new(&self.autostart.detail).small().color(theme::TEXT_DIM));
+
+        ui.add_space(theme::space::L);
+        ui.label(RichText::new("Keys").strong());
+        // One shortcut per row, the key in a monospace column of its own so the
+        // list reads down the keys and not across a line of dots.
+        egui::Grid::new("xgview-system-keys")
+            .num_columns(2)
+            .spacing([theme::space::L, theme::space::XS])
+            .show(ui, |ui| {
+                for (keys, action) in [
+                    ("DPAD / arrows", "move the focus"),
+                    ("Enter", "magnify the focused channel (1x1)"),
+                    ("Esc / Back", "back"),
+                    ("PgUp / PgDn", "previous / next page"),
+                    ("F1", "settings"),
+                    ("F2", "devices"),
+                    ("F11", "full screen"),
+                ] {
+                    ui.label(RichText::new(keys).monospace().strong());
+                    ui.label(RichText::new(action).small().color(theme::TEXT_DIM));
+                    ui.end_row();
+                }
+            });
 
         dirty
     }
@@ -2344,18 +2460,179 @@ impl XgViewApp {
         false
     }
 
-    /// Version, decoder, and where the configuration lives.
+    /// What the program is, where its configuration lives, and the export /
+    /// import of that configuration.
     fn settings_about(&mut self, ui: &mut egui::Ui) {
-        ui.label(format!("{} {}", monitor_core::APP_DISPLAY_NAME, env!("CARGO_PKG_VERSION")));
-        ui.label(format!("author: {}", monitor_core::APP_AUTHOR));
+        // Description, version and authors come from the manifest, declared
+        // once in `[workspace.package]` and inherited by every crate, so the
+        // about panel cannot drift from Cargo.toml. The name is the display
+        // name, not the crate name (this crate is `monitor_gui`).
+        ui.label(format!("{}: {}", monitor_core::APP_DISPLAY_NAME, env!("CARGO_PKG_DESCRIPTION")));
+        // The author is a mailto link, with the version and the copyright years
+        // either side of it so the line still reads as one sentence. The years
+        // are the ones the binary was built in; see `copyright_years`.
+        let (author, email) = monitor_core::author();
+        ui.horizontal(|ui| {
+            ui.label(format!("v{} by", env!("CARGO_PKG_VERSION")));
+            if email.is_empty() {
+                ui.label(author);
+            } else {
+                // `Ui::link` rather than `hyperlink_to`: the click is opened
+                // through the shell here, so a `mailto:` reaches the mail
+                // client. See `open_link`.
+                let link = ui.link(format!("{author} <{email}>"));
+                self.nav.item(&link);
+                self.name(&link, "Author");
+                if link.clicked() {
+                    Self::open_link(ui.ctx(), &monitor_core::author_mailto());
+                }
+            }
+            ui.label(format!("· © {}", monitor_core::copyright_years()));
+        });
         ui.label(format!(
             "decoder: {} ({})",
             self.decoder,
             if self.hardware_decoder { "hardware decoding available" } else { "software decoding only" }
         ));
         ui.label(format!("config: {}", self.config_path.display()));
+
+        // The export / import pair. The desktop opens a file dialog for it; on
+        // Android, where there is none, it works on a fixed file - see
+        // `export_dir` - and the hint says where that is.
         ui.add_space(theme::space::M);
-        ui.label(RichText::new("DPAD, or the arrow keys: move · Enter: 1x1 · Esc or Back: back · PgUp / PgDn: page · F1: settings · F2: devices · F11: full screen").small().color(theme::TEXT_DIM));
+        let export = ui.button("Export…");
+        self.nav.item(&export);
+        self.name(&export, "Export configuration");
+        if export.clicked() {
+            self.export_config();
+        }
+        ui.horizontal(|ui| {
+            let import = ui.button("Import…");
+            self.nav.item(&import);
+            self.name(&import, "Import configuration");
+            if import.clicked() {
+                self.import_config();
+            }
+            let only = ui.checkbox(&mut self.import_cameras_only, "Only import the cameras");
+            self.nav.item(&only);
+            self.name(&only, "Only import the cameras");
+        });
+        ui.label(RichText::new(self.import_hint()).small().color(theme::TEXT_DIM));
+    }
+
+    /// The fixed file an export and an import use where there is no file dialog
+    /// to ask the viewer: `config.json` inside an `xgview` folder of
+    /// [`Self::export_dir`]. `None` on the desktop, which has the dialog and no
+    /// fixed file. Writing the file creates the folder
+    /// ([`monitor_core::config::AppConfig::save`] makes the parent directory).
+    fn fixed_config_path(&self) -> Option<PathBuf> {
+        Some(
+            self.export_dir
+                .as_ref()?
+                .join(monitor_core::APP_NAME)
+                .join(monitor_core::CONFIG_FILE_NAME),
+        )
+    }
+
+    /// What the export / import pair does, and - where there is no dialog to
+    /// choose a file - the fixed file it uses.
+    fn import_hint(&self) -> String {
+        let body = "Import replaces the cameras of this configuration with the ones in the \
+                    file, and the file is written over the current configuration. Tick the box \
+                    to take the cameras alone and keep this viewer's own settings - the grid \
+                    layout, discovery, reconnect.";
+        match self.fixed_config_path() {
+            Some(path) => {
+                format!("Export writes {}, and import reads it back. {body}", path.display())
+            }
+            None => body.to_string(),
+        }
+    }
+
+    /// Where an export is written: the file the viewer picks.
+    #[cfg(not(target_os = "android"))]
+    fn export_target(&self) -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .set_file_name(monitor_core::CONFIG_FILE_NAME)
+            .add_filter("JSON", &["json"])
+            .save_file()
+    }
+
+    /// Where an export is written: the fixed file, there being no dialog.
+    #[cfg(target_os = "android")]
+    fn export_target(&self) -> Option<PathBuf> {
+        self.fixed_config_path()
+    }
+
+    /// The file an import is read from: the one the viewer picks.
+    #[cfg(not(target_os = "android"))]
+    fn import_source(&self) -> Option<PathBuf> {
+        rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file()
+    }
+
+    /// The file an import is read from: the fixed one, and only if it is there.
+    #[cfg(target_os = "android")]
+    fn import_source(&self) -> Option<PathBuf> {
+        self.fixed_config_path().filter(|path| path.exists())
+    }
+
+    /// Writes the current configuration to a file the viewer picks.
+    fn export_config(&mut self) {
+        let Some(path) = self.export_target() else {
+            return;
+        };
+        match self.config.save(&path) {
+            Ok(()) => {
+                self.flash(format!("configuration exported to {}", path.display()), ToastKind::Info)
+            }
+            Err(error) => self.flash(format!("cannot export: {error}"), ToastKind::Error),
+        }
+    }
+
+    /// Reads a configuration file into the running one.
+    ///
+    /// The cameras of the file replace this viewer's, and the result is written
+    /// back over this installation's configuration on the next save. With the
+    /// "only the cameras" box ticked nothing else is taken from the file.
+    fn import_config(&mut self) {
+        let Some(path) = self.import_source() else {
+            // A fixed path with no file there is worth saying: the viewer has no
+            // dialog to look at and nothing happened. A cancelled dialog is not.
+            if let Some(missing) = self.fixed_config_path() {
+                let message = format!("no file to import at {}", missing.display());
+                self.flash(message, ToastKind::Error);
+            }
+            return;
+        };
+        match AppConfig::load(&path) {
+            Ok(imported) => {
+                let count = imported.cameras.len();
+                if self.import_cameras_only {
+                    self.config.cameras = imported.cameras;
+                } else {
+                    // Everything is taken from the file, but the path this
+                    // installation reads and writes stays its own - it is a
+                    // field of the app, not of the configuration. The wall
+                    // follows the imported layout, page and focus, so the
+                    // scheduler is rebuilt the way start-up builds it.
+                    self.config = imported;
+                    self.scheduler = Scheduler::new(
+                        self.config.layout,
+                        self.config.page,
+                        self.config.focus,
+                        self.config.enabled_count(),
+                    );
+                }
+                self.config.normalize();
+                self.needs_sync = true;
+                self.mark_dirty();
+                self.flash(
+                    format!("imported {count} camera(s) from {}", path.display()),
+                    ToastKind::Info,
+                );
+            }
+            Err(error) => self.flash(format!("cannot import: {error}"), ToastKind::Error),
+        }
     }
 
     fn current_view(&self, total: usize) -> PageView {

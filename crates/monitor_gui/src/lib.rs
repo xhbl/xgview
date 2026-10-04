@@ -45,6 +45,11 @@ pub struct RunOptions {
     pub fullscreen: bool,
     /// The process was started by the start-on-boot registration.
     pub from_autostart: bool,
+    /// Directory the About tab's export and import use where there is no file
+    /// dialog to ask the viewer (Android): the fixed file
+    /// [`monitor_core::CONFIG_FILE_NAME`] inside it. `None` on the desktop,
+    /// which opens the system dialog instead.
+    pub export_dir: Option<PathBuf>,
 }
 
 impl RunOptions {
@@ -216,6 +221,12 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
     if let Some(dir) = app.internal_data_path() {
         std::env::set_var("XGVIEW_HOME", dir);
     }
+    // The About tab there has no file dialog to open, so its export and import
+    // use a fixed file. The app-specific external directory is the one to use:
+    // writing needs no permission, and a file manager or `adb pull`/`push` can
+    // reach it, which the private internal directory does not allow. Without
+    // external storage mounted, the internal directory is the fallback.
+    let export_dir = app.external_data_path().or_else(|| app.internal_data_path());
     let config_path = AppConfig::default_path();
     let config = AppConfig::load_or_default(&config_path);
     let options = RunOptions {
@@ -223,6 +234,7 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
         config_path: Some(config_path.clone()),
         fullscreen: true,
         from_autostart: true,
+        export_dir,
     };
 
     let mut native = native_options(true);

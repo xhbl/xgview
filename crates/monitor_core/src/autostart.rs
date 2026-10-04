@@ -13,6 +13,9 @@
 use std::path::PathBuf;
 
 use crate::error::{CoreError, Result};
+// Only the Windows registry and the XDG desktop entry below use the display
+// name; on Android there is neither, and the import would be unused.
+#[cfg(any(windows, all(unix, not(target_os = "android"))))]
 use crate::APP_DISPLAY_NAME;
 
 /// Result of a start-on-boot query.
