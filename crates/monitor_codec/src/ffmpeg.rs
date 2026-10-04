@@ -282,14 +282,43 @@ unsafe extern "C" fn forward_log(
     }
     let message = CStr::from_ptr(line.as_ptr()).to_string_lossy();
     let message = message.trim_end();
+    // The levels are mapped onto ours so that libavcodec's own diagnoses keep
+    // their weight. Its ERROR is the only place some failures are ever named -
+    // a hardware decoder that will not set up says so here and nowhere else -
+    // and a level below `warn` is a level a viewer never reads.
     match level {
         ffmpeg::ffi::AV_LOG_PANIC | ffmpeg::ffi::AV_LOG_FATAL => {
             tracing::error!(target: "xgview::codec", "{message}")
         }
-        ffmpeg::ffi::AV_LOG_ERROR | ffmpeg::ffi::AV_LOG_WARNING => {
+        ffmpeg::ffi::AV_LOG_ERROR => tracing::warn!(target: "xgview::codec", "{message}"),
+        ffmpeg::ffi::AV_LOG_WARNING => tracing::info!(target: "xgview::codec", "{message}"),
+        // INFO and VERBOSE carry the setup detail - which adapter, which
+        // decoder, what the driver answered - and are what a decoder that
+        // misbehaves is diagnosed with.
+        ffmpeg::ffi::AV_LOG_INFO | ffmpeg::ffi::AV_LOG_VERBOSE => {
             tracing::debug!(target: "xgview::codec", "{message}")
         }
         _ => tracing::trace!(target: "xgview::codec", "{message}"),
+    }
+}
+
+/// How much of libavcodec's own logging is kept, asked for in
+/// `XGVIEW_FFMPEG_LEVEL`.
+///
+/// `info` - the default - is where the library names a failure it cannot
+/// handle. `verbose` and `debug` add the setup detail a decoder that will not
+/// take the hardware path is diagnosed with: which adapter was chosen, what the
+/// driver answered, which pixel format was refused. They cost a line or two per
+/// decoder rather than per frame, but they are not what a healthy machine needs
+/// in its log, so they are asked for rather than always on.
+fn log_level() -> c_int {
+    match std::env::var("XGVIEW_FFMPEG_LEVEL").unwrap_or_default().to_ascii_lowercase().as_str() {
+        "trace" => ffmpeg::ffi::AV_LOG_TRACE,
+        "debug" => ffmpeg::ffi::AV_LOG_DEBUG,
+        "verbose" => ffmpeg::ffi::AV_LOG_VERBOSE,
+        "warning" => ffmpeg::ffi::AV_LOG_WARNING,
+        "error" => ffmpeg::ffi::AV_LOG_ERROR,
+        _ => ffmpeg::ffi::AV_LOG_INFO,
     }
 }
 
@@ -310,7 +339,7 @@ fn init() -> Result<()> {
         // left at the default because the default writes to `stderr`; the level
         // is what bounds how much reaches it.
         unsafe {
-            ffmpeg::ffi::av_log_set_level(ffmpeg::ffi::AV_LOG_INFO);
+            ffmpeg::ffi::av_log_set_level(log_level());
             ffmpeg::ffi::av_log_set_callback(Some(forward_log));
         }
     });
@@ -433,6 +462,9 @@ fn open_device(wanted: bool) -> Option<(&'static Device, *mut ffmpeg::ffi::AVBuf
     if !wanted {
         return None;
     }
+    // Kept for the warning below: which device failed, and with what, is the
+    // whole of the answer when no device opens.
+    let mut last: Option<(&'static Device, std::ffi::c_int)> = None;
     for device in DEVICES {
         let mut handle: *mut ffmpeg::ffi::AVBufferRef = std::ptr::null_mut();
         // Safety: the call only writes the out parameter, and a null device
@@ -464,10 +496,13 @@ fn open_device(wanted: bool) -> Option<(&'static Device, *mut ffmpeg::ffi::AVBuf
             code,
             "device turned the hardware decoder down"
         );
+        last = Some((device, code));
     }
-    if !DEVICES.is_empty() {
+    if let Some((device, code)) = last {
         tracing::warn!(
             target: "xgview::codec",
+            device = device.name,
+            code,
             "no device for the hardware decoder, decoding on the cpu"
         );
     }
@@ -655,10 +690,33 @@ impl VideoDecoder for FfmpegDecoder {
             }
         }
 
-        let decoder = context
-            .decoder()
-            .video()
-            .map_err(|err| CodecError::Configure(format!("ffmpeg: {err}")))?;
+        // Three outcomes have to be told apart here, because they mean three
+        // different things about the machine and only one of them is a limit
+        // nobody can lift:
+        //
+        // * no device at all - `open_device` has already said so, and the codec
+        //   opens on the CPU;
+        // * a device, and the codec opens: the GPU is decoding;
+        // * a device, and the codec refuses. That refusal is the driver
+        //   declining a session - its count of concurrent decoders is full, or
+        //   it will not decode this stream - and it is worth naming, because
+        //   "cannot configure the decoder" on its own reads like a bad stream.
+        let decoder = match context.decoder().video() {
+            Ok(decoder) => decoder,
+            Err(err) => {
+                if let Some((device, _)) = device {
+                    tracing::warn!(
+                        target: "xgview::codec",
+                        device = device.name,
+                        %err,
+                        "the device opened but the decoder was refused: the \
+                         driver declined the session, which is what its limit on \
+                         concurrent hardware decoders looks like"
+                    );
+                }
+                return Err(CodecError::Configure(format!("ffmpeg: {err}")));
+            }
+        };
 
         self.codec = config.codec;
         self.decoder = Some(decoder);

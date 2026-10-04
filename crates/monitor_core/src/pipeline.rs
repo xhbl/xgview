@@ -18,7 +18,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
-use monitor_codec::sps::picture_size;
+use monitor_codec::sps;
 use monitor_codec::{Codec, ColorSpace, DecodedFrame, DecoderConfig, VideoDecoder};
 
 use crate::config::ReconnectPolicy;
@@ -800,7 +800,7 @@ async fn run_session(
     // read from there when the SDP itself did not name one.
     if width.is_none() || height.is_none() {
         if let Some((sps_width, sps_height)) =
-            parameter_sets.iter().find_map(|nal| picture_size(nal))
+            parameter_sets.iter().find_map(|nal| sps::picture_size(nal))
         {
             width = width.or(Some(sps_width));
             height = height.or(Some(sps_height));
@@ -822,6 +822,13 @@ async fn run_session(
         index,
         codec = ?codec,
         resolution = ?video.and_then(|track| track.resolution()),
+        // The size the decoder is actually opened with: `a=framesize` when the
+        // SDP carried one, the sequence parameter set's when it did not, and
+        // nothing when neither did. A hardware hwaccel is set up at open time,
+        // and a decoder opened without a size is one it can refuse - which is
+        // why this is worth a field of its own rather than left to the SDP's
+        // optional answer.
+        size = ?width.zip(height),
         decoder = ?decoder.as_ref().map(|decoder| decoder.name()),
         // The parameter sets the SDP advertised, by NAL type and length. A
         // camera whose SDP carries none is served from the stream, which has to
@@ -880,6 +887,18 @@ async fn run_session(
     let mut slowest_decode = Duration::ZERO;
     let mut window_start = Instant::now();
     let mut announced = false;
+    // The stream's own parameter set, logged once per session. It is the only
+    // place the profile, the level, the chroma sampling and the bit depth
+    // appear, and a hardware decoder that turns a stream down is otherwise a
+    // refusal with no visible cause.
+    let mut sps_logged = false;
+    // Whether the stream declares Baseline without the constrained flag, which
+    // is the one declaration the hardware decoder has no mode for and the
+    // software one takes as it is. Decided once, from the first parameter set
+    // the stream carries, and applied to every access unit after that - see
+    // `sps::constrain_baseline`.
+    let mut constrain_baseline = false;
+    let mut constrain_decided = false;
     // The server announces how much silence it tolerates. The probe is sent
     // before the read, never after: a check placed after a blocking read is
     // starved for as long as the camera stays quiet.
@@ -1023,9 +1042,62 @@ async fn run_session(
                     // timestamp change released, and the one its marker closed.
                     let units = depacketizer.push(&header, payload);
                     let completed_none = units.is_empty();
-                    for unit in units {
+                    for mut unit in units {
                         window_units += 1;
                         window_unit_bytes += unit.data.len() as u64;
+                        // Once per session, from the first access unit that
+                        // carries a parameter set of its own: a camera whose
+                        // SDP advertised none only ever says what it is here.
+                        if !sps_logged {
+                            if let Some(nal) = sps::access_unit_sps(&unit.data) {
+                                if let Some(info) = sps::sps_info(nal) {
+                                    // What a hardware decoder screens the
+                                    // stream on: a profile or level it does not
+                                    // implement, a chroma sampling other than
+                                    // 4:2:0, more than eight bits per sample, a
+                                    // set carrying scaling matrices. One line
+                                    // per session, and the first place to look
+                                    // when a channel decodes on the CPU.
+                                    tracing::debug!(
+                                        target: "xgview::pipeline",
+                                        index,
+                                        profile = info.profile,
+                                        level = info.level,
+                                        chroma = info.chroma,
+                                        bit_depth = info.bit_depth,
+                                        scaling_matrices = info.scaling_matrices,
+                                        size = ?info.size,
+                                        "stream parameter set"
+                                    );
+                                    sps_logged = true;
+                                }
+                            }
+                        }
+                        // A stream that calls itself plain Baseline is one the
+                        // hardware decoder has no mode for; the flag that says
+                        // otherwise is set before the picture is handed over.
+                        // Decided from the first parameter set, so the healthy
+                        // majority of streams is never touched at all.
+                        if !constrain_decided {
+                            if let Some(nal) = sps::access_unit_sps(&unit.data) {
+                                constrain_baseline = sps::needs_constrained_baseline(nal);
+                                constrain_decided = true;
+                                if constrain_baseline {
+                                    // Said out loud: the channel is about to be
+                                    // decoded from bytes the camera did not
+                                    // send.
+                                    tracing::info!(
+                                        target: "xgview::pipeline",
+                                        index,
+                                        "declaring the stream's baseline profile as constrained, \
+                                         which is what the hardware decoder asks of it"
+                                    );
+                                }
+                            }
+                        }
+                        if constrain_baseline {
+                            sps::constrain_baseline(&mut unit.data);
+                        }
                         stall.observe(unit.keyframe, Instant::now());
                         let started = Instant::now();
                         let decoded = decoder.decode(&unit.data, unit.pts_us(), unit.keyframe);

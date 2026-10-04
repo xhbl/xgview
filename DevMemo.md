@@ -87,6 +87,12 @@ Three checks settled it, in this order:
 `ffprobe -hide_banner -rtsp_transport tcp -i <url>` is worth running first: it
 prints the codec, profile, pixel format and resolution the decoder will see.
 
+**Check what your own log forwarding drops.** Every libavcodec message goes
+through one callback, and mapping its `AV_LOG_ERROR` down to `debug` is enough
+to hide the only line that names a hardware-decoder refusal: a `WARN | ERROR`
+grep comes back empty, and the search moves on to the wrong suspect. Ours did
+exactly that for a whole afternoon.
+
 Keep a per session trace of the first N packets behind a counter while chasing
 something like this, then delete it. The traces in `pipeline.rs` that name the
 interleaved channel, the NAL type, the marker bit and the RTP timestamp found
@@ -105,6 +111,7 @@ this bug; they are noise once the session is understood.
 | Several | Set the RTP marker bit on the packets carrying parameter sets rather than on the last slice, so pictures also have to be closed by a change of RTP timestamp. |
 | FOSCAM R2 V4 | Sends around thirty pictures before its first `IDR`. A decoder rejects every one of them for want of a reference frame, so the first second of a session is a burst of failures that clears itself — see §4 for what that does to libavcodec's output. |
 | Reolink doorbell | Does not really serve four concurrent sessions. With four open the stream degrades to a picture every six to eight seconds where it runs at fifteen, and the fourth suffers first. Nothing is refused and nothing is reported — see §8. |
+| FOSCAM MCS2021, and one unbranded `IP-Camera` | Declare the Baseline profile *without* `constraint_set1_flag`, a declaration the Direct3D 11 decoder has no mode for. Both streams of both cameras decode on the CPU until the flag is set for them — see §7. |
 
 ---
 
@@ -309,6 +316,55 @@ bottleneck, the result is a hardware path that measures no faster than the
 software one and sometimes slower. Use the environment to prove the path opens,
 the fallback is reached when it does not, and the pictures are right. Take the
 numbers from the machine the program will actually run on.
+
+### A stream the hardware decoder will not take
+
+Nine channels on an N5105: seven decoded on the GPU and two on the CPU, with
+nothing about the two pictures to say why. The trail, because it is the one to
+walk again:
+
+1. **Not a device limit.** Nine `av_hwdevice_ctx_create` calls, nine successes;
+   `no device for the hardware decoder` never logged, every decoder configured.
+   Whatever was happening was inside libavcodec, not at our `open_device`.
+2. **Not concurrency.** One of the two channels run alone in an otherwise empty
+   grid still came up on the CPU, and so did both its streams. A limit on
+   concurrent sessions would have cleared.
+3. **Not the fields a decoder screens.** Read out of the sequence parameter
+   set: profile, level, chroma, bit depth, frame_num period, POC type,
+   reference count, VUI. A working camera matched a failing one on all of them
+   but `pic_order_cnt_type` - and a second working camera shared that too.
+4. **The bytes.** The two sets differed in their third byte, the constraint
+   flags, and that was the whole of it.
+
+`ff_h264_get_profile` (`libavcodec/h264_parse.c`) reads `profile_idc` 66 as
+`CONSTRAINED_BASELINE` **only when `constraint_set1_flag` is set**; without it
+the stream is plain `BASELINE`. And the Direct3D 11 / DXVA mode table
+(`libavcodec/dxva2.c`, `prof_h264_high[]`) matches three profiles and no more:
+`CONSTRAINED_BASELINE`, `MAIN`, `HIGH`. So a camera declaring plain Baseline
+finds no mode at all, `dxva_get_decoder_guid` fails, the hwaccel initialisation
+fails, and libavcodec falls back to the software decoder - reporting it at
+*error* level as `Failed setup for format d3d11: hwaccel initialisation returned
+error`, which our log forwarding was dropping to `debug` (see §2).
+
+**What we do about it.** `monitor_codec::sps::constrain_baseline` sets that one
+bit in the sequence parameter sets handed to the decoder, decided once per
+session from the first parameter set the stream carries and applied to every
+access unit after it. The flag declares that the stream obeys the constraints of
+the Main profile - no arbitrary slice order, no flexible macroblock ordering, no
+redundant slices - which is true of every stream here and is what the camera
+should have said itself. The pictures are untouched. A stream that did use those
+features could not be hardware decoded whatever the flag says, which is why they
+are not in the mode list to begin with; and the healthy majority of channels is
+never touched at all. The change is announced at `info`, because decoding from
+bytes the camera did not send is not something to do quietly.
+
+**Two facts about where the failure lands.** The profile comes from the
+*stream*, not from the configuration, and `ff_get_format` runs after the
+sequence parameter set is parsed (`h264_slice.c`) - so nothing the SDP says, a
+size or a profile or a hint, has any bearing on whether the hardware path is
+taken. When a channel decodes on the CPU for no visible reason, run with
+`RUST_LOG=xgview::pipeline=debug,xgview::codec=debug` and read the `stream
+parameter set` line first.
 
 ---
 
