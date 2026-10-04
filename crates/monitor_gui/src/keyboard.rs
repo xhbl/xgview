@@ -169,3 +169,14 @@ pub fn java_backspace(count: jint) {
 pub fn java_enter() {
     push(Typed::Enter);
 }
+
+/// The activity's class, so that another Android-side helper can call into it -
+/// see [`crate::android`]. `None` until the activity has reported itself ready.
+pub(crate) fn activity_class() -> Option<&'static GlobalRef> {
+    ACTIVITY.get()
+}
+
+/// The Java VM, as above.
+pub(crate) fn vm() -> Option<&'static JavaVM> {
+    VM.get()
+}

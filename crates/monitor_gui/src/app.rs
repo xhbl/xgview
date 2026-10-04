@@ -367,6 +367,9 @@ pub struct XgViewApp {
     video: VideoRenderer,
     events_tx: Sender<BackgroundEvent>,
     events_rx: Receiver<BackgroundEvent>,
+    /// Start-on-boot state as the desktop start-up section reports it; the
+    /// Android section shows the system's own state instead and never reads it.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     autostart: AutostartStatus,
     decoder: &'static str,
     hardware_decoder: bool,
@@ -437,6 +440,14 @@ pub struct XgViewApp {
     /// [`monitor_core::CONFIG_FILE_NAME`] inside it. `None` on the desktop,
     /// which opens the system dialog instead.
     export_dir: Option<PathBuf>,
+    /// The Android start-on-boot state - whether the app may draw over other
+    /// apps, and whether it is the home app - and when it was last read. Read
+    /// through `crate::android`, throttled: it only changes while the viewer is
+    /// away in the system settings.
+    #[cfg(target_os = "android")]
+    android_boot: (bool, bool),
+    #[cfg(target_os = "android")]
+    android_boot_at: f64,
     /// The camera the settings panel is editing, while its window is up.
     camera_edit: Option<CameraEdit>,
     /// First control of the edit window, to hand it the focus as it opens.
@@ -575,6 +586,10 @@ impl XgViewApp {
             restore_focus: None,
             import_cameras_only: true,
             export_dir,
+            #[cfg(target_os = "android")]
+            android_boot: (false, false),
+            #[cfg(target_os = "android")]
+            android_boot_at: f64::NEG_INFINITY,
             camera_edit: None,
             camera_edit_anchor: None,
             camera_edit_handoff: Handoff::default(),
@@ -1844,37 +1859,49 @@ impl XgViewApp {
     /// What the box does around the viewer: it starts it at boot, and it is the
     /// machine the decoder is chosen for.
     fn settings_system(&mut self, ui: &mut egui::Ui) -> bool {
+        // Only the desktop start-up section below changes anything on this tab.
+        #[cfg(not(target_os = "android"))]
         let mut dirty = false;
+        #[cfg(target_os = "android")]
+        let dirty = false;
 
         ui.label(RichText::new("Start-up").strong());
-        let supported = self.autostart.supported;
-        let mut enabled = self.config.autostart;
-        ui.add_enabled_ui(supported, |ui| {
-            let boot = ui.checkbox(&mut enabled, "Start with the system boot");
-            self.nav.item(&boot);
-            if boot.changed() {
-                match autostart::set_enabled(enabled) {
-                    Ok(()) => {
-                        self.config.autostart = enabled;
-                        self.autostart = autostart::status();
-                        dirty = true;
-                        self.flash(
-                            if enabled { "registered for start-on-boot" } else { "start-on-boot registration removed" },
-                            ToastKind::Info,
-                        );
-                    }
-                    Err(err) => {
-                        self.autostart = autostart::status();
-                        self.flash(format!("start-on-boot: {err}"), ToastKind::Error);
+        // Desktop: the registration is ours to make, so it is a checkbox. On
+        // Android it belongs to the manifest and the system, and the section
+        // below shows the two things the device asks for instead.
+        #[cfg(not(target_os = "android"))]
+        {
+            let supported = self.autostart.supported;
+            let mut enabled = self.config.autostart;
+            ui.add_enabled_ui(supported, |ui| {
+                let boot = ui.checkbox(&mut enabled, "Start with the system boot");
+                self.nav.item(&boot);
+                if boot.changed() {
+                    match autostart::set_enabled(enabled) {
+                        Ok(()) => {
+                            self.config.autostart = enabled;
+                            self.autostart = autostart::status();
+                            dirty = true;
+                            self.flash(
+                                if enabled { "registered for start-on-boot" } else { "start-on-boot registration removed" },
+                                ToastKind::Info,
+                            );
+                        }
+                        Err(err) => {
+                            self.autostart = autostart::status();
+                            self.flash(format!("start-on-boot: {err}"), ToastKind::Error);
+                        }
                     }
                 }
+            });
+            if !supported {
+                ui.label(RichText::new("start-on-boot is not supported on this platform").small().color(theme::TEXT_DIM));
             }
-        });
-        if !supported {
-            ui.label(RichText::new("start-on-boot is not supported on this platform").small().color(theme::TEXT_DIM));
+            ui.label(RichText::new(format!("mechanism: {}", self.autostart.mechanism)).small().color(theme::TEXT_DIM));
+            ui.label(RichText::new(&self.autostart.detail).small().color(theme::TEXT_DIM));
         }
-        ui.label(RichText::new(format!("mechanism: {}", self.autostart.mechanism)).small().color(theme::TEXT_DIM));
-        ui.label(RichText::new(&self.autostart.detail).small().color(theme::TEXT_DIM));
+        #[cfg(target_os = "android")]
+        self.android_boot_section(ui);
 
         ui.add_space(theme::space::L);
         ui.label(RichText::new("Keys").strong());
@@ -1902,6 +1929,74 @@ impl XgViewApp {
             });
 
         dirty
+    }
+
+    /// The Android start-on-boot section.
+    ///
+    /// Android starts nothing from the boot broadcast unless the system allows
+    /// it, and there is nothing to toggle from here: the receiver is declared in
+    /// the manifest. What the device asks for is one of two things, so both are
+    /// shown with the screen that sets each, and the adb route is written out
+    /// for a deployment that has a computer at hand.
+    #[cfg(target_os = "android")]
+    fn android_boot_section(&mut self, ui: &mut egui::Ui) {
+        // The two states only change while the viewer is away in the system
+        // settings, so reading them twice a second is enough and keeps the JNI
+        // calls off every frame.
+        if self.time - self.android_boot_at > 0.5 {
+            self.android_boot = (crate::android::overlay_allowed(), crate::android::is_home_app());
+            self.android_boot_at = self.time;
+        }
+        let (overlay, home) = self.android_boot;
+
+        ui.label(
+            RichText::new(
+                "Android refuses to start an app from the boot broadcast unless the system allows \
+                 it. Either of these, set once on the device, is enough.",
+            )
+            .small()
+            .color(theme::TEXT_DIM),
+        );
+        ui.add_space(theme::space::S);
+
+        ui.horizontal(|ui| {
+            let button = ui.button("Home app…");
+            self.nav.item(&button);
+            self.name(&button, "Home app settings");
+            if button.clicked() {
+                crate::android::open_home_settings();
+                self.android_boot_at = f64::NEG_INFINITY;
+            }
+            ui.label(
+                RichText::new(if home { "XGView is the home app" } else { "XGView is not the home app" })
+                    .small()
+                    .color(if home { theme::LIVE } else { theme::TEXT_DIM }),
+            );
+        });
+        ui.horizontal(|ui| {
+            let button = ui.button("Start over other apps…");
+            self.nav.item(&button);
+            self.name(&button, "Display over other apps settings");
+            if button.clicked() {
+                crate::android::open_overlay_settings();
+                self.android_boot_at = f64::NEG_INFINITY;
+            }
+            ui.label(
+                RichText::new(if overlay { "allowed" } else { "not allowed" })
+                    .small()
+                    .color(if overlay { theme::LIVE } else { theme::TEXT_DIM }),
+            );
+        });
+
+        ui.add_space(theme::space::S);
+        ui.label(
+            RichText::new(
+                "Or, from a computer with adb:\n\
+                 adb shell appops set com.xhbl.xgview SYSTEM_ALERT_WINDOW allow",
+            )
+            .small()
+            .color(theme::TEXT_DIM),
+        );
     }
 
     /// What the viewer pulls off each camera, and what turns it into pictures.

@@ -31,6 +31,18 @@
          finished booting. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Android 10+ refuses a background activity start, and a BOOT_COMPLETED
+         receiver is a background start: without being whitelisted the
+         relaunch below is aborted by the system ("Abort background activity
+         starts"), silently as far as the viewer is concerned. Holding
+         SYSTEM_ALERT_WINDOW is one of the accepted whitelist conditions, so it
+         is declared here. It is a special permission: the user grants it once
+         under Settings - Apps - Special access - Display over other apps (or
+         `adb shell appops set com.xhbl.xgview SYSTEM_ALERT_WINDOW allow`), and
+         the app itself never draws an overlay. Making XGView the device's
+         launcher is the alternative that needs no permission. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <!-- Keep the screen on while the surveillance wall is displayed. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
@@ -79,6 +91,16 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+
+            <!-- Optional: makes XGView a candidate home app, which is the other
+                 way to start on boot and needs no permission at all. It is only
+                 a candidate - the viewer picks it under Settings - and nothing
+                 changes until they do. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 

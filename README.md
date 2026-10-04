@@ -152,9 +152,24 @@ interactive logon, install a scheduled task instead (see the install script
 below) or register the binary as a Windows service.
 
 **Android.** The manifest registers a `BootReceiver` for `BOOT_COMPLETED`, which
-relaunches the activity after the box booted. On Android 10+ a background
-activity start is restricted, so whitelist XGView in the OEM auto-start settings
-or make it the default launcher.
+relaunches the activity after the box booted. Android 10+ refuses to start an
+activity from the background, and that broadcast is one, so the relaunch is
+aborted - silently, from the viewer's side - unless the app is whitelisted.
+Either of these, a one-time step on each device, is enough:
+
+* **Start over other apps** - grant the *Display over other apps* special
+  permission (`SYSTEM_ALERT_WINDOW`, declared in the manifest). The settings
+  panel's **System** tab has a button that opens the screen, and shows whether
+  it is granted.
+* **Home app** - the manifest also offers XGView as a home app; the **System**
+  tab has a button that opens the chooser. No permission is involved, at the
+  cost of replacing the box's own launcher.
+
+From a computer, the first is one command:
+
+```bash
+adb shell appops set com.xhbl.xgview SYSTEM_ALERT_WINDOW allow
+```
 
 ### Windows Mini PC deployment
 

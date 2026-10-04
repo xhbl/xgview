@@ -23,6 +23,8 @@ pub mod fonts;
 pub mod grid;
 pub mod icons;
 #[cfg(target_os = "android")]
+pub mod android;
+#[cfg(target_os = "android")]
 pub mod keyboard;
 pub mod nav;
 pub mod theme;

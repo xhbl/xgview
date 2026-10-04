@@ -2,8 +2,13 @@ package com.xhbl.xgview;
 
 import android.app.NativeActivity;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.KeyEvent;
 import android.view.View;
@@ -267,6 +272,78 @@ public class MainActivity extends NativeActivity {
         inputView.setFocusableInTouchMode(false);
         final ViewGroup content = findViewById(android.R.id.content);
         content.addView(inputView, new ViewGroup.LayoutParams(1, 1));
+    }
+
+    // ---------------------------------------------------------------- boot start
+    //
+    // Android 10+ refuses to start an activity from the background, and the
+    // BOOT_COMPLETED receiver is a background start: without one of the two
+    // conditions below the system aborts the relaunch ("Abort background
+    // activity starts"), silently as far as the viewer is concerned. The
+    // native side reads them and opens the screen that sets each.
+
+    /**
+     * Whether XGView may draw over other apps.
+     *
+     * <p>Holding this permission is one of the conditions that lift the
+     * background-start refusal, which is what lets {@code BootReceiver}
+     * relaunch the wall after boot.
+     */
+    public static boolean overlayAllowed() {
+        final MainActivity self = instance;
+        return self != null && Settings.canDrawOverlays(self);
+    }
+
+    /** Opens the system screen that grants {@link #overlayAllowed()}. */
+    public static void openOverlaySettings() {
+        final MainActivity self = instance;
+        if (self != null) {
+            self.startSettingsOrDetails(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + self.getPackageName())));
+        }
+    }
+
+    /** Whether XGView is the device's home app - the other way to start at boot. */
+    public static boolean isHomeApp() {
+        final MainActivity self = instance;
+        if (self == null) {
+            return false;
+        }
+        final Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+        final ResolveInfo resolved =
+                self.getPackageManager().resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY);
+        return resolved != null
+                && resolved.activityInfo != null
+                && self.getPackageName().equals(resolved.activityInfo.packageName);
+    }
+
+    /** Opens the system screen that chooses the device's home app. */
+    public static void openHomeSettings() {
+        final MainActivity self = instance;
+        if (self != null) {
+            self.startSettingsOrDetails(new Intent(Settings.ACTION_HOME_SETTINGS));
+        }
+    }
+
+    /**
+     * Starts a settings screen, falling back to this app's own details page
+     * when the screen does not exist on the device - some TV builds omit one of
+     * them - so a button is never left doing nothing.
+     */
+    private void startSettingsOrDetails(Intent intent) {
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(intent);
+        } catch (RuntimeException missing) {
+            android.util.Log.w("XGView.BootReceiver", "no settings screen for " + intent, missing);
+            try {
+                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName()))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (RuntimeException error) {
+                android.util.Log.w("XGView.BootReceiver", "no app details screen either", error);
+            }
+        }
     }
 
     /** Called once, so that the native side can find this class later. */
