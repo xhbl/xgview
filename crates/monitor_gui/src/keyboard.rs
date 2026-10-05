@@ -10,9 +10,10 @@
 //!
 //! Everything in this module is therefore only compiled on Android.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use egui::{Event, Id, Key};
+use egui::{Event, Id, Key, Modifiers};
 use jni::objects::{GlobalRef, JClass, JString, JValue};
 use jni::sys::jint;
 use jni::{JNIEnv, JavaVM};
@@ -22,6 +23,10 @@ enum Typed {
     Text(String),
     Backspace(usize),
     Enter,
+    /// Ctrl+A: the field's own select-all, so that what is typed next replaces it.
+    SelectAll,
+    /// Text that was pasted, which a field takes in one piece.
+    Paste(String),
 }
 
 /// What `MainActivity` has reported since the last frame.
@@ -30,6 +35,15 @@ enum Typed {
 /// reports whenever the input method feels like it, which is not necessarily
 /// while a frame is being built.
 static TYPED: Mutex<Vec<Typed>> = Mutex::new(Vec::new());
+
+/// The keyboard went away on its own - Back, or the input method's own hide
+/// button - since the application last looked. See [`take_hidden`].
+static HIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// The egui context, kept from the first frame so that what arrives from Java
+/// can wake the loop: the wall repaints on a timer, which would leave a
+/// keystroke or a hidden keyboard waiting for the next tick.
+static CONTEXT: OnceLock<egui::Context> = OnceLock::new();
 
 /// The Java VM, kept from the one call the activity makes when it is ready.
 static VM: OnceLock<JavaVM> = OnceLock::new();
@@ -43,19 +57,21 @@ static VM: OnceLock<JavaVM> = OnceLock::new();
 /// hands its class over on the way in instead, and that is what is used here.
 static ACTIVITY: OnceLock<GlobalRef> = OnceLock::new();
 
-/// What the activity was last asked for: whether the keyboard is wanted, and
-/// which text field wanted it.
+/// What the activity was last asked for: whether the keyboard is wanted,
+/// which text field wanted it, and whether that field holds several lines.
 ///
-/// Keyed on both, not on the answer alone: moving the focus from one field
-/// straight to the next keeps the answer at "wanted", but the keyboard has to
-/// be asked for again or it does not come back for the second field.
-static LAST: Mutex<Option<(bool, Option<Id>)>> = Mutex::new(None);
+/// Keyed on all three, not on the answer alone: moving the focus from one
+/// field straight to the next keeps the answer at "wanted", but the keyboard
+/// has to be asked for again - with the new field's action key - or it does
+/// not come back for the second field.
+static LAST: Mutex<Option<(bool, Option<Id>, bool)>> = Mutex::new(None);
 
 /// Hands everything the keyboard typed since the last frame to egui.
 ///
 /// Called at the top of the frame, before any widget is drawn, so that a text
 /// field reads the text in the same frame it arrived in.
 pub fn drain(ctx: &egui::Context) {
+    CONTEXT.get_or_init(|| ctx.clone());
     let typed = match TYPED.lock() {
         Ok(mut queue) => std::mem::take(&mut *queue),
         // A poisoned queue means another thread panicked while holding it; the
@@ -69,6 +85,14 @@ pub fn drain(ctx: &egui::Context) {
         for item in typed {
             match item {
                 Typed::Text(text) => input.events.push(Event::Text(text)),
+                Typed::Paste(text) => input.events.push(Event::Paste(text)),
+                Typed::SelectAll => input.events.push(Event::Key {
+                    key: Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers { ctrl: true, command: true, ..Default::default() },
+                }),
                 Typed::Backspace(0) => {}
                 Typed::Backspace(count) => {
                     for _ in 0..count {
@@ -99,17 +123,24 @@ pub fn drain(ctx: &egui::Context) {
 /// Asks the activity to raise or drop the keyboard.
 ///
 /// Called with the state of the focus every frame, and only passed on when it
-/// changes - see [`LAST`] for why the focused field is part of that.
-pub fn set_wanted(wanted: bool, focused: Option<Id>) {
+/// changes - see [`LAST`] for why the focused field and its shape are part of
+/// that. `multiline` is what the input method builds its action key from: a
+/// single-line field gets a Done that takes the text, a multi-line one gets a
+/// newline, because Enter cannot both break the line and finish the field.
+pub fn set_wanted(wanted: bool, focused: Option<Id>, multiline: bool) {
     match LAST.lock() {
-        Ok(last) if *last == Some((wanted, focused)) => return,
-        Ok(mut last) => *last = Some((wanted, focused)),
+        Ok(last) if *last == Some((wanted, focused, multiline)) => return,
+        Ok(mut last) => *last = Some((wanted, focused, multiline)),
         Err(_) => return,
     }
     let (Some(vm), Some(class)) = (VM.get(), ACTIVITY.get()) else {
         // The activity has not called `nativeReady` yet: nothing to talk to.
         return;
     };
+    if wanted {
+        // A keyboard that went away before this ask is old news.
+        HIDDEN.store(false, Ordering::SeqCst);
+    }
     // Permanently, not `attach_current_thread`: this runs on the UI thread,
     // which the runtime owns. The plain form returns a guard that detaches on
     // drop, and detaching a thread the runtime still believes it owns brings
@@ -120,9 +151,30 @@ pub fn set_wanted(wanted: bool, focused: Option<Id>) {
     let _ = env.call_static_method(
         class,
         "setKeyboardWanted",
-        "(Z)V",
-        &[JValue::Bool(wanted as u8)],
+        "(ZZ)V",
+        &[JValue::Bool(wanted as u8), JValue::Bool(multiline as u8)],
     );
+}
+
+/// Selects the whole text of the field being typed into.
+///
+/// What the floating input box's buttons call: they act on the field through
+/// the same queue the keyboard does, so a field cannot tell the difference.
+pub fn select_all() {
+    push(Typed::SelectAll);
+}
+
+/// Replaces nothing and inserts `text` as a paste.
+pub fn paste(text: String) {
+    if !text.is_empty() {
+        push(Typed::Paste(text));
+    }
+}
+
+/// Empties the field: select everything, then delete the selection.
+pub fn clear() {
+    push(Typed::SelectAll);
+    push(Typed::Backspace(1));
 }
 
 /// Queues one thing the keyboard did.
@@ -130,6 +182,33 @@ fn push(item: Typed) {
     if let Ok(mut queue) = TYPED.lock() {
         queue.push(item);
     }
+    wake();
+}
+
+/// Asks for a frame, so that what was just queued is read now.
+fn wake() {
+    if let Some(ctx) = CONTEXT.get() {
+        ctx.request_repaint();
+    }
+}
+
+/// The keyboard went away without the application asking.
+///
+/// Called from the JNI entry point in `monitor_android`.
+pub fn java_keyboard_hidden() {
+    HIDDEN.store(true, Ordering::SeqCst);
+    wake();
+}
+
+/// Whether the keyboard went away on its own since the last call.
+///
+/// Back while the keyboard is up, and the input method's hide button, are
+/// handled by the input method: the application sees no key. Without this the
+/// field would stay marked as being edited - the floating input box on screen,
+/// and no way to raise the keyboard again by touching the field, because the
+/// activity was never told it had gone.
+pub fn take_hidden() -> bool {
+    HIDDEN.swap(false, Ordering::SeqCst)
 }
 
 /// The activity is up and can be talked to.

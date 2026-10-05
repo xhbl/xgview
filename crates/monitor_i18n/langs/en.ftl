@@ -249,9 +249,11 @@ dialog-full-scan = Full scan (WS-Discovery + TCP)
 dialog-scan-settings = Scan settings
 dialog-multicast-probe = Multicast probe (local subnet)
 dialog-unicast-probe = Unicast probe over the ranges below (VLAN / cross subnet)
-dialog-ip-ranges-hint = IP ranges: one per line, e.g. 192.168.1.1-254 or 10.0.0.0/24
+dialog-ip-ranges-hint = one per line, e.g. 192.168.1.1-254 or 10.0.0.0/24
+dialog-ip-ranges = IP ranges
 dialog-target-count = { $count } target address(es)
 dialog-tcp-fallback = TCP fallback scan
+dialog-tcp-ports = TCP ports
 dialog-probe-timeout = probe timeout (ms)
 dialog-concurrent-probes =  concurrent probes
 dialog-onvif-credentials = ONVIF credentials (used by GetProfiles / GetStreamUri)
@@ -302,3 +304,10 @@ summary-multicast = multicast
 summary-unicast = unicast ({ $count } ranges)
 summary-tcp = tcp { $ports }
 summary-disabled = disabled
+
+## Floating input box (Android soft keyboard)
+input-select-all = Select all
+input-copy = Copy
+input-paste = Paste
+input-clear = Clear
+input-done = Done

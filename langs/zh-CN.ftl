@@ -240,9 +240,11 @@ dialog-full-scan = 完整扫描（WS-Discovery + TCP）
 dialog-scan-settings = 扫描设置
 dialog-multicast-probe = 多播探测（本地子网）
 dialog-unicast-probe = 对下列网段单播探测（VLAN / 跨子网）
-dialog-ip-ranges-hint = IP 网段：每行一个，如 192.168.1.1-254 或 10.0.0.0/24
+dialog-ip-ranges-hint = 每行一个，如 192.168.1.1-254 或 10.0.0.0/24
+dialog-ip-ranges = IP 网段
 dialog-target-count = { $count } 个目标地址
 dialog-tcp-fallback = TCP 回退扫描
+dialog-tcp-ports = TCP 端口
 dialog-probe-timeout = 探测超时（ms）
 dialog-concurrent-probes =  并发探测数
 dialog-onvif-credentials = ONVIF 凭据（用于 GetProfiles / GetStreamUri）
@@ -293,3 +295,10 @@ summary-multicast = 多播
 summary-unicast = 单播（{ $count } 个网段）
 summary-tcp = tcp { $ports }
 summary-disabled = 已禁用
+
+## 浮层输入框（Android 软键盘）
+input-select-all = 全选
+input-copy = 复制
+input-paste = 粘贴
+input-clear = 清空
+input-done = 完成

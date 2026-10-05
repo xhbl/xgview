@@ -76,3 +76,14 @@ pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeEnter(
 ) {
     monitor_gui::keyboard::java_enter();
 }
+
+/// The keyboard went away without the application asking: the viewer pressed
+/// Back, or the input method's own hide button.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeKeyboardHidden(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    monitor_gui::keyboard::java_keyboard_hidden();
+}

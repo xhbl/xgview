@@ -20,6 +20,61 @@ use crate::controls;
 use crate::nav::{Kind, Nav};
 use crate::theme;
 
+/// Key under which the text field being typed into leaves a copy of its text
+/// for the floating input box (Android); see [`text_field`].
+pub const MIRROR: &str = "xg-input-mirror";
+
+/// What the floating input box shows: the focused text field, as of this frame.
+#[derive(Clone)]
+pub struct Mirror {
+    pub id: egui::Id,
+    pub label: String,
+    pub text: String,
+    pub password: bool,
+    /// Whether the field holds several lines - what the soft keyboard's action
+    /// key has to be built from; see `MainActivity.onCreateInputConnection`.
+    pub multiline: bool,
+}
+
+/// A text field of the navigation layer.
+///
+/// Every text field of the application is drawn through this, rather than
+/// through `nav.tracked_kind(Kind::Text, ui.add(TextEdit...))`, because on
+/// Android the soft keyboard covers the lower part of the screen and the field
+/// may be underneath it. The string lives in the caller's state and egui keeps
+/// only the caret, so the only way for the floating input box to show what is
+/// being typed is for the field to leave a copy of it here. `build` makes the
+/// `TextEdit` out of the string (hint, width, `password(true)` and so on);
+/// `label`, `password` and `multiline` are only what the floating box and the
+/// soft keyboard read.
+///
+/// The copy keeps being refreshed once the field is the mirrored one, even on
+/// the frame it loses the focus: a press on the floating box's buttons is a
+/// click elsewhere to egui, and the box has to be drawn that frame to see it.
+pub fn text_field(
+    ui: &mut egui::Ui,
+    nav: &mut Nav,
+    text: &mut String,
+    label: &str,
+    password: bool,
+    multiline: bool,
+    build: impl for<'a> FnOnce(&'a mut String) -> egui::TextEdit<'a>,
+) -> egui::Response {
+    let response = nav.tracked_kind(Kind::Text, ui.add(build(text)));
+    #[cfg(target_os = "android")]
+    {
+        let key = egui::Id::new(MIRROR);
+        let current = ui.ctx().data(|data| data.get_temp::<Mirror>(key));
+        if response.has_focus() || current.is_some_and(|mirror| mirror.id == response.id) {
+            let mirror = Mirror { id: response.id, label: label.to_owned(), text: text.clone(), password, multiline };
+            ui.ctx().data_mut(|data| data.insert_temp(key, mirror));
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (label, password, multiline);
+    response
+}
+
 /// Everything a background job reports to the UI thread.
 #[derive(Debug, Clone)]
 pub enum BackgroundEvent {
@@ -545,15 +600,27 @@ fn onvif_tab(
         |ui, nav| {
             nav.tracked(ui.checkbox(&mut state.scan.broadcast, monitor_i18n::tr("dialog-multicast-probe")));
             nav.tracked(ui.checkbox(&mut state.scan.subnet_scan, monitor_i18n::tr("dialog-unicast-probe")));
-            ui.label(RichText::new(monitor_i18n::tr("dialog-ip-ranges-hint")).small());
-            nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::multiline(&mut state.scan.ip_ranges).desired_rows(3).desired_width(f32::INFINITY)));
+            // A short label above the field, as the fields of the camera form
+            // have; `text_field` carries the same label into the Android
+            // floating input box. The longer explanation is the box's own hint,
+            // so it is not repeated and disappears once the box has text.
+            ui.label(monitor_i18n::tr("dialog-ip-ranges"));
+            text_field(ui, nav, &mut state.scan.ip_ranges, &monitor_i18n::tr("dialog-ip-ranges"), false, true, |s| {
+                egui::TextEdit::multiline(s)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(theme::hint(&monitor_i18n::tr("dialog-ip-ranges-hint")))
+            });
             ui.horizontal(|ui| {
                 let targets = state.scan.target_count();
                 ui.label(RichText::new(monitor_i18n::tr_args("dialog-target-count", &[("count", targets.into())])).small().color(theme::TEXT_DIM));
             });
             ui.horizontal(|ui| {
                 nav.tracked(ui.checkbox(&mut state.scan.tcp_probe, monitor_i18n::tr("dialog-tcp-fallback")));
-                nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut state.scan.tcp_ports).desired_width(140.0).hint_text(theme::hint("554, 80, 8000"))));
+                ui.label(monitor_i18n::tr("dialog-tcp-ports"));
+                text_field(ui, nav, &mut state.scan.tcp_ports, &monitor_i18n::tr("dialog-tcp-ports"), false, false, |s| {
+                    egui::TextEdit::singleline(s).desired_width(140.0).hint_text(theme::hint("554, 80, 8000"))
+                });
             });
             // The two value controls: the slider keeps Left / Right for its
             // thumb, the drag value keeps Up / Down for its step, and each walks
@@ -566,9 +633,13 @@ fn onvif_tab(
             ui.label(RichText::new(monitor_i18n::tr("dialog-onvif-credentials")).small());
             ui.horizontal(|ui| {
                 ui.label(monitor_i18n::tr("dialog-user"));
-                nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut state.scan.username).desired_width(140.0)));
+                text_field(ui, nav, &mut state.scan.username, &monitor_i18n::tr("dialog-user"), false, false, |s| {
+                    egui::TextEdit::singleline(s).desired_width(140.0)
+                });
                 ui.label(monitor_i18n::tr("dialog-password"));
-                nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut state.scan.password).password(true).desired_width(140.0)));
+                text_field(ui, nav, &mut state.scan.password, &monitor_i18n::tr("dialog-password"), true, false, |s| {
+                    egui::TextEdit::singleline(s).password(true).desired_width(140.0)
+                });
             });
         },
     );
@@ -658,28 +729,27 @@ pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mu
     egui::Grid::new(grid_id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label(monitor_i18n::tr("dialog-name"));
         // The first control of the form, and the one a window opens on.
-        let name = ui.add(
-            egui::TextEdit::singleline(&mut draft.name).hint_text(theme::hint("Front door")).desired_width(f32::INFINITY),
-        );
+        let name = text_field(ui, nav, &mut draft.name, &monitor_i18n::tr("dialog-name"), false, false, |s| {
+            egui::TextEdit::singleline(s).hint_text(theme::hint("Front door")).desired_width(f32::INFINITY)
+        });
         first = Some(name.id);
-        nav.item_kind(Kind::Text, &name);
         ui.end_row();
 
         ui.label(monitor_i18n::tr("dialog-main-stream"));
-        nav.tracked_kind(Kind::Text, ui.add(
-            egui::TextEdit::singleline(&mut draft.main)
+        text_field(ui, nav, &mut draft.main, &monitor_i18n::tr("dialog-main-stream"), false, false, |s| {
+            egui::TextEdit::singleline(s)
                 .hint_text(theme::hint("rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101"))
-                .desired_width(f32::INFINITY),
-        ));
+                .desired_width(f32::INFINITY)
+        });
         ui.end_row();
 
         ui.label(monitor_i18n::tr("dialog-sub-stream"));
         ui.horizontal(|ui| {
-            nav.tracked_kind(Kind::Text, ui.add(
-                egui::TextEdit::singleline(&mut draft.sub)
+            text_field(ui, nav, &mut draft.sub, &monitor_i18n::tr("dialog-sub-stream"), false, false, |s| {
+                egui::TextEdit::singleline(s)
                     .hint_text(theme::hint(&monitor_i18n::tr("dialog-sub-hint")))
-                    .desired_width(320.0),
-            ));
+                    .desired_width(320.0)
+            });
             if nav.tracked(ui.button(monitor_i18n::tr("dialog-infer"))).clicked() {
                 draft.infer_sub = true;
                 inferred = true;
@@ -696,18 +766,18 @@ pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mu
         // two are never confused for one another the way a geometric walk did,
         // which used to drop the caret into the password from the sub stream box.
         ui.label(monitor_i18n::tr("dialog-user"));
-        nav.tracked_kind(Kind::Text, ui.add(
-            egui::TextEdit::singleline(&mut draft.username).hint_text(theme::hint("user")).desired_width(f32::INFINITY),
-        ));
+        text_field(ui, nav, &mut draft.username, &monitor_i18n::tr("dialog-user"), false, false, |s| {
+            egui::TextEdit::singleline(s).hint_text(theme::hint("user")).desired_width(f32::INFINITY)
+        });
         ui.end_row();
 
         ui.label(monitor_i18n::tr("dialog-password"));
-        nav.tracked_kind(Kind::Text, ui.add(
-            egui::TextEdit::singleline(&mut draft.password)
+        text_field(ui, nav, &mut draft.password, &monitor_i18n::tr("dialog-password"), true, false, |s| {
+            egui::TextEdit::singleline(s)
                 .password(true)
                 .hint_text(theme::hint("password"))
-                .desired_width(f32::INFINITY),
-        ));
+                .desired_width(f32::INFINITY)
+        });
         ui.end_row();
     });
     nav.tracked(ui.checkbox(&mut draft.infer_sub, monitor_i18n::tr("dialog-derive-sub")));
@@ -807,7 +877,9 @@ fn synology_tab(
     egui::Grid::new("synology").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label(monitor_i18n::tr("dialog-host"));
         // The first control of this tab, and the one the strip's Down lands on.
-        nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut synology.host).hint_text(theme::hint("192.168.1.10")).desired_width(220.0)));
+        text_field(ui, nav, &mut synology.host, &monitor_i18n::tr("dialog-host"), false, false, |s| {
+            egui::TextEdit::singleline(s).hint_text(theme::hint("192.168.1.10")).desired_width(220.0)
+        });
         ui.end_row();
         ui.label(monitor_i18n::tr("dialog-port"));
         // A drag value: Up / Down step it, Left / Right walk the column.
@@ -817,10 +889,14 @@ fn synology_tab(
         nav.tracked(ui.checkbox(&mut synology.https, monitor_i18n::tr("dialog-https")));
         ui.end_row();
         ui.label(monitor_i18n::tr("dialog-account"));
-        nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut synology.username).desired_width(220.0)));
+        text_field(ui, nav, &mut synology.username, &monitor_i18n::tr("dialog-account"), false, false, |s| {
+            egui::TextEdit::singleline(s).desired_width(220.0)
+        });
         ui.end_row();
         ui.label(monitor_i18n::tr("dialog-password"));
-        nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut synology.password).password(true).desired_width(220.0)));
+        text_field(ui, nav, &mut synology.password, &monitor_i18n::tr("dialog-password"), true, false, |s| {
+            egui::TextEdit::singleline(s).password(true).desired_width(220.0)
+        });
         ui.end_row();
     });
     if *synology != before {

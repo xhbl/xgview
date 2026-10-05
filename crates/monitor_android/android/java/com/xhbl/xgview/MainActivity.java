@@ -1,6 +1,8 @@
 package com.xhbl.xgview;
 
 import android.app.NativeActivity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -20,6 +22,8 @@ import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
+
+import java.lang.reflect.Method;
 
 /**
  * XGView's activity: the {@link NativeActivity} the whole UI runs in, with the
@@ -58,12 +62,53 @@ public class MainActivity extends NativeActivity {
 
     private InputMethodManager inputMethod;
 
+    /** Whether the native side wants the keyboard up, as last told by {@link #setKeyboardWanted}. */
+    private boolean keyboardWanted;
+
+    /**
+     * Whether the field being edited holds several lines, as last told by
+     * {@link #setKeyboardWanted}. It decides the input method's action key: a
+     * single-line field gets a Done that takes the text, a multi-line one gets
+     * a newline, because Enter cannot both break the line and finish the field.
+     */
+    private boolean keyboardMultiline;
+
+    /**
+     * Whether the keyboard has been seen on screen since it was last asked for.
+     *
+     * <p>A report that it is not showing means nothing until it has shown: the
+     * input method takes a moment to come up, and the first answer is always
+     * "not yet".
+     */
+    private boolean imeSeenVisible;
+
+    /** The hidden call that reports the keyboard's height, found once; see {@link #imeHeight}. */
+    private Method imeHeightMethod;
+
+    /** Asks the input method how tall it is, on the Android versions that have no insets for it. */
+    private final Runnable imePoll = new Runnable() {
+        @Override
+        public void run() {
+            if (!keyboardWanted || Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                return;
+            }
+            final int height = imeHeight();
+            if (height < 0) {
+                // This device does not answer: nothing more to learn by asking.
+                return;
+            }
+            onImeVisibility(height > 0);
+            inputView.postDelayed(this, 300);
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         instance = this;
         hideSystemBars();
         installTextInput();
+        watchKeyboard();
         // The activity loads the native library itself, with a bare `dlopen`
         // that leaves its symbols out of the global scope the runtime searches
         // when it resolves a `native` method. Without this second load - which
@@ -92,18 +137,42 @@ public class MainActivity extends NativeActivity {
     /**
      * Called from the native side when a text field takes or loses the focus, so
      * that the keyboard follows what the viewer is doing in the UI.
+     *
+     * <p>{@code multiline} is the shape of the field being edited: see
+     * {@link #keyboardMultiline}.
      */
-    public static void setKeyboardWanted(final boolean wanted) {
+    public static void setKeyboardWanted(final boolean wanted, final boolean multiline) {
         final MainActivity self = instance;
         if (self == null || self.inputView == null) {
             return;
         }
         self.runOnUiThread(() -> {
+            // Read before they are overwritten: the action key can only be
+            // changed by remaking the input connection, and that is worth doing
+            // only when the keyboard is already up on a field of the other kind.
+            final boolean wasWanted = self.keyboardWanted;
+            final boolean optionsChanged = self.keyboardMultiline != multiline;
+            // Told before the keyboard is asked to move, so that what it does
+            // in answer to this is not taken for the viewer putting it away.
+            self.keyboardWanted = wanted;
+            self.keyboardMultiline = multiline;
+            self.imeSeenVisible = false;
+            self.inputView.removeCallbacks(self.imePoll);
             if (wanted) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                    self.inputView.postDelayed(self.imePoll, 600);
+                }
                 self.inputView.setFocusable(true);
                 self.inputView.setFocusableInTouchMode(true);
                 self.inputView.requestFocus();
                 self.inputMethod.showSoftInput(self.inputView, 0);
+                if (wasWanted && optionsChanged) {
+                    // The action key of an input method is fixed when its input
+                    // connection is made, so a move between a single-line and a
+                    // multi-line field while the keyboard stays up needs the
+                    // connection remade for the new editor options.
+                    self.inputMethod.restartInput(self.inputView);
+                }
             } else {
                 self.inputMethod.hideSoftInputFromWindow(self.inputView.getWindowToken(), 0);
                 self.inputView.clearFocus();
@@ -156,6 +225,58 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    /**
+     * Learns when the keyboard goes away by itself.
+     *
+     * <p>The native side only ever hears about the keyboard from here, and the
+     * keyboard has two ways to leave without the application asking: Back, which
+     * {@code onKeyPreIme} above sees, and the input method's own hide button,
+     * which sends no key at all. On Android 11 and newer the window insets say
+     * whether it is showing; before that the input method is asked its height
+     * (see {@link #imePoll}), which is the best that can be done without a
+     * public API, and where the device does not answer the hide button goes
+     * unnoticed.
+     */
+    private void watchKeyboard() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().getDecorView().setOnApplyWindowInsetsListener((view, insets) -> {
+                onImeVisibility(insets.isVisible(WindowInsets.Type.ime()));
+                return view.onApplyWindowInsets(insets);
+            });
+        }
+    }
+
+    /** The keyboard is, or is not, on screen. Acts only on the way from showing to gone. */
+    private void onImeVisibility(boolean visible) {
+        if (!keyboardWanted) {
+            imeSeenVisible = false;
+            return;
+        }
+        if (visible) {
+            imeSeenVisible = true;
+        } else if (imeSeenVisible) {
+            keyboardDismissed();
+        }
+    }
+
+    /** The keyboard went away without the native side asking. */
+    private void keyboardDismissed() {
+        imeSeenVisible = false;
+        nativeKeyboardHidden();
+    }
+
+    /** The input method's height in pixels, 0 when hidden, -1 when this device will not say. */
+    private int imeHeight() {
+        try {
+            if (imeHeightMethod == null) {
+                imeHeightMethod = InputMethodManager.class.getMethod("getInputMethodWindowVisibleHeight");
+            }
+            return (Integer) imeHeightMethod.invoke(inputMethod);
+        } catch (Throwable unsupported) {
+            return -1;
+        }
+    }
+
     /** Hides the status and navigation bars, and keeps them hidden. */
     private void hideSystemBars() {
         final Window window = getWindow();
@@ -203,10 +324,41 @@ public class MainActivity extends NativeActivity {
                 return true;
             }
 
+            /**
+             * Back while the keyboard is up belongs to the input method: it puts
+             * itself away and the key never reaches the activity, so the native
+             * side would go on believing the keyboard is there. This is the one
+             * place that sees the key first.
+             */
+            @Override
+            public boolean onKeyPreIme(int keyCode, KeyEvent event) {
+                if (keyCode == KeyEvent.KEYCODE_BACK
+                        && event.getAction() == KeyEvent.ACTION_UP
+                        && keyboardWanted) {
+                    keyboardDismissed();
+                }
+                return super.onKeyPreIme(keyCode, event);
+            }
+
             @Override
             public InputConnection onCreateInputConnection(EditorInfo out) {
-                out.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI;
-                out.imeOptions = EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_FULLSCREEN;
+                // The kind of field the native side is editing decides the
+                // action key. A single-line field finishes on Done; a multi-line
+                // one must keep Enter as a newline (IME_ACTION_NONE with
+                // IME_FLAG_NO_ENTER_ACTION), because that key cannot both break
+                // the line and take the text - Back, or the floating box's Done,
+                // is how a multi-line field is left.
+                if (keyboardMultiline) {
+                    out.inputType = InputType.TYPE_CLASS_TEXT
+                            | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                            | InputType.TYPE_TEXT_VARIATION_URI;
+                    out.imeOptions = EditorInfo.IME_ACTION_NONE
+                            | EditorInfo.IME_FLAG_NO_ENTER_ACTION
+                            | EditorInfo.IME_FLAG_NO_FULLSCREEN;
+                } else {
+                    out.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI;
+                    out.imeOptions = EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_FULLSCREEN;
+                }
                 return new BaseInputConnection(this, false) {
                     @Override
                     public boolean setComposingText(CharSequence text, int newCursorPosition) {
@@ -272,6 +424,51 @@ public class MainActivity extends NativeActivity {
         inputView.setFocusableInTouchMode(false);
         final ViewGroup content = findViewById(android.R.id.content);
         content.addView(inputView, new ViewGroup.LayoutParams(1, 1));
+    }
+
+    // ---------------------------------------------------------------- clipboard
+    //
+    // For the buttons of the floating input box (copy and paste), called from
+    // `monitor_gui::android`. Any thread may call them. A device that refuses
+    // the clipboard - some TV builds do - gives an empty string, and a copy
+    // that goes nowhere, instead of an exception on the native side.
+
+    /** The text on the clipboard, or an empty string. */
+    public static String getClipboardText() {
+        final MainActivity self = instance;
+        if (self == null) {
+            return "";
+        }
+        try {
+            final ClipboardManager manager =
+                    (ClipboardManager) self.getSystemService(Context.CLIPBOARD_SERVICE);
+            final ClipData data = manager == null ? null : manager.getPrimaryClip();
+            if (data == null || data.getItemCount() == 0) {
+                return "";
+            }
+            final CharSequence text = data.getItemAt(0).coerceToText(self);
+            return text == null ? "" : text.toString();
+        } catch (RuntimeException refused) {
+            android.util.Log.w("XGView.Clipboard", "clipboard read refused", refused);
+            return "";
+        }
+    }
+
+    /** Puts {@code text} on the clipboard. */
+    public static void setClipboardText(final String text) {
+        final MainActivity self = instance;
+        if (self == null) {
+            return;
+        }
+        try {
+            final ClipboardManager manager =
+                    (ClipboardManager) self.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (manager != null) {
+                manager.setPrimaryClip(ClipData.newPlainText("XGView", text));
+            }
+        } catch (RuntimeException refused) {
+            android.util.Log.w("XGView.Clipboard", "clipboard write refused", refused);
+        }
     }
 
     // ---------------------------------------------------------------- boot start
@@ -357,4 +554,7 @@ public class MainActivity extends NativeActivity {
 
     /** The keyboard asked for the text to be taken (the Done / Enter key). */
     private static native void nativeEnter();
+
+    /** The keyboard went away on its own - Back, or its own hide button. */
+    private static native void nativeKeyboardHidden();
 }

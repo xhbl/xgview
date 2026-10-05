@@ -1125,6 +1125,116 @@ impl XgViewApp {
 
     // ---------------------------------------------------------------- update
 
+    /// Android: the floating input box.
+    ///
+    /// The soft keyboard covers the lower part of a full screen window, and a
+    /// window that is full screen is not moved up out of its way. So while a
+    /// field is being edited a copy of it is drawn at the top of the screen -
+    /// the part that is always in sight - with the caret where the field's own
+    /// is. The focus stays on the field and the keystrokes still reach it
+    /// through `keyboard::drain`; this only shows what they did, and carries
+    /// the buttons that act on the field: select all, copy, paste, clear, done.
+    ///
+    /// The buttons are for a touch screen or a pointer. A remote has neither,
+    /// and while the keyboard is up its arrows belong to the keyboard.
+    #[cfg(target_os = "android")]
+    fn input_overlay(&mut self, ctx: &egui::Context) {
+        enum Act {
+            SelectAll,
+            Copy,
+            Paste,
+            Clear,
+            /// Take the text and put the keyboard away - the only way out of a
+            /// multi-line field, whose input method action key is a newline.
+            Done,
+        }
+
+        let Some(mirror) = ctx.data(|data| data.get_temp::<dialogs::Mirror>(Id::new(dialogs::MIRROR))) else {
+            return;
+        };
+        if self.editing != Some(mirror.id) {
+            return;
+        }
+
+        let shown: String = if mirror.password {
+            "\u{2022}".repeat(mirror.text.chars().count())
+        } else {
+            mirror.text.clone()
+        };
+        let range = egui::TextEdit::load_state(ctx, mirror.id).and_then(|state| state.cursor.char_range());
+        let selecting = range.is_some_and(|range| range.primary.index != range.secondary.index);
+        let text = if selecting {
+            // Only select-all makes a selection here, so the whole text is it.
+            RichText::new(shown).size(20.0).color(theme::TEXT).background_color(theme::FOCUS_FILL)
+        } else {
+            let mut chars: Vec<char> = shown.chars().collect();
+            let caret = range.map(|range| range.primary.index).unwrap_or(chars.len()).min(chars.len());
+            chars.insert(caret, '|');
+            RichText::new(chars.into_iter().collect::<String>()).size(20.0).color(theme::TEXT)
+        };
+
+        let screen = ctx.screen_rect();
+        let mut act = None;
+        let area = egui::Area::new(Id::new("xg-input-overlay"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(screen.center_top() + vec2(0.0, 12.0))
+            .pivot(egui::Align2::CENTER_TOP)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .stroke(egui::Stroke::new(theme::FOCUS_WIDTH, theme::FOCUS))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_max_width(screen.width() * 0.8);
+                        ui.label(RichText::new(&mirror.label).small().color(theme::TEXT_DIM));
+                        ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Wrap));
+                        ui.horizontal(|ui| {
+                            if ui.button(monitor_i18n::tr("input-select-all")).clicked() {
+                                act = Some(Act::SelectAll);
+                            }
+                            // A password is not put on the clipboard.
+                            if ui.add_enabled(!mirror.password, egui::Button::new(monitor_i18n::tr("input-copy"))).clicked() {
+                                act = Some(Act::Copy);
+                            }
+                            if ui.button(monitor_i18n::tr("input-paste")).clicked() {
+                                act = Some(Act::Paste);
+                            }
+                            if ui.button(monitor_i18n::tr("input-clear")).clicked() {
+                                act = Some(Act::Clear);
+                            }
+                            if ui.button(monitor_i18n::tr("input-done")).clicked() {
+                                act = Some(Act::Done);
+                            }
+                        });
+                    });
+            });
+
+        // A press on the box is a click elsewhere to the field, which lets go
+        // of the focus - and with it the keyboard, a frame later. The box is
+        // not a place the viewer left the field for, so the focus is handed
+        // straight back.
+        let rect = area.response.rect;
+        let touched = ctx.input(|input| {
+            (input.pointer.any_pressed() || input.pointer.any_released())
+                && input.pointer.interact_pos().is_some_and(|pos| rect.contains(pos))
+        });
+        if touched && ctx.memory(|memory| memory.focused()) != Some(mirror.id) {
+            ctx.memory_mut(|memory| memory.request_focus(mirror.id));
+        }
+
+        if let Some(act) = act {
+            match act {
+                Act::SelectAll => crate::keyboard::select_all(),
+                Act::Copy => crate::android::set_clipboard_text(&mirror.text),
+                Act::Paste => crate::keyboard::paste(crate::android::clipboard_text()),
+                Act::Clear => crate::keyboard::clear(),
+                Act::Done => self.editing = None,
+            }
+            ctx.request_repaint();
+        }
+    }
+
     /// Whether a control of this kind takes typed text while it has the focus.
     ///
     /// A drag value is one of them: egui hands its keyboard-edit mode a
@@ -3519,6 +3629,12 @@ impl eframe::App for XgViewApp {
         #[cfg(target_os = "android")]
         {
             let focused = ctx.memory(|memory| memory.focused());
+            // The keyboard went away on its own - Back, or its hide button -
+            // and the field is no longer being edited. Before the click below,
+            // so that a touch on the field in the same frame confirms it again.
+            if crate::keyboard::take_hidden() {
+                self.editing = None;
+            }
             // A touch click on a text field confirms it for editing, as Enter
             // does: the field has the focus and the caret, and the keyboard
             // follows. On a remote the pointer does not click, so this does not
@@ -3532,11 +3648,36 @@ impl eframe::App for XgViewApp {
             // it once confirmed with Enter or a touch, and keeps it until Back
             // or a focus change clears that confirmation. Walking a form with
             // the arrows never puts the keyboard up.
+            // The floating input box goes up with the keyboard, over the top of
+            // the screen where the keyboard cannot reach. Its buttons may hand
+            // the focus back to the field, so the focus is read again after it.
+            self.input_overlay(ctx);
+            let focused = ctx.memory(|memory| memory.focused());
             let wanted = focused.is_some_and(|f| self.editing == Some(f));
-            crate::keyboard::set_wanted(wanted, focused);
+            // The shape of the field being edited decides the soft keyboard's
+            // action key: a multi-line field must keep Enter as a newline. Read
+            // from the mirror the field left for the floating box, and only for
+            // the field actually being edited.
+            let multiline = ctx
+                .data(|data| data.get_temp::<dialogs::Mirror>(Id::new(dialogs::MIRROR)))
+                .is_some_and(|mirror| self.editing == Some(mirror.id) && mirror.multiline);
+            crate::keyboard::set_wanted(wanted, focused, multiline);
+            if self.editing.is_none() {
+                ctx.data_mut(|data| data.remove::<dialogs::Mirror>(Id::new(dialogs::MIRROR)));
+            }
         }
 
         let animation = self.needs_animation();
         ctx.request_repaint_after(if animation { LIVE_REPAINT } else { Duration::from_millis(500) });
+
+        // The soft keyboard is moved by `keyboard::set_wanted` alone. egui would
+        // otherwise answer its own focused `TextEdit` by asking eframe to enable
+        // the window's input method, and winit toggles that through
+        // `android-activity` - which hides and re-shows the keyboard around a
+        // touch on the window, flickering over the field. Dropping the request
+        // each frame keeps that from ever firing; the Android keyboard is not
+        // egui's to move.
+        #[cfg(target_os = "android")]
+        ctx.output_mut(|output| output.ime = None);
     }
 }
