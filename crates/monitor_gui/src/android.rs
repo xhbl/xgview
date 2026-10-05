@@ -1,14 +1,64 @@
 //! Android helpers that ask the activity to do what the native side cannot:
-//! report the start-on-boot state, and open the two system screens that grant
-//! it.
+//! report the start-on-boot state, open the two system screens that grant it,
+//! and say how wide the navigation bar's strip is.
 //!
 //! Everything here calls a static method on `MainActivity` - see the matching
 //! methods there - over the same JNI bridge `keyboard` uses, including the
 //! reasoning for attaching the VM to the UI thread permanently. Only compiled
 //! on Android.
 
+use std::sync::atomic::{AtomicI32, AtomicI8, Ordering};
+
 use jni::objects::{GlobalRef, JString, JValue};
 use jni::JNIEnv;
+
+/// The horizontal window insets, in physical pixels, as last reported by the
+/// activity: the navigation bar's strip. Zero on a television and on an external
+/// display, which have no navigation bar.
+static INSET_LEFT_PX: AtomicI32 = AtomicI32::new(0);
+static INSET_RIGHT_PX: AtomicI32 = AtomicI32::new(0);
+
+/// Records the horizontal insets the activity reported.
+///
+/// Called from the JNI entry point in `monitor_android`, on the UI thread.
+pub fn set_horizontal_insets(left_px: i32, right_px: i32) {
+    INSET_LEFT_PX.store(left_px, Ordering::Relaxed);
+    INSET_RIGHT_PX.store(right_px, Ordering::Relaxed);
+}
+
+/// The horizontal window insets, in physical pixels, as last reported by the
+/// activity: the navigation bar's strip. Zero on a television and on an external
+/// display, which have no navigation bar.
+pub fn horizontal_insets_px() -> (i32, i32) {
+    (
+        INSET_LEFT_PX.load(Ordering::Relaxed).max(0),
+        INSET_RIGHT_PX.load(Ordering::Relaxed).max(0),
+    )
+}
+
+/// The last value sent to [`set_reserve_navigation_bar`], so the activity is told
+/// only when it changes. `-1` until the first call.
+static RESERVE_SENT: AtomicI8 = AtomicI8::new(-1);
+
+/// Tells the activity whether the navigation bar keeps its strip (`true`) or the
+/// wall hides it (`false`). Only sent when it changes.
+pub fn set_reserve_navigation_bar(reserve: bool) {
+    let wanted = reserve as i8;
+    if RESERVE_SENT.load(Ordering::Relaxed) == wanted {
+        return;
+    }
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        // The activity has not called `nativeReady` yet: try again next frame.
+        return;
+    };
+    let _ = env.call_static_method(
+        class,
+        "setReserveNavigationBar",
+        "(Z)V",
+        &[JValue::Bool(reserve as u8)],
+    );
+    RESERVE_SENT.store(wanted, Ordering::Relaxed);
+}
 
 /// Whether XGView may draw over other apps.
 ///

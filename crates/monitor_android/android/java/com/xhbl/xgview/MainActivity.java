@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -27,18 +28,18 @@ import java.lang.reflect.Method;
 
 /**
  * XGView's activity: the {@link NativeActivity} the whole UI runs in, with the
- * system bars kept hidden and a soft keyboard that can be typed into.
+ * status bar kept hidden, the navigation bar left in place, and a soft keyboard
+ * that can be typed into.
  *
- * <p>The bars have to be hidden from Java: a {@code NativeActivity} tells the
- * native library where to draw but says nothing about the system UI, and a
- * window that merely fills the screen still has the navigation bar drawn over
- * it. On a phone in landscape that bar is a strip along the right edge, laid
- * over the toolbar - a control underneath it looks live and never receives a
- * touch.
- *
- * <p>Hiding it is what the full screen setting is for on Android. It stays
- * hidden until a swipe from an edge asks for it back, which is why the bars are
- * hidden again whenever the activity regains the focus.
+ * <p>The status bar has to be hidden from Java: a {@code NativeActivity} tells
+ * the native library where to draw but says nothing about the system UI. The
+ * navigation bar is deliberately *not* hidden. On a landscape phone it is a
+ * strip along the right edge; hiding it lets the wall run under it, and keeping
+ * it means the wall is narrower - which is what the viewer wants, with the
+ * native side mirroring the same width on the left so the wall sits centred.
+ * Its width is reported with the window insets; a television and an external
+ * display have no navigation bar, so there it is zero and the wall stays edge
+ * to edge.
  *
  * <p>Note that a device using gesture navigation has no bar to hide, and keeps
  * a back-gesture band along each edge of the screen instead. That band is not
@@ -56,6 +57,16 @@ public class MainActivity extends NativeActivity {
 
     /** The activity the native side talks back to, set in {@link #onCreate}. */
     private static MainActivity instance;
+
+    /** Whether {@code monitor_android} is loaded, so a native method may be called. */
+    private boolean nativeLoaded;
+
+    /**
+     * Whether the navigation bar keeps its strip, or the wall hides it and draws
+     * full screen. Set from the native side; see {@link #setReserveNavigationBar}
+     * and {@link #applySystemBars}.
+     */
+    private boolean reserveNavigationBar = true;
 
     /** The one pixel view the input method types into. */
     private View inputView;
@@ -106,15 +117,15 @@ public class MainActivity extends NativeActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         instance = this;
-        hideSystemBars();
+        applySystemBars();
         installTextInput();
-        watchKeyboard();
         // The activity loads the native library itself, with a bare `dlopen`
         // that leaves its symbols out of the global scope the runtime searches
         // when it resolves a `native` method. Without this second load - which
         // is what registers the library with this class loader - the call below
         // dies of `UnsatisfiedLinkError` before the first frame.
         System.loadLibrary("monitor_android");
+        nativeLoaded = true;
         nativeReady();
     }
 
@@ -130,7 +141,7 @@ public class MainActivity extends NativeActivity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
-            hideSystemBars();
+            applySystemBars();
         }
     }
 
@@ -225,27 +236,6 @@ public class MainActivity extends NativeActivity {
         }
     }
 
-    /**
-     * Learns when the keyboard goes away by itself.
-     *
-     * <p>The native side only ever hears about the keyboard from here, and the
-     * keyboard has two ways to leave without the application asking: Back, which
-     * {@code onKeyPreIme} above sees, and the input method's own hide button,
-     * which sends no key at all. On Android 11 and newer the window insets say
-     * whether it is showing; before that the input method is asked its height
-     * (see {@link #imePoll}), which is the best that can be done without a
-     * public API, and where the device does not answer the hide button goes
-     * unnoticed.
-     */
-    private void watchKeyboard() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            getWindow().getDecorView().setOnApplyWindowInsetsListener((view, insets) -> {
-                onImeVisibility(insets.isVisible(WindowInsets.Type.ime()));
-                return view.onApplyWindowInsets(insets);
-            });
-        }
-    }
-
     /** The keyboard is, or is not, on screen. Acts only on the way from showing to gone. */
     private void onImeVisibility(boolean visible) {
         if (!keyboardWanted) {
@@ -277,31 +267,111 @@ public class MainActivity extends NativeActivity {
         }
     }
 
-    /** Hides the status and navigation bars, and keeps them hidden. */
-    private void hideSystemBars() {
+    /**
+     * Applies the bars for the mode {@link #setReserveNavigationBar} chose, and
+     * reports the navigation bar's width to the native side.
+     *
+     * <p>With the bar reserved (the default) the wall is drawn edge to edge under
+     * the bars - {@code setDecorFitsSystemWindows(false)}, and the matching
+     * layout flags on older Android - but only the status bar is hidden. The
+     * navigation bar stays, so a landscape phone keeps its strip along one side;
+     * the insets say how wide that strip is, and the wall leaves that width free
+     * on the same side. A television and an external display have no navigation
+     * bar, so there the insets are zero and the wall is edge to edge.
+     *
+     * <p>With the bar hidden (immersive) both bars are hidden as they were, and
+     * nothing is reserved.
+     *
+     * <p>Also the only place the keyboard's own coming and going is seen, on
+     * Android 11 and newer - before that it is asked its height, see {@link
+     * #imePoll}.
+     */
+    private void applySystemBars() {
         final Window window = getWindow();
+        // Reported on every change: the navigation bar can move to the other
+        // side, appear, or go as the keyboard comes and goes.
+        window.getDecorView().setOnApplyWindowInsetsListener((view, insets) -> {
+            final int left;
+            final int right;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                final Insets bars = insets.getInsets(WindowInsets.Type.navigationBars());
+                left = bars.left;
+                right = bars.right;
+                onImeVisibility(insets.isVisible(WindowInsets.Type.ime()));
+            } else {
+                left = insets.getSystemWindowInsetLeft();
+                right = insets.getSystemWindowInsetRight();
+            }
+            // The library is loaded late in `onCreate`, and the first insets can
+            // arrive before that. Nothing is reserved while the bar is hidden.
+            if (nativeLoaded) {
+                nativeInsets(reserveNavigationBar ? left : 0, reserveNavigationBar ? right : 0);
+            }
+            return view.onApplyWindowInsets(insets);
+        });
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11 and newer. The transient behaviour brings the bars back
-            // as an overlay for a moment rather than resizing the window, which
-            // would drop a frame of every video on screen.
+            // Android 11 and newer. The window extends under the bars.
             window.setDecorFitsSystemWindows(false);
             final WindowInsetsController controller = window.getInsetsController();
             if (controller != null) {
-                controller.setSystemBarsBehavior(
-                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-                controller.hide(WindowInsets.Type.systemBars());
+                if (reserveNavigationBar) {
+                    // Only the status bar goes. The navigation bar has to be
+                    // asked back explicitly: it was hidden by the immersive mode
+                    // - hiding something else does not bring it out - and the
+                    // transient behaviour is dropped with it.
+                    controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_DEFAULT);
+                    controller.show(WindowInsets.Type.navigationBars());
+                    controller.hide(WindowInsets.Type.statusBars());
+                } else {
+                    // The transient behaviour brings the bars back as an overlay
+                    // for a moment rather than resizing the window, which would
+                    // drop a frame of every video on screen.
+                    controller.setSystemBarsBehavior(
+                            WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                    controller.hide(WindowInsets.Type.systemBars());
+                }
             }
+        } else if (reserveNavigationBar) {
+            // Android 10 and older: the flags, which are also what the manifest's
+            // fullscreen theme sets before the first frame. The navigation bar is
+            // laid out under (`LAYOUT_HIDE_NAVIGATION`) but not hidden, so it
+            // keeps its strip while the wall runs beneath it.
+            window.getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        } else {
+            window.getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        }
+        // A switch between the two modes changes what may be reserved, and the
+        // bars coming or going is what reports it - ask for a fresh dispatch.
+        window.getDecorView().requestApplyInsets();
+    }
+
+    /**
+     * Called from the native side when the setting changes: whether the
+     * navigation bar keeps its strip ({@code true}) or the wall hides it and
+     * draws full screen ({@code false}).
+     */
+    public static void setReserveNavigationBar(final boolean reserve) {
+        final MainActivity self = instance;
+        if (self == null) {
             return;
         }
-        // Android 10 and older: the flags, which is also what the manifest's
-        // fullscreen theme sets before the first frame.
-        window.getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        | View.SYSTEM_UI_FLAG_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        self.runOnUiThread(() -> {
+            if (self.reserveNavigationBar == reserve) {
+                return;
+            }
+            self.reserveNavigationBar = reserve;
+            self.applySystemBars();
+        });
     }
 
     /**
@@ -557,4 +627,7 @@ public class MainActivity extends NativeActivity {
 
     /** The keyboard went away on its own - Back, or its own hide button. */
     private static native void nativeKeyboardHidden();
+
+    /** The window insets, in pixels: the width of the navigation bar's strip. */
+    private static native void nativeInsets(int left, int right);
 }

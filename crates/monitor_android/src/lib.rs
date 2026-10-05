@@ -87,3 +87,16 @@ pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeKeyboardHidden(
 ) {
     monitor_gui::keyboard::java_keyboard_hidden();
 }
+
+/// The window insets changed: how wide the navigation bar's strip is, in
+/// pixels. See `monitor_gui::android`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeInsets(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    left: jni::sys::jint,
+    right: jni::sys::jint,
+) {
+    monitor_gui::android::set_horizontal_insets(left, right);
+}

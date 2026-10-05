@@ -161,6 +161,10 @@ pub struct AppConfig {
     pub autostart: bool,
     /// Open the window in full screen (TV / kiosk deployment).
     pub start_fullscreen: bool,
+    /// Android: leave the navigation bar in place and keep its strip free of the
+    /// wall, instead of hiding it and drawing under it. Ignored on the other
+    /// platforms, which have no such bar.
+    pub reserve_navigation_bar: bool,
     /// Interface language: a BCP-47 tag such as `zh-CN`, `auto` to follow the
     /// operating system, or `en` for English. A language that is not installed
     /// (no matching `.ftl` pack) falls back to English.
@@ -189,6 +193,7 @@ impl Default for AppConfig {
             focus: None,
             autostart: false,
             start_fullscreen: false,
+            reserve_navigation_bar: true,
             language: "auto".to_string(),
             prefer_hardware_decode: true,
             reconnect: ReconnectPolicy::default(),

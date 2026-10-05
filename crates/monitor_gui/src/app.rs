@@ -2187,6 +2187,24 @@ impl XgViewApp {
             dirty = true;
         }
 
+        // Android only: whether the navigation bar keeps its strip (the wall is
+        // narrower) or is hidden with the status bar (immersive). The activity is
+        // told from the frame's layout; see `update`.
+        #[cfg(target_os = "android")]
+        {
+            let mut reserve = self.config.reserve_navigation_bar;
+            let response = self.nav.tracked(ui.checkbox(&mut reserve, monitor_i18n::tr("settings-reserve-navigation-bar")));
+            if response.changed() {
+                self.config.reserve_navigation_bar = reserve;
+                dirty = true;
+            }
+            ui.label(
+                RichText::new(monitor_i18n::tr("settings-reserve-navigation-bar-hint"))
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+        }
+
         dirty
     }
 
@@ -3460,6 +3478,41 @@ impl eframe::App for XgViewApp {
         // Rebuilt as the frame is drawn: a control that is gone has no name to
         // offer the status line. See `focus_names`.
         self.focus_names.clear();
+
+        // Android: the navigation bar keeps its strip on one side of a landscape
+        // phone. The wall leaves exactly that width free on that side, so no
+        // control sits under the bar. A television and an external display have
+        // no navigation bar, so both insets are zero and everything stays edge
+        // to edge. The setting chooses this or the immersive full screen, and is
+        // passed to the activity here; see the inset it reports back.
+        #[cfg(target_os = "android")]
+        let (inset_left, inset_right) = {
+            crate::android::set_reserve_navigation_bar(self.config.reserve_navigation_bar);
+            if self.config.reserve_navigation_bar {
+                crate::android::horizontal_insets_px()
+            } else {
+                (0, 0)
+            }
+        };
+        #[cfg(not(target_os = "android"))]
+        let (inset_left, inset_right) = (0_i32, 0_i32);
+        let pixels_per_point = ctx.pixels_per_point();
+        let inset_left = inset_left as f32 / pixels_per_point;
+        let inset_right = inset_right as f32 / pixels_per_point;
+        if inset_left >= 1.0 {
+            egui::SidePanel::left("xgview-gutter-left")
+                .resizable(false)
+                .exact_width(inset_left)
+                .frame(egui::Frame::default().fill(theme::BACKGROUND))
+                .show(ctx, |_| {});
+        }
+        if inset_right >= 1.0 {
+            egui::SidePanel::right("xgview-gutter-right")
+                .resizable(false)
+                .exact_width(inset_right)
+                .frame(egui::Frame::default().fill(theme::BACKGROUND))
+                .show(ctx, |_| {});
+        }
 
         // In full screen the bars fade out when the wall is left alone; see
         // `chrome_visible`. The row is not inset on the right: the version
