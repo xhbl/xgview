@@ -2294,10 +2294,23 @@ impl XgViewApp {
         if let Some(order) = self.reorder.clone() {
             self.cameras_reorder(ui, &order);
             ui.add_space(theme::space::M);
-            let confirm = ui.button(monitor_i18n::tr("cameras-confirm-order"));
-            self.nav.item(&confirm);
-            self.name(&confirm, "cameras-confirm-order");
-            if confirm.clicked() {
+            let mut confirm_clicked = false;
+            let mut cancel_clicked = false;
+            ui.horizontal(|ui| {
+                let confirm = ui.button(monitor_i18n::tr("cameras-confirm-order"));
+                self.nav.item(&confirm);
+                self.name(&confirm, "cameras-confirm-order");
+                confirm_clicked = confirm.clicked();
+                let cancel = ui.button(monitor_i18n::tr("cancel"));
+                self.nav.item(&cancel);
+                self.name(&cancel, "cameras-cancel-order");
+                cancel_clicked = cancel.clicked();
+            });
+            if cancel_clicked {
+                self.cancel_reorder();
+                return false;
+            }
+            if confirm_clicked {
                 return self.apply_reorder();
             }
             return false;
