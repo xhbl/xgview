@@ -153,10 +153,10 @@ impl CameraDraft {
     pub fn build(&self) -> Result<CameraSource, String> {
         let main = self.main.trim();
         if main.is_empty() {
-            return Err("an RTSP url is required".to_string());
+            return Err(monitor_i18n::tr("dialog-an-rtsp-url-required"));
         }
         if !main.to_ascii_lowercase().starts_with("rtsp://") {
-            return Err("the url must start with rtsp://".to_string());
+            return Err(monitor_i18n::tr("dialog-url-must-start"));
         }
         let mut source = CameraSource::new(String::new(), main);
         source.name = if self.name.trim().is_empty() {
@@ -266,10 +266,9 @@ impl DiscoveryUi {
                 }
                 self.running = false;
                 self.phase.clear();
-                self.message = Some(format!(
-                    "discovery finished: {} ONVIF device(s), {} open port(s)",
-                    self.devices.len(),
-                    self.ports.len()
+                self.message = Some(monitor_i18n::tr_args(
+                    "dialog-discovery-finished",
+                    &[("devices", self.devices.len().into()), ("ports", self.ports.len().into())],
                 ));
             }
             BackgroundEvent::DiscoveryFailed(error) => {
@@ -278,7 +277,10 @@ impl DiscoveryUi {
             }
             BackgroundEvent::Imported(camera) => {
                 self.busy = None;
-                self.message = Some(format!("imported {} ({})", camera.name, camera.display_address()));
+                self.message = Some(monitor_i18n::tr_args(
+                    "dialog-imported",
+                    &[("name", camera.name.clone().into()), ("address", camera.display_address().into())],
+                ));
             }
             BackgroundEvent::ImportFailed { name, error } => {
                 self.busy = None;
@@ -286,12 +288,18 @@ impl DiscoveryUi {
             }
             BackgroundEvent::SynologyDone(cameras) => {
                 self.synology_busy = false;
-                self.message = Some(format!("{} camera(s) on the NAS - pick the ones to add", cameras.len()));
+                self.message = Some(monitor_i18n::tr_args(
+                    "dialog-synology-count",
+                    &[("count", cameras.len().into())],
+                ));
                 self.synology_cameras = cameras;
             }
             BackgroundEvent::SynologyFailed(error) => {
                 self.synology_busy = false;
-                self.error = Some(format!("Synology: {error}"));
+                self.error = Some(monitor_i18n::tr_args(
+                    "toast-synology-failed",
+                    &[("error", error.into())],
+                ));
             }
         }
     }
@@ -373,7 +381,7 @@ pub fn add_devices_window(
     // dialog shut and the settings panel could be rearranged from under it.
     egui::Modal::new(egui::Id::new("xgview-add-devices")).show(ctx, |ui| {
         ui.set_width(620.0);
-        ui.label(RichText::new("Add devices").heading());
+        ui.label(RichText::new(monitor_i18n::tr("dialog-add-devices")).heading());
         ui.add_space(theme::space::S);
 
         if tab_strip(ui, state, nav) {
@@ -430,9 +438,9 @@ pub fn add_devices_window(
 /// reaches it with the arrows. Returns `true` when it was pressed.
 fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) -> bool {
     const TABS: [(Tab, &str); 3] = [
-        (Tab::Onvif, "ONVIF / network scan"),
-        (Tab::Manual, "Manual entry"),
-        (Tab::Synology, "Synology NAS"),
+        (Tab::Onvif, "dialog-tab-onvif"),
+        (Tab::Manual, "dialog-tab-manual"),
+        (Tab::Synology, "dialog-tab-synology"),
     ];
 
     let mut ids = [egui::Id::NULL; TABS.len()];
@@ -442,7 +450,7 @@ fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) -> bool 
     ui.horizontal(|ui| {
         nav.open("dialog-tabs");
         for (slot, (value, label)) in TABS.iter().enumerate() {
-            let response = nav.tracked(ui.selectable_value(&mut state.tab, *value, *label));
+            let response = nav.tracked(ui.selectable_value(&mut state.tab, *value, monitor_i18n::tr(label)));
             if response.clicked() {
                 response.request_focus();
             }
@@ -464,7 +472,7 @@ fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) -> bool 
         nav.set_entry("dialog-tabs", ids[slot]);
         // The way out, at the far end of the strip.
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if nav.tracked(ui.button("Close")).clicked() {
+            if nav.tracked(ui.button(monitor_i18n::tr("dialog-close"))).clicked() {
                 close = true;
             }
         });
@@ -486,7 +494,7 @@ fn onvif_tab(
     ui.horizontal(|ui| {
         let busy = state.running;
         // The first control of this tab, and the one the strip's Down lands on.
-        let probe = nav.tracked(ui.add_enabled(!busy, egui::Button::new("Probe 239.255.255.250:3702")));
+        let probe = nav.tracked(ui.add_enabled(!busy, egui::Button::new(monitor_i18n::tr("dialog-probe"))));
         if probe.clicked() {
             let mut scan = state.scan.clone();
             scan.broadcast = true;
@@ -497,12 +505,12 @@ fn onvif_tab(
             state.message = None;
             state.devices.clear();
             state.ports.clear();
-            state.phase = "starting…".to_string();
+            state.phase = monitor_i18n::tr("dialog-starting");
             config.discovery = discovery.clone();
             changed = true;
             start_discovery(handle, events, discovery);
         }
-        let full = nav.tracked(ui.add_enabled(!busy, egui::Button::new("Full scan (WS-Discovery + TCP)")));
+        let full = nav.tracked(ui.add_enabled(!busy, egui::Button::new(monitor_i18n::tr("dialog-full-scan"))));
         if full.clicked() {
             let mut scan = state.scan.clone();
             scan.subnet_scan = true;
@@ -513,7 +521,7 @@ fn onvif_tab(
             state.message = None;
             state.devices.clear();
             state.ports.clear();
-            state.phase = "starting…".to_string();
+            state.phase = monitor_i18n::tr("dialog-starting");
             config.discovery = discovery.clone();
             changed = true;
             start_discovery(handle, events, discovery);
@@ -528,45 +536,47 @@ fn onvif_tab(
     // The fold is a stop of its own, ahead of the controls it hides: Down from
     // the buttons above reaches the header, and Enter - or a click - folds it
     // away. See `controls::fold` for what that takes.
+    let scan_settings_label = monitor_i18n::tr("dialog-scan-settings");
     controls::fold(
         nav,
         ui,
-        "Scan settings",
+        &scan_settings_label,
         state.scan.ip_ranges.trim().is_empty(),
         |ui, nav| {
-            nav.tracked(ui.checkbox(&mut state.scan.broadcast, "Multicast probe (local subnet)"));
-            nav.tracked(ui.checkbox(&mut state.scan.subnet_scan, "Unicast probe over the ranges below (VLAN / cross subnet)"));
-            ui.label(RichText::new("IP ranges — one per line, e.g. 192.168.1.1-254 or 10.0.0.0/24").small());
+            nav.tracked(ui.checkbox(&mut state.scan.broadcast, monitor_i18n::tr("dialog-multicast-probe")));
+            nav.tracked(ui.checkbox(&mut state.scan.subnet_scan, monitor_i18n::tr("dialog-unicast-probe")));
+            ui.label(RichText::new(monitor_i18n::tr("dialog-ip-ranges-hint")).small());
             nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::multiline(&mut state.scan.ip_ranges).desired_rows(3).desired_width(f32::INFINITY)));
             ui.horizontal(|ui| {
                 let targets = state.scan.target_count();
-                ui.label(RichText::new(format!("{targets} target address(es)")).small().color(theme::TEXT_DIM));
+                ui.label(RichText::new(monitor_i18n::tr_args("dialog-target-count", &[("count", targets.into())])).small().color(theme::TEXT_DIM));
             });
             ui.horizontal(|ui| {
-                nav.tracked(ui.checkbox(&mut state.scan.tcp_probe, "TCP fallback scan"));
+                nav.tracked(ui.checkbox(&mut state.scan.tcp_probe, monitor_i18n::tr("dialog-tcp-fallback")));
                 nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut state.scan.tcp_ports).desired_width(140.0).hint_text(theme::hint("554, 80, 8000"))));
             });
             // The two value controls: the slider keeps Left / Right for its
             // thumb, the drag value keeps Up / Down for its step, and each walks
             // the column with the other axis.
-            let timeout = ui.add(egui::Slider::new(&mut state.scan.timeout_ms, 200..=8000).text("probe timeout (ms)"));
+            let timeout = ui.add(egui::Slider::new(&mut state.scan.timeout_ms, 200..=8000).text(monitor_i18n::tr("dialog-probe-timeout")));
             nav.item_kind(Kind::Slider, &timeout);
-            controls::drag_value(nav, ui, &mut state.scan.concurrency, 1..=512, 1.0, " concurrent probes");
+            let concurrent_probes_label = monitor_i18n::tr("dialog-concurrent-probes");
+            controls::drag_value(nav, ui, &mut state.scan.concurrency, 1..=512, 1.0, &concurrent_probes_label);
             ui.separator();
-            ui.label(RichText::new("ONVIF credentials (used by GetProfiles / GetStreamUri)").small());
+            ui.label(RichText::new(monitor_i18n::tr("dialog-onvif-credentials")).small());
             ui.horizontal(|ui| {
-                ui.label("User");
+                ui.label(monitor_i18n::tr("dialog-user"));
                 nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut state.scan.username).desired_width(140.0)));
-                ui.label("Password");
+                ui.label(monitor_i18n::tr("dialog-password"));
                 nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut state.scan.password).password(true).desired_width(140.0)));
             });
         },
     );
 
     ui.add_space(6.0);
-    ui.label(RichText::new(format!("ONVIF devices ({})", state.devices.len())).strong());
+    ui.label(RichText::new(monitor_i18n::tr_args("dialog-onvif-devices", &[("count", state.devices.len().into())])).strong());
     if state.devices.is_empty() {
-        ui.label(RichText::new("no device answered yet").small().color(theme::TEXT_DIM));
+        ui.label(RichText::new(monitor_i18n::tr("dialog-no-device")).small().color(theme::TEXT_DIM));
     }
     let mut to_import: Option<DiscoveredDevice> = None;
     for device in &state.devices {
@@ -577,7 +587,7 @@ fn onvif_tab(
         let added = config.cameras.iter().any(|known| known.host.eq_ignore_ascii_case(&host));
         ui.horizontal(|ui| {
             let busy = state.busy.is_some();
-            let label = if added { "Added" } else { "Add" };
+            let label = if added { monitor_i18n::tr("dialog-added") } else { monitor_i18n::tr("dialog-add") };
             let add = nav.tracked(ui.add_enabled(!added && !busy, egui::Button::new(label)));
             if add.clicked() {
                 to_import = Some(device.clone());
@@ -588,7 +598,7 @@ fn onvif_tab(
                 ui.label(RichText::new(vendor).small().color(theme::TEXT_DIM));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(device.source.label()).small().color(theme::TEXT_DIM));
+                ui.label(RichText::new(monitor_i18n::tr(device.source.label())).small().color(theme::TEXT_DIM));
             });
         });
     }
@@ -602,21 +612,21 @@ fn onvif_tab(
     }
 
     ui.add_space(6.0);
-    ui.label(RichText::new(format!("Other open ports ({})", state.ports.len())).strong());
+    ui.label(RichText::new(monitor_i18n::tr_args("dialog-other-ports", &[("count", state.ports.len().into())])).strong());
     ui.label(
-        RichText::new("devices that do not answer WS-Discovery; add them manually with the RTSP url")
+        RichText::new(monitor_i18n::tr("dialog-other-ports-hint"))
             .small()
             .color(theme::TEXT_DIM),
     );
     let mut to_manual: Option<String> = None;
     for hit in &state.ports {
         ui.horizontal(|ui| {
-            if nav.tracked(ui.button("Use")).clicked() {
+            if nav.tracked(ui.button(monitor_i18n::tr("dialog-use"))).clicked() {
                 to_manual = Some(format!("rtsp://{}:{}/", hit.address, hit.port));
             }
             ui.label(RichText::new(hit.address.to_string()).monospace());
             ui.label(RichText::new(format!(":{}", hit.port)).monospace().color(theme::TEXT_DIM));
-            let service = if hit.is_rtsp() { "RTSP" } else { hit.service.as_deref().unwrap_or("open port") };
+            let service = if hit.is_rtsp() { "RTSP".to_string() } else { hit.service.as_deref().map(str::to_string).unwrap_or_else(|| monitor_i18n::tr("dialog-open-port")) };
             ui.label(RichText::new(service).small().color(theme::TEXT_DIM));
         });
     }
@@ -646,7 +656,7 @@ pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mu
     let mut first = None;
     let mut inferred = false;
     egui::Grid::new(grid_id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-        ui.label("Name");
+        ui.label(monitor_i18n::tr("dialog-name"));
         // The first control of the form, and the one a window opens on.
         let name = ui.add(
             egui::TextEdit::singleline(&mut draft.name).hint_text(theme::hint("Front door")).desired_width(f32::INFINITY),
@@ -655,7 +665,7 @@ pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mu
         nav.item_kind(Kind::Text, &name);
         ui.end_row();
 
-        ui.label("Main stream");
+        ui.label(monitor_i18n::tr("dialog-main-stream"));
         nav.tracked_kind(Kind::Text, ui.add(
             egui::TextEdit::singleline(&mut draft.main)
                 .hint_text(theme::hint("rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101"))
@@ -663,14 +673,14 @@ pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mu
         ));
         ui.end_row();
 
-        ui.label("Sub stream");
+        ui.label(monitor_i18n::tr("dialog-sub-stream"));
         ui.horizontal(|ui| {
             nav.tracked_kind(Kind::Text, ui.add(
                 egui::TextEdit::singleline(&mut draft.sub)
-                    .hint_text(theme::hint("optional, derived from the main url"))
+                    .hint_text(theme::hint(&monitor_i18n::tr("dialog-sub-hint")))
                     .desired_width(320.0),
             ));
-            if nav.tracked(ui.button("Infer")).clicked() {
+            if nav.tracked(ui.button(monitor_i18n::tr("dialog-infer"))).clicked() {
                 draft.infer_sub = true;
                 inferred = true;
                 let mut probe = draft.clone();
@@ -685,13 +695,13 @@ pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mu
         // One field per row. The column walk visits them in draw order, so the
         // two are never confused for one another the way a geometric walk did,
         // which used to drop the caret into the password from the sub stream box.
-        ui.label("User");
+        ui.label(monitor_i18n::tr("dialog-user"));
         nav.tracked_kind(Kind::Text, ui.add(
             egui::TextEdit::singleline(&mut draft.username).hint_text(theme::hint("user")).desired_width(f32::INFINITY),
         ));
         ui.end_row();
 
-        ui.label("Password");
+        ui.label(monitor_i18n::tr("dialog-password"));
         nav.tracked_kind(Kind::Text, ui.add(
             egui::TextEdit::singleline(&mut draft.password)
                 .password(true)
@@ -700,30 +710,30 @@ pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mu
         ));
         ui.end_row();
     });
-    nav.tracked(ui.checkbox(&mut draft.infer_sub, "Derive the sub stream from the main url when it is empty"));
+    nav.tracked(ui.checkbox(&mut draft.infer_sub, monitor_i18n::tr("dialog-derive-sub")));
     CameraFields { first, inferred }
 }
 
 fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {
     let mut changed = false;
     if camera_fields(ui, nav, "manual-camera", &mut state.manual).inferred {
-        state.message = Some("sub stream url derived from the main url".to_string());
+        state.message = Some(monitor_i18n::tr("dialog-sub-derived-msg"));
     }
 
     ui.horizontal(|ui| {
-        if nav.tracked(ui.button("Add camera")).clicked() {
+        if nav.tracked(ui.button(monitor_i18n::tr("dialog-add-camera"))).clicked() {
             match state.manual.build() {
                 Ok(source) => {
                     config.upsert_camera(source);
                     state.manual.reset();
                     state.error = None;
-                    state.message = Some("camera added".to_string());
+                    state.message = Some(monitor_i18n::tr("dialog-camera-added"));
                     changed = true;
                 }
                 Err(err) => state.error = Some(err),
             }
         }
-        if nav.tracked(ui.button("Clear")).clicked() {
+        if nav.tracked(ui.button(monitor_i18n::tr("dialog-clear"))).clicked() {
             state.manual.reset();
         }
     });
@@ -786,7 +796,7 @@ fn synology_tab(
 ) -> bool {
     let mut changed = false;
     ui.label(
-        RichText::new("SYNO.API.Auth + SYNO.SurveillanceStation.Camera: pulls every camera bound to the NAS with its main and sub stream.")
+        RichText::new(monitor_i18n::tr("dialog-synology-hint"))
             .small()
             .color(theme::TEXT_DIM),
     );
@@ -795,21 +805,21 @@ fn synology_tab(
     let synology = &mut config.synology;
     let before = synology.clone();
     egui::Grid::new("synology").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-        ui.label("Host");
+        ui.label(monitor_i18n::tr("dialog-host"));
         // The first control of this tab, and the one the strip's Down lands on.
         nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut synology.host).hint_text(theme::hint("192.168.1.10")).desired_width(220.0)));
         ui.end_row();
-        ui.label("Port");
+        ui.label(monitor_i18n::tr("dialog-port"));
         // A drag value: Up / Down step it, Left / Right walk the column.
         controls::drag_value(nav, ui, &mut synology.port, 1..=65535, 1.0, "");
         ui.end_row();
-        ui.label("Scheme");
-        nav.tracked(ui.checkbox(&mut synology.https, "https"));
+        ui.label(monitor_i18n::tr("dialog-scheme"));
+        nav.tracked(ui.checkbox(&mut synology.https, monitor_i18n::tr("dialog-https")));
         ui.end_row();
-        ui.label("Account");
+        ui.label(monitor_i18n::tr("dialog-account"));
         nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut synology.username).desired_width(220.0)));
         ui.end_row();
-        ui.label("Password");
+        ui.label(monitor_i18n::tr("dialog-password"));
         nav.tracked_kind(Kind::Text, ui.add(egui::TextEdit::singleline(&mut synology.password).password(true).desired_width(220.0)));
         ui.end_row();
     });
@@ -820,7 +830,7 @@ fn synology_tab(
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let ready = config.synology.is_configured() && !state.synology_busy;
-        if nav.tracked(ui.add_enabled(ready, egui::Button::new("Fetch cameras"))).clicked() {
+        if nav.tracked(ui.add_enabled(ready, egui::Button::new(monitor_i18n::tr("dialog-fetch-cameras")))).clicked() {
             state.synology_busy = true;
             state.error = None;
             // The list is about to be replaced; a stale one under a running
@@ -830,25 +840,25 @@ fn synology_tab(
         }
         if state.synology_busy {
             grid_spinner(ui);
-            ui.label(RichText::new("contacting the NAS…").color(theme::ACCENT));
+            ui.label(RichText::new(monitor_i18n::tr("dialog-contacting-nas")).color(theme::ACCENT));
         }
     });
 
     // What the NAS answered, one row per camera: added on the viewer's press,
     // like the ONVIF device list, rather than all at once as they arrive.
     ui.add_space(6.0);
-    ui.label(RichText::new(format!("Cameras on the NAS ({})", state.synology_cameras.len())).strong());
+    ui.label(RichText::new(monitor_i18n::tr_args("dialog-cameras-on-nas", &[("count", state.synology_cameras.len().into())])).strong());
     if state.synology_cameras.is_empty() {
-        ui.label(RichText::new("nothing fetched yet").small().color(theme::TEXT_DIM));
+        ui.label(RichText::new(monitor_i18n::tr("dialog-nothing-fetched")).small().color(theme::TEXT_DIM));
     }
     let mut to_add: Option<(CameraSource, AddOffer)> = None;
     for camera in &state.synology_cameras {
         let offer = add_offer(config, camera);
         ui.horizontal(|ui| {
             let (label, enabled) = match offer {
-                AddOffer::Add => ("Add", true),
-                AddOffer::Update => ("Update", true),
-                AddOffer::Added => ("Added", false),
+                AddOffer::Add => (monitor_i18n::tr("dialog-add"), true),
+                AddOffer::Update => (monitor_i18n::tr("dialog-update"), true),
+                AddOffer::Added => (monitor_i18n::tr("dialog-added"), false),
             };
             if nav.tracked(ui.add_enabled(enabled, egui::Button::new(label))).clicked() {
                 to_add = Some((camera.clone(), offer));
@@ -856,20 +866,21 @@ fn synology_tab(
             ui.label(RichText::new(camera.short_label(24)).strong());
             ui.label(RichText::new(&camera.host).monospace().color(theme::TEXT_DIM));
             if camera.rtsp_sub.is_some() {
-                ui.label(RichText::new("sub").small().color(theme::ACCENT));
+                ui.label(RichText::new(monitor_i18n::tr("dialog-sub-tag")).small().color(theme::ACCENT));
             }
             if offer == AddOffer::Update {
-                ui.label(RichText::new("already added, settings differ").small().color(theme::WARN));
+                ui.label(RichText::new(monitor_i18n::tr("dialog-already-added")).small().color(theme::WARN));
             }
         });
     }
     if let Some((camera, offer)) = to_add {
         let name = camera.name.clone();
         config.upsert_camera(camera);
-        state.message = Some(format!(
-            "{} {name}",
-            if offer == AddOffer::Update { "updated" } else { "added" }
-        ));
+        state.message = Some(if offer == AddOffer::Update {
+            monitor_i18n::tr_args("dialog-updated-msg", &[("name", name.into())])
+        } else {
+            monitor_i18n::tr_args("dialog-added-msg", &[("name", name.into())])
+        });
         changed = true;
     }
 
@@ -895,16 +906,17 @@ fn grid_spinner(ui: &mut egui::Ui) {
 pub fn discovery_summary(config: &DiscoveryConfig) -> String {
     let mut parts: Vec<String> = Vec::new();
     if config.broadcast {
-        parts.push("multicast".to_string());
+        parts.push(monitor_i18n::tr("summary-multicast"));
     }
     if config.subnet_scan {
-        parts.push(format!("unicast ({} ranges)", config.ip_ranges.len()));
+        parts.push(monitor_i18n::tr_args("summary-unicast", &[("count", config.ip_ranges.len().into())]));
     }
     if config.tcp_probe {
-        parts.push(format!("tcp {}", config.tcp_ports.iter().map(u16::to_string).collect::<Vec<_>>().join("/")));
+        let ports = config.tcp_ports.iter().map(u16::to_string).collect::<Vec<_>>().join("/");
+        parts.push(monitor_i18n::tr_args("summary-tcp", &[("ports", ports.into())]));
     }
     if parts.is_empty() {
-        "disabled".to_string()
+        monitor_i18n::tr("summary-disabled")
     } else {
         parts.join(" + ")
     }

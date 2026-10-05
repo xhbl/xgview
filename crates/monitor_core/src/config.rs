@@ -161,6 +161,10 @@ pub struct AppConfig {
     pub autostart: bool,
     /// Open the window in full screen (TV / kiosk deployment).
     pub start_fullscreen: bool,
+    /// Interface language: a BCP-47 tag such as `zh-CN`, `auto` to follow the
+    /// operating system, or `en` for English. A language that is not installed
+    /// (no matching `.ftl` pack) falls back to English.
+    pub language: String,
     /// Decode on the GPU where the machine offers a decoder for it. It is only
     /// a preference: a device that cannot be opened, or a stream the hardware
     /// decoder will not take, is decoded on the CPU.
@@ -185,6 +189,7 @@ impl Default for AppConfig {
             focus: None,
             autostart: false,
             start_fullscreen: false,
+            language: "auto".to_string(),
             prefer_hardware_decode: true,
             reconnect: ReconnectPolicy::default(),
             discovery: DiscoveryConfig::default(),
@@ -481,6 +486,15 @@ mod tests {
         assert_eq!(loaded.page, 1);
         assert!(loaded.autostart);
         assert_eq!(loaded.cameras.len(), 12);
+    }
+
+    /// An older `config.json` written before the language field existed must
+    /// still load, and the interface must default to auto-detection rather
+    /// than a language named by an empty string.
+    #[test]
+    fn a_configuration_without_a_language_defaults_to_auto() {
+        let config: AppConfig = serde_json::from_str(r#"{"version":1}"#).unwrap();
+        assert_eq!(config.language, "auto");
     }
 
     #[test]

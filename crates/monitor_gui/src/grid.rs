@@ -148,7 +148,7 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
         ConnectionState::Failed => {
             painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS_FAILED));
             painter.text(body.center() - vec2(0.0, 16.0), Align2::CENTER_CENTER, "!", FontId::proportional(26.0), theme::ERROR);
-            painter.text(body.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, "Stream failed", FontId::proportional(14.0), theme::ERROR);
+            painter.text(body.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, monitor_i18n::tr("grid-stream-failed"), FontId::proportional(14.0), theme::ERROR);
             if tier != Tier::Minimal && !detail.is_empty() {
                 painter.text(
                     body.center() + vec2(0.0, 32.0),
@@ -161,12 +161,12 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
         }
         ConnectionState::Suspended => {
             painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS));
-            painter.text(body.center(), Align2::CENTER_CENTER, "suspended", FontId::proportional(13.0), dim(theme::TEXT_DIM));
+            painter.text(body.center(), Align2::CENTER_CENTER, monitor_i18n::tr("grid-suspended"), FontId::proportional(13.0), dim(theme::TEXT_DIM));
         }
         ConnectionState::Idle | ConnectionState::Connecting | ConnectionState::Reconnecting => {
             painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS_PENDING));
             spinner(&painter, body.center() - vec2(0.0, 16.0), 12.0, tile.time, theme::ACCENT);
-            painter.text(body.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, state.label(), FontId::proportional(14.0), theme::TEXT);
+            painter.text(body.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, monitor_i18n::tr(state.label()), FontId::proportional(14.0), theme::TEXT);
             if tier != Tier::Minimal && !detail.is_empty() {
                 painter.text(
                     body.center() + vec2(0.0, 34.0),
@@ -192,14 +192,14 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
             painter.text(
                 band.left_center() + vec2(42.0, -10.0),
                 Align2::LEFT_CENTER,
-                format!("Switching to {} stream…", target.label()),
+                monitor_i18n::tr_args("grid-switching-to", &[("stream", monitor_i18n::tr(target.label()).into())]),
                 FontId::proportional(13.0),
                 theme::FOCUS,
             );
             painter.text(
                 band.left_center() + vec2(42.0, 10.0),
                 Align2::LEFT_CENTER,
-                format!("holding last {} frame", from.tag()),
+                monitor_i18n::tr_args("grid-holding-last", &[("tag", from.tag().into())]),
                 FontId::proportional(11.0),
                 theme::TEXT_DIM,
             );
@@ -298,8 +298,8 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
     let format = || OsdLine {
         dot: None,
         text: match channel.and_then(|channel| channel.width.zip(channel.height)) {
-            Some((width, height)) => format!("{}x{} {}", width, height, tile.aspect.short_label()),
-            None => format!("?x? {}", tile.aspect.short_label()),
+            Some((width, height)) => format!("{}x{} {}", width, height, monitor_i18n::tr(tile.aspect.short_label())),
+            None => format!("?x? {}", monitor_i18n::tr(tile.aspect.short_label())),
         },
     };
     match item {
@@ -471,7 +471,7 @@ fn waiting_for_video(painter: &egui::Painter, rect: Rect, tier: Tier) {
     painter.text(
         rect.center() + vec2(0.0, scale * 0.72),
         Align2::CENTER_CENTER,
-        "waiting for video",
+        monitor_i18n::tr("grid-waiting-video"),
         FontId::monospace(12.0),
         theme::TEXT_DIM,
     );

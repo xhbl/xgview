@@ -55,8 +55,9 @@ fn main() -> Result<()> {
     }
 
     if args.iter().any(|arg| arg == "--install-autostart") {
+        monitor_i18n::init("en", &[]);
         autostart::set_enabled(true)?;
-        println!("start-on-boot registered ({})", autostart::mechanism());
+        println!("start-on-boot registered ({})", monitor_i18n::tr(autostart::mechanism()));
         return Ok(());
     }
     if args.iter().any(|arg| arg == "--remove-autostart") {

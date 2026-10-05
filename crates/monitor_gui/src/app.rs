@@ -255,11 +255,11 @@ impl SettingsTab {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Display => "Display",
-            Self::Cameras => "Cameras",
-            Self::Streams => "Streams",
-            Self::System => "System",
-            Self::About => "About",
+            Self::Display => "settings-tab-display",
+            Self::Cameras => "settings-tab-cameras",
+            Self::Streams => "settings-tab-streams",
+            Self::System => "settings-tab-system",
+            Self::About => "settings-tab-about",
         }
     }
 }
@@ -319,17 +319,17 @@ struct RemoveConfirm {
     from: Id,
 }
 
-/// What the status line calls a grid layout.
+/// Translation key of what the status line calls a grid layout.
 ///
 /// [`GridLayout::label`] is the button's own text: right on the bar, where the
 /// neighbouring buttons are the context, and too terse on its own in a line of
 /// status.
 fn layout_hint(layout: GridLayout) -> &'static str {
     match layout {
-        GridLayout::G1x1 => "Grid 1×1",
-        GridLayout::G2x2 => "Grid 2×2",
-        GridLayout::G3x3 => "Grid 3×3",
-        GridLayout::G4x4 => "Grid 4×4",
+        GridLayout::G1x1 => "toolbar-layout-1x1",
+        GridLayout::G2x2 => "toolbar-layout-2x2",
+        GridLayout::G3x3 => "toolbar-layout-3x3",
+        GridLayout::G4x4 => "toolbar-layout-4x4",
     }
 }
 
@@ -517,11 +517,21 @@ impl XgViewApp {
         config_path: PathBuf,
         handle: Handle,
     ) -> Self {
-        fonts::install(&cc.egui_ctx);
-        theme::install(&cc.egui_ctx);
-
         let RunOptions { config, fullscreen, from_autostart, export_dir, .. } = options;
         let mut config = config;
+
+        // The interface language is chosen before the first frame is drawn:
+        // English is embedded, and a pack beside the executable or under the
+        // configuration directory is what the setting can switch to.
+        let mut language_dirs = vec![monitor_core::config::config_dir().join("langs")];
+        if let Some(dir) = export_dir.as_ref() {
+            language_dirs.push(dir.join("langs"));
+        }
+        monitor_i18n::init(&config.language, &language_dirs);
+
+        theme::install(&cc.egui_ctx);
+        fonts::install_for(&cc.egui_ctx, &monitor_i18n::current_language());
+
         let autostart = autostart::status();
         if autostart.supported {
             // The registry is the source of truth for the start-on-boot state.
@@ -621,9 +631,15 @@ impl XgViewApp {
         };
         app.sync();
         let message = if app.from_autostart {
-            format!("XGView {} started automatically ({} decoder)", env!("CARGO_PKG_VERSION"), app.decoder)
+            monitor_i18n::tr_args(
+                "toast-started-autostart",
+                &[("version", env!("CARGO_PKG_VERSION").into()), ("decoder", app.decoder.into())],
+            )
         } else {
-            format!("XGView {} — {} decoder", env!("CARGO_PKG_VERSION"), app.decoder)
+            monitor_i18n::tr_args(
+                "toast-started",
+                &[("version", env!("CARGO_PKG_VERSION").into()), ("decoder", app.decoder.into())],
+            )
         };
         app.flash(message, ToastKind::Info);
         app
@@ -743,7 +759,16 @@ impl XgViewApp {
             Err(err) => {
                 self.dirty = false;
                 self.dirty_since = None;
-                self.flash(format!("cannot save {}: {err}", self.config_path.display()), ToastKind::Error);
+                self.flash(
+                    monitor_i18n::tr_args(
+                        "toast-config-save-failed",
+                        &[
+                            ("path", self.config_path.display().to_string().into()),
+                            ("error", err.to_string().into()),
+                        ],
+                    ),
+                    ToastKind::Error,
+                );
             }
         }
     }
@@ -1035,24 +1060,42 @@ impl XgViewApp {
                 BackgroundEvent::Imported(camera) => {
                     self.config.upsert_camera((**camera).clone());
                     touched_config = true;
-                    toast = Some((format!("added {}", camera.name), ToastKind::Info));
+                    toast = Some((
+                        monitor_i18n::tr_args("toast-camera-added", &[("name", camera.name.clone().into())]),
+                        ToastKind::Info,
+                    ));
                 }
                 BackgroundEvent::ImportFailed { name, error } => {
-                    toast = Some((format!("{name}: {error}"), ToastKind::Error));
+                    toast = Some((
+                        monitor_i18n::tr_args(
+                            "toast-camera-import-failed",
+                            &[("name", name.clone().into()), ("error", error.to_string().into())],
+                        ),
+                        ToastKind::Error,
+                    ));
                 }
                 BackgroundEvent::SynologyDone(cameras) => {
                     // The cameras are listed in the dialog for the viewer to
                     // pick from, not imported on arrival - see `synology_tab`.
                     toast = Some((
-                        format!("{} camera(s) found on Surveillance Station", cameras.len()),
+                        monitor_i18n::tr_args(
+                            "toast-synology-found",
+                            &[("count", cameras.len().into())],
+                        ),
                         ToastKind::Info,
                     ));
                 }
                 BackgroundEvent::SynologyFailed(error) => {
-                    toast = Some((format!("Synology: {error}"), ToastKind::Error));
+                    toast = Some((
+                        monitor_i18n::tr_args("toast-synology-failed", &[("error", error.to_string().into())]),
+                        ToastKind::Error,
+                    ));
                 }
                 BackgroundEvent::DiscoveryFailed(error) => {
-                    toast = Some((format!("discovery failed: {error}"), ToastKind::Error));
+                    toast = Some((
+                        monitor_i18n::tr_args("toast-discovery-failed", &[("error", error.to_string().into())]),
+                        ToastKind::Error,
+                    ));
                 }
                 _ => {}
             }
@@ -1649,9 +1692,9 @@ impl XgViewApp {
             // and a double click all magnify, but a touch screen has no keyboard
             // and no arrow, so this is the one way back it can offer.
             if self.scheduler.is_zoomed() {
-                let back = icons::button(ui, Icon::Grid, false, "Back to the grid (Esc / Back)");
+                let back = icons::button(ui, Icon::Grid, false, &monitor_i18n::tr("toolbar-back-grid-tip"));
                 items.push((back.id, back.rect));
-                self.name(&back, "Back to the grid");
+                self.name(&back, "toolbar-back-grid");
                 if back.clicked() {
                     self.zoom_out();
                 }
@@ -1662,16 +1705,16 @@ impl XgViewApp {
             let previous = ui.add_enabled(info.has_previous(), egui::Button::new("◀"));
             if info.has_previous() {
                 items.push((previous.id, previous.rect));
-                self.name(&previous, "Previous page");
+                self.name(&previous, "toolbar-prev-page");
             }
             if previous.clicked() {
                 self.turn_page(false);
             }
-            ui.label(format!("page {} / {}", info.page + 1, info.page_count));
+            ui.label(monitor_i18n::tr_args("toolbar-page", &[("page", (info.page + 1).into()), ("count", info.page_count.into())]));
             let next = ui.add_enabled(info.has_next(), egui::Button::new("▶"));
             if info.has_next() {
                 items.push((next.id, next.rect));
-                self.name(&next, "Next page");
+                self.name(&next, "toolbar-next-page");
             }
             if next.clicked() {
                 self.turn_page(true);
@@ -1695,28 +1738,32 @@ impl XgViewApp {
                     ui,
                     if self.fullscreen { Icon::Collapse } else { Icon::Expand },
                     self.fullscreen,
-                    if self.fullscreen { "Leave full screen (F11)" } else { "Full screen (F11)" },
+                    &monitor_i18n::tr(if self.fullscreen {
+                        "toolbar-fullscreen-leave-tip"
+                    } else {
+                        "toolbar-fullscreen-enter-tip"
+                    }),
                 );
                 items.push((fullscreen.id, fullscreen.rect));
                 self.name(
                     &fullscreen,
-                    if self.fullscreen { "Leave full screen" } else { "Full screen" },
+                    if self.fullscreen { "toolbar-fullscreen-leave" } else { "toolbar-fullscreen-enter" },
                 );
                 if fullscreen.clicked() {
                     let enabled = !self.fullscreen;
                     self.set_fullscreen(ui.ctx(), enabled);
                 }
 
-                let settings = icons::button(ui, Icon::Gear, self.show_settings, "Settings (F1)");
+                let settings = icons::button(ui, Icon::Gear, self.show_settings, &monitor_i18n::tr("toolbar-settings-tip"));
                 items.push((settings.id, settings.rect));
-                self.name(&settings, "Settings");
+                self.name(&settings, "toolbar-settings");
                 if settings.clicked() {
                     self.show_settings = !self.show_settings;
                 }
 
-                let devices = icons::button(ui, Icon::Plus, self.discovery.open, "Add devices (F2)");
+                let devices = icons::button(ui, Icon::Plus, self.discovery.open, &monitor_i18n::tr("toolbar-add-devices-tip"));
                 items.push((devices.id, devices.rect));
-                self.name(&devices, "Add devices");
+                self.name(&devices, "toolbar-add-devices");
                 if devices.clicked() {
                     self.discovery.open = !self.discovery.open;
                 }
@@ -1743,32 +1790,42 @@ impl XgViewApp {
             // bar, where it was competing with the controls.
             let live = self.channels.values().filter(|channel| channel.state.is_live()).count();
             ui.label(
-                RichText::new(format!("{live}/{} live", self.config.enabled_count()))
-                    .color(if live > 0 { theme::LIVE } else { theme::TEXT_DIM }),
+                RichText::new(monitor_i18n::tr_args(
+                    "status-live",
+                    &[("live", live.into()), ("total", self.config.enabled_count().into())],
+                ))
+                .color(if live > 0 { theme::LIVE } else { theme::TEXT_DIM }),
             );
             ui.separator();
-            ui.label(format!("{} · page {}/{}", self.scheduler.layout().label(), info.page + 1, info.page_count));
+            ui.label(monitor_i18n::tr_args(
+                "status-page",
+                &[
+                    ("layout", self.scheduler.layout().label().into()),
+                    ("page", (info.page + 1).into()),
+                    ("count", info.page_count.into()),
+                ],
+            ));
             if self.scheduler.is_zoomed() {
                 ui.separator();
-                ui.label(RichText::new("1x1 zoom · main stream").color(theme::FOCUS));
+                ui.label(RichText::new(monitor_i18n::tr("status-zoom")).color(theme::FOCUS));
             }
             ui.separator();
             match self.scheduler.focus() {
-                Some(focus) => ui.label(format!("focus #{focus}")),
-                None => ui.label("no focus"),
+                Some(focus) => ui.label(monitor_i18n::tr_args("status-focus", &[("index", focus.into())])),
+                None => ui.label(monitor_i18n::tr("status-no-focus")),
             };
             // What the remote control is on, for the controls that carry a shape
             // instead of a word and have no pointer to hover for a tooltip.
             if let Some(name) = self.focused_name {
                 ui.separator();
-                ui.label(RichText::new(name).color(theme::FOCUS));
+                ui.label(RichText::new(monitor_i18n::tr(name)).color(theme::FOCUS));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // Drawn right to left, so the copyright lands at the very right
                 // and the decoder just left of it. The author is a mailto link,
                 // the same one the about panel carries.
                 ui.label(
-                    RichText::new(format!("© {}", monitor_core::copyright_years()))
+                    RichText::new(monitor_i18n::tr_args("status-copyright", &[("years", monitor_core::copyright_years().into())]))
                         .small()
                         .color(theme::TEXT_DIM),
                 );
@@ -1782,7 +1839,14 @@ impl XgViewApp {
                     }
                 }
                 ui.separator();
-                ui.label(RichText::new(format!("decoder: {}", self.decoder)).small().color(theme::TEXT_DIM));
+                ui.label(
+                    RichText::new(monitor_i18n::tr_args(
+                        "status-decoder",
+                        &[("backend", self.decoder.into())],
+                    ))
+                    .small()
+                    .color(theme::TEXT_DIM),
+                );
             });
         });
     }
@@ -1800,8 +1864,11 @@ impl XgViewApp {
             for (slot, tab) in SettingsTab::ALL.into_iter().enumerate() {
                 let selected = self.settings_tab == tab;
                 let label = match tab {
-                    SettingsTab::Cameras => format!("Cameras ({})", self.config.cameras.len()),
-                    other => other.label().to_string(),
+                    SettingsTab::Cameras => monitor_i18n::tr_args(
+                        "settings-tab-cameras-count",
+                        &[("count", self.config.cameras.len().into())],
+                    ),
+                    other => monitor_i18n::tr(other.label()),
                 };
                 let response = self.nav.tracked(ui.selectable_label(selected, label));
                 self.name(&response, tab.label());
@@ -1880,7 +1947,12 @@ impl XgViewApp {
     fn settings_display(&mut self, ui: &mut egui::Ui) -> bool {
         let mut dirty = false;
 
-        ui.label(RichText::new("Grid").strong());
+        if self.settings_language(ui) {
+            dirty = true;
+        }
+        ui.add_space(theme::space::S);
+
+        ui.label(RichText::new(monitor_i18n::tr("settings-grid")).strong());
         ui.horizontal_wrapped(|ui| {
             for layout in GridLayout::ALL {
                 let selected = self.scheduler.layout() == layout;
@@ -1891,22 +1963,22 @@ impl XgViewApp {
             }
         });
         ui.add_space(theme::space::S);
-        ui.label(RichText::new("On-screen display").strong());
+        ui.label(RichText::new(monitor_i18n::tr("settings-osd")).strong());
         ui.label(
-            RichText::new("What each corner of a tile shows. Press a button to cycle.")
+            RichText::new(monitor_i18n::tr("settings-osd-hint"))
                 .small()
                 .color(theme::TEXT_DIM),
         );
         let corners: [(&str, &mut OsdItem); 4] = [
-            ("Top left", &mut self.config.osd.top_left),
-            ("Top right", &mut self.config.osd.top_right),
-            ("Bottom left", &mut self.config.osd.bottom_left),
-            ("Bottom right", &mut self.config.osd.bottom_right),
+            ("corner-top-left", &mut self.config.osd.top_left),
+            ("corner-top-right", &mut self.config.osd.top_right),
+            ("corner-bottom-left", &mut self.config.osd.bottom_left),
+            ("corner-bottom-right", &mut self.config.osd.bottom_right),
         ];
         for (corner, item) in corners {
             ui.horizontal(|ui| {
-                ui.label(corner);
-                let button = ui.button(item.label());
+                ui.label(monitor_i18n::tr(corner));
+                let button = ui.button(monitor_i18n::tr(item.label()));
                 self.nav.item(&button);
                 self.focus_names.insert(button.id, corner);
                 if button.clicked() {
@@ -1917,17 +1989,77 @@ impl XgViewApp {
         }
         ui.add_space(theme::space::S);
         let mut fullscreen = self.fullscreen;
-        let full = self.nav.tracked(ui.checkbox(&mut fullscreen, "Full screen (F11)"));
+        let full = self.nav.tracked(ui.checkbox(&mut fullscreen, monitor_i18n::tr("settings-fullscreen")));
         if full.changed() {
             self.set_fullscreen(ui.ctx(), fullscreen);
         }
         let mut start_fullscreen = self.config.start_fullscreen;
-        let start = self.nav.tracked(ui.checkbox(&mut start_fullscreen, "Open in full screen at start-up"));
+        let start = self.nav.tracked(ui.checkbox(&mut start_fullscreen, monitor_i18n::tr("settings-start-fullscreen")));
         if start.changed() {
             self.config.start_fullscreen = start_fullscreen;
             dirty = true;
         }
 
+        dirty
+    }
+
+    /// The interface language picker.
+    ///
+    /// Switching it takes effect at once: the catalogue is swapped, the fonts
+    /// are reinstalled for the language's own glyphs, and a repaint draws the
+    /// new text. The choice is written back to the configuration like any other
+    /// setting, so the next start comes up in it.
+    fn settings_language(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut dirty = false;
+        ui.label(RichText::new(monitor_i18n::tr("settings-language")).strong());
+        ui.label(
+            RichText::new(monitor_i18n::tr("settings-language-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+
+        let current = monitor_i18n::current_language();
+        let available = monitor_i18n::available();
+        let is_auto = self.config.language.is_empty() || self.config.language == "auto";
+        let auto_label = monitor_i18n::tr("settings-language-auto");
+        let selected_name = if is_auto {
+            auto_label.clone()
+        } else {
+            available
+                .iter()
+                .find(|info| info.id == current)
+                .map(|info| info.name.clone())
+                .unwrap_or_else(|| current.clone())
+        };
+
+        let response = egui::ComboBox::from_id_salt("settings-language")
+            .selected_text(selected_name)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(is_auto, &auto_label).clicked() && !is_auto {
+                    self.config.language = "auto".to_string();
+                    monitor_i18n::set_language("auto");
+                    fonts::install_for(ui.ctx(), &monitor_i18n::current_language());
+                    ui.ctx().request_repaint();
+                    dirty = true;
+                }
+                for info in &available {
+                    let selected = !is_auto && info.id == current;
+                    if ui.selectable_label(selected, &info.name).clicked() && !selected {
+                        // Always record the explicit choice so the user leaves
+                        // auto mode even when the language is the same as the
+                        // one auto-detection picked.
+                        let changed = monitor_i18n::set_language(&info.id);
+                        self.config.language = info.id.clone();
+                        if changed {
+                            fonts::install_for(ui.ctx(), &info.id);
+                            ui.ctx().request_repaint();
+                        }
+                        dirty = true;
+                    }
+                }
+            })
+            .response;
+        self.nav.item(&response);
         dirty
     }
 
@@ -1940,7 +2072,7 @@ impl XgViewApp {
         #[cfg(target_os = "android")]
         let dirty = false;
 
-        ui.label(RichText::new("Start-up").strong());
+        ui.label(RichText::new(monitor_i18n::tr("settings-startup")).strong());
         // Desktop: the registration is ours to make, so it is a checkbox. On
         // Android it belongs to the manifest and the system, and the section
         // below shows the two things the device asks for instead.
@@ -1949,7 +2081,7 @@ impl XgViewApp {
             let supported = self.autostart.supported;
             let mut enabled = self.config.autostart;
             ui.add_enabled_ui(supported, |ui| {
-                let boot = ui.checkbox(&mut enabled, "Start with the system boot");
+                let boot = ui.checkbox(&mut enabled, monitor_i18n::tr("settings-autostart"));
                 self.nav.item(&boot);
                 if boot.changed() {
                     match autostart::set_enabled(enabled) {
@@ -1958,28 +2090,41 @@ impl XgViewApp {
                             self.autostart = autostart::status();
                             dirty = true;
                             self.flash(
-                                if enabled { "registered for start-on-boot" } else { "start-on-boot registration removed" },
+                                monitor_i18n::tr(if enabled { "toast-autostart-on" } else { "toast-autostart-off" }),
                                 ToastKind::Info,
                             );
                         }
                         Err(err) => {
                             self.autostart = autostart::status();
-                            self.flash(format!("start-on-boot: {err}"), ToastKind::Error);
+                            self.flash(
+                                monitor_i18n::tr_args(
+                                    "toast-autostart-failed",
+                                    &[("error", err.to_string().into())],
+                                ),
+                                ToastKind::Error,
+                            );
                         }
                     }
                 }
             });
             if !supported {
-                ui.label(RichText::new("start-on-boot is not supported on this platform").small().color(theme::TEXT_DIM));
+                ui.label(RichText::new(monitor_i18n::tr("settings-autostart-unsupported")).small().color(theme::TEXT_DIM));
             }
-            ui.label(RichText::new(format!("mechanism: {}", self.autostart.mechanism)).small().color(theme::TEXT_DIM));
+            ui.label(
+                RichText::new(monitor_i18n::tr_args(
+                    "settings-mechanism",
+                    &[("name", monitor_i18n::tr(&self.autostart.mechanism).into())],
+                ))
+                .small()
+                .color(theme::TEXT_DIM),
+            );
             ui.label(RichText::new(&self.autostart.detail).small().color(theme::TEXT_DIM));
         }
         #[cfg(target_os = "android")]
         self.android_boot_section(ui);
 
         ui.add_space(theme::space::L);
-        ui.label(RichText::new("Keys").strong());
+        ui.label(RichText::new(monitor_i18n::tr("settings-keys")).strong());
         // One shortcut per row, the key in a monospace column of its own so the
         // list reads down the keys and not across a line of dots.
         egui::Grid::new("xgview-system-keys")
@@ -1987,18 +2132,18 @@ impl XgViewApp {
             .spacing([theme::space::L, theme::space::XS])
             .show(ui, |ui| {
                 for (keys, action) in [
-                    ("DPAD / arrows", "move focus"),
-                    ("Enter (wall)", "magnify / restore"),
-                    ("Enter (panel)", "activate"),
-                    ("Esc / Back", "back"),
-                    ("1-4", "grid 1x1 … 4x4"),
-                    ("PgUp / PgDn", "previous / next"),
-                    ("F1", "settings"),
-                    ("F2", "devices"),
-                    ("F11", "full screen"),
+                    ("DPAD / arrows", "key-move-focus"),
+                    ("Enter (wall)", "key-magnify"),
+                    ("Enter (panel)", "key-OK"),
+                    ("Esc / Back", "key-back"),
+                    ("1-4", "key-grid"),
+                    ("PgUp / PgDn", "key-page"),
+                    ("F1", "key-settings"),
+                    ("F2", "key-add-devices"),
+                    ("F11", "key-fullscreen"),
                 ] {
                     ui.label(RichText::new(keys).monospace().strong());
-                    ui.label(RichText::new(action).small().color(theme::TEXT_DIM));
+                    ui.label(RichText::new(monitor_i18n::tr(action)).small().color(theme::TEXT_DIM));
                     ui.end_row();
                 }
             });
@@ -2025,39 +2170,36 @@ impl XgViewApp {
         let (overlay, home) = self.android_boot;
 
         ui.label(
-            RichText::new(
-                "Android refuses to start an app from the boot broadcast unless the system allows \
-                 it. Either of these, set once on the device, is enough.",
-            )
-            .small()
-            .color(theme::TEXT_DIM),
+            RichText::new(monitor_i18n::tr("android-boot-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
         );
         ui.add_space(theme::space::S);
 
         ui.horizontal(|ui| {
-            let button = ui.button("Home app…");
+            let button = ui.button(monitor_i18n::tr("android-home-button"));
             self.nav.item(&button);
-            self.name(&button, "Home app settings");
+            self.name(&button, "android-home-name");
             if button.clicked() {
                 crate::android::open_home_settings();
                 self.android_boot_at = f64::NEG_INFINITY;
             }
             ui.label(
-                RichText::new(if home { "XGView is the home app" } else { "XGView is not the home app" })
+                RichText::new(monitor_i18n::tr(if home { "android-home-yes" } else { "android-home-no" }))
                     .small()
                     .color(if home { theme::LIVE } else { theme::TEXT_DIM }),
             );
         });
         ui.horizontal(|ui| {
-            let button = ui.button("Start over other apps…");
+            let button = ui.button(monitor_i18n::tr("android-overlay-button"));
             self.nav.item(&button);
-            self.name(&button, "Display over other apps settings");
+            self.name(&button, "android-overlay-name");
             if button.clicked() {
                 crate::android::open_overlay_settings();
                 self.android_boot_at = f64::NEG_INFINITY;
             }
             ui.label(
-                RichText::new(if overlay { "allowed" } else { "not allowed" })
+                RichText::new(monitor_i18n::tr(if overlay { "android-overlay-yes" } else { "android-overlay-no" }))
                     .small()
                     .color(if overlay { theme::LIVE } else { theme::TEXT_DIM }),
             );
@@ -2065,10 +2207,7 @@ impl XgViewApp {
 
         ui.add_space(theme::space::S);
         ui.label(
-            RichText::new(
-                "Or, from a computer with adb:\n\
-                 adb shell appops set com.xhbl.xgview SYSTEM_ALERT_WINDOW allow",
-            )
+            RichText::new(monitor_i18n::tr_args("android-adb-hint", &[("nl", "\n".into())]))
             .small()
             .color(theme::TEXT_DIM),
         );
@@ -2079,46 +2218,47 @@ impl XgViewApp {
         let mut dirty = false;
 
         ui.label(
-            RichText::new("The multi grid pulls the sub stream; 1x1 - and a magnified viewport - pull the main stream.")
+            RichText::new(monitor_i18n::tr("streams-hint"))
                 .small()
                 .color(theme::TEXT_DIM),
         );
 
         ui.add_space(theme::space::M);
-        ui.label(RichText::new("Reconnect").strong());
+        ui.label(RichText::new(monitor_i18n::tr("settings-reconnect")).strong());
         let reconnect = &mut self.config.reconnect;
         ui.horizontal(|ui| {
-            ui.label("first retry after");
+            ui.label(monitor_i18n::tr("streams-first-retry"));
             let first = controls::drag_value(&mut self.nav, ui, &mut reconnect.initial_delay_ms, 100..=10_000, 100.0, " ms");
             dirty |= first.changed();
-            ui.label("then at most");
+            ui.label(monitor_i18n::tr("streams-then-at-most"));
             let second = controls::drag_value(&mut self.nav, ui, &mut reconnect.max_delay_ms, 1_000..=300_000, 1000.0, " ms");
             dirty |= second.changed();
         });
-        ui.label(RichText::new("a change applies to the connections opened afterwards").small().color(theme::TEXT_DIM));
+        ui.label(RichText::new(monitor_i18n::tr("streams-change-note")).small().color(theme::TEXT_DIM));
         // The shape of the curve is settled once, by whoever sized the network,
         // and never looked at again: it belongs behind a fold, not on the tab.
         // The fold is a stop of its own, ahead of the controls it hides; see
         // `controls::fold`.
-        controls::fold(&mut self.nav, ui, "Backoff shape", false, |ui, nav| {
+        let backoff = monitor_i18n::tr("streams-backoff");
+        controls::fold(&mut self.nav, ui, &backoff, false, |ui, nav| {
             ui.horizontal(|ui| {
-                ui.label("factor");
+                ui.label(monitor_i18n::tr("streams-factor"));
                 let factor = controls::drag_value(nav, ui, &mut reconnect.multiplier, 1.0..=5.0, 0.05, "");
                 dirty |= factor.changed();
-                ui.label("jitter");
+                ui.label(monitor_i18n::tr("streams-jitter"));
                 let jitter = controls::drag_value(nav, ui, &mut reconnect.jitter, 0.0..=1.0, 0.02, "");
                 dirty |= jitter.changed();
-                ui.label("attempts (0 = forever)");
+                ui.label(monitor_i18n::tr("streams-attempts"));
                 let attempts = controls::drag_value(nav, ui, &mut reconnect.max_attempts, 0..=100, 1.0, "");
                 dirty |= attempts.changed();
             });
         });
 
         ui.add_space(theme::space::M);
-        ui.label(RichText::new("Decoding").strong());
+        ui.label(RichText::new(monitor_i18n::tr("settings-decoding")).strong());
         let mut prefer_hardware = self.config.prefer_hardware_decode;
         ui.add_enabled_ui(self.decoder_selectable, |ui| {
-            let hardware = ui.checkbox(&mut prefer_hardware, "Prefer hardware decoding");
+            let hardware = ui.checkbox(&mut prefer_hardware, monitor_i18n::tr("streams-prefer-hardware"));
             self.nav.item(&hardware);
             if hardware.changed() {
                 self.config.prefer_hardware_decode = prefer_hardware;
@@ -2127,21 +2267,21 @@ impl XgViewApp {
                 self.manager.set_hardware_preference(prefer_hardware);
                 dirty = true;
                 self.flash(
-                    if prefer_hardware {
-                        "channels reopening, the GPU decodes where it can"
+                    monitor_i18n::tr(if prefer_hardware {
+                        "toast-decoding-gpu"
                     } else {
-                        "channels reopening on the CPU"
-                    },
+                        "toast-decoding-cpu"
+                    }),
                     ToastKind::Info,
                 );
             }
         });
         let summary = if !self.decoder_selectable {
-            "Decoding happens in hardware here and nowhere else, so there is nothing to switch."
+            monitor_i18n::tr("streams-summary-fixed")
         } else if self.hardware_decoder {
-            "Pictures are decoded on the GPU where the machine offers a decoder for the stream, and on the CPU everywhere else. Each tile shows which one it got."
+            monitor_i18n::tr("streams-summary-available")
         } else {
-            "This build has no hardware decoder: the CPU decodes, whatever this setting says."
+            monitor_i18n::tr("streams-summary-software")
         };
         ui.label(RichText::new(summary).small().color(theme::TEXT_DIM));
 
@@ -2155,9 +2295,9 @@ impl XgViewApp {
         if let Some(order) = self.reorder.clone() {
             self.cameras_reorder(ui, &order);
             ui.add_space(theme::space::M);
-            let confirm = ui.button("Confirm order");
+            let confirm = ui.button(monitor_i18n::tr("cameras-confirm-order"));
             self.nav.item(&confirm);
-            self.name(&confirm, "Confirm order");
+            self.name(&confirm, "cameras-confirm-order");
             if confirm.clicked() {
                 return self.apply_reorder();
             }
@@ -2172,13 +2312,13 @@ impl XgViewApp {
         let mut dirty = false;
 
         ui.horizontal(|ui| {
-            let devices = ui.button("Add devices…");
+            let devices = ui.button(monitor_i18n::tr("cameras-add-devices"));
             self.nav.item(&devices);
             if devices.clicked() {
                 self.discovery.open = true;
                 self.discovery.tab = Tab::Onvif;
             }
-            let manual = ui.button("Add manually…");
+            let manual = ui.button(monitor_i18n::tr("cameras-add-manually"));
             self.nav.item(&manual);
             if manual.clicked() {
                 self.discovery.open = true;
@@ -2206,12 +2346,12 @@ impl XgViewApp {
                 if let Some(sub) = camera.rtsp_sub.as_deref() {
                     let inferred = sub == monitor_core::model::infer_sub_stream(&camera.rtsp_main).unwrap_or_default();
                     ui.label(
-                        RichText::new(if inferred { "sub: derived" } else { "sub: set" })
+                        RichText::new(monitor_i18n::tr(if inferred { "cameras-sub-derived" } else { "cameras-sub-set" }))
                             .small()
                             .color(theme::ACCENT),
                     );
                 } else {
-                    let infer_button = ui.small_button("infer sub");
+                    let infer_button = ui.small_button(monitor_i18n::tr("cameras-infer-sub"));
                     self.nav.item(&infer_button);
                     if infer_button.clicked() {
                         infer = Some(slot);
@@ -2224,10 +2364,7 @@ impl XgViewApp {
                     } else {
                         theme::TEXT_DIM
                     }))
-                    .on_hover_text(
-                        "RTSP transport for this camera. UDP bypasses a relay that damages \
-                         the TCP interleaved framing.",
-                    );
+                    .on_hover_text(monitor_i18n::tr("cameras-transport-tip"));
                 self.nav.item(&transport_button);
                 if transport_button.clicked() {
                     transport_change = Some((slot, transport.toggled()));
@@ -2236,12 +2373,12 @@ impl XgViewApp {
                     // Drawn right to left so the pair reads edit, remove;
                     // registered edit first, so the walk reaches the control
                     // that changes before the one that deletes.
-                    let remove_button = icons::button_sized(ui, Icon::Trash, false, false, "Remove this camera", ROW_ICON);
-                    let edit_button = icons::button_sized(ui, Icon::Edit, false, false, "Edit this camera", ROW_ICON);
+                    let remove_button = icons::button_sized(ui, Icon::Trash, false, false, &monitor_i18n::tr("cameras-remove-tip"), ROW_ICON);
+                    let edit_button = icons::button_sized(ui, Icon::Edit, false, false, &monitor_i18n::tr("cameras-edit-tip"), ROW_ICON);
                     self.nav.item(&edit_button);
-                    self.focus_names.insert(edit_button.id, "Edit camera");
+                    self.focus_names.insert(edit_button.id, "cameras-edit-name");
                     self.nav.item(&remove_button);
-                    self.focus_names.insert(remove_button.id, "Remove camera");
+                    self.focus_names.insert(remove_button.id, "cameras-remove-name");
                     if remove_button.clicked() {
                         ask_remove = Some((camera.id.clone(), camera.name.clone(), remove_button.id));
                     }
@@ -2258,16 +2395,16 @@ impl XgViewApp {
                 ui.add_space(theme::space::S);
                 let aspect = camera.aspect;
                 let aspect_button = ui
-                    .small_button(RichText::new(aspect.label()).small().color(theme::ACCENT))
-                    .on_hover_text("How the picture is fitted into its tile");
+                    .small_button(RichText::new(monitor_i18n::tr(aspect.label())).small().color(theme::ACCENT))
+                    .on_hover_text(monitor_i18n::tr("cameras-aspect-tip"));
                 self.nav.item(&aspect_button);
-                self.focus_names.insert(aspect_button.id, "Display aspect");
+                self.focus_names.insert(aspect_button.id, "cameras-aspect-name");
                 if aspect_button.clicked() {
                     aspect_change = Some((slot, aspect.next()));
                 }
                 let address = theme::truncate(&camera.masked_uri(StreamKind::Main), 26);
                 ui.label(RichText::new(address).small().monospace().color(theme::TEXT_DIM));
-                ui.label(RichText::new(camera.origin.label()).small().color(theme::TEXT_DIM));
+                ui.label(RichText::new(monitor_i18n::tr(camera.origin.label())).small().color(theme::TEXT_DIM));
             });
             ui.add_space(theme::space::XS);
         }
@@ -2295,7 +2432,7 @@ impl XgViewApp {
                     self.needs_sync = true;
                     dirty = true;
                 } else {
-                    self.flash("no sub stream pattern recognised", ToastKind::Error);
+                    self.flash(monitor_i18n::tr("toast-no-sub"), ToastKind::Error);
                 }
             }
         }
@@ -2328,15 +2465,15 @@ impl XgViewApp {
         if self.config.cameras.len() >= 2 {
             ui.add_space(theme::space::M);
             let trigger =
-                ui.push_id("xgview-reorder-trigger", |ui| ui.button("Reorder cameras")).inner;
+                ui.push_id("xgview-reorder-trigger", |ui| ui.button(monitor_i18n::tr("cameras-reorder"))).inner;
             self.nav.item(&trigger);
-            self.name(&trigger, "Reorder cameras");
+            self.name(&trigger, "cameras-reorder");
             self.reorder_trigger_anchor = Some(trigger.id);
             if trigger.clicked() {
                 self.reorder =
                     Some(self.config.cameras.iter().map(|camera| camera.id.clone()).collect());
                 self.reorder_focus = true;
-                self.flash("Reorder: Up / Down to move · Confirm to apply · Back to cancel", ToastKind::Info);
+                self.flash(monitor_i18n::tr("toast-reorder"), ToastKind::Info);
             }
         }
 
@@ -2381,7 +2518,7 @@ impl XgViewApp {
                         Icon::Down,
                         false,
                         bottom,
-                        "Move down",
+                        &monitor_i18n::tr("cameras-move-down"),
                         ROW_ICON,
                     );
                     let up = icons::button_at(
@@ -2390,7 +2527,7 @@ impl XgViewApp {
                         Icon::Up,
                         false,
                         first,
-                        "Move up",
+                        &monitor_i18n::tr("cameras-move-up"),
                         ROW_ICON,
                     );
                     // Only the arrows with somewhere to go join the walk: a
@@ -2407,14 +2544,14 @@ impl XgViewApp {
                     // does after a click.
                     if !first {
                         self.nav.item(&up);
-                        self.name(&up, "Move camera up");
+                        self.name(&up, "cameras-move-camera-up");
                         if up.is_pointer_button_down_on() {
                             up.request_focus();
                         }
                     }
                     if !bottom {
                         self.nav.item(&down);
-                        self.name(&down, "Move camera down");
+                        self.name(&down, "cameras-move-camera-down");
                         if down.is_pointer_button_down_on() {
                             down.request_focus();
                         }
@@ -2513,22 +2650,24 @@ impl XgViewApp {
         // own buttons (or Back) - a press on the backdrop does nothing.
         egui::Modal::new(Id::new("xgview-edit-camera")).show(ctx, |ui| {
             ui.set_width(560.0);
-            ui.label(RichText::new("Edit camera").heading());
+            ui.label(RichText::new(monitor_i18n::tr("camera-edit-title")).heading());
             ui.add_space(theme::space::S);
             self.nav.open("edit-body");
             let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft);
             // The dialog opens on the first control of the form.
             self.camera_edit_anchor = fields.first;
             if fields.inferred {
-                ui.label(RichText::new("sub stream url derived from the main url").small().color(theme::LIVE));
+                ui.label(RichText::new(monitor_i18n::tr("camera-edit-sub-derived")).small().color(theme::LIVE));
             }
             ui.add_space(theme::space::M);
             ui.horizontal(|ui| {
-                ui.add_space(Self::center_offset(ui, &["Save", "Cancel"]));
-                if self.nav.tracked(ui.button("Save")).clicked() {
+                let save_label = monitor_i18n::tr("save");
+                let cancel_label = monitor_i18n::tr("cancel");
+                ui.add_space(Self::center_offset(ui, &[&save_label, &cancel_label]));
+                if self.nav.tracked(ui.button(save_label)).clicked() {
                     save = true;
                 }
-                if self.nav.tracked(ui.button("Cancel")).clicked() {
+                if self.nav.tracked(ui.button(cancel_label)).clicked() {
                     cancel = true;
                 }
             });
@@ -2592,22 +2731,24 @@ impl XgViewApp {
             // panel behind then takes away from them.
             self.nav.open("confirm-body");
             ui.set_width(380.0);
-            ui.label(RichText::new(format!("Remove \"{name}\"?")).heading());
+            ui.label(RichText::new(monitor_i18n::tr_args("remove-title", &[("name", name.clone().into())])).heading());
             ui.label(
-                RichText::new("It leaves the wall and the configuration; the camera itself is untouched.")
+                RichText::new(monitor_i18n::tr("remove-hint"))
                     .small()
                     .color(theme::TEXT_DIM),
             );
             ui.add_space(theme::space::M);
             ui.horizontal(|ui| {
-                ui.add_space(Self::center_offset(ui, &["Keep", "Remove"]));
-                let keep_button = self.nav.tracked(ui.button("Keep"));
+                let keep_label = monitor_i18n::tr("action-keep");
+                let remove_label = monitor_i18n::tr("action-remove");
+                ui.add_space(Self::center_offset(ui, &[&keep_label, &remove_label]));
+                let keep_button = self.nav.tracked(ui.button(keep_label));
                 // The dialog opens on the answer that changes nothing.
                 self.remove_confirm_anchor = Some(keep_button.id);
                 if keep_button.clicked() {
                     cancel = true;
                 }
-                if self.nav.tracked(ui.button(RichText::new("Remove").color(theme::ERROR))).clicked() {
+                if self.nav.tracked(ui.button(RichText::new(remove_label).color(theme::ERROR))).clicked() {
                     remove = true;
                 }
             });
@@ -2635,17 +2776,25 @@ impl XgViewApp {
     /// What the program is, where its configuration lives, and the export /
     /// import of that configuration.
     fn settings_about(&mut self, ui: &mut egui::Ui) {
-        // Description, version and authors come from the manifest, declared
-        // once in `[workspace.package]` and inherited by every crate, so the
-        // about panel cannot drift from Cargo.toml. The name is the display
-        // name, not the crate name (this crate is `monitor_gui`).
-        ui.label(format!("{}: {}", monitor_core::APP_DISPLAY_NAME, env!("CARGO_PKG_DESCRIPTION")));
+        // Version and authors come from the manifest, declared once in
+        // `[workspace.package]` and inherited by every crate, so the about
+        // panel cannot drift from Cargo.toml. The description is translated
+        // (`about-description`), with the English pack matching the manifest.
+        // The name is the display name, not the crate name (this crate is
+        // `monitor_gui`).
+        ui.label(monitor_i18n::tr_args(
+            "about-title",
+            &[
+                ("app", monitor_core::APP_DISPLAY_NAME.into()),
+                ("description", monitor_i18n::tr("about-description").into()),
+            ],
+        ));
         // The author is a mailto link, with the version and the copyright years
         // either side of it so the line still reads as one sentence. The years
         // are the ones the binary was built in; see `copyright_years`.
         let (author, email) = monitor_core::author();
         ui.horizontal(|ui| {
-            ui.label(format!("v{} by", env!("CARGO_PKG_VERSION")));
+            ui.label(monitor_i18n::tr_args("about-version-by", &[("version", env!("CARGO_PKG_VERSION").into())]));
             if email.is_empty() {
                 ui.label(author);
             } else {
@@ -2654,40 +2803,47 @@ impl XgViewApp {
                 // client. See `open_link`.
                 let link = ui.link(format!("{author} <{email}>"));
                 self.nav.item(&link);
-                self.name(&link, "Author");
+                self.name(&link, "about-author-name");
                 if link.clicked() {
                     Self::open_link(ui.ctx(), &monitor_core::author_mailto());
                 }
             }
-            ui.label(format!("· © {}", monitor_core::copyright_years()));
+            ui.label(monitor_i18n::tr_args("about-copyright", &[("years", monitor_core::copyright_years().into())]));
         });
-        ui.label(format!(
-            "decoder: {} ({})",
-            self.decoder,
-            if self.hardware_decoder { "hardware decoding available" } else { "software decoding only" }
+        let decoder_mode = monitor_i18n::tr(if self.hardware_decoder {
+            "about-decoder-hardware"
+        } else {
+            "about-decoder-software"
+        });
+        ui.label(monitor_i18n::tr_args(
+            "about-decoder",
+            &[("backend", self.decoder.into()), ("mode", decoder_mode.into())],
         ));
-        ui.label(format!("config: {}", self.config_path.display()));
+        ui.label(monitor_i18n::tr_args(
+            "about-config",
+            &[("path", self.config_path.display().to_string().into())],
+        ));
 
         // The export / import pair. The desktop opens a file dialog for it; on
         // Android, where there is none, it works on a fixed file - see
         // `export_dir` - and the hint says where that is.
         ui.add_space(theme::space::M);
-        let export = ui.button("Export…");
+        let export = ui.button(monitor_i18n::tr("about-export"));
         self.nav.item(&export);
-        self.name(&export, "Export configuration");
+        self.name(&export, "about-export-name");
         if export.clicked() {
             self.export_config();
         }
         ui.horizontal(|ui| {
-            let import = ui.button("Import…");
+            let import = ui.button(monitor_i18n::tr("about-import"));
             self.nav.item(&import);
-            self.name(&import, "Import configuration");
+            self.name(&import, "about-import-name");
             if import.clicked() {
                 self.import_config();
             }
-            let only = ui.checkbox(&mut self.import_cameras_only, "Only import the cameras");
+            let only = ui.checkbox(&mut self.import_cameras_only, monitor_i18n::tr("about-only-cameras"));
             self.nav.item(&only);
-            self.name(&only, "Only import the cameras");
+            self.name(&only, "about-only-cameras-name");
         });
         ui.label(RichText::new(self.import_hint()).small().color(theme::TEXT_DIM));
     }
@@ -2709,15 +2865,12 @@ impl XgViewApp {
     /// What the export / import pair does, and - where there is no dialog to
     /// choose a file - the fixed file it uses.
     fn import_hint(&self) -> String {
-        let body = "Import replaces the cameras of this configuration with the ones in the \
-                    file, and the file is written over the current configuration. Tick the box \
-                    to take the cameras alone and keep this viewer's own settings - the grid \
-                    layout, discovery, reconnect.";
         match self.fixed_config_path() {
-            Some(path) => {
-                format!("Export writes {}, and import reads it back. {body}", path.display())
-            }
-            None => body.to_string(),
+            Some(path) => monitor_i18n::tr_args(
+                "about-import-hint-fixed",
+                &[("path", path.display().to_string().into())],
+            ),
+            None => monitor_i18n::tr("about-import-hint"),
         }
     }
 
@@ -2755,9 +2908,15 @@ impl XgViewApp {
         };
         match self.config.save(&path) {
             Ok(()) => {
-                self.flash(format!("configuration exported to {}", path.display()), ToastKind::Info)
+                self.flash(
+                    monitor_i18n::tr_args(
+                        "toast-config-exported",
+                        &[("path", path.display().to_string().into())],
+                    ),
+                    ToastKind::Info,
+                )
             }
-            Err(error) => self.flash(format!("cannot export: {error}"), ToastKind::Error),
+            Err(error) => self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]), ToastKind::Error),
         }
     }
 
@@ -2771,8 +2930,13 @@ impl XgViewApp {
             // A fixed path with no file there is worth saying: the viewer has no
             // dialog to look at and nothing happened. A cancelled dialog is not.
             if let Some(missing) = self.fixed_config_path() {
-                let message = format!("no file to import at {}", missing.display());
-                self.flash(message, ToastKind::Error);
+                self.flash(
+                    monitor_i18n::tr_args(
+                        "toast-import-missing",
+                        &[("path", missing.display().to_string().into())],
+                    ),
+                    ToastKind::Error,
+                );
             }
             return;
         };
@@ -2799,11 +2963,14 @@ impl XgViewApp {
                 self.needs_sync = true;
                 self.mark_dirty();
                 self.flash(
-                    format!("imported {count} camera(s) from {}", path.display()),
+                    monitor_i18n::tr_args(
+                        "toast-imported",
+                        &[("count", count.into()), ("path", path.display().to_string().into())],
+                    ),
                     ToastKind::Info,
                 );
             }
-            Err(error) => self.flash(format!("cannot import: {error}"), ToastKind::Error),
+            Err(error) => self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.to_string().into())]), ToastKind::Error),
         }
     }
 
@@ -2906,8 +3073,8 @@ impl XgViewApp {
             grid::empty_state(
                 ui,
                 area,
-                "No camera configured",
-                "Press F2 — or click “Add devices” — to scan the network for ONVIF cameras",
+                &monitor_i18n::tr("wall-empty-title"),
+                &monitor_i18n::tr("wall-empty-hint"),
             );
             return;
         }
@@ -3012,7 +3179,7 @@ impl XgViewApp {
                 egui::Frame::popup(ui.style())
                     .inner_margin(egui::Margin::symmetric(20, 14))
                     .show(ui, |ui| {
-                        ui.label(RichText::new("Press BACK again to quit").size(18.0).strong());
+                        ui.label(RichText::new(monitor_i18n::tr("exit-hint")).size(18.0).strong());
                     });
             });
     }

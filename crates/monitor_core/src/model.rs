@@ -25,8 +25,8 @@ impl StreamKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            StreamKind::Main => "Main stream",
-            StreamKind::Sub => "Sub stream",
+            StreamKind::Main => "stream-kind-main",
+            StreamKind::Sub => "stream-kind-sub",
         }
     }
 
@@ -66,12 +66,12 @@ pub enum ConnectionState {
 impl ConnectionState {
     pub fn label(self) -> &'static str {
         match self {
-            ConnectionState::Idle => "Idle",
-            ConnectionState::Suspended => "Suspended",
-            ConnectionState::Connecting => "Connecting...",
-            ConnectionState::Streaming => "Live",
-            ConnectionState::Reconnecting => "Reconnecting...",
-            ConnectionState::Failed => "Failed",
+            ConnectionState::Idle => "state-idle",
+            ConnectionState::Suspended => "state-suspended",
+            ConnectionState::Connecting => "state-connecting",
+            ConnectionState::Streaming => "state-streaming",
+            ConnectionState::Reconnecting => "state-reconnecting",
+            ConnectionState::Failed => "state-failed",
         }
     }
 
@@ -93,9 +93,9 @@ pub enum CameraOrigin {
 impl CameraOrigin {
     pub fn label(self) -> &'static str {
         match self {
-            CameraOrigin::Manual => "Manual",
-            CameraOrigin::Onvif => "ONVIF",
-            CameraOrigin::Synology => "Synology",
+            CameraOrigin::Manual => "origin-manual",
+            CameraOrigin::Onvif => "origin-onvif",
+            CameraOrigin::Synology => "origin-synology",
         }
     }
 }
@@ -187,22 +187,22 @@ impl TileAspect {
     /// The name shown on the settings button that cycles the mode.
     pub fn label(self) -> &'static str {
         match self {
-            TileAspect::Original => "Original",
-            TileAspect::Stretch => "Stretch",
-            TileAspect::Ratio16x9 => "16:9",
-            TileAspect::Ratio4x3 => "4:3",
-            TileAspect::Ratio1x1 => "1:1",
+            TileAspect::Original => "aspect-original",
+            TileAspect::Stretch => "aspect-stretch",
+            TileAspect::Ratio16x9 => "aspect-16x9",
+            TileAspect::Ratio4x3 => "aspect-4x3",
+            TileAspect::Ratio1x1 => "aspect-1x1",
         }
     }
 
     /// The shape, written short for a tile's on-screen display.
     pub fn short_label(self) -> &'static str {
         match self {
-            TileAspect::Original => "orig",
-            TileAspect::Stretch => "fill",
-            TileAspect::Ratio16x9 => "16:9",
-            TileAspect::Ratio4x3 => "4:3",
-            TileAspect::Ratio1x1 => "1:1",
+            TileAspect::Original => "aspect-short-original",
+            TileAspect::Stretch => "aspect-short-stretch",
+            TileAspect::Ratio16x9 => "aspect-short-16x9",
+            TileAspect::Ratio4x3 => "aspect-short-4x3",
+            TileAspect::Ratio1x1 => "aspect-short-1x1",
         }
     }
 
@@ -266,14 +266,14 @@ impl OsdItem {
     /// What the settings button says, and the only name the item has.
     pub fn label(self) -> &'static str {
         match self {
-            OsdItem::Off => "None",
-            OsdItem::Name => "Name",
-            OsdItem::NumberName => "Number + name",
-            OsdItem::Stream => "Status + stream",
-            OsdItem::Link => "Transport + rate",
-            OsdItem::Fps => "Frame rate",
-            OsdItem::Format => "Size + shape",
-            OsdItem::Detail => "All of the measures",
+            OsdItem::Off => "osd-off",
+            OsdItem::Name => "osd-name",
+            OsdItem::NumberName => "osd-number-name",
+            OsdItem::Stream => "osd-stream",
+            OsdItem::Link => "osd-link",
+            OsdItem::Fps => "osd-fps",
+            OsdItem::Format => "osd-format",
+            OsdItem::Detail => "osd-detail",
         }
     }
 }

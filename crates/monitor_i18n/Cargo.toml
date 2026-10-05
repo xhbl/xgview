@@ -1,0 +1,17 @@
+[package]
+name = "monitor_i18n"
+version.workspace = true
+authors.workspace = true
+description = "XGView internationalisation: Fluent language packs loaded at run time"
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+fluent-bundle = "0.15"
+tracing = "0.1"
+unic-langid = "0.9"
+# Interface language detection for the `auto` setting.
+sys-locale = "0.3"

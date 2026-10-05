@@ -128,6 +128,15 @@ Write-Step "Installing into $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item -Path $sourceExe -Destination $targetExe -Force
 Write-Host "    $targetExe"
+# Language packs: every .ftl in the repo's langs/ directory travels beside the
+# executable so a viewer can switch language without rebuilding.
+$langsSource = Join-Path $repoRoot 'langs'
+if (Test-Path $langsSource) {
+    $langsDest = Join-Path $InstallDir 'langs'
+    New-Item -ItemType Directory -Force -Path $langsDest | Out-Null
+    Copy-Item -Path (Join-Path $langsSource '*.ftl') -Destination $langsDest -Force
+    Write-Host "    langs/"
+}
 
 # The FFmpeg runtime the binary imports, beside it: without these the installed
 # viewer exits at launch with "dll not found", which is not a state the machine

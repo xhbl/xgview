@@ -229,6 +229,10 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
     if let Some(dir) = app.internal_data_path() {
         std::env::set_var("XGVIEW_HOME", dir);
     }
+    // The language packs shipped as APK assets are extracted to the
+    // configuration directory before `XgViewApp::new` runs, so the catalogue
+    // built there discovers them alongside the embedded English fallback.
+    extract_lang_assets(&app);
     // The About tab there has no file dialog to open, so its export and import
     // use a fixed file. The app-specific external directory is the one to use:
     // writing needs no permission, and a file manager or `adb pull`/`push` can
@@ -256,4 +260,44 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
         }),
     )
     .map_err(|err| anyhow::anyhow!("cannot start the viewer: {err}"))
+}
+/// Copies the language packs shipped as APK assets to the configuration
+/// directory, where `monitor_i18n` discovers them.
+///
+/// English is embedded in the binary, so only the extra packs (`zh-CN.ftl`,
+/// …) are shipped as assets and extracted here. The files are small, so they
+/// are overwritten every launch to pick up pack updates without a manual clear.
+#[cfg(target_os = "android")]
+fn extract_lang_assets(app: &android_activity::AndroidApp) {
+    use std::ffi::CString;
+
+    let manager = app.asset_manager();
+    let root = CString::new("").expect("empty C string");
+    let Some(dir) = manager.open_dir(&root) else {
+        tracing::warn!(target: "xgview", "cannot open APK assets for language packs");
+        return;
+    };
+    let dest = monitor_core::config::config_dir().join("langs");
+    if let Err(err) = std::fs::create_dir_all(&dest) {
+        tracing::warn!(target: "xgview", %err, path = %dest.display(), "cannot create language pack directory");
+        return;
+    }
+    for name in dir {
+        if !name.to_bytes().ends_with(b".ftl") {
+            continue;
+        }
+        let Some(mut asset) = manager.open(&name) else {
+            tracing::warn!(target: "xgview", name = %name.to_string_lossy(), "cannot open language asset");
+            continue;
+        };
+        match asset.buffer() {
+            Ok(bytes) => {
+                let path = dest.join(name.to_string_lossy().as_ref());
+                if let Err(err) = std::fs::write(&path, bytes) {
+                    tracing::warn!(target: "xgview", %err, path = %path.display(), "cannot write language pack");
+                }
+            }
+            Err(err) => tracing::warn!(target: "xgview", %err, name = %name.to_string_lossy(), "cannot read language asset"),
+        }
+    }
 }

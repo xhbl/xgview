@@ -131,6 +131,15 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 Copy-Item -Path $sourceExe -Destination (Join-Path $stage $exeName) -Force
 Write-Host "    $exeName"
+# Language packs: every .ftl in the repo's langs/ directory travels beside the
+# executable so a viewer can switch language without rebuilding.
+$langsSource = Join-Path $repoRoot 'langs'
+if (Test-Path $langsSource) {
+    $langsDest = Join-Path $stage 'langs'
+    New-Item -ItemType Directory -Force -Path $langsDest | Out-Null
+    Copy-Item -Path (Join-Path $langsSource '*.ftl') -Destination $langsDest -Force
+    Write-Host "    langs/"
+}
 foreach ($dll in Get-FfmpegRuntimeDlls -Exe $sourceExe) {
     Copy-Item -Path $dll -Destination $stage -Force
     Write-Host "    $(Split-Path $dll -Leaf)"

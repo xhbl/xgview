@@ -31,9 +31,9 @@ pub enum DiscoverySource {
 impl DiscoverySource {
     pub fn label(self) -> &'static str {
         match self {
-            DiscoverySource::Multicast => "WS-Discovery (multicast)",
-            DiscoverySource::Unicast => "WS-Discovery (unicast)",
-            DiscoverySource::PortScan => "TCP port scan",
+            DiscoverySource::Multicast => "discovery-source-multicast",
+            DiscoverySource::Unicast => "discovery-source-unicast",
+            DiscoverySource::PortScan => "discovery-source-portscan",
         }
     }
 }

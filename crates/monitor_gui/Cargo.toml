@@ -29,6 +29,7 @@ tracing = "0.1"
 
 monitor_core = { path = "../monitor_core" }
 monitor_codec = { path = "../monitor_codec" }
+monitor_i18n = { path = "../monitor_i18n" }
 
 # Desktop keeps the rest of eframe's defaults: the accessibility support and the
 # glow backend it would otherwise turn on itself.

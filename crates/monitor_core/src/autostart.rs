@@ -52,19 +52,19 @@ pub fn is_supported() -> bool {
 pub fn mechanism() -> &'static str {
     #[cfg(windows)]
     {
-        "Registry (HKCU Run)"
+        "autostart-mechanism-windows"
     }
     #[cfg(all(unix, not(target_os = "android")))]
     {
-        "XDG autostart (.desktop)"
+        "autostart-mechanism-xdg"
     }
     #[cfg(target_os = "android")]
     {
-        "Android BootReceiver (RECEIVE_BOOT_COMPLETED)"
+        "autostart-mechanism-android"
     }
     #[cfg(not(any(windows, unix)))]
     {
-        "unsupported"
+        "autostart-mechanism-unsupported"
     }
 }
 

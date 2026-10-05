@@ -85,6 +85,11 @@ android {
             res.srcDirs("../../crates/monitor_android/android/res")
             // Populated by scripts/build-android.sh (cargo-ndk).
             jniLibs.srcDirs("../../android-build/jniLibs")
+            // Language packs (.ftl) shipped as APK assets. The native library
+            // extracts them to the configuration directory on launch; see
+            // `extract_lang_assets` in monitor_gui/src/lib.rs. English is
+            // embedded in the binary, so only the extra packs live here.
+            assets.srcDirs("../../langs")
         }
     }
 

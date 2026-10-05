@@ -25,6 +25,7 @@ use std::sync::Arc;
 use egui::{FontData, FontDefinitions, FontFamily};
 
 /// A font file to try, and the face to take from it.
+#[derive(Clone, Copy)]
 struct Candidate {
     /// Path to the file.
     path: &'static str,
@@ -146,6 +147,17 @@ const CJK_FACES: &[Candidate] = &[];
 /// is left as boxes. That is a degraded wall, not a broken one, so a miss is
 /// logged as a warning rather than treated as an error.
 pub fn install(ctx: &egui::Context) {
+    install_for(ctx, "en");
+}
+
+/// Installs the system faces for one interface language.
+///
+/// The CJK face is chosen for the language, because a Han character shared
+/// between Chinese and Japanese is drawn in the language's own form: Windows
+/// and Android ship a face per language, and the Noto CJK collections carry
+/// them as separate faces of one file. The English chain - which the built-in
+/// fonts already cover - is left as it is.
+pub fn install_for(ctx: &egui::Context, language: &str) {
     let mut fonts = FontDefinitions::default();
     let mut any = false;
 
@@ -166,7 +178,8 @@ pub fn install(ctx: &egui::Context) {
     }
     // Coverage comes last in both families: only what the faces before it
     // cannot draw should reach the CJK face.
-    if let Some(face) = load(CJK_FACES) {
+    let cjk = cjk_faces(language);
+    if let Some(face) = load(&cjk) {
         let name = register(&mut fonts, "system-cjk", face);
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             fonts.families.entry(family).or_default().push(name.clone());
@@ -179,6 +192,55 @@ pub fn install(ctx: &egui::Context) {
     } else {
         tracing::warn!("no system font found: the interface keeps egui's own, and non-Latin text renders as boxes");
     }
+}
+
+/// The CJK faces to try for `language`, best first, with the platform's default
+/// Chinese face last as the catch-all.
+fn cjk_faces(language: &str) -> Vec<Candidate> {
+    let base = language
+        .split(['-', '_'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let traditional = {
+        let lower = language.to_ascii_lowercase();
+        lower.contains("hant") || lower.starts_with("zh-tw") || lower.starts_with("zh-hk") || lower.starts_with("zh-mo")
+    };
+
+    // The language's own face, then the platform default from `CJK_FACES`.
+    let mut faces: Vec<Candidate> = match base.as_str() {
+        #[cfg(target_os = "windows")]
+        "ja" => vec![
+            Candidate { path: "C:/Windows/Fonts/msgothic.ttc", index: 0 },
+            Candidate { path: "C:/Windows/Fonts/meiryo.ttc", index: 0 },
+            Candidate { path: "C:/Windows/Fonts/YuGothM.ttc", index: 0 },
+        ],
+        #[cfg(target_os = "windows")]
+        "ko" => vec![
+            Candidate { path: "C:/Windows/Fonts/malgun.ttf", index: 0 },
+            Candidate { path: "C:/Windows/Fonts/gulim.ttc", index: 0 },
+        ],
+        #[cfg(target_os = "windows")]
+        "zh" if traditional => vec![
+            Candidate { path: "C:/Windows/Fonts/msjh.ttc", index: 0 },
+            Candidate { path: "C:/Windows/Fonts/msjh.ttf", index: 0 },
+        ],
+        #[cfg(target_os = "android")]
+        "ja" => vec![Candidate { path: "/system/fonts/NotoSansCJK-Regular.ttc", index: 0 }],
+        #[cfg(target_os = "android")]
+        "ko" => vec![Candidate { path: "/system/fonts/NotoSansCJK-Regular.ttc", index: 1 }],
+        #[cfg(target_os = "android")]
+        "zh" if traditional => vec![Candidate { path: "/system/fonts/NotoSansCJK-Regular.ttc", index: 3 }],
+        #[cfg(target_os = "linux")]
+        "ja" => vec![Candidate { path: "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", index: 0 }],
+        #[cfg(target_os = "linux")]
+        "ko" => vec![Candidate { path: "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", index: 1 }],
+        #[cfg(target_os = "linux")]
+        "zh" if traditional => vec![Candidate { path: "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", index: 3 }],
+        _ => Vec::new(),
+    };
+    faces.extend(CJK_FACES.iter().copied());
+    faces
 }
 
 /// Adds a face to the definitions and reports the name it was registered under.
