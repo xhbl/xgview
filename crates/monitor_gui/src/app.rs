@@ -459,6 +459,16 @@ pub struct XgViewApp {
     android_boot: (bool, bool),
     #[cfg(target_os = "android")]
     android_boot_at: f64,
+    /// Android: the text field the viewer has confirmed for editing, which is
+    /// what raises the soft keyboard.
+    ///
+    /// The focus alone does not raise it: on a remote, walking a form full of
+    /// fields would put the keyboard up at every stop and cut the walk short.
+    /// It comes up when a field is confirmed with Enter or a touch, and goes
+    /// away on Back or when the focus leaves. `None` while nothing is being
+    /// edited. See `handle_keys`.
+    #[cfg(target_os = "android")]
+    editing: Option<Id>,
     /// The camera the settings panel is editing, while its window is up.
     camera_edit: Option<CameraEdit>,
     /// First control of the edit window, to hand it the focus as it opens.
@@ -614,6 +624,8 @@ impl XgViewApp {
             android_boot: (false, false),
             #[cfg(target_os = "android")]
             android_boot_at: f64::NEG_INFINITY,
+            #[cfg(target_os = "android")]
+            editing: None,
             camera_edit: None,
             camera_edit_anchor: None,
             camera_edit_handoff: Handoff::default(),
@@ -1285,6 +1297,21 @@ impl XgViewApp {
     /// out of the queue in that case. The wall is not made of widgets, so it
     /// answers the same keys itself.
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // Android: a field's edit confirmation is dropped the moment the focus
+        // leaves it - whether by an arrow, a click, or Back. Without this, a
+        // field confirmed once would raise the keyboard again on re-entering
+        // it, and a walk from one field to the next would carry the keyboard
+        // along. `set_wanted` already gates on `editing == focused`, so a stale
+        // value would not raise the keyboard on the wrong field, but clearing
+        // it here keeps the state honest.
+        #[cfg(target_os = "android")]
+        {
+            let focused = ctx.memory(|memory| memory.focused());
+            if self.editing.is_some_and(|e| focused != Some(e)) {
+                self.editing = None;
+            }
+        }
+
         // The question the first Back asks on the wall is answered by a second
         // Back and by nothing else. Any *input* between the two presses - a
         // direction, a click, the key that opens a panel - was the viewer doing
@@ -1352,6 +1379,32 @@ impl XgViewApp {
         // answer `typing` gives at the end of the frame.
         let typing = nav_kind.is_some_and(Self::types);
         if typing {
+            // Android: the soft keyboard is not raised by focus alone. Enter on
+            // a field that is not yet being edited confirms it - `editing` takes
+            // the focus and the keyboard comes up next frame; the Enter itself
+            // is consumed so `TextEdit` does not read it as a submit. Back on a
+            // field that is being edited drops the keyboard but keeps the focus,
+            // so the viewer can read the field and re-confirm it. Back on a field
+            // that is not being edited falls through to `leave` below and walks
+            // the focus out, as on the desktop. A touch click is handled at the
+            // end of the frame, where it can be told apart from a DPAD walk.
+            #[cfg(target_os = "android")]
+            {
+                let focused = ctx.memory(|memory| memory.focused());
+                let none = Modifiers::NONE;
+                if self.editing == focused {
+                    if ctx.input_mut(|input| {
+                        input.consume_key(none, Key::Escape)
+                            || input.consume_key(none, Key::BrowserBack)
+                    }) {
+                        self.editing = None;
+                        return;
+                    }
+                } else if ctx.input_mut(|input| input.consume_key(none, Key::Enter)) {
+                    self.editing = focused;
+                    return;
+                }
+            }
             // Back leaves the field; the arrows walk the form. Where a field
             // keeps its caret keys for itself - the bars and the wall - the
             // arrows are taken out of the queue here, as before; on the
@@ -3466,7 +3519,21 @@ impl eframe::App for XgViewApp {
         #[cfg(target_os = "android")]
         {
             let focused = ctx.memory(|memory| memory.focused());
-            crate::keyboard::set_wanted(self.typing(ctx), focused);
+            // A touch click on a text field confirms it for editing, as Enter
+            // does: the field has the focus and the caret, and the keyboard
+            // follows. On a remote the pointer does not click, so this does not
+            // fire for a DPAD walk - only an actual touch on the screen.
+            if ctx.input(|i| i.pointer.primary_clicked())
+                && focused.is_some_and(|f| Self::types(self.nav.kind(f)))
+            {
+                self.editing = focused;
+            }
+            // The keyboard tracks `editing`, not the focus: a field only raises
+            // it once confirmed with Enter or a touch, and keeps it until Back
+            // or a focus change clears that confirmation. Walking a form with
+            // the arrows never puts the keyboard up.
+            let wanted = focused.is_some_and(|f| self.editing == Some(f));
+            crate::keyboard::set_wanted(wanted, focused);
         }
 
         let animation = self.needs_animation();
