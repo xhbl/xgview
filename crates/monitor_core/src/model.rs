@@ -33,8 +33,8 @@ impl StreamKind {
     /// Short tag rendered inside a grid tile.
     pub fn tag(self) -> &'static str {
         match self {
-            StreamKind::Main => "MAIN",
-            StreamKind::Sub => "SUB",
+            StreamKind::Main => "stream-tag-main",
+            StreamKind::Sub => "stream-tag-sub",
         }
     }
 }

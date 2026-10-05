@@ -2133,10 +2133,9 @@ impl XgViewApp {
             .show(ui, |ui| {
                 for (keys, action) in [
                     ("DPAD / arrows", "key-move-focus"),
-                    ("Enter (wall)", "key-magnify"),
-                    ("Enter (panel)", "key-OK"),
+                    ("Enter", "key-enter"),
                     ("Esc / Back", "key-back"),
-                    ("1-4", "key-grid"),
+                    ("Num (1-4)", "key-grid"),
                     ("PgUp / PgDn", "key-page"),
                     ("F1", "key-settings"),
                     ("F2", "key-add-devices"),

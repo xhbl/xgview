@@ -199,7 +199,7 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
             painter.text(
                 band.left_center() + vec2(42.0, 10.0),
                 Align2::LEFT_CENTER,
-                monitor_i18n::tr_args("grid-holding-last", &[("tag", from.tag().into())]),
+                monitor_i18n::tr_args("grid-holding-last", &[("tag", monitor_i18n::tr(from.tag()).into())]),
                 FontId::proportional(11.0),
                 theme::TEXT_DIM,
             );
@@ -286,7 +286,11 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
         return Vec::new();
     };
     let channel = tile.channel;
-    let hardware = if channel.is_some_and(|channel| channel.hardware) { "HW" } else { "SW" };
+    let hardware = if channel.is_some_and(|channel| channel.hardware) {
+        monitor_i18n::tr("decode-hw")
+    } else {
+        monitor_i18n::tr("decode-sw")
+    };
     let link = || OsdLine {
         dot: None,
         text: format!(
@@ -325,7 +329,7 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
             }),
             text: channel
                 .and_then(|channel| channel.stream)
-                .map(|stream| stream.tag().to_string())
+                .map(|stream| monitor_i18n::tr(stream.tag()).to_string())
                 .unwrap_or_else(|| "—".to_string()),
         }],
         OsdItem::Link => vec![link()],
