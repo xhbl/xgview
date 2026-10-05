@@ -5,6 +5,7 @@
 //! command line switches so that the Windows / Android install scripts can
 //! register the start-on-boot entry without any UI interaction.
 
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -28,41 +29,45 @@ Options:
   --install-autostart  Register XGView for start-on-boot and exit
   --remove-autostart   Remove the start-on-boot registration and exit
   --print-schedule     Print the resolved grid / channel schedule and exit
+  --console            Open a console window for log output (Windows only)
   -h, --help           Print this help
   -V, --version        Print the version
 ";
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    setup_console(&args);
     init_logging();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        print!("{HELP}");
+        cli_print(HELP);
         return Ok(());
     }
     if args.iter().any(|arg| arg == "-V" || arg == "--version") {
         // Authors and version come from the manifest, the same source the about
         // panel reads. `(c)` rather than `©`: a redirected log or a terminal
         // without the glyph should still read.
-        println!(
-            "{APP_DISPLAY_NAME} {} by {} (c) {}",
+        cli_print(&format!(
+            "{APP_DISPLAY_NAME} v{} by {} (c) {}\n",
             env!("CARGO_PKG_VERSION"),
             env!("CARGO_PKG_AUTHORS"),
             monitor_core::copyright_years()
-        );
+        ));
         return Ok(());
     }
 
     if args.iter().any(|arg| arg == "--install-autostart") {
         monitor_i18n::init("en", &[]);
         autostart::set_enabled(true)?;
-        println!("start-on-boot registered ({})", monitor_i18n::tr(autostart::mechanism()));
+        cli_print(&format!(
+            "start-on-boot registered ({})\n",
+            monitor_i18n::tr(autostart::mechanism())
+        ));
         return Ok(());
     }
     if args.iter().any(|arg| arg == "--remove-autostart") {
         autostart::set_enabled(false)?;
-        println!("start-on-boot registration removed");
+        cli_print("start-on-boot registration removed\n");
         return Ok(());
     }
 
@@ -105,13 +110,17 @@ fn main() -> Result<()> {
 /// configuration on a headless deployment.
 fn print_schedule(config: &AppConfig, path: &Path) {
     let cameras = config.active_cameras();
-    println!("configuration : {}", path.display());
-    println!("cameras       : {} enabled / {} total", cameras.len(), config.cameras.len());
-    println!(
-        "backend       : {} (hardware: {})",
+    cli_print(&format!("configuration : {}\n", path.display()));
+    cli_print(&format!(
+        "cameras       : {} enabled / {} total\n",
+        cameras.len(),
+        config.cameras.len()
+    ));
+    cli_print(&format!(
+        "backend       : {} (hardware: {})\n",
         monitor_codec::capabilities().backend,
         monitor_codec::capabilities().hardware
-    );
+    ));
 
     for layout in GridLayout::ALL {
         let mut scheduler = Scheduler::new(layout, 0, None, cameras.len());
@@ -128,14 +137,14 @@ fn print_schedule(config: &AppConfig, path: &Path) {
                     format!("{name} ({})", plan.mode.label())
                 })
                 .collect::<Vec<_>>();
-            println!(
-                "  {:<4} page {}/{}: {} live channel(s) [{}]",
+            cli_print(&format!(
+                "  {:<4} page {}/{}: {} live channel(s) [{}]\n",
                 layout.label(),
                 page + 1,
                 pages,
                 live.len(),
                 live.join(", ")
-            );
+            ));
         }
     }
 }
@@ -147,6 +156,45 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
         .and_then(|index| args.get(index + 1))
         .cloned()
 }
+
+/// Write to stdout and flush. Under the console subsystem `println!` handles
+/// line endings correctly, so this is a plain write + flush.
+fn cli_print(text: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(text.as_bytes());
+    let _ = out.flush();
+}
+
+/// Release the console window when launching the GUI without `--console`.
+///
+/// The binary runs under the console subsystem (no `windows_subsystem`
+/// attribute), so `println!` works normally and `\n` is translated to
+/// `\r\n` by the console. When starting the GUI — no CLI switch, no
+/// `--console` — call `FreeConsole` to close the console window. There is a
+/// brief flash on double-click launch before `FreeConsole` runs, but CLI
+/// output is always correct.
+#[cfg(windows)]
+fn setup_console(args: &[String]) {
+    use windows_sys::Win32::System::Console::FreeConsole;
+
+    let want_console = args.iter().any(|a| a == "--console");
+    let is_cli = args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "-h" | "--help" | "-V" | "--version"
+                | "--install-autostart" | "--remove-autostart" | "--print-schedule"
+        )
+    });
+    if !want_console && !is_cli {
+        unsafe {
+            FreeConsole();
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn setup_console(_args: &[String]) {}
 
 fn init_logging() {
     use std::io::IsTerminal;
