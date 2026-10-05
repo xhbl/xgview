@@ -220,7 +220,8 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
 
 /// Draws the four corners of a tile's on-screen display.
 fn osd(painter: &egui::Painter, body: Rect, tile: &Tile<'_>) {
-    let metrics = OsdMetrics::of(body);
+    let screen_min = painter.ctx().screen_rect().size().min_elem();
+    let metrics = OsdMetrics::of(body, screen_min);
     for (item, align) in [
         (tile.osd.top_left, Align2::LEFT_TOP),
         (tile.osd.top_right, Align2::RIGHT_TOP),
@@ -260,10 +261,11 @@ struct OsdMetrics {
 }
 
 impl OsdMetrics {
-    fn of(body: Rect) -> Self {
+    fn of(body: Rect, screen_min: f32) -> Self {
         let min = body.width().min(body.height());
+        let cap = 12.0 * (screen_min / 1080.0).clamp(1.0, 2.0);
         Self {
-            font: (min * 0.045).clamp(7.0, 12.0),
+            font: (min * 0.045).clamp(7.0, cap),
             inset: (min * 0.0125).clamp(1.0, 4.0),
         }
     }

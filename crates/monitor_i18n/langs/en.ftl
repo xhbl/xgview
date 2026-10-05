@@ -20,10 +20,7 @@ close = Close
 settings = Settings
 settings-language = Language
 settings-language-auto = Automatic (follow system)
-settings-language-hint =
-    Interface language. A new language appears here as soon as its .ftl file is
-    added to the langs folder next to the executable (or under the configuration
-    directory).
+settings-language-hint = Interface language. A new language appears here as soon as its .ftl file is added to the langs folder next to the executable (or under the configuration directory).
 settings-tab-display = Display
 settings-tab-cameras = Cameras
 settings-tab-streams = Streams
@@ -57,9 +54,7 @@ key-add-devices = add devices
 key-fullscreen = full screen
 
 ## Settings / Streams
-streams-hint =
-    The multi grid pulls the sub stream; 1x1 - and a magnified viewport - pull
-    the main stream.
+streams-hint = The multi grid pulls the sub stream; 1x1 - and a magnified viewport - pull the main stream.
 settings-reconnect = Reconnect
 streams-first-retry = first retry after
 streams-then-at-most = then at most
@@ -70,15 +65,9 @@ streams-jitter = jitter
 streams-attempts = attempts (0 = forever)
 settings-decoding = Decoding
 streams-prefer-hardware = Prefer hardware decoding
-streams-summary-fixed =
-    Decoding happens in hardware here and nowhere else, so there is nothing to
-    switch.
-streams-summary-available =
-    Pictures are decoded on the GPU where the machine offers a decoder for the
-    stream, and on the CPU everywhere else. Each tile shows which one it got.
-streams-summary-software =
-    This build has no hardware decoder: the CPU decodes, whatever this setting
-    says.
+streams-summary-fixed = Decoding happens in hardware here and nowhere else, so there is nothing to switch.
+streams-summary-available = Pictures are decoded on the GPU where the machine offers a decoder for the stream, and on the CPU everywhere else. Each tile shows which one it got.
+streams-summary-software = This build has no hardware decoder: the CPU decodes, whatever this setting says.
 
 ## Cameras
 cameras-confirm-order = Confirm order
@@ -87,9 +76,7 @@ cameras-add-manually = Add manually…
 cameras-sub-derived = sub: derived
 cameras-sub-set = sub: set
 cameras-infer-sub = infer sub
-cameras-transport-tip =
-    RTSP transport for this camera. UDP bypasses a relay that damages the TCP
-    interleaved framing.
+cameras-transport-tip = RTSP transport for this camera. UDP bypasses a relay that damages the TCP interleaved framing.
 cameras-remove-tip = Remove this camera
 cameras-edit-tip = Edit this camera
 cameras-edit-name = Edit camera
@@ -106,8 +93,7 @@ camera-edit-sub-derived = sub stream url derived from the main url
 
 ## Remove confirmation
 remove-title = Remove "{ $name }"?
-remove-hint =
-    It leaves the wall and the configuration; the camera itself is untouched.
+remove-hint = It leaves the wall and the configuration; the camera itself is untouched.
 action-keep = Keep
 action-remove = Remove
 
@@ -127,11 +113,7 @@ about-export-name = Export configuration
 about-import-name = Import configuration
 about-only-cameras = Only import the cameras
 about-only-cameras-name = Only import the cameras
-about-import-hint =
-    Import replaces the cameras of this configuration with the ones in the file,
-    and the file is written over the current configuration. Tick the box to take
-    the cameras alone and keep this viewer's own settings - the grid layout,
-    discovery, reconnect.
+about-import-hint = Import replaces the cameras of this configuration with the ones in the file, and the file is written over the current configuration. Tick the box to take the cameras alone and keep this viewer's own settings - the grid layout, discovery, reconnect.
 about-import-hint-fixed = Export writes { $path }, and import reads it back. { about-import-hint }
 
 ## Toolbar
@@ -198,9 +180,7 @@ status-copyright = © { $years }
 status-decoder = decoder: { $backend }
 
 ## Android start-on-boot
-android-boot-hint =
-    Android refuses to start an app from the boot broadcast unless the system
-    allows it. Either of these, set once on the device, is enough.
+android-boot-hint = Android refuses to start an app from the boot broadcast unless the system allows it. Either of these, set once on the device, is enough.
 android-home-button = Home app…
 android-home-name = Home app settings
 android-home-yes = XGView is the home app

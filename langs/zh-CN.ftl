@@ -18,9 +18,7 @@ close = 关闭
 settings = 设置
 settings-language = 语言
 settings-language-auto = 自动（跟随系统）
-settings-language-hint =
-    界面语言。将 .ftl 文件放入可执行文件旁的 langs 文件夹（或配置目录下），
-    新语言即会出现在此处。
+settings-language-hint = 界面语言。将 .ftl 文件放入可执行文件旁的 langs 文件夹（或配置目录下），新语言即会出现在此处。
 settings-tab-display = 显示
 settings-tab-cameras = 摄像头
 settings-tab-streams = 流
@@ -54,8 +52,7 @@ key-add-devices = 添加设备
 key-fullscreen = 全屏
 
 ## 设置 / 流
-streams-hint =
-    多宫格拉取子码流；1x1 及放大视口拉取主码流。
+streams-hint = 多宫格拉取子码流；1x1 及放大视口拉取主码流。
 settings-reconnect = 重连
 streams-first-retry = 首次重试于
 streams-then-at-most = 其后至多
@@ -66,12 +63,9 @@ streams-jitter = 抖动
 streams-attempts = 尝试次数（0 = 无限）
 settings-decoding = 解码
 streams-prefer-hardware = 优先硬件解码
-streams-summary-fixed =
-    当前此处只能使用硬件解码，无其它可用，因此无需切换。
-streams-summary-available =
-    若设备支持该视频流的硬件解码，则由 GPU 解码；其余情况均由 CPU 解码。每个画面均会显示当前所使用的解码方式。
-streams-summary-software =
-    当前此处未集成硬件解码器：无论此项如何设置，均由 CPU 进行软件解码。
+streams-summary-fixed = 当前此处只能使用硬件解码，无其它可用，因此无需切换。
+streams-summary-available = 若设备支持该视频流的硬件解码，则由 GPU 解码；其余情况均由 CPU 解码。每个画面均会显示当前所使用的解码方式。
+streams-summary-software = 当前此处未集成硬件解码器：无论此项如何设置，均由 CPU 进行软件解码。
 
 ## 摄像头
 cameras-confirm-order = 确认顺序
@@ -80,8 +74,7 @@ cameras-add-manually = 手动添加…
 cameras-sub-derived = 子流：推断
 cameras-sub-set = 子流：已设
 cameras-infer-sub = 推断子流
-cameras-transport-tip =
-    此摄像头的 RTSP 传输方式。UDP 可绕过损坏 TCP 交叉帧的中继。
+cameras-transport-tip = 此摄像头的 RTSP 传输方式。UDP 可绕过损坏 TCP 交叉帧的中继。
 cameras-remove-tip = 移除此摄像头
 cameras-edit-tip = 编辑此摄像头
 cameras-edit-name = 编辑摄像头
@@ -98,8 +91,7 @@ camera-edit-sub-derived = 子码流地址由主码流推断
 
 ## 移除确认
 remove-title = 移除“{ $name }”？
-remove-hint =
-    它将离开大屏和配置；摄像头本身不受影响。
+remove-hint = 它将离开大屏和配置；摄像头本身不受影响。
 action-keep = 保留
 action-remove = 移除
 
@@ -119,9 +111,7 @@ about-export-name = 导出配置
 about-import-name = 导入配置
 about-only-cameras = 仅导入摄像头
 about-only-cameras-name = 仅导入摄像头
-about-import-hint =
-    导入会用文件中的摄像头替换本配置的摄像头，并覆盖当前配置文件。勾选此框
-    仅取摄像头，保留本查看器自身的设置——宫格布局、发现、重连。
+about-import-hint = 导入会用文件中的摄像头替换本配置的摄像头，并覆盖当前配置文件。勾选此框仅取摄像头，保留本查看器自身的设置——宫格布局、发现、重连。
 about-import-hint-fixed = 导出写入 { $path }，导入再读回。{ about-import-hint }
 
 ## 工具栏
@@ -180,9 +170,7 @@ status-copyright = © { $years }
 status-decoder = 解码器：{ $backend }
 
 ## Android 开机自启
-android-boot-hint =
-    Android 除非系统允许，否则拒绝从开机广播启动应用。以下任一在设备上
-    设置一次即可。
+android-boot-hint = Android 除非系统允许，否则拒绝从开机广播启动应用。以下任一在设备上设置一次即可。
 android-home-button = 主屏应用…
 android-home-name = 主屏应用设置
 android-home-yes = XGView 是主屏应用
