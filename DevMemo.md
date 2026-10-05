@@ -825,3 +825,69 @@ state, the cursor, a grid's column widths, a scroll area's offset - is shared
 between every use of that position. Reusing a form for other data reuses all of
 it, and `insert_persisted` means it is never cleaned up on its own.
 
+---
+
+## 15. OSD font sizing: DPI-independent and tile-proportional
+
+The on-screen display burned into each tile corner has to look the same on a
+1080p Android TV with a large system scale and a 1080p desktop with none, and it
+has to scale with the tile it sits on rather than with the screen. egui's font
+unit is a logical point, and the renderer multiplies it by `pixels_per_point`
+(`ppp`) to reach physical pixels, so a fixed logical size drifts with the system
+DPI setting - exactly the inconsistency that was showing up.
+
+**The rule.** Do the whole calculation in physical pixels, then divide by `ppp`
+to hand egui logical points. The rendered physical size is then independent of
+`ppp`:
+
+```rust
+fn of(body: Rect, ppp: f32, screen_min: f32) -> Self {
+    let min = body.width().min(body.height()) * ppp;
+    let f = (screen_min / 1080.0).max(1.0);
+    Self {
+        font: (min * 0.045).clamp(7.0 * f, 28.0 * f) / ppp,
+        inset: (min * 0.0125).clamp(1.0 * f, 10.0 * f) / ppp,
+    }
+}
+```
+
+Three layers, each in `crates/monitor_gui/src/grid.rs`:
+
+1. **Base size** (`OsdMetrics::of`). `min` is the tile's physical short side
+   (`body` is logical, so multiply by `ppp`). The proportional part `min * 0.045`
+   is already DPI-independent on its own - `min_logical * ppp = min_physical` -
+   and only the `clamp` would have reintroduced the dependency, had its bounds
+   stayed in logical points. Putting the bounds in physical pixels and dividing
+   by `ppp` afterwards keeps the clamped value DPI-independent too.
+2. **Type scale** (`osd`). `NAME_SCALE = 1.2` for channel names, `MEASURE_SCALE
+   = 0.8` for bitrate / fps / format.
+3. **Final size** (`osd_corner`). `size = m.font * scale`, handed to
+   `FontId::monospace`; line height is `size * 1.25`.
+
+**The screen factor `f`.** A tile-proportional size alone leaves 2K and 4K
+looking small: a 28 px ceiling is 28 physical pixels whatever the screen, and on
+a denser 4K panel that is visually smaller. `f = (screen_min / 1080).max(1.0)`
+scales the clamp bounds linearly above 1080p and leaves smaller screens alone -
+no fixed multiplier, no step. The bounds move with it, so the whole OSD grows on
+a larger screen rather than only the tiles that hit the ceiling:
+
+| Screen | `f` | font clamp (physical px) | 1×1 tile | 2×2 tile | 4×4 tile |
+| --- | --- | --- | --- | --- | --- |
+| 1080p | 1.00 | 7 - 28 | 28 | 24 | 12 |
+| 1440p | 1.33 | 9.3 - 37.3 | 37.3 | 37.3 | 16.2 |
+| 2160p (4K) | 2.00 | 14 - 56 | 56 | 56 | 24.3 |
+
+**Why the bounds are 7 and 28.** The ceiling sets the 1×1 tile size and the
+gradient above it; the floor keeps a small tile legible. The values were walked
+to, not chosen:
+
+| Ceiling tried | Result |
+| --- | --- |
+| 12 (logical points, the original) | 1×1 through 4×4 all hit the ceiling - no visible gradient |
+| 12 (physical, DPI-independent) | 1080p right, 2K / 4K too small |
+| 64.8 (a 1440p tile reference) | far too large |
+| 32 | slightly large |
+| 28 | right on 1080p; with the screen factor, right on 2K / 4K too |
+
+Implemented in `OsdMetrics::of` and `osd` in `crates/monitor_gui/src/grid.rs`.
+
