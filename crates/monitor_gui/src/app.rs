@@ -1238,10 +1238,22 @@ impl XgViewApp {
     /// Whether a control of this kind takes typed text while it has the focus.
     ///
     /// A drag value is one of them: egui hands its keyboard-edit mode a
-    /// `TextEdit`, which on a device with no keyboard of its own is where a
-    /// number is typed. A slider is not - it has no text to type into.
+    /// `TextEdit`, and its caret keys belong to it while it is focused. A
+    /// slider is not - it has no text to type into.
     fn types(kind: Kind) -> bool {
         matches!(kind, Kind::Text | Kind::DragValue)
+    }
+
+    /// Whether a control of this kind raises the Android soft keyboard.
+    ///
+    /// Only a text field does. A drag value can be typed into on the desktop,
+    /// where a keyboard is already at hand, but on Android it is stepped by
+    /// dragging or with the remote's Up / Down; raising the keyboard for it
+    /// would only cover the box, and unlike a text field it leaves no copy for
+    /// the floating input box to mirror.
+    #[cfg(target_os = "android")]
+    fn soft_keyboard(kind: Kind) -> bool {
+        matches!(kind, Kind::Text)
     }
 
     /// Whether a text field is being typed into, which is what the soft
@@ -1490,14 +1502,16 @@ impl XgViewApp {
         let typing = nav_kind.is_some_and(Self::types);
         if typing {
             // Android: the soft keyboard is not raised by focus alone. Enter on
-            // a field that is not yet being edited confirms it - `editing` takes
-            // the focus and the keyboard comes up next frame; the Enter itself
-            // is consumed so `TextEdit` does not read it as a submit. Back on a
-            // field that is being edited drops the keyboard but keeps the focus,
-            // so the viewer can read the field and re-confirm it. Back on a field
-            // that is not being edited falls through to `leave` below and walks
-            // the focus out, as on the desktop. A touch click is handled at the
-            // end of the frame, where it can be told apart from a DPAD walk.
+            // a text field that is not yet being edited confirms it - `editing`
+            // takes the focus and the keyboard comes up next frame; the Enter
+            // itself is consumed so `TextEdit` does not read it as a submit. A
+            // drag value is left out: it is stepped, not typed into, on Android.
+            // Back on a field that is being edited drops the keyboard but keeps
+            // the focus, so the viewer can read the field and re-confirm it.
+            // Back on a field that is not being edited falls through to `leave`
+            // below and walks the focus out, as on the desktop. A touch click is
+            // handled at the end of the frame, where it can be told apart from a
+            // DPAD walk.
             #[cfg(target_os = "android")]
             {
                 let focused = ctx.memory(|memory| memory.focused());
@@ -1510,7 +1524,9 @@ impl XgViewApp {
                         self.editing = None;
                         return;
                     }
-                } else if ctx.input_mut(|input| input.consume_key(none, Key::Enter)) {
+                } else if nav_kind.is_some_and(Self::soft_keyboard)
+                    && ctx.input_mut(|input| input.consume_key(none, Key::Enter))
+                {
                     self.editing = focused;
                     return;
                 }
@@ -3640,7 +3656,7 @@ impl eframe::App for XgViewApp {
             // follows. On a remote the pointer does not click, so this does not
             // fire for a DPAD walk - only an actual touch on the screen.
             if ctx.input(|i| i.pointer.primary_clicked())
-                && focused.is_some_and(|f| Self::types(self.nav.kind(f)))
+                && focused.is_some_and(|f| Self::soft_keyboard(self.nav.kind(f)))
             {
                 self.editing = focused;
             }

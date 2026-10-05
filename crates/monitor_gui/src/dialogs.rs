@@ -278,7 +278,11 @@ pub struct DiscoveryUi {
     /// First control of the window, so that a remote control can be handed the
     /// focus as the window opens rather than leaving it on the wall behind.
     pub focus_anchor: Option<egui::Id>,
-
+    /// The Synology port, as its text box shows it. `None` until that tab is
+    /// first drawn, so the box opens on the configured port. Only digits are
+    /// kept; [`SynologyConfig::port`] follows it while the text names a valid
+    /// port.
+    pub synology_port: Option<String>,
 }
 
 impl DiscoveryUi {
@@ -882,8 +886,24 @@ fn synology_tab(
         });
         ui.end_row();
         ui.label(monitor_i18n::tr("dialog-port"));
-        // A drag value: Up / Down step it, Left / Right walk the column.
-        controls::drag_value(nav, ui, &mut synology.port, 1..=65535, 1.0, "");
+        // A text box rather than a drag value: a port is typed, and on Android a
+        // typed field is the one the floating input box mirrors. Only digits are
+        // kept, at most five; the number is taken from the text while it names a
+        // valid port, so the box can be cleared to retype it without the port
+        // being lost, and shows the port in use again once it is left.
+        let port_text = state.synology_port.get_or_insert_with(|| synology.port.to_string());
+        let port_field = text_field(ui, nav, port_text, &monitor_i18n::tr("dialog-port"), false, false, |s| {
+            egui::TextEdit::singleline(s).desired_width(220.0).char_limit(5)
+        });
+        port_text.retain(|c| c.is_ascii_digit());
+        if let Ok(port) = port_text.parse::<u16>() {
+            if port >= 1 {
+                synology.port = port;
+            }
+        }
+        if !port_field.has_focus() {
+            *port_text = synology.port.to_string();
+        }
         ui.end_row();
         ui.label(monitor_i18n::tr("dialog-scheme"));
         nav.tracked(ui.checkbox(&mut synology.https, monitor_i18n::tr("dialog-https")));
