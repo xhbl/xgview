@@ -603,6 +603,7 @@ impl XgViewApp {
                 ("toolbar", ScopeDef::new(Axis::Row)),
                 ("edit-body", ScopeDef::new(Axis::Column)),
                 ("confirm-body", ScopeDef::new(Axis::Column)),
+
             ]),
             reveal_next: None,
             swallow_enter: 0,
@@ -1412,7 +1413,7 @@ impl XgViewApp {
                             keys.up = input.consume_key(none, Key::ArrowUp);
                             keys.down = input.consume_key(none, Key::ArrowDown);
                         }
-                        Some(Kind::DragValue) => {
+                        Some(Kind::DragValue) | Some(Kind::Cycle) => {
                             // Taken so the field's caret does not move on them;
                             // the value change happens at the widget.
                             keys.up = input.consume_key(none, Key::ArrowUp);
@@ -1479,6 +1480,7 @@ impl XgViewApp {
             return;
         }
 
+
         // Application keys first: they are how a keyboard, and whatever button
         // a remote offers beside the DPAD, reach the panels at all.
         // A dialog owns the screen while it is up: nothing behind it answers the
@@ -1513,10 +1515,11 @@ impl XgViewApp {
         // the scope's order, then its exits - and not by geometry. Answered
         // before the Back handling below, so that Back still unwinds a window.
         if nav_owns {
-            // A drag value takes its value from the sideways presses recorded
-            // here; the widget applies the step as it is drawn this frame.
-            // Left steps down and Right up, the way a slider reads them.
-            if nav_kind == Some(Kind::DragValue) {
+            // A value control - a drag value, or the language button - takes
+            // its step from the sideways presses recorded here; the widget
+            // applies it as it is drawn this frame. Left steps down and Right
+            // up, the way a slider reads them.
+            if matches!(nav_kind, Some(Kind::DragValue) | Some(Kind::Cycle)) {
                 if keys.left {
                     self.nav.step_value(-1);
                 }
@@ -1525,10 +1528,11 @@ impl XgViewApp {
                 }
             }
             // Up and Down always move the focus. A value control - slider, drag
-            // value or text field - answers its sideways keys itself, so they
-            // never reach here; a plain control walks with all four.
+            // value, text field or cycling button - answers its sideways keys
+            // itself, so they never reach here; a plain control walks with all
+            // four.
             let dir = match nav_kind {
-                Some(Kind::Slider) | Some(Kind::DragValue) | Some(Kind::Text) => {
+                Some(Kind::Slider) | Some(Kind::DragValue) | Some(Kind::Text) | Some(Kind::Cycle) => {
                     if keys.up {
                         Some(Dir::Up)
                     } else if keys.down {
@@ -1978,11 +1982,15 @@ impl XgViewApp {
         for (corner, item) in corners {
             ui.horizontal(|ui| {
                 ui.label(monitor_i18n::tr(corner));
-                let button = ui.button(monitor_i18n::tr(item.label()));
-                self.nav.item(&button);
+                let button = controls::cycle_button(
+                    &mut self.nav,
+                    ui,
+                    &OsdItem::ALL,
+                    item,
+                    |choice| monitor_i18n::tr(choice.label()),
+                );
                 self.focus_names.insert(button.id, corner);
-                if button.clicked() {
-                    *item = item.next();
+                if button.changed() {
                     dirty = true;
                 }
             });
@@ -2018,48 +2026,51 @@ impl XgViewApp {
                 .color(theme::TEXT_DIM),
         );
 
-        let current = monitor_i18n::current_language();
+        // The languages are one cycling button, drawn by `controls::cycle_button`
+        // - the same helper the OSD corners below use: the language in force is
+        // shown, and a Left / Right press - or Enter, as on those buttons -
+        // steps to the next one. The whole list never has to fit on the panel,
+        // and the remote needs no other gesture to reach it.
+        let chosen = monitor_i18n::current_language();
         let available = monitor_i18n::available();
         let is_auto = self.config.language.is_empty() || self.config.language == "auto";
+        // `None` is auto, then a language by id in the order the catalogue
+        // lists them - English first.
+        let mut choices: Vec<Option<String>> = Vec::with_capacity(available.len() + 1);
+        choices.push(None);
+        choices.extend(available.iter().map(|info| Some(info.id.clone())));
+        let mut choice = if is_auto { None } else { Some(chosen) };
         let auto_label = monitor_i18n::tr("settings-language-auto");
-        let selected_name = if is_auto {
-            auto_label.clone()
-        } else {
-            available
-                .iter()
-                .find(|info| info.id == current)
-                .map(|info| info.name.clone())
-                .unwrap_or_else(|| current.clone())
-        };
+        let button = controls::cycle_button(&mut self.nav, ui, &choices, &mut choice, |choice| {
+            match choice {
+                None => auto_label.clone(),
+                Some(id) => available
+                    .iter()
+                    .find(|info| info.id == *id)
+                    .map(|info| info.name.clone())
+                    .unwrap_or_else(|| id.clone()),
+            }
+        });
+        self.focus_names.insert(button.id, "settings-language");
+        if button.changed() {
+            if let Some(id) = choice {
+                // Always record the explicit choice so the user leaves auto
+                // mode even when the language is the same as the one
+                // auto-detection picked.
+                let switched = monitor_i18n::set_language(&id);
+                self.config.language = id.clone();
+                if switched {
+                    fonts::install_for(ui.ctx(), &id);
+                }
+            } else {
+                self.config.language = "auto".to_string();
+                monitor_i18n::set_language("auto");
+                fonts::install_for(ui.ctx(), &monitor_i18n::current_language());
+            }
+            ui.ctx().request_repaint();
+            dirty = true;
+        }
 
-        let response = egui::ComboBox::from_id_salt("settings-language")
-            .selected_text(selected_name)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(is_auto, &auto_label).clicked() && !is_auto {
-                    self.config.language = "auto".to_string();
-                    monitor_i18n::set_language("auto");
-                    fonts::install_for(ui.ctx(), &monitor_i18n::current_language());
-                    ui.ctx().request_repaint();
-                    dirty = true;
-                }
-                for info in &available {
-                    let selected = !is_auto && info.id == current;
-                    if ui.selectable_label(selected, &info.name).clicked() && !selected {
-                        // Always record the explicit choice so the user leaves
-                        // auto mode even when the language is the same as the
-                        // one auto-detection picked.
-                        let changed = monitor_i18n::set_language(&info.id);
-                        self.config.language = info.id.clone();
-                        if changed {
-                            fonts::install_for(ui.ctx(), &info.id);
-                            ui.ctx().request_repaint();
-                        }
-                        dirty = true;
-                    }
-                }
-            })
-            .response;
-        self.nav.item(&response);
         dirty
     }
 

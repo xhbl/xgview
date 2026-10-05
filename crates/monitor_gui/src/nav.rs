@@ -115,7 +115,9 @@ impl ScopeDef {
 /// A slider is moved with Left and Right and a [`egui::DragValue`] with Up and
 /// Down; the other axis is the one that moves the focus. A text field keeps
 /// Left and Right for its caret, which a form - a column - never needs for the
-/// walk. A plain control keeps neither, and all four arrows walk the scope.
+/// walk. A cycling button keeps Left and Right for stepping through its
+/// choices, and lets Up and Down walk the form. A plain control keeps neither,
+/// and all four arrows walk the scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Kind {
     #[default]
@@ -124,6 +126,10 @@ pub enum Kind {
     DragValue,
     /// A text field: Left and Right move its caret, Up and Down walk the form.
     Text,
+    /// A control that a sideways press steps to its next choice - the language
+    /// picker. Up and Down are the focus's. The press is carried on the layer
+    /// like a drag value's: see [`Nav::value_step`].
+    Cycle,
 }
 
 /// Where a registered control lives.

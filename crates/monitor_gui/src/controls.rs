@@ -52,6 +52,42 @@ pub fn drag_value<T: Numeric>(
     response
 }
 
+/// A button that cycles through `options`, registered with the navigation
+/// layer.
+///
+/// Up and Down walk the form; Left and Right - or Enter, or a click - step to
+/// the next option, and the step wraps at both ends. It is the panel's way of
+/// offering a choice from a list that is too long, or too rarely changed, to
+/// lay out as a row of buttons: the language picker and the OSD corners. The
+/// order is the slice's.
+///
+/// The value is written straight to `value` and the returned [`Response`] is
+/// marked changed, so a caller that tracks edits with
+/// [`Response::changed`] still sees them.
+pub fn cycle_button<T: Clone + PartialEq>(
+    nav: &mut Nav,
+    ui: &mut Ui,
+    options: &[T],
+    value: &mut T,
+    label: impl Fn(&T) -> String,
+) -> Response {
+    let mut response = ui.button(label(value));
+    nav.item_kind(Kind::Cycle, &response);
+    // The layer recorded the sideways presses; they are this control's only
+    // while it has the focus. A click is there too, because egui turns Enter on
+    // a focused button into one.
+    let step = if response.has_focus() { nav.value_step() } else { 0 };
+    if options.is_empty() || (step == 0 && !response.clicked()) {
+        return response;
+    }
+    let delta = if step != 0 { step } else { 1 };
+    let index = options.iter().position(|option| option == &*value).unwrap_or(0) as i32;
+    let next = (index + delta).rem_euclid(options.len() as i32) as usize;
+    *value = options[next].clone();
+    response.mark_changed();
+    response
+}
+
 /// A [`egui::CollapsingHeader`] registered with the navigation layer.
 ///
 /// It is a stop of the form like any other control - Up and Down reach it, and
