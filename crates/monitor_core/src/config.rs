@@ -217,7 +217,17 @@ impl AppConfig {
             return Ok(Self::default());
         }
         let data = std::fs::read_to_string(path)?;
-        let mut config: AppConfig = serde_json::from_str(&data)?;
+        Self::from_json(&data)
+    }
+
+    /// Parses configuration JSON, normalized the way [`Self::load`] normalizes
+    /// it.
+    ///
+    /// An import reads the text through whatever the platform offers - a file
+    /// on the desktop, a document the viewer picked on Android - so the parsing
+    /// cannot live inside `load`.
+    pub fn from_json(data: &str) -> Result<Self> {
+        let mut config: AppConfig = serde_json::from_str(data)?;
         config.normalize();
         Ok(config)
     }
@@ -252,6 +262,14 @@ impl AppConfig {
         }
     }
 
+    /// The configuration as the JSON an export carries.
+    ///
+    /// Android hands this text to `MediaStore` rather than writing a path
+    /// itself, so the serialization cannot live inside `save`.
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
     /// Writes the configuration atomically (temporary file + rename).
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
@@ -260,7 +278,7 @@ impl AppConfig {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let json = serde_json::to_string_pretty(self)?;
+        let json = self.to_json()?;
         let temporary = path.with_extension("json.tmp");
         std::fs::write(&temporary, json)?;
         std::fs::rename(&temporary, path).map_err(|err| {

@@ -3,14 +3,21 @@ package com.xhbl.xgview;
 import android.app.NativeActivity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.database.Cursor;
 import android.graphics.Insets;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.KeyEvent;
@@ -24,7 +31,14 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 
 /**
  * XGView's activity: the {@link NativeActivity} the whole UI runs in, with the
@@ -569,6 +583,214 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    // ------------------------------------------------------- config import / export
+    //
+    // The About tab's export and import. Android has no file dialog of the
+    // desktop kind, so the export goes to a fixed place any file manager can
+    // reach - Download/xgview/config.json - while the import is handed to the
+    // system's own document picker. The picker is not a preference: from
+    // Android 11 a plain path into shared storage is closed to an app for any
+    // file it did not create itself, which is exactly the case for a
+    // configuration carried over from another device.
+
+    /** Folder the export is written to, under the public Downloads directory. */
+    private static final String EXPORT_FOLDER = "Download/xgview";
+
+    /** Request code for the storage permission Android 9 needs to write there. */
+    private static final int REQUEST_WRITE_STORAGE = 0x5847;
+
+    /** Request code for the document picker an import opens. */
+    private static final int REQUEST_IMPORT_DOCUMENT = 0x5848;
+
+    /**
+     * Writes the exported configuration into {@link #EXPORT_FOLDER} and returns
+     * the path to show the viewer.
+     *
+     * <p>Returns null when the write could not even be attempted because the
+     * storage permission Android 9 needs is still missing - the system dialog
+     * has been asked for, and the viewer is to try again. Everything else that
+     * goes wrong is thrown, and reaches the viewer as an export failure.
+     *
+     * <p>Called from the native side, on the UI thread.
+     */
+    public static String writeDownloadFile(String name, String text) throws Exception {
+        if (instance == null) {
+            throw new IllegalStateException("the activity is not up");
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return writeViaMediaStore(name, text);
+        }
+        return writeViaPublicDownload(name, text);
+    }
+
+    /**
+     * Android 10+: the Downloads collection, which lets an app put a file in
+     * the public Downloads folder without holding any storage permission. The
+     * permission that route needs nothing of is the very one Android 9 has no
+     * substitute for; see {@link #writeViaPublicDownload}.
+     */
+    private static String writeViaMediaStore(String name, String text) throws Exception {
+        final MainActivity self = instance;
+        final ContentResolver resolver = self.getContentResolver();
+        // `MediaStore` wants the relative path without the trailing separator.
+        final String folder = Environment.DIRECTORY_DOWNLOADS + "/xgview";
+        final Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+        final byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+
+        // Exporting twice must replace the file rather than leave a
+        // "config (1).json" beside it, which is what an insert would do.
+        final Uri existing = findDownload(resolver, folder, name);
+        if (existing != null) {
+            try (OutputStream stream = resolver.openOutputStream(existing, "wt")) {
+                if (stream == null) {
+                    throw new IOException("cannot open " + existing);
+                }
+                stream.write(bytes);
+            }
+            return EXPORT_FOLDER + "/" + name;
+        }
+
+        final ContentValues values = new ContentValues();
+        values.put(MediaStore.Downloads.DISPLAY_NAME, name);
+        values.put(MediaStore.Downloads.RELATIVE_PATH, folder);
+        values.put(MediaStore.Downloads.MIME_TYPE, "application/json");
+        // Pending until the bytes are all there, so a reader never sees half a
+        // configuration.
+        values.put(MediaStore.Downloads.IS_PENDING, 1);
+        final Uri target = resolver.insert(collection, values);
+        if (target == null) {
+            throw new IOException("cannot create " + EXPORT_FOLDER + "/" + name);
+        }
+        boolean written = false;
+        try {
+            try (OutputStream stream = resolver.openOutputStream(target, "wt")) {
+                if (stream == null) {
+                    throw new IOException("cannot open " + target);
+                }
+                stream.write(bytes);
+                written = true;
+            }
+        } finally {
+            if (!written) {
+                // Nothing to publish, and a pending entry would only be litter.
+                resolver.delete(target, null, null);
+            } else {
+                final ContentValues publish = new ContentValues();
+                publish.put(MediaStore.Downloads.IS_PENDING, 0);
+                resolver.update(target, publish, null, null);
+            }
+        }
+        return EXPORT_FOLDER + "/" + name;
+    }
+
+    /** The entry `MediaStore` already holds for that file, if any. */
+    private static Uri findDownload(ContentResolver resolver, String folder, String name) {
+        final Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+        final String[] columns = { MediaStore.Downloads._ID };
+        final String where =
+                MediaStore.Downloads.DISPLAY_NAME + "=? AND " + MediaStore.Downloads.RELATIVE_PATH + "=?";
+        // The relative path `MediaStore` reports keeps the trailing separator.
+        final String[] args = { name, folder + "/" };
+        try (Cursor cursor = resolver.query(collection, columns, where, args, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                return ContentUris.withAppendedId(collection, cursor.getLong(0));
+            }
+        } catch (RuntimeException error) {
+            android.util.Log.w("xgview", "cannot look for an existing " + name, error);
+        }
+        return null;
+    }
+
+    /**
+     * Android 9: the public Downloads directory itself, which needs the storage
+     * permission. There is no MediaStore route at that API level, so this is
+     * the one version whose export can ask the viewer for something.
+     *
+     * <p>Returns null when the permission is missing, having asked for it.
+     */
+    @SuppressWarnings("deprecation")
+    private static String writeViaPublicDownload(String name, String text) throws Exception {
+        final MainActivity self = instance;
+        if (self.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+            self.runOnUiThread(() -> self.requestPermissions(
+                    new String[] { android.Manifest.permission.WRITE_EXTERNAL_STORAGE },
+                    REQUEST_WRITE_STORAGE));
+            return null;
+        }
+        final File folder = new File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "xgview");
+        if (!folder.isDirectory() && !folder.mkdirs()) {
+            throw new IOException("cannot create " + folder);
+        }
+        final File file = new File(folder, name);
+        try (OutputStream stream = new FileOutputStream(file)) {
+            stream.write(text.getBytes(StandardCharsets.UTF_8));
+        }
+        // So a media transfer and the Downloads app see it without a reboot.
+        MediaScannerConnection.scanFile(self, new String[] { file.getAbsolutePath() }, null, null);
+        return EXPORT_FOLDER + "/" + name;
+    }
+
+    /**
+     * Opens the system's document picker for an import.
+     *
+     * <p>Called from the native side. The answer - the file's text, or why it
+     * could not be read - comes back through {@link #onActivityResult}.
+     */
+    public static void pickConfigFile() {
+        final MainActivity self = instance;
+        if (self == null) {
+            return;
+        }
+        self.runOnUiThread(() -> {
+            final Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("*/*")
+                    // A picker honouring the filter shows only these, which keeps
+                    // a wall of unrelated files out of the way.
+                    .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
+                            "application/json", "text/plain", "application/octet-stream"
+                    });
+            try {
+                self.startActivityForResult(intent, REQUEST_IMPORT_DOCUMENT);
+            } catch (RuntimeException none) {
+                // Some television builds have no document provider at all.
+                android.util.Log.w("xgview", "no document picker on this device", none);
+                nativeConfigPicked(null, "no document picker on this device");
+            }
+        });
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_IMPORT_DOCUMENT) {
+            return;
+        }
+        final Uri uri = resultCode == RESULT_OK && data != null ? data.getData() : null;
+        if (uri == null) {
+            // Cancelled: nothing happened, and nothing is said about it.
+            nativeConfigPicked(null, null);
+            return;
+        }
+        try (InputStream stream = getContentResolver().openInputStream(uri)) {
+            if (stream == null) {
+                throw new IOException("cannot open " + uri);
+            }
+            final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            final byte[] chunk = new byte[8192];
+            int read;
+            while ((read = stream.read(chunk)) > 0) {
+                buffer.write(chunk, 0, read);
+            }
+            nativeConfigPicked(new String(buffer.toByteArray(), StandardCharsets.UTF_8), null);
+        } catch (Exception error) {
+            android.util.Log.w("xgview", "cannot read the picked file", error);
+            nativeConfigPicked(null, String.valueOf(error));
+        }
+    }
+
     // ---------------------------------------------------------------- boot start
     //
     // Android 10+ refuses to start an activity from the background, and the
@@ -655,6 +877,15 @@ public class MainActivity extends NativeActivity {
 
     /** The keyboard went away on its own - Back, or its own hide button. */
     private static native void nativeKeyboardHidden();
+
+    /**
+     * The document an import picked, or why it could not be read.
+     *
+     * <p>{@code text} is the file's content and {@code error} says what went
+     * wrong when it is not null; both null means the viewer cancelled, which is
+     * not a failure and is not reported as one.
+     */
+    private static native void nativeConfigPicked(String text, String error);
 
     /** The window insets, in pixels: the width of the navigation bar's strip. */
     private static native void nativeInsets(int left, int right);

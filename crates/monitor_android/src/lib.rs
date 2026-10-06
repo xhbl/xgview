@@ -88,6 +88,19 @@ pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeKeyboardHidden(
     monitor_gui::keyboard::java_keyboard_hidden();
 }
 
+/// The document an import picked, or why it could not be read. See
+/// `MainActivity.onActivityResult`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeConfigPicked(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    text: jni::objects::JString,
+    error: jni::objects::JString,
+) {
+    monitor_gui::android::java_config_picked(&mut env, &text, &error);
+}
+
 /// The window insets changed: how wide the navigation bar's strip is, in
 /// pixels. See `monitor_gui::android`.
 #[cfg(target_os = "android")]

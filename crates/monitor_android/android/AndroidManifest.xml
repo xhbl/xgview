@@ -46,6 +46,16 @@
     <!-- Keep the screen on while the surveillance wall is displayed. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Writing the exported configuration into the public Download/xgview
+         folder. Android 10 (API 29) lets an app do that through MediaStore with
+         no permission at all, and that is the route taken from there on; on
+         Android 9 there is no MediaStore route and the write is a plain one
+         into the public directory, which needs this permission. The attribute
+         is what keeps Android 10+ from asking for a permission it never uses. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <!-- Broadcast / multicast reception has to be enabled on some TV boxes,
          otherwise the WS-Discovery probe never leaves the device. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />

@@ -115,8 +115,8 @@ about-export-name = Export configuration
 about-import-name = Import configuration
 about-only-cameras = Only import the cameras
 about-only-cameras-name = Only import the cameras
-about-import-hint = Import replaces the cameras of this configuration with the ones in the file, and the file is written over the current configuration. Tick the box to take the cameras alone and keep this viewer's own settings - the grid layout, discovery, reconnect.
-about-import-hint-fixed = Export writes { $path }, and import reads it back. { about-import-hint }
+about-import-hint = Importing overwrites your current configuration. Check the box to import cameras only while keeping your viewer settings.
+about-import-hint-android = Export saves to Download/xgview/config.json. Import opens the system file picker. { about-import-hint }
 
 ## Toolbar
 toolbar-layout-1x1 = Grid 1×1
@@ -160,12 +160,17 @@ toast-reorder = Reorder: Up / Down to move · Confirm to apply · Back to cancel
 toast-config-save-failed = cannot save { $path }: { $error }
 toast-config-exported = configuration exported to { $path }
 toast-export-failed = cannot export: { $error }
-toast-import-missing = no file to import at { $path }
+toast-export-needs-storage = export needs the storage permission - grant it, then export again
 toast-imported =
     imported { $count ->
         [one] { $count } camera
        *[other] { $count } cameras
     } from { $path }
+toast-imported-document =
+    imported { $count ->
+        [one] { $count } camera
+       *[other] { $count } cameras
+    } from the picked file
 toast-import-failed = cannot import: { $error }
 toast-started-autostart = XGView { $version } started automatically ({ $decoder } decoder)
 toast-started = XGView { $version } — { $decoder } decoder

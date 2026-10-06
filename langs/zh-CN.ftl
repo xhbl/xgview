@@ -113,8 +113,8 @@ about-export-name = 导出配置
 about-import-name = 导入配置
 about-only-cameras = 仅导入摄像头
 about-only-cameras-name = 仅导入摄像头
-about-import-hint = 导入会用文件中的摄像头替换本配置的摄像头，并覆盖当前配置文件。勾选此框仅取摄像头，保留本查看器自身的设置——宫格布局、发现、重连。
-about-import-hint-fixed = 导出写入 { $path }，导入再读回。{ about-import-hint }
+about-import-hint = 导入会覆盖当前配置。勾选此框仅导入摄像头，保留本查看器自身的设置。
+about-import-hint-android = 导出保存到 Download/xgview/config.json。导入会打开系统文件选择器。{ about-import-hint }
 
 ## 工具栏
 toolbar-layout-1x1 = 宫格 1×1
@@ -158,8 +158,9 @@ toast-reorder = 重排：上 / 下移动 · 确认应用 · 返回取消
 toast-config-save-failed = 无法保存 { $path }：{ $error }
 toast-config-exported = 配置已导出到 { $path }
 toast-export-failed = 无法导出：{ $error }
-toast-import-missing = 无可导入文件 { $path }
+toast-export-needs-storage = 导出需要存储权限——授权后再导出一次
 toast-imported = 已从 { $path } 导入 { $count } 个摄像头
+toast-imported-document = 已从所选文件导入 { $count } 个摄像头
 toast-import-failed = 无法导入：{ $error }
 toast-started-autostart = XGView { $version } 已自动启动（{ $decoder } 解码器）
 toast-started = XGView { $version } — { $decoder } 解码器

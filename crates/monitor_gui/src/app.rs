@@ -471,11 +471,6 @@ pub struct XgViewApp {
     /// default: taking the cameras alone is the import that cannot surprise a
     /// machine that is already installed.
     import_cameras_only: bool,
-    /// Directory the About tab's export and import use where there is no file
-    /// dialog to ask the viewer (Android), with
-    /// [`monitor_core::CONFIG_FILE_NAME`] inside it. `None` on the desktop,
-    /// which opens the system dialog instead.
-    export_dir: Option<PathBuf>,
     /// The Android start-on-boot state - whether the app may draw over other
     /// apps, and whether it is the home app - and when it was last read. Read
     /// through `crate::android`, throttled: it only changes while the viewer is
@@ -552,15 +547,15 @@ impl XgViewApp {
         config_path: PathBuf,
         handle: Handle,
     ) -> Self {
-        let RunOptions { config, fullscreen, from_autostart, export_dir, .. } = options;
+        let RunOptions { config, fullscreen, from_autostart, extra_lang_dir, .. } = options;
         let mut config = config;
 
         // The interface language is chosen before the first frame is drawn:
         // English is embedded, and a pack beside the executable or under the
         // configuration directory is what the setting can switch to.
         let mut language_dirs = vec![monitor_core::config::config_dir().join("langs")];
-        if let Some(dir) = export_dir.as_ref() {
-            language_dirs.push(dir.join("langs"));
+        if let Some(dir) = extra_lang_dir.as_ref() {
+            language_dirs.push(dir.clone());
         }
         monitor_i18n::init(&config.language, &language_dirs);
 
@@ -648,7 +643,6 @@ impl XgViewApp {
             swallow_enter: 0,
             restore_focus: None,
             import_cameras_only: true,
-            export_dir,
             #[cfg(target_os = "android")]
             android_boot: (false, false),
             #[cfg(target_os = "android")]
@@ -3420,9 +3414,9 @@ impl XgViewApp {
             &[("path", self.config_path.display().to_string().into())],
         ));
 
-        // The export / import pair. The desktop opens a file dialog for it; on
-        // Android, where there is none, it works on a fixed file - see
-        // `export_dir` - and the hint says where that is.
+        // The export / import pair. The desktop opens file dialogs for both; on
+        // Android the export goes to the public Download/xgview folder and the
+        // import opens the system's document picker, and the hint says so.
         ui.add_space(theme::space::M);
         let export = ui.button(monitor_i18n::tr("about-export"));
         self.nav.item(&export);
@@ -3444,129 +3438,152 @@ impl XgViewApp {
         ui.label(RichText::new(self.import_hint()).small().color(theme::TEXT_DIM));
     }
 
-    /// The fixed file an export and an import use where there is no file dialog
-    /// to ask the viewer: `config.json` inside an `xgview` folder of
-    /// [`Self::export_dir`]. `None` on the desktop, which has the dialog and no
-    /// fixed file. Writing the file creates the folder
-    /// ([`monitor_core::config::AppConfig::save`] makes the parent directory).
-    fn fixed_config_path(&self) -> Option<PathBuf> {
-        Some(
-            self.export_dir
-                .as_ref()?
-                .join(monitor_core::APP_NAME)
-                .join(monitor_core::CONFIG_FILE_NAME),
-        )
-    }
-
-    /// What the export / import pair does, and - where there is no dialog to
-    /// choose a file - the fixed file it uses.
-    fn import_hint(&self) -> String {
-        match self.fixed_config_path() {
-            Some(path) => monitor_i18n::tr_args(
-                "about-import-hint-fixed",
-                &[("path", path.display().to_string().into())],
-            ),
-            None => monitor_i18n::tr("about-import-hint"),
-        }
-    }
-
-    /// Where an export is written: the file the viewer picks.
+    /// What the export / import pair does. The desktop picks files with the
+    /// system's dialogs; Android has the fixed export folder and the system's
+    /// document picker, and says so. See [`Self::export_config`].
     #[cfg(not(target_os = "android"))]
-    fn export_target(&self) -> Option<PathBuf> {
-        rfd::FileDialog::new()
+    fn import_hint(&self) -> String {
+        monitor_i18n::tr("about-import-hint")
+    }
+
+    /// What the export / import pair does, where the export has a fixed folder
+    /// and the import opens the system's document picker.
+    #[cfg(target_os = "android")]
+    fn import_hint(&self) -> String {
+        monitor_i18n::tr("about-import-hint-android")
+    }
+
+    /// Writes the current configuration to the file the viewer picks.
+    #[cfg(not(target_os = "android"))]
+    fn export_config(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
             .set_file_name(monitor_core::CONFIG_FILE_NAME)
             .add_filter("JSON", &["json"])
             .save_file()
-    }
-
-    /// Where an export is written: the fixed file, there being no dialog.
-    #[cfg(target_os = "android")]
-    fn export_target(&self) -> Option<PathBuf> {
-        self.fixed_config_path()
-    }
-
-    /// The file an import is read from: the one the viewer picks.
-    #[cfg(not(target_os = "android"))]
-    fn import_source(&self) -> Option<PathBuf> {
-        rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file()
-    }
-
-    /// The file an import is read from: the fixed one, and only if it is there.
-    #[cfg(target_os = "android")]
-    fn import_source(&self) -> Option<PathBuf> {
-        self.fixed_config_path().filter(|path| path.exists())
-    }
-
-    /// Writes the current configuration to a file the viewer picks.
-    fn export_config(&mut self) {
-        let Some(path) = self.export_target() else {
+        else {
             return;
         };
         match self.config.save(&path) {
-            Ok(()) => {
-                self.flash(
-                    monitor_i18n::tr_args(
-                        "toast-config-exported",
-                        &[("path", path.display().to_string().into())],
-                    ),
-                    ToastKind::Info,
-                )
-            }
+            Ok(()) => self.flash(
+                monitor_i18n::tr_args(
+                    "toast-config-exported",
+                    &[("path", path.display().to_string().into())],
+                ),
+                ToastKind::Info,
+            ),
             Err(error) => self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]), ToastKind::Error),
         }
     }
 
-    /// Reads a configuration file into the running one.
+    /// Writes the current configuration into the public `Download/xgview`
+    /// folder.
     ///
-    /// The cameras of the file replace this viewer's, and the result is written
-    /// back over this installation's configuration on the next save. With the
-    /// "only the cameras" box ticked nothing else is taken from the file.
-    fn import_config(&mut self) {
-        let Some(path) = self.import_source() else {
-            // A fixed path with no file there is worth saying: the viewer has no
-            // dialog to look at and nothing happened. A cancelled dialog is not.
-            if let Some(missing) = self.fixed_config_path() {
-                self.flash(
-                    monitor_i18n::tr_args(
-                        "toast-import-missing",
-                        &[("path", missing.display().to_string().into())],
-                    ),
-                    ToastKind::Error,
-                );
+    /// The write is the activity's - `MediaStore` from Android 10 on, a plain
+    /// file into the public Downloads folder before that - because a
+    /// `NativeActivity` has no storage of its own the viewer can reach. See
+    /// `MainActivity.writeDownloadFile`.
+    #[cfg(target_os = "android")]
+    fn export_config(&mut self) {
+        let json = match self.config.to_json() {
+            Ok(json) => json,
+            Err(error) => {
+                self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]), ToastKind::Error);
+                return;
             }
+        };
+        match crate::android::write_download(monitor_core::CONFIG_FILE_NAME, &json) {
+            Ok(crate::android::ExportOutcome::Written(path)) => self.flash(
+                monitor_i18n::tr_args("toast-config-exported", &[("path", path.into())]),
+                ToastKind::Info,
+            ),
+            // Android 9 only: the storage permission has just been asked for,
+            // so the export is one press away rather than failed.
+            Ok(crate::android::ExportOutcome::NeedsStoragePermission) => {
+                self.flash(monitor_i18n::tr("toast-export-needs-storage"), ToastKind::Error)
+            }
+            Err(error) => self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.into())]), ToastKind::Error),
+        }
+    }
+
+    /// Reads a configuration file into the running one.
+    #[cfg(not(target_os = "android"))]
+    fn import_config(&mut self) {
+        let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() else {
             return;
         };
-        match AppConfig::load(&path) {
-            Ok(imported) => {
-                let count = imported.cameras.len();
-                if self.import_cameras_only {
-                    self.config.cameras = imported.cameras;
-                } else {
-                    // Everything is taken from the file, but the path this
-                    // installation reads and writes stays its own - it is a
-                    // field of the app, not of the configuration. The wall
-                    // follows the imported layout, page and focus, so the
-                    // scheduler is rebuilt the way start-up builds it.
-                    self.config = imported;
-                    self.scheduler = Scheduler::new(
-                        self.config.layout,
-                        self.config.page,
-                        self.config.focus,
-                        self.config.enabled_count(),
-                    );
-                }
-                self.config.normalize();
-                self.needs_sync = true;
-                self.mark_dirty();
-                self.flash(
+        match std::fs::read_to_string(&path) {
+            Ok(data) => match self.apply_import(&data) {
+                Ok(count) => self.flash(
                     monitor_i18n::tr_args(
                         "toast-imported",
                         &[("count", count.into()), ("path", path.display().to_string().into())],
                     ),
                     ToastKind::Info,
-                );
-            }
+                ),
+                Err(error) => self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error),
+            },
             Err(error) => self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.to_string().into())]), ToastKind::Error),
+        }
+    }
+
+    /// Opens the system's document picker.
+    ///
+    /// Nothing is imported here: the picker is another activity, and its answer
+    /// arrives frames later, where [`Self::poll_picked_config`] takes it. A
+    /// picker the viewer backs out of is not a failure and says nothing.
+    #[cfg(target_os = "android")]
+    fn import_config(&mut self) {
+        crate::android::pick_config_file();
+    }
+
+    /// Applies a configuration that was read from somewhere - a file the
+    /// desktop picked, a document the Android picker returned - and reports how
+    /// many cameras came with it, for the toast the caller puts up.
+    ///
+    /// The cameras replace this viewer's, and the result is written back over
+    /// this installation's configuration on the next save. With the "only the
+    /// cameras" box ticked nothing else is taken from it.
+    fn apply_import(&mut self, data: &str) -> Result<usize, String> {
+        let imported = AppConfig::from_json(data).map_err(|error| error.to_string())?;
+        let count = imported.cameras.len();
+        if self.import_cameras_only {
+            self.config.cameras = imported.cameras;
+        } else {
+            // Everything is taken from the document, but the path this
+            // installation reads and writes stays its own - it is a field of
+            // the app, not of the configuration. The wall follows the imported
+            // layout, page and focus, so the scheduler is rebuilt the way
+            // start-up builds it.
+            self.config = imported;
+            self.scheduler = Scheduler::new(
+                self.config.layout,
+                self.config.page,
+                self.config.focus,
+                self.config.enabled_count(),
+            );
+        }
+        self.config.normalize();
+        self.needs_sync = true;
+        self.mark_dirty();
+        Ok(count)
+    }
+
+    /// Takes the document the system picker returned, if one has arrived.
+    #[cfg(target_os = "android")]
+    fn poll_picked_config(&mut self) {
+        match crate::android::take_picked_config() {
+            None => {}
+            Some(crate::android::Picked::Cancelled) => {}
+            Some(crate::android::Picked::Config(text)) => match self.apply_import(&text) {
+                Ok(count) => self.flash(
+                    monitor_i18n::tr_args("toast-imported-document", &[("count", count.into())]),
+                    ToastKind::Info,
+                ),
+                Err(error) => self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error),
+            },
+            Some(crate::android::Picked::Failed(error)) => {
+                self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error)
+            }
         }
     }
 
@@ -3809,6 +3826,12 @@ impl eframe::App for XgViewApp {
         // drawn in, so a keystroke handed over later would be a frame behind.
         #[cfg(target_os = "android")]
         crate::keyboard::drain(ctx);
+
+        // The document an import picked, if the picker has answered since the
+        // last frame. Taken before anything is drawn, so the wall it changes is
+        // drawn from the new configuration on this frame.
+        #[cfg(target_os = "android")]
+        self.poll_picked_config();
 
         if ctx.input(|input| input.viewport().close_requested()) {
             self.save_now();

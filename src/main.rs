@@ -101,8 +101,9 @@ fn main() -> Result<()> {
         fullscreen,
         // Launched by the start-on-boot entry: the window is not focused.
         from_autostart: args.iter().any(|arg| arg == "--autostart"),
-        // The desktop opens a file dialog for the About tab's export / import.
-        export_dir: None,
+        // Language packs live under the configuration directory here; only
+        // Android names a second place a file transfer can reach.
+        extra_lang_dir: None,
     })
 }
 

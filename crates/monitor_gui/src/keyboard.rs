@@ -186,7 +186,11 @@ fn push(item: Typed) {
 }
 
 /// Asks for a frame, so that what was just queued is read now.
-fn wake() {
+///
+/// Shared with [`crate::android`]: what the activity reports after the fact -
+/// a picked document, like a keystroke - would otherwise wait for the wall's
+/// own next repaint.
+pub(crate) fn wake() {
     if let Some(ctx) = CONTEXT.get() {
         ctx.request_repaint();
     }
