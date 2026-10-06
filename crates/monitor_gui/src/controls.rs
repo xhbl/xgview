@@ -52,6 +52,46 @@ pub fn drag_value<T: Numeric>(
     response
 }
 
+/// A [`egui::Slider`] registered with the navigation layer.
+///
+/// Left and Right move the thumb and step the value by `step`; Up and Down
+/// walk the form. The label sits at the left, the slider and its value at
+/// the right, and the row is the slider's own - so each value gets a line to
+/// itself. `suffix` is shown after the value, `text` before the slider. A
+/// small reset button after the value restores `default` on a click.
+pub fn slider<T: Numeric>(
+    nav: &mut Nav,
+    ui: &mut Ui,
+    value: &mut T,
+    range: RangeInclusive<T>,
+    step: f64,
+    suffix: &str,
+    text: &str,
+    default: T,
+) -> Response {
+    let mut slider = egui::Slider::new(value, range).step_by(step);
+    if !suffix.is_empty() {
+        slider = slider.suffix(suffix);
+    }
+    // egui's `Slider::text` draws the label to the right of the value, so the
+    // label is laid out by hand to put it on the left.
+    let (mut slider_response, reset) = ui
+        .horizontal(|ui| {
+            ui.label(text);
+            let slider_response = ui.add(slider);
+            let reset = ui.add(egui::Button::new("\u{21BA}").small());
+            (slider_response, reset)
+        })
+        .inner;
+    nav.item_kind(Kind::Slider, &slider_response);
+    nav.item(&reset);
+    if reset.clicked() {
+        *value = default;
+        slider_response.mark_changed();
+    }
+    slider_response
+}
+
 /// A button that cycles through `options`, registered with the navigation
 /// layer.
 ///

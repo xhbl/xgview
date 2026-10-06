@@ -2802,14 +2802,10 @@ impl XgViewApp {
         ui.add_space(theme::space::M);
         ui.label(RichText::new(monitor_i18n::tr("settings-reconnect")).strong());
         let reconnect = &mut self.config.reconnect;
-        ui.horizontal(|ui| {
-            ui.label(monitor_i18n::tr("streams-first-retry"));
-            let first = controls::drag_value(&mut self.nav, ui, &mut reconnect.initial_delay_ms, 100..=10_000, 100.0, " ms");
-            dirty |= first.changed();
-            ui.label(monitor_i18n::tr("streams-then-at-most"));
-            let second = controls::drag_value(&mut self.nav, ui, &mut reconnect.max_delay_ms, 1_000..=300_000, 1000.0, " ms");
-            dirty |= second.changed();
-        });
+        let first = controls::slider(&mut self.nav, ui, &mut reconnect.initial_delay_ms, 100..=10_000, 100.0, " ms", &monitor_i18n::tr("streams-first-retry"), 1_000);
+        dirty |= first.changed();
+        let second = controls::slider(&mut self.nav, ui, &mut reconnect.max_delay_ms, 1_000..=300_000, 1000.0, " ms", &monitor_i18n::tr("streams-then-at-most"), 30_000);
+        dirty |= second.changed();
         ui.label(RichText::new(monitor_i18n::tr("streams-change-note")).small().color(theme::TEXT_DIM));
         // The shape of the curve is settled once, by whoever sized the network,
         // and never looked at again: it belongs behind a fold, not on the tab.
@@ -2817,17 +2813,12 @@ impl XgViewApp {
         // `controls::fold`.
         let backoff = monitor_i18n::tr("streams-backoff");
         controls::fold(&mut self.nav, ui, &backoff, false, |ui, nav| {
-            ui.horizontal(|ui| {
-                ui.label(monitor_i18n::tr("streams-factor"));
-                let factor = controls::drag_value(nav, ui, &mut reconnect.multiplier, 1.0..=5.0, 0.05, "");
-                dirty |= factor.changed();
-                ui.label(monitor_i18n::tr("streams-jitter"));
-                let jitter = controls::drag_value(nav, ui, &mut reconnect.jitter, 0.0..=1.0, 0.02, "");
-                dirty |= jitter.changed();
-                ui.label(monitor_i18n::tr("streams-attempts"));
-                let attempts = controls::drag_value(nav, ui, &mut reconnect.max_attempts, 0..=100, 1.0, "");
-                dirty |= attempts.changed();
-            });
+            let factor = controls::slider(nav, ui, &mut reconnect.multiplier, 1.0..=5.0, 0.05, "", &monitor_i18n::tr("streams-factor"), 1.8);
+            dirty |= factor.changed();
+            let jitter = controls::slider(nav, ui, &mut reconnect.jitter, 0.0..=1.0, 0.02, "", &monitor_i18n::tr("streams-jitter"), 0.2);
+            dirty |= jitter.changed();
+            let attempts = controls::slider(nav, ui, &mut reconnect.max_attempts, 0..=100, 1.0, "", &monitor_i18n::tr("streams-attempts"), 0);
+            dirty |= attempts.changed();
         });
 
         ui.add_space(theme::space::M);

@@ -626,13 +626,10 @@ fn onvif_tab(
                     egui::TextEdit::singleline(s).desired_width(140.0).hint_text(theme::hint("554, 80, 8000"))
                 });
             });
-            // The two value controls: the slider keeps Left / Right for its
-            // thumb, the drag value keeps Up / Down for its step, and each walks
-            // the column with the other axis.
-            let timeout = ui.add(egui::Slider::new(&mut state.scan.timeout_ms, 200..=8000).text(monitor_i18n::tr("dialog-probe-timeout")));
-            nav.item_kind(Kind::Slider, &timeout);
-            let concurrent_probes_label = monitor_i18n::tr("dialog-concurrent-probes");
-            controls::drag_value(nav, ui, &mut state.scan.concurrency, 1..=512, 1.0, &concurrent_probes_label);
+            // Both value controls are sliders: Left / Right move the thumb, Up
+            // / Down walks the column.
+            controls::slider(nav, ui, &mut state.scan.timeout_ms, 200..=8000, 100.0, " ms", &monitor_i18n::tr("dialog-probe-timeout"), 1_500);
+            controls::slider(nav, ui, &mut state.scan.concurrency, 1..=512, 1.0, "", &monitor_i18n::tr("dialog-concurrent-probes"), 64);
             ui.separator();
             ui.label(RichText::new(monitor_i18n::tr("dialog-onvif-credentials")).small());
             ui.horizontal(|ui| {
