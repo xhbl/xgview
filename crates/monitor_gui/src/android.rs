@@ -121,6 +121,27 @@ pub fn set_clipboard_text(text: &str) {
     clear_exception(&mut env);
 }
 
+/// Opens a URL (`http:`, `mailto:`, ...) in whatever application handles it.
+///
+/// egui's own opener is compiled out on Android - eframe is built without its
+/// `webbrowser` feature - so a link clicked on the About tab would otherwise do
+/// nothing.
+pub fn open_uri(url: &str) {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return;
+    };
+    let Ok(string) = env.new_string(url) else {
+        return;
+    };
+    let _ = env.call_static_method(
+        class,
+        "openUri",
+        "(Ljava/lang/String;)V",
+        &[JValue::Object(&string)],
+    );
+    clear_exception(&mut env);
+}
+
 /// A Java exception left pending aborts the process on the next JNI call - see
 /// the note on `keyboard::ACTIVITY` - so one is cleared rather than kept.
 fn clear_exception(env: &mut JNIEnv) {

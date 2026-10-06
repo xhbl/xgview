@@ -110,6 +110,7 @@ about-config = config: { $path }
 about-export = Export…
 about-import = Import…
 about-author-name = Author
+about-repository = Project on GitHub
 about-export-name = Export configuration
 about-import-name = Import configuration
 about-only-cameras = Only import the cameras

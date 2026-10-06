@@ -541,6 +541,34 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    /**
+     * Opens a URL - {@code http:}, {@code mailto:}, ... - in whatever
+     * application handles it.
+     *
+     * <p>egui's own opener is compiled out on Android, so a link clicked in the
+     * About tab is handed here instead; without this the click would do nothing.
+     * A device with no handler for the scheme is logged, not an error.
+     */
+    public static void openUri(final String url) {
+        final MainActivity self = instance;
+        if (self == null) {
+            return;
+        }
+        try {
+            final Uri uri = Uri.parse(url);
+            // A `mailto:` is registered by mail clients under ACTION_SENDTO, not
+            // ACTION_VIEW - asking for a view there often finds no handler - so
+            // the action follows the scheme.
+            final Intent intent = "mailto".equalsIgnoreCase(uri.getScheme())
+                    ? new Intent(Intent.ACTION_SENDTO, uri)
+                    : new Intent(Intent.ACTION_VIEW, uri);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            self.startActivity(intent);
+        } catch (RuntimeException none) {
+            android.util.Log.w("XGView.Link", "no app handles " + url, none);
+        }
+    }
+
     // ---------------------------------------------------------------- boot start
     //
     // Android 10+ refuses to start an activity from the background, and the

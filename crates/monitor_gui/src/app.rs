@@ -66,6 +66,9 @@ const EXIT_WINDOW: Duration = Duration::from_secs(2);
 const SETTINGS_WIDTH: f32 = 360.0;
 const SETTINGS_MIN_WIDTH: f32 = 300.0;
 
+/// The project's page on GitHub, shown in the About tab.
+const REPOSITORY_URL: &str = "https://github.com/xhbl/RustApps/tree/master/xgview";
+
 /// How far a direction press scrolls the settings body when it has nowhere left
 /// to move the focus, as a fraction of the window's height.
 ///
@@ -412,6 +415,10 @@ pub struct XgViewApp {
     /// The controls of the top bar with the rectangle each was drawn in, left to
     /// right, as of the last frame the bar was on screen.
     toolbar_items: Vec<(Id, Rect)>,
+    /// The author control of the status bar, as of the last frame that bar was
+    /// on screen - the one control below the wall, which the arrow off the
+    /// bottom of the wall lands on.
+    status_author: Option<Id>,
     /// Horizontal centre of the focused tile, which is where the arrow that
     /// walks off the top of the wall comes back down from.
     grid_focus_x: Option<f32>,
@@ -597,6 +604,7 @@ impl XgViewApp {
                 input_seen: false,
             },
             toolbar_items: Vec::new(),
+            status_author: None,
             grid_focus_x: None,
             // The "Add devices" window, the settings panel and the top bar are
             // on this layer: each is a row (of tabs, or of controls) over a
@@ -611,6 +619,7 @@ impl XgViewApp {
                 ("settings-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("settings-body"))),
                 ("settings-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("settings-tabs"))),
                 ("toolbar", ScopeDef::new(Axis::Row)),
+                ("status", ScopeDef::new(Axis::Row)),
                 ("edit-body", ScopeDef::new(Axis::Column)),
                 ("confirm-body", ScopeDef::new(Axis::Column)),
 
@@ -880,6 +889,17 @@ impl XgViewApp {
         }
     }
 
+    /// Hands the remote's focus from the wall to the author in the status bar.
+    ///
+    /// The status row holds the one control below the wall, so the arrow that
+    /// walks off the bottom of the wall is the way onto it - the mirror of the
+    /// arrow that walks off the top into the bar.
+    fn enter_status(&mut self, ctx: &egui::Context) {
+        if let Some(id) = self.status_author {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+    }
+
     /// Hands the remote's focus back to the wall.
     fn leave_controls(&mut self, ctx: &egui::Context) {
         if let Some(id) = ctx.memory(|memory| memory.focused()) {
@@ -891,6 +911,13 @@ impl XgViewApp {
     fn toolbar_has_focus(&self, ctx: &egui::Context) -> bool {
         ctx.memory(|memory| memory.focused())
             .is_some_and(|focused| self.toolbar_items.iter().any(|(id, _)| *id == focused))
+    }
+
+    /// Whether the author in the status bar is what currently has the remote's
+    /// focus.
+    fn status_has_focus(&self, ctx: &egui::Context) -> bool {
+        self.status_author
+            .is_some_and(|id| ctx.memory(|memory| memory.focused()) == Some(id))
     }
 
     fn zoom_in(&mut self) {
@@ -1332,8 +1359,7 @@ impl XgViewApp {
     /// the shell that resolves a protocol to its handler. The shell is asked
     /// here instead: `ShellExecuteW` on Windows, and the desktop's opener
     /// elsewhere.
-    #[cfg_attr(not(target_os = "android"), allow(unused_variables))]
-    fn open_link(ctx: &egui::Context, url: &str) {
+    fn open_link(_ctx: &egui::Context, url: &str) {
         #[cfg(windows)]
         {
             #[link(name = "shell32")]
@@ -1381,9 +1407,12 @@ impl XgViewApp {
             let _ = std::process::Command::new("xdg-open").arg(url).spawn();
             return;
         }
-        // Android has no shell to ask; fall back to egui's own opener.
+        // Android has no shell to ask. egui's own opener is compiled out on this
+        // target - eframe is built without its `webbrowser` feature - so the
+        // activity is asked to open it with an Intent instead, which is what lets
+        // a `mailto:` reach the mail app.
         #[cfg(target_os = "android")]
-        ctx.open_url(egui::OpenUrl { url: url.to_owned(), new_tab: false });
+        crate::android::open_uri(url);
     }
 
     /// Whether this frame carries input that is not a Back press.
@@ -1768,6 +1797,10 @@ impl XgViewApp {
                 // Below the bar there is only the wall, so the arrow that walks
                 // off the bottom of it hands the keys back.
                 self.leave_controls(ctx);
+            } else if keys.up && self.status_has_focus(ctx) {
+                // The status row is below the wall, so the arrow back to the
+                // wall from it is Up, the mirror of the one that came down.
+                self.leave_controls(ctx);
             }
             return;
         }
@@ -1778,8 +1811,8 @@ impl XgViewApp {
         if keys.right {
             self.navigate(Direction::Right);
         }
-        if keys.down {
-            self.navigate(Direction::Down);
+        if keys.down && self.navigate(Direction::Down) == NavigateOutcome::Blocked {
+            self.enter_status(ctx);
         }
         if keys.up && self.navigate(Direction::Up) == NavigateOutcome::Blocked {
             self.enter_toolbar(ctx);
@@ -1966,70 +1999,118 @@ impl XgViewApp {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let info = self.scheduler.page_info();
-            // How many of the configured channels are actually on the wall, and
-            // how many there are to be: the one number that says at a glance
-            // whether anything is missing. It reads better down here than in the
-            // bar, where it was competing with the controls.
-            let live = self.channels.values().filter(|channel| channel.state.is_live()).count();
-            ui.label(
-                RichText::new(monitor_i18n::tr_args(
-                    "status-live",
-                    &[("live", live.into()), ("total", self.config.enabled_count().into())],
-                ))
-                .color(if live > 0 { theme::LIVE } else { theme::TEXT_DIM }),
-            );
-            ui.separator();
-            ui.label(monitor_i18n::tr_args(
-                "status-page",
-                &[
-                    ("layout", self.scheduler.layout().label().into()),
-                    ("page", (info.page + 1).into()),
-                    ("count", info.page_count.into()),
-                ],
-            ));
-            if self.scheduler.is_zoomed() {
-                ui.separator();
-                ui.label(RichText::new(monitor_i18n::tr("status-zoom")).color(theme::FOCUS));
-            }
-            ui.separator();
-            match self.scheduler.focus() {
-                Some(focus) => ui.label(monitor_i18n::tr_args("status-focus", &[("index", focus.into())])),
-                None => ui.label(monitor_i18n::tr("status-no-focus")),
-            };
-            // What the remote control is on, for the controls that carry a shape
-            // instead of a word and have no pointer to hover for a tooltip.
-            if let Some(name) = self.focused_name {
-                ui.separator();
-                ui.label(RichText::new(monitor_i18n::tr(name)).color(theme::FOCUS));
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Drawn right to left, so the copyright lands at the very right
-                // and the decoder just left of it. The author is a mailto link,
-                // the same one the about panel carries.
-                ui.label(
-                    RichText::new(monitor_i18n::tr_args("status-copyright", &[("years", monitor_core::copyright_years().into())]))
-                        .small()
-                        .color(theme::TEXT_DIM),
-                );
-                let (author, email) = monitor_core::author();
-                if email.is_empty() {
-                    ui.label(RichText::new(author).small().color(theme::TEXT_DIM));
-                } else {
-                    let link = ui.link(RichText::new(author).small());
-                    if link.clicked() {
-                        Self::open_link(ui.ctx(), &monitor_core::author_mailto());
-                    }
-                }
-                ui.separator();
+            // The left half of the row comes and goes - the zoom label, and the
+            // name of the control the remote is on - and egui derives a widget's
+            // id from how many widgets preceded it in its row. The author at the
+            // other end is a control the arrows land on, so that variable half is
+            // put in a scope of its own: the row then has the same shape every
+            // frame and the author keeps its id. Without this the author is drawn
+            // under a different id each time the name appears or goes, and the
+            // focus the arrows gave it is dropped the moment it is drawn.
+            ui.push_id("xgview-status-left", |ui| {
+                let info = self.scheduler.page_info();
+                // How many of the configured channels are actually on the wall,
+                // and how many there are to be: the one number that says at a
+                // glance whether anything is missing. It reads better down here
+                // than in the bar, where it was competing with the controls.
+                let live = self.channels.values().filter(|channel| channel.state.is_live()).count();
                 ui.label(
                     RichText::new(monitor_i18n::tr_args(
-                        "status-decoder",
-                        &[("backend", self.decoder.into())],
+                        "status-live",
+                        &[("live", live.into()), ("total", self.config.enabled_count().into())],
                     ))
-                    .small()
-                    .color(theme::TEXT_DIM),
+                    .color(if live > 0 { theme::LIVE } else { theme::TEXT_DIM }),
                 );
+                ui.separator();
+                ui.label(monitor_i18n::tr_args(
+                    "status-page",
+                    &[
+                        ("layout", self.scheduler.layout().label().into()),
+                        ("page", (info.page + 1).into()),
+                        ("count", info.page_count.into()),
+                    ],
+                ));
+                if self.scheduler.is_zoomed() {
+                    ui.separator();
+                    ui.label(RichText::new(monitor_i18n::tr("status-zoom")).color(theme::FOCUS));
+                }
+                ui.separator();
+                match self.scheduler.focus() {
+                    Some(focus) => ui.label(monitor_i18n::tr_args("status-focus", &[("index", focus.into())])),
+                    None => ui.label(monitor_i18n::tr("status-no-focus")),
+                };
+                // What the remote control is on, for the controls that carry a
+                // shape instead of a word and have no pointer to hover for a
+                // tooltip.
+                if let Some(name) = self.focused_name {
+                    ui.separator();
+                    ui.label(RichText::new(monitor_i18n::tr(name)).color(theme::FOCUS));
+                }
+            });
+            // The author is a control of this row, so the row has to be a scope
+            // of the navigation layer for the remote to walk onto it - without
+            // one, `tracked` drops the id; see `Nav::push`.
+            //
+            // The group has an id of its own as well: the row on the left grows
+            // and shrinks with what it has to say - the name of the focused
+            // control appears there the moment the author takes the focus - and
+            // without a salt of its own this group's widgets would move to new
+            // ids with it, dropping the very focus the arrow just gave them.
+            ui.push_id("xgview-status-right", |ui| {
+                self.nav.open("status");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Drawn right to left, so the copyright lands at the very
+                    // right and the decoder just left of it. The author is a
+                    // control of its own rather than a mail link: a remote can
+                    // walk onto it, and pressing it opens the About tab, which
+                    // carries the address - a `mailto:` is not something a remote
+                    // can follow. All three keep the top bar's own text size, and
+                    // the author the top bar's text colour, so the bar reads as
+                    // one row.
+                    ui.label(
+                        RichText::new(monitor_i18n::tr_args("status-copyright", &[("years", monitor_core::copyright_years().into())]))
+                            .small()
+                            .color(theme::TEXT_DIM),
+                    );
+                    let (author, _email) = monitor_core::author();
+                    // A selectable label rather than a frameless button: this one
+                    // draws its frame only while the pointer is on it or it holds
+                    // the focus, and a focused control is painted with the focus
+                    // fill and the ring - the same feedback the toolbar's own
+                    // labels give. A button with no frame draws nothing at all.
+                    //
+                    // Its padding goes for the same reason the frame is there: a
+                    // button is drawn with the button padding around its text and
+                    // at least the interaction height, and both are sized for a
+                    // control standing on its own - on this row they would open it
+                    // up and lift the author off the line the labels either side
+                    // of it sit on. With neither, the control is exactly the word,
+                    // so the ring lands on the word.
+                    let padding = ui.spacing().button_padding;
+                    ui.spacing_mut().button_padding = egui::Vec2::ZERO;
+                    let link = ui.add(
+                        egui::Button::selectable(false, RichText::new(author).small().color(theme::TEXT))
+                            .small(),
+                    );
+                    ui.spacing_mut().button_padding = padding;
+                    let link = self.nav.tracked(link);
+                    self.name(&link, "about-author-name");
+                    self.status_author = Some(link.id);
+                    if link.clicked() {
+                        self.show_settings = true;
+                        self.settings_tab = SettingsTab::About;
+                    }
+                    ui.separator();
+                    ui.label(
+                        RichText::new(monitor_i18n::tr_args(
+                            "status-decoder",
+                            &[("backend", self.decoder.into())],
+                        ))
+                        .small()
+                        .color(theme::TEXT_DIM),
+                    );
+                });
+                self.nav.close();
             });
         });
     }
@@ -3030,6 +3111,20 @@ impl XgViewApp {
             }
             ui.label(monitor_i18n::tr_args("about-copyright", &[("years", monitor_core::copyright_years().into())]));
         });
+        // Where the project lives, right under the version line. A link like the
+        // author's, but a wrapping label rather than `Ui::link`: the settings
+        // panel is narrow and the URL is longer than one line there.
+        ui.label(monitor_i18n::tr("about-repository"));
+        let repository = ui.add(
+            egui::Label::new(RichText::new(REPOSITORY_URL).color(theme::ACCENT))
+                .wrap()
+                .sense(egui::Sense::click()),
+        );
+        let repository = self.nav.tracked(repository);
+        self.name(&repository, "about-repository");
+        if repository.clicked() {
+            Self::open_link(ui.ctx(), REPOSITORY_URL);
+        }
         let decoder_mode = monitor_i18n::tr(if self.hardware_decoder {
             "about-decoder-hardware"
         } else {
@@ -3526,6 +3621,7 @@ impl eframe::App for XgViewApp {
             // focus to: keeping the list would point the focus at a control
             // that is not on screen.
             self.toolbar_items.clear();
+            self.status_author = None;
             // A wall nobody is operating is a picture, and a pointer sitting on
             // it is the last thing left that is not part of it. Any input brings
             // the bars back, and the pointer with them.

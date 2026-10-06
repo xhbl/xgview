@@ -108,6 +108,7 @@ about-config = 配置：{ $path }
 about-export = 导出…
 about-import = 导入…
 about-author-name = 作者
+about-repository = GitHub 项目主页
 about-export-name = 导出配置
 about-import-name = 导入配置
 about-only-cameras = 仅导入摄像头
