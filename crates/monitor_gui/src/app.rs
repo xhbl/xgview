@@ -3632,6 +3632,34 @@ impl eframe::App for XgViewApp {
                 .default_width(SETTINGS_WIDTH)
                 .min_width(SETTINGS_MIN_WIDTH)
                 .show(ctx, |ui| self.settings_panel(ui));
+
+            // The pointer's way out of the panel: a click anywhere on the wall
+            // beside it. A remote control and a keyboard have Back and Escape,
+            // which say "close the panel" from wherever the focus happens to
+            // be; a mouse or a finger has only the gear that opened it, and a
+            // control that opens something is not read as the one that closes
+            // it either.
+            //
+            // The press is taken by a layer over the wall rather than read
+            // from the input queue, so that the click which dismisses the
+            // panel cannot also land on the tile under the pointer - a click
+            // on the wall magnifies that channel, and closing the panel while
+            // zooming into a picture behind it is not what the viewer asked
+            // for. The layer stops short of the bars: they keep working while
+            // the panel is open, and the gear closes it by itself.
+            //
+            // Its rect is what the central panel is about to be given, so it
+            // covers the wall and nothing else - the panel has just been laid
+            // out, and the bars before it.
+            let wall = ctx.available_rect();
+            let dismissed = egui::Area::new(Id::new("xgview-settings-dismiss"))
+                .order(egui::Order::Middle)
+                .fixed_pos(wall.min)
+                .show(ctx, |ui| ui.allocate_rect(wall, egui::Sense::click()).clicked())
+                .inner;
+            if dismissed {
+                self.show_settings = false;
+            }
         }
 
         egui::CentralPanel::default()
