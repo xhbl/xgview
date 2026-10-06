@@ -396,9 +396,12 @@ impl Scheduler {
             }
         };
 
-        // Multi grid pulls the cheap sub stream; a full screen viewport — either
-        // the 1x1 layout or a temporary magnification — pulls the main stream.
-        let main_stream = zoom.is_some() || self.layout.is_single();
+        // Every grid pulls the cheap sub stream, the 1x1 layout included: what
+        // the wall is showing is a wall either way, and one cell on screen does
+        // not mean the viewer is studying it. Only a magnification does - the
+        // viewport a double click or the remote put full screen - and that one
+        // switches to the main stream.
+        let main_stream = zoom.is_some();
         let plans = cameras
             .iter()
             .enumerate()
@@ -516,13 +519,15 @@ mod tests {
         assert_eq!(schedule.mode_of(16), ChannelMode::Suspend);
     }
 
+    /// The 1x1 layout is a grid like any other: it pulls the sub stream, and
+    /// only a magnification switches a channel to the main one.
     #[test]
-    fn single_grid_layout_pulls_the_main_stream() {
+    fn single_grid_layout_pulls_the_sub_stream() {
         let cameras = cameras(4);
         let scheduler = Scheduler::new(GridLayout::G1x1, 0, Some(0), cameras.len());
         let schedule = scheduler.schedule(&cameras);
         assert_eq!(schedule.live().count(), 1);
-        assert_eq!(schedule.mode_of(0), ChannelMode::Decode(StreamKind::Main));
+        assert_eq!(schedule.mode_of(0), ChannelMode::Decode(StreamKind::Sub));
     }
 
     #[test]

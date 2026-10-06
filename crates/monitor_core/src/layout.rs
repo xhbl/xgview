@@ -82,11 +82,6 @@ impl GridLayout {
         }
     }
 
-    /// `true` when this layout renders a single channel full screen.
-    pub fn is_single(self) -> bool {
-        matches!(self, GridLayout::G1x1)
-    }
-
     /// Index of the layout inside [`GridLayout::ALL`].
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|item| *item == self).unwrap_or(0)
