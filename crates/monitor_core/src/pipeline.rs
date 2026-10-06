@@ -26,7 +26,7 @@ use crate::error::Result;
 use crate::h264::{nal_unit_type, AccessUnit, H264Depacketizer, START_CODE};
 use crate::mjpeg::{JpegDepacketizer, MjpegClient};
 use crate::model::{is_http_url, CameraSource, ConnectionState, RtspTransport, StreamKind};
-use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtpHeader};
+use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtspStage, RtpHeader, SdpTrack};
 use crate::scheduler::ScheduleChange;
 
 /// Time without any RTP payload after which the session is considered dead.
@@ -61,6 +61,27 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 /// SSRC the receiver reports go out under. Any fixed value does, it only has to
 /// differ from the sender's.
 const RECEIVER_SSRC: u32 = 0x5847_5631;
+
+/// What a channel reads afresh before each attempt.
+///
+/// Kept behind one lock so that a setting the user edits reaches the channels
+/// that are already running at their next attempt, rather than only the ones
+/// opened after the change.
+#[derive(Debug, Clone)]
+struct SessionSettings {
+    /// The backoff applied between attempts.
+    reconnect: ReconnectPolicy,
+    /// The budget one attempt has to establish its session.
+    ///
+    /// The handshake is the one part of the path without a deadline of its own:
+    /// `OPTIONS` / `DESCRIBE` / `SETUP` / `PLAY` each wait for the peer's answer
+    /// with no timeout, and the stall detector only starts once packets are
+    /// expected. A peer that accepts the connection and then stops answering -
+    /// a half open connection, a middlebox that turns into a black hole, a
+    /// device at its limit of sessions - would otherwise hold the channel for
+    /// good, neither streaming nor reconnecting. Only the TCP connect was bound.
+    handshake_timeout: Duration,
+}
 
 /// Everything a channel reports to the renderer.
 #[derive(Debug, Clone, PartialEq)]
@@ -202,6 +223,10 @@ enum ChannelCommand {
     },
     /// Decode on the GPU from now on, or stop trying to.
     PreferHardware(bool),
+    /// Replace the reconnection policy of every channel, live ones included.
+    SetPolicy(ReconnectPolicy),
+    /// Replace the budget a session has to establish itself.
+    SetHandshakeTimeout(Duration),
     Shutdown,
 }
 
@@ -219,7 +244,12 @@ impl ChannelManager {
     ///
     /// `prefer_hardware` is the decoding preference live channels are opened
     /// with; see [`ChannelManager::set_hardware_preference`].
-    pub fn spawn(handle: &Handle, policy: ReconnectPolicy, prefer_hardware: bool) -> Self {
+    pub fn spawn(
+        handle: &Handle,
+        policy: ReconnectPolicy,
+        handshake_timeout: Duration,
+        prefer_hardware: bool,
+    ) -> Self {
         let (command_tx, command_rx) = unbounded_channel();
         let (event_tx, event_rx) = unbounded();
         let frames = Arc::new(FrameStore::default());
@@ -227,7 +257,7 @@ impl ChannelManager {
             command_rx,
             event_tx,
             frames.clone(),
-            policy,
+            Arc::new(Mutex::new(SessionSettings { reconnect: policy, handshake_timeout })),
             prefer_hardware,
             handle.clone(),
         ));
@@ -242,6 +272,25 @@ impl ChannelManager {
     /// not take, keeps decoding on the CPU.
     pub fn set_hardware_preference(&self, prefer: bool) {
         self.send(ChannelCommand::PreferHardware(prefer));
+    }
+
+    /// Replaces the reconnection policy of every channel.
+    ///
+    /// Unlike the decoder preference this needs no reopen: the delay is
+    /// computed afresh before each attempt, so a channel that is running takes
+    /// the new timing at its next retry, and a healthy stream is never
+    /// interrupted by a change to retries it is not making.
+    pub fn set_reconnect_policy(&self, policy: ReconnectPolicy) {
+        self.send(ChannelCommand::SetPolicy(policy));
+    }
+
+    /// Replaces how long a session has to establish itself.
+    ///
+    /// Read afresh before each attempt, like the reconnection policy, so a
+    /// channel stuck handshaking picks the new budget up at its next attempt
+    /// without having to be reopened.
+    pub fn set_handshake_timeout(&self, timeout: Duration) {
+        self.send(ChannelCommand::SetHandshakeTimeout(timeout));
     }
 
     /// The runtime used by the streaming tasks (the UI uses it to spawn the
@@ -358,7 +407,7 @@ async fn supervisor(
     mut commands: UnboundedReceiver<ChannelCommand>,
     events: Sender<StreamEvent>,
     frames: Arc<FrameStore>,
-    policy: ReconnectPolicy,
+    settings: Arc<Mutex<SessionSettings>>,
     mut prefer_hardware: bool,
     handle: Handle,
 ) {
@@ -410,7 +459,7 @@ async fn supervisor(
                 let task = handle.spawn(run_channel(
                     endpoint.clone(),
                     prefer_hardware,
-                    policy.clone(),
+                    settings.clone(),
                     events.clone(),
                     frames.clone(),
                 ));
@@ -443,12 +492,30 @@ async fn supervisor(
                     let task = handle.spawn(run_channel(
                         endpoint.clone(),
                         prefer_hardware,
-                        policy.clone(),
+                        settings.clone(),
                         events.clone(),
                         frames.clone(),
                     ));
                     channels.insert(index, ChannelRuntime { endpoint, task });
                 }
+            }
+            ChannelCommand::SetPolicy(new_policy) => {
+                match settings.lock() {
+                    Ok(mut current) => current.reconnect = new_policy,
+                    Err(poisoned) => poisoned.into_inner().reconnect = new_policy,
+                }
+                tracing::debug!(target: "xgview::pipeline", "reconnection policy replaced");
+            }
+            ChannelCommand::SetHandshakeTimeout(timeout) => {
+                match settings.lock() {
+                    Ok(mut current) => current.handshake_timeout = timeout,
+                    Err(poisoned) => poisoned.into_inner().handshake_timeout = timeout,
+                }
+                tracing::debug!(
+                    target: "xgview::pipeline",
+                    timeout_ms = timeout.as_millis() as u64,
+                    "handshake timeout replaced"
+                );
             }
             ChannelCommand::Shutdown => break,
         }
@@ -464,7 +531,7 @@ async fn supervisor(
 async fn run_channel(
     endpoint: Endpoint,
     prefer_hardware: bool,
-    policy: ReconnectPolicy,
+    settings: Arc<Mutex<SessionSettings>>,
     events: Sender<StreamEvent>,
     frames: Arc<FrameStore>,
 ) {
@@ -477,6 +544,15 @@ async fn run_channel(
 
     loop {
         attempt += 1;
+        // Read afresh every attempt, so a setting the user edits while this
+        // channel is running is picked up at its next attempt rather than at
+        // the next reopen: retry timing is not worth interrupting a healthy
+        // stream for, and a handshake that keeps failing wants the new budget
+        // now rather than after a restart.
+        let settings = match settings.lock() {
+            Ok(settings) => settings.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
         let state = if attempt == 1 {
             ConnectionState::Connecting
         } else {
@@ -502,9 +578,10 @@ async fn run_channel(
         // branching on it statement by statement.
         let started = Instant::now();
         let outcome = if endpoint.is_mjpeg() {
-            run_mjpeg_session(endpoint.clone(), &events, &frames).await
+            run_mjpeg_session(endpoint.clone(), settings.handshake_timeout, &events, &frames).await
         } else {
-            run_session(endpoint.clone(), prefer_hardware, &events, &frames).await
+            run_session(endpoint.clone(), prefer_hardware, settings.handshake_timeout, &events, &frames)
+                .await
         };
         let lived = started.elapsed();
         match outcome {
@@ -537,7 +614,9 @@ async fn run_channel(
             attempt = 0;
         }
 
-        if !policy.should_retry(attempt) {
+        // The snapshot taken at the top of the attempt is what this reads: one
+        // policy for the whole attempt, and the newest one the user set.
+        if !settings.reconnect.should_retry(attempt) {
             emit(
                 &events,
                 StreamEvent::State {
@@ -551,7 +630,7 @@ async fn run_channel(
         }
 
         let first_frame = frames.published(index) == 0;
-        let delay = policy.delay_for(attempt, first_frame, index as u32);
+        let delay = settings.reconnect.delay_for(attempt, first_frame, index as u32);
         emit(
             &events,
             StreamEvent::State {
@@ -762,10 +841,111 @@ impl Depacketizer {
     }
 }
 
+/// How an attempt at establishing a session ended.
+///
+/// The two failures that are worth answering with the other transport are kept
+/// apart from the rest, and from each other, because the answer differs: a
+/// refusal is the server saying so, a timeout is the server saying nothing, and
+/// where it went quiet decides whether the other transport is worth a try.
+#[derive(Debug)]
+enum HandshakeFailure {
+    /// The server answered `461` to `SETUP`, with what it said.
+    Refused(String),
+    /// The peer stopped answering; `stage` is how far the handshake had got.
+    TimedOut {
+        stage: Option<RtspStage>,
+        timeout: Duration,
+    },
+    /// Anything else.
+    Failed(crate::error::CoreError),
+}
+
+impl HandshakeFailure {
+    /// Whether the handshake should be tried once more over TCP.
+    ///
+    /// Two answers justify it, and only over UDP. A `461` is the server saying
+    /// so outright - go2rtc answers it to every UDP `SETUP` on purpose, so that
+    /// a client asking for UDP first falls back. A silence from `SETUP` onwards
+    /// usually means the datagrams are being dropped while the connection the
+    /// handshake has been running over is plainly working, which is what a
+    /// routed or NATed path does to UDP. A silence before that is the control
+    /// connection itself, which the other transport would only repeat.
+    fn worth_the_other_transport(&self, transport: RtspTransport) -> bool {
+        if !transport.is_udp() {
+            return false;
+        }
+        match self {
+            HandshakeFailure::Refused(_) => true,
+            HandshakeFailure::TimedOut { stage, .. } => {
+                matches!(stage, Some(RtspStage::Setup) | Some(RtspStage::Play))
+            }
+            HandshakeFailure::Failed(_) => false,
+        }
+    }
+
+    /// The failure as the channel reports it.
+    fn into_error(self) -> crate::error::CoreError {
+        use crate::error::CoreError;
+        match self {
+            HandshakeFailure::Failed(err) => err,
+            HandshakeFailure::Refused(message) => CoreError::transport(message),
+            HandshakeFailure::TimedOut { stage, timeout } => {
+                // Which request went unanswered, kept in the message: it is the
+                // difference between a path that drops datagrams and one that
+                // never carried the control connection at all.
+                let stage = match stage {
+                    Some(RtspStage::Options) => " during OPTIONS",
+                    Some(RtspStage::Describe) => " during DESCRIBE",
+                    Some(RtspStage::Setup) => " during SETUP",
+                    Some(RtspStage::Play) => " during PLAY",
+                    None => "",
+                };
+                CoreError::rtsp(format!(
+                    "the session handshake timed out after {} s{stage}",
+                    timeout.as_secs()
+                ))
+            }
+        }
+    }
+}
+
+/// Establishes a session, within `timeout`.
+///
+/// The client is dropped rather than reused when the deadline fires, so a
+/// request left half read costs nothing: the next attempt opens its own
+/// connection. That is what makes an overall deadline safe here where a
+/// cancelled read mid session would not be.
+async fn negotiate(
+    client: &mut RtspClient,
+    transport: RtspTransport,
+    timeout: Duration,
+    index: usize,
+) -> Result<Vec<SdpTrack>, HandshakeFailure> {
+    match tokio::time::timeout(timeout, client.start_with_transport(transport)).await {
+        Ok(Ok(tracks)) => Ok(tracks),
+        Ok(Err(crate::error::CoreError::Transport(message))) => {
+            Err(HandshakeFailure::Refused(message))
+        }
+        Ok(Err(err)) => Err(HandshakeFailure::Failed(err)),
+        Err(_) => {
+            let stage = client.stage();
+            tracing::warn!(
+                target: "xgview::pipeline",
+                index,
+                timeout_s = timeout.as_secs(),
+                stage = ?stage,
+                "the handshake timed out, the peer stopped answering"
+            );
+            Err(HandshakeFailure::TimedOut { stage, timeout })
+        }
+    }
+}
+
 /// One RTSP session: negotiation then packet pumping.
 async fn run_session(
     endpoint: Endpoint,
     prefer_hardware: bool,
+    handshake_timeout: Duration,
     events: &Sender<StreamEvent>,
     frames: &FrameStore,
 ) -> Result<()> {
@@ -776,23 +956,27 @@ async fn run_session(
     // A server may take one transport and refuse the other, which is worth a
     // second attempt rather than a failed session: go2rtc answers every UDP
     // `SETUP` with 461 on purpose, so that a client asking for UDP first falls
-    // back, and a preference must never cost a channel its picture. The session
-    // is opened afresh rather than patched, because the refused attempt left
-    // the old one half set up.
+    // back, and a preference must never cost a channel its picture. A UDP
+    // handshake that simply goes quiet from `SETUP` onwards is answered the same
+    // way - see `HandshakeFailure::worth_the_other_transport`. The session is
+    // opened afresh rather than patched, because the failed attempt left the
+    // old one half set up.
     let mut transport = transport;
-    let tracks = match client.start_with_transport(transport).await {
+    let tracks = match negotiate(&mut client, transport, handshake_timeout, index).await {
         Ok(tracks) => tracks,
-        Err(crate::error::CoreError::Transport(_)) if transport.is_udp() => {
+        Err(failure) if failure.worth_the_other_transport(transport) => {
             tracing::debug!(
                 target: "xgview::pipeline",
                 index,
-                "the server turned udp down, reopening the session over tcp"
+                "the udp session did not come up, reopening the session over tcp"
             );
             client = RtspClient::connect_with_auth(uri, credentials).await?;
             transport = RtspTransport::Tcp;
-            client.start_with_transport(transport).await?
+            negotiate(&mut client, transport, handshake_timeout, index)
+                .await
+                .map_err(HandshakeFailure::into_error)?
         }
-        Err(err) => return Err(err),
+        Err(failure) => return Err(failure.into_error()),
     };
     let video = tracks.iter().find(|track| track.is_video());
     let codec = video.and_then(|track| track.encoding.clone());
@@ -921,6 +1105,23 @@ async fn run_session(
     let mut source_ssrc: u32 = 0;
     let mut highest_sequence: u32 = 0;
     let mut received_packets = false;
+    // Beyond the sequence numbers, the report also says how badly the stream is
+    // arriving. Both of these accumulate over the session, which is the window
+    // RFC 3550 defines them in.
+    //
+    // `total_lost` is what the sequence gaps between packets say was never
+    // delivered. A camera that honours the report can only act on a count, so
+    // reporting the zero a TCP-shaped client would send tells it nothing about
+    // a link that is dropping datagrams.
+    let mut total_lost: u64 = 0;
+    // Interarrival jitter, kept as the difference between consecutive packets
+    // rather than against a session origin: the RTP timestamp wraps every
+    // thirteen hours or so, and an absolute transit would read that wrap as one
+    // enormous jitter.
+    let mut jitter: f64 = 0.0;
+    let mut last_arrival: Option<(Instant, u32)> = None;
+    // RTP timestamp units per second, as the session description announced it.
+    let clock_rate = f64::from(video.and_then(|track| track.clock_rate).unwrap_or(90_000));
     // How long this session may go without a picture, learned from the stream
     // itself: see `StallDeadline`.
     let mut stall = StallDeadline::new();
@@ -969,8 +1170,16 @@ async fn run_session(
             // Cameras differ in how much they care about being reported to. Some
             // stream regardless, but one was measured sending a single key frame
             // and then nothing but `SEI` until a receiver report arrived, which
-            // a viewer shows as a slideshow whose timecode jumps.
-            let report = crate::rtcp::receiver_report(RECEIVER_SSRC, source_ssrc, highest_sequence, 0, 0);
+            // a viewer shows as a slideshow whose timecode jumps. The counts it
+            // carries are the session's real ones, so a camera that does adapt
+            // to them has something to adapt to.
+            let report = crate::rtcp::receiver_report(
+                RECEIVER_SSRC,
+                source_ssrc,
+                highest_sequence,
+                total_lost.min(i32::MAX as u64) as i32,
+                jitter.round() as u32,
+            );
             client.send_rtcp(&report).await?;
             last_report = Instant::now();
         }
@@ -1039,6 +1248,7 @@ async fn run_session(
                             // together and decoded into a screenful of
                             // corruption.
                             window_lost += u64::from(delta) - 1;
+                            total_lost += u64::from(delta) - 1;
                             depacketizer.invalidate();
                         }
                     }
@@ -1058,6 +1268,18 @@ async fn run_session(
                 } else {
                     candidate
                 };
+                // How far apart this packet and the last one were sent, against
+                // how far apart they arrived. RFC 3550 smooths the difference
+                // into the jitter the receiver report carries.
+                let now = Instant::now();
+                if let Some((previous_arrival, previous_timestamp)) = last_arrival {
+                    let arrived = now.saturating_duration_since(previous_arrival).as_secs_f64()
+                        * clock_rate;
+                    let sent = f64::from(header.timestamp.wrapping_sub(previous_timestamp) as i32);
+                    let difference = (arrived - sent).abs();
+                    jitter += (difference - jitter) / 16.0;
+                }
+                last_arrival = Some((now, header.timestamp));
                 // The marker bit is set on the last packet of an access unit.
                 if header.marker && header.payload_type < 192 {
                     window_frames += 1;
@@ -1359,13 +1581,34 @@ fn publish_frames(
 /// displayable from its first picture and the decoder never waits for one.
 async fn run_mjpeg_session(
     endpoint: Endpoint,
+    handshake_timeout: Duration,
     events: &Sender<StreamEvent>,
     frames: &FrameStore,
 ) -> Result<()> {
     let Endpoint { index, camera_id, uri, stream, .. } = endpoint;
     let camera_id = camera_id.as_str();
 
-    let mut client = MjpegClient::connect(&uri).await?;
+    // The response headers are the handshake here, and the client sets no
+    // deadline on them: a server that accepts the connection and then says
+    // nothing would hold the channel the same way a silent RTSP peer does.
+    // Only the connect itself was bounded, and the per picture read below has
+    // its own idle timeout - this covers the gap between the two.
+    let mut client =
+        match tokio::time::timeout(handshake_timeout, MjpegClient::connect(&uri)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                tracing::warn!(
+                    target: "xgview::pipeline",
+                    index,
+                    timeout_s = handshake_timeout.as_secs(),
+                    "the stream did not answer, giving up on this attempt"
+                );
+                return Err(crate::error::CoreError::network(format!(
+                    "the stream did not answer within {} s",
+                    handshake_timeout.as_secs()
+                )));
+            }
+        };
     let mut decoder = open_decoder(
         &DecoderConfig {
             codec: Codec::Mjpeg,
@@ -1669,6 +1912,56 @@ mod tests {
         assert_eq!(stall.patience(), STALL_FLOOR);
     }
 
+    #[test]
+    fn only_a_udp_media_stage_silence_is_worth_the_other_transport() {
+        let timeout_at =
+            |stage| HandshakeFailure::TimedOut { stage, timeout: Duration::from_secs(15) };
+        // A refusal is the server saying so outright, and it only means anything
+        // over UDP.
+        let refused = HandshakeFailure::Refused("SETUP refused the transport".to_string());
+        assert!(refused.worth_the_other_transport(RtspTransport::Udp));
+        assert!(!refused.worth_the_other_transport(RtspTransport::Tcp));
+        // Silence once the media transport was being set up is what a path that
+        // drops datagrams looks like, and is worth one try over TCP.
+        assert!(timeout_at(Some(RtspStage::Setup)).worth_the_other_transport(RtspTransport::Udp));
+        assert!(timeout_at(Some(RtspStage::Play)).worth_the_other_transport(RtspTransport::Udp));
+        // Silence before that is the control connection itself, which the other
+        // transport would only repeat.
+        assert!(!timeout_at(Some(RtspStage::Options)).worth_the_other_transport(RtspTransport::Udp));
+        assert!(!timeout_at(Some(RtspStage::Describe)).worth_the_other_transport(RtspTransport::Udp));
+        // And nothing else is answered with the other transport.
+        let other = HandshakeFailure::Failed(crate::error::CoreError::rtsp("no video track"));
+        assert!(!other.worth_the_other_transport(RtspTransport::Udp));
+    }
+
+    #[tokio::test]
+    async fn a_silent_peer_says_which_request_it_was_waiting_on() {
+        // A listener that accepts and then never answers: the state a half open
+        // connection leaves a handshake in, and the one that used to hold a
+        // channel for good.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let quiet = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let mut client = RtspClient::connect_with_auth(&format!("rtsp://{address}/live"), None)
+            .await
+            .expect("the connection is accepted");
+        let failure = negotiate(&mut client, RtspTransport::Tcp, Duration::from_millis(100), 0)
+            .await
+            .unwrap_err();
+
+        match failure {
+            HandshakeFailure::TimedOut { stage, .. } => {
+                assert_eq!(stage, Some(RtspStage::Options), "it stalls on the first request");
+            }
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+        quiet.abort();
+    }
+
     #[tokio::test]
     async fn unreachable_camera_reports_failure() {
         let handle = Handle::current();
@@ -1679,7 +1972,7 @@ mod tests {
             max_delay_ms: 20,
             ..Default::default()
         };
-        let manager = ChannelManager::spawn(&handle, policy, false);
+        let manager = ChannelManager::spawn(&handle, policy, Duration::from_secs(5), false);
         let cameras = vec![camera("cam-1", "rtsp://127.0.0.1:1/stream")];
         manager.apply(
             &[ScheduleChange::Activate {

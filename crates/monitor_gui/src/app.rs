@@ -589,7 +589,12 @@ impl XgViewApp {
         }
         let discovery = DiscoveryUi::new(&config.discovery);
         let scheduler = Scheduler::new(config.layout, config.page, config.focus, config.enabled_count());
-        let manager = ChannelManager::spawn(&handle, config.reconnect.clone(), config.prefer_hardware_decode);
+        let manager = ChannelManager::spawn(
+            &handle,
+            config.reconnect.clone(),
+            Duration::from_millis(config.handshake_timeout_ms),
+            config.prefer_hardware_decode,
+        );
         let (events_tx, events_rx) = unbounded();
         let capabilities = monitor_codec::capabilities();
 
@@ -2829,12 +2834,21 @@ impl XgViewApp {
         ui.add_space(theme::space::M);
         ui.label(RichText::new(monitor_i18n::tr("settings-reconnect")).strong());
         let reconnect = &mut self.config.reconnect;
+        // Borrowed beside the policy: they are two fields of the same struct,
+        // and the slider that owns it sits among the retry ones.
+        let handshake_timeout_ms = &mut self.config.handshake_timeout_ms;
         let first = controls::slider(&mut self.nav, ui, &mut reconnect.initial_delay_ms, 100..=10_000, 100.0, " ms", &monitor_i18n::tr("streams-first-retry"), 1_000);
         dirty |= first.changed();
         let first_frame = controls::slider(&mut self.nav, ui, &mut reconnect.first_frame_delay_ms, 1_000..=30_000, 500.0, " ms", &monitor_i18n::tr("streams-first-frame-retry"), 5_000);
         dirty |= first_frame.changed();
         let second = controls::slider(&mut self.nav, ui, &mut reconnect.max_delay_ms, 1_000..=300_000, 1000.0, " ms", &monitor_i18n::tr("streams-then-at-most"), 30_000);
         dirty |= second.changed();
+        // One attempt's budget for establishing the session. It sits with the
+        // retry timings because it is read at the same moment and reaches a
+        // stalled channel the same way, and because a camera reached over the
+        // internet can need far more of it than one on the local network.
+        let handshake = controls::slider(&mut self.nav, ui, handshake_timeout_ms, 5_000..=60_000, 1_000.0, " ms", &monitor_i18n::tr("streams-handshake-timeout"), 15_000);
+        dirty |= handshake.changed();
         ui.label(RichText::new(monitor_i18n::tr("streams-change-note")).small().color(theme::TEXT_DIM));
         // The shape of the curve is settled once, by whoever sized the network,
         // and never looked at again: it belongs behind a fold, not on the tab.
@@ -2851,6 +2865,17 @@ impl XgViewApp {
             let attempts = controls::slider(nav, ui, &mut reconnect.max_attempts, 0..=100, 1.0, "", &monitor_i18n::tr("streams-attempts"), 0);
             dirty |= attempts.changed();
         });
+
+        // At this point `dirty` is only the connection sliders above. They are
+        // handed to the supervisor so that the channels already running pick the
+        // new values up at their next attempt instead of only the ones opened
+        // after the change - a running channel holds no copy of its own to go
+        // stale.
+        if dirty {
+            self.manager.set_reconnect_policy(self.config.reconnect.clone());
+            self.manager
+                .set_handshake_timeout(Duration::from_millis(self.config.handshake_timeout_ms));
+        }
 
         ui.add_space(theme::space::M);
         ui.label(RichText::new(monitor_i18n::tr("settings-decoding")).strong());

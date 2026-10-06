@@ -198,6 +198,13 @@ pub struct AppConfig {
     /// decoder will not take, is decoded on the CPU.
     pub prefer_hardware_decode: bool,
     pub reconnect: ReconnectPolicy,
+    /// How long a session has to establish itself before the attempt is written
+    /// off and retried: the `OPTIONS` / `DESCRIBE` / `SETUP` / `PLAY` exchange,
+    /// or the response headers of an HTTP stream. It is a budget for the whole
+    /// handshake, not per request, and it is what bounds a peer that accepts
+    /// the connection and then stops answering. Longer for a link that is slow
+    /// to answer, which a camera reached over the internet can be.
+    pub handshake_timeout_ms: u64,
     pub discovery: DiscoveryConfig,
     pub synology: SynologyConfig,
     /// What each corner of a tile shows. It is a property of the wall rather
@@ -221,6 +228,7 @@ impl Default for AppConfig {
             language: "auto".to_string(),
             prefer_hardware_decode: true,
             reconnect: ReconnectPolicy::default(),
+            handshake_timeout_ms: 15_000,
             discovery: DiscoveryConfig::default(),
             synology: SynologyConfig::default(),
             osd: Osd::default(),

@@ -565,6 +565,20 @@ pub enum RtspSessionState {
     Closed,
 }
 
+/// How far a session's handshake has got.
+///
+/// Kept on the client so that a deadline which fires part way through can name
+/// the request it was waiting on: a silence at `SETUP` says something quite
+/// different from one at `OPTIONS`, and only one of them is worth answering
+/// with the other transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtspStage {
+    Options,
+    Describe,
+    Setup,
+    Play,
+}
+
 /// An RTSP session over a single TCP connection using interleaved framing.
 #[derive(Debug)]
 pub struct RtspClient {
@@ -578,6 +592,8 @@ pub struct RtspClient {
     session_timeout: Option<Duration>,
     content_base: Option<String>,
     state: RtspSessionState,
+    /// Request of the handshake being waited on, `None` outside one.
+    stage: Option<RtspStage>,
     user_agent: String,
     timeout: Duration,
     /// Credentials answering the server challenge. Kept separate from `url`
@@ -655,6 +671,7 @@ impl RtspClient {
             session_timeout: None,
             content_base: None,
             state: RtspSessionState::Connected,
+            stage: None,
             user_agent: format!("XGView/{}", env!("CARGO_PKG_VERSION")),
             timeout,
             credentials,
@@ -675,6 +692,11 @@ impl RtspClient {
 
     pub fn state(&self) -> RtspSessionState {
         self.state
+    }
+
+    /// Request of the handshake being waited on, `None` outside one.
+    pub fn stage(&self) -> Option<RtspStage> {
+        self.stage
     }
 
     pub fn session_id(&self) -> Option<&str> {
@@ -774,41 +796,39 @@ impl RtspClient {
         reader: &mut BufReader<OwnedReadHalf>,
         state: &mut RtspSessionState,
     ) -> Result<RtspPacket> {
-        loop {
-            let first = {
-                let buffered = reader
-                    .fill_buf()
-                    .await
-                    .map_err(|err| CoreError::rtsp(format!("read failed: {err}")))?;
-                if buffered.is_empty() {
-                    *state = RtspSessionState::Closed;
-                    return Err(CoreError::rtsp("connection closed by peer"));
-                }
-                buffered[0]
-            };
-
-            if first == b'$' {
-                let mut header = [0u8; 4];
-                reader
-                    .read_exact(&mut header)
-                    .await
-                    .map_err(|err| CoreError::rtsp(format!("read interleaved header: {err}")))?;
-                let channel = header[1];
-                let length = u16::from_be_bytes([header[2], header[3]]) as usize;
-                if length > MAX_INTERLEAVED_PAYLOAD {
-                    return Err(CoreError::rtsp(format!("interleaved payload too large: {length}")));
-                }
-                let mut payload = vec![0u8; length];
-                reader
-                    .read_exact(&mut payload)
-                    .await
-                    .map_err(|err| CoreError::rtsp(format!("read interleaved payload: {err}")))?;
-                *state = RtspSessionState::Playing;
-                return Ok(RtspPacket::Interleaved { channel, payload });
+        let first = {
+            let buffered = reader
+                .fill_buf()
+                .await
+                .map_err(|err| CoreError::rtsp(format!("read failed: {err}")))?;
+            if buffered.is_empty() {
+                *state = RtspSessionState::Closed;
+                return Err(CoreError::rtsp("connection closed by peer"));
             }
+            buffered[0]
+        };
 
-            return Ok(RtspPacket::Response(Self::read_response_headers(reader).await?));
+        if first == b'$' {
+            let mut header = [0u8; 4];
+            reader
+                .read_exact(&mut header)
+                .await
+                .map_err(|err| CoreError::rtsp(format!("read interleaved header: {err}")))?;
+            let channel = header[1];
+            let length = u16::from_be_bytes([header[2], header[3]]) as usize;
+            if length > MAX_INTERLEAVED_PAYLOAD {
+                return Err(CoreError::rtsp(format!("interleaved payload too large: {length}")));
+            }
+            let mut payload = vec![0u8; length];
+            reader
+                .read_exact(&mut payload)
+                .await
+                .map_err(|err| CoreError::rtsp(format!("read interleaved payload: {err}")))?;
+            *state = RtspSessionState::Playing;
+            return Ok(RtspPacket::Interleaved { channel, payload });
         }
+
+        Ok(RtspPacket::Response(Self::read_response_headers(reader).await?))
     }
 
     /// Reads one response, body included.
@@ -1120,7 +1140,11 @@ impl RtspClient {
     /// up: an audio track the SDP advertises is left alone, so nothing of it is
     /// ever sent to the client.
     pub async fn start_with_transport(&mut self, transport: RtspTransport) -> Result<Vec<SdpTrack>> {
+        // Each step is stamped before it is waited on, so that a deadline which
+        // fires somewhere in here can say which request was not answered.
+        self.stage = Some(RtspStage::Options);
         self.options().await?;
+        self.stage = Some(RtspStage::Describe);
         let sdp = self.describe().await?;
         let tracks = parse_sdp(&sdp);
         let video = tracks
@@ -1128,6 +1152,7 @@ impl RtspClient {
             .find(|track| track.is_video())
             .ok_or_else(|| CoreError::rtsp("no video track in session description"))?;
         let control = video.control.clone().unwrap_or_default();
+        self.stage = Some(RtspStage::Setup);
         match transport {
             RtspTransport::Tcp => {
                 self.setup_interleaved(&control, 0).await?;
@@ -1136,6 +1161,7 @@ impl RtspClient {
                 self.setup_udp(&control).await?;
             }
         }
+        self.stage = Some(RtspStage::Play);
         self.play("npt=0.000-").await?;
         Ok(tracks)
     }

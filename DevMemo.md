@@ -746,7 +746,10 @@ deadline - for as long as the channel had no decoder to show a picture. The
 fix separates waiting from reading: `RtspClient::wait_for_media` peeks
 (`fill_buf`, and the RTP socket's `readable` on the datagram transport), which is
 cancel-safe, and only then is a packet read, with no timeout around it. Nothing
-is ever half consumed, so the wait can be cut wherever it lands.
+is ever half consumed, so the wait can be cut wherever it lands. (The session
+read stays unbounded on purpose — a deadline that fires mid packet is the bug
+this section is about; what is bounded is the handshake before it, where the
+client can be dropped whole. See §16.)
 
 **A codec configured without parameter sets is refused.** The other half was
 that the two streams carried no `sprop-parameter-sets` in their `SDP`, and the
@@ -890,4 +893,94 @@ to, not chosen:
 | 28 | right on 1080p; with the screen factor, right on 2K / 4K too |
 
 Implemented in `OsdMetrics::of` and `osd` in `crates/monitor_gui/src/grid.rs`.
+
+---
+
+## 16. Establishing a session: the part that had no deadline
+
+**The gap hid under the two failures that always worked.** Only the TCP `connect`
+was bounded (10 s). A refused connection and an unreachable host were therefore
+always handled — `ECONNREFUSED` at once, the 10 s connect timeout when the SYN is
+dropped — and that is probably why nothing looked wrong for as long as it did.
+The third case was left open: the peer accepts the connection and then stops
+answering. `OPTIONS` / `DESCRIBE` / `SETUP` / `PLAY` each write a request and wait
+for the answer, and every one of those waits was unbounded. A camera at its limit
+of concurrent sessions answers the connection and stays quiet; a middlebox can
+swallow the flow the same way. MJPEG had the identical hole: `connect_timeout(10 s)`
+covered the TCP connect, and the response headers had no deadline at all.
+
+The stall detector of §8 does not cover any of this. It lives inside the packet
+loop, which is reached only once `PLAY` has returned, so a channel that never got
+that far sat on `Connecting` for good — no `retry in N ms`, no `Stalled`, no
+`session failed` in the log — and `run_channel` never got the chance to retry,
+because its backoff sits after the call that would not return.
+
+**One deadline around the whole exchange.** `SessionSettings` carries it
+(`handshake_timeout_ms` in the panel, default 15 s, beside the retry timings) and
+bounds the four requests *together* rather than each of them. When it fires the
+client is dropped rather than patched, which is what makes an overall deadline
+safe here where a deadline mid packet is not (§13). The budget is generous in the
+only unit that matters, round trips: four of them at 300 ms RTT is 1.2 s, so
+latency alone almost never needs it raised. What needs it is loss — one TCP
+retransmission timeout is a second or more — or a camera that is slow to answer
+at all, which is why it is configurable rather than fixed.
+
+**The deadline names the request it was waiting on.** `RtspStage` is stamped
+before each step of `start_with_transport`, so the failure reads
+
+```text
+the session handshake timed out after 15 s during SETUP
+```
+
+and the `warn` line carries `stage = Some(Setup)`. That is not decoration: the
+first half of the handshake and the second half mean different things, and only
+one of them is worth answering with the other transport. It is also the one part
+of this that can be tested cheaply — a listener that accepts and never answers,
+given an explicit 100 ms budget rather than 15 s, because the budget is a
+parameter.
+
+**A silence is an answer too, once it comes late enough.** The fallback to TCP
+existed for exactly one case: a `461` to `SETUP`, which go2rtc answers on purpose
+so that a client asking for UDP first falls back. A UDP handshake that goes quiet
+from `SETUP` onwards is the same kind of answer, and on a routed or NATed path it
+usually means the datagrams are being dropped while the TCP connection the
+handshake is running over is plainly working. It now falls back as well. A
+silence at `OPTIONS` or `DESCRIBE` does not: that is the control connection
+itself, and the other transport would only repeat it at the price of a second
+deadline. The cost is real and paid where it is incurred — a genuinely dead UDP
+camera now spends two deadlines per attempt before the backoff starts, where it
+used to spend one.
+
+**The settings are read, not remembered.** The reconnect timings used to be
+written to the config and never looked at again: each channel kept the copy its
+supervisor was spawned with, so the sliders did nothing until a restart. The
+policy and the handshake budget now live in one shared `SessionSettings`, read
+afresh at the top of every attempt — a channel in backoff takes the new timing at
+its next retry, a channel stuck handshaking takes the new budget at its next
+attempt, and neither is reopened for it. The decoder preference is deliberately
+not treated this way: a decoder is chosen when a session opens (§7), so that one
+still reopens the channels. The panel note that claimed a change "applies to the
+connections opened afterwards" was wrong the moment this landed, and has been
+reworded.
+
+**The receiver report carries the numbers it always had names for.**
+`packets_lost` and `jitter` went out as `0, 0` whatever the link was doing, which
+tells a camera that adapts to receiver reports that everything is fine exactly
+when it is not. They are now the cumulative count of the gaps the sequence
+numbers showed — zero on TCP, which delivers in order — and RFC 3550's
+interarrival jitter, `J += (|D| - J) / 16`, taken between consecutive packets so
+that the RTP timestamp's 13 hour wrap is not read as one enormous jitter, scaled
+by the clock rate the SDP announced (90000 when it says nothing). Two caveats
+worth keeping: the lost count is the gaps *observed*, not RFC 3550's
+`expected - received`, so duplicates and reordering make it read a little high;
+and the arrival times are taken in the async loop rather than at the socket, so
+our own scheduling delay is inside the jitter — a busy sixteen-channel wall
+reports more jitter than the wire carries.
+
+**Still unbounded, on purpose.** Two things this did not change. A reordered UDP
+packet is still written off as lost rather than held for its neighbours: a
+reorder buffer would buy back the occasional whole picture at the price of
+adding latency to every picture, and that trade was not taken. And the write
+path has no deadline — a send buffer that fills blocks the pump — which is left
+as the back-pressure it is.
 
