@@ -55,6 +55,9 @@ public class BootReceiver extends BroadcastReceiver {
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                 | Intent.FLAG_ACTIVITY_CLEAR_TOP
                 | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        // Marks this launch as the boot receiver's, so the toast the viewer
+        // shows on start can tell it apart from a manual open.
+        launch.putExtra("com.xhbl.xgview.FROM_AUTOSTART", true);
 
         try {
             context.startActivity(launch);

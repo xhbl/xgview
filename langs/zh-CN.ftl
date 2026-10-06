@@ -144,7 +144,7 @@ status-no-focus = 无焦点
 
 ## 大屏与退出
 wall-empty-title = 未配置摄像头
-wall-empty-hint = 按 F2 — 或点击“添加设备” — 扫描网络中的 ONVIF 摄像头
+wall-empty-hint = 点击 "+" 或按 F2 扫描网络摄像头或手动添加
 exit-hint = 再按一次返回退出
 
 ## 提示

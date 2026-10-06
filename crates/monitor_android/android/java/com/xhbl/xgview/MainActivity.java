@@ -82,6 +82,9 @@ public class MainActivity extends NativeActivity {
      */
     private boolean reserveNavigationBar = true;
 
+    /** Whether the activity was started by the boot receiver, read from the launch intent. */
+    private static boolean fromAutostart = false;
+
     /** The one pixel view the input method types into. */
     private View inputView;
 
@@ -129,6 +132,8 @@ public class MainActivity extends NativeActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        Intent launch = getIntent();
+        fromAutostart = launch != null && launch.getBooleanExtra("com.xhbl.xgview.FROM_AUTOSTART", false);
         super.onCreate(savedInstanceState);
         instance = this;
         applySystemBars();
@@ -157,6 +162,11 @@ public class MainActivity extends NativeActivity {
         if (hasFocus) {
             applySystemBars();
         }
+    }
+
+    /** Whether the activity was started by the boot receiver; see {@link BootReceiver}. */
+    public static boolean getFromAutostart() {
+        return fromAutostart;
     }
 
     /**
@@ -638,7 +648,8 @@ public class MainActivity extends NativeActivity {
         final byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
 
         // Exporting twice must replace the file rather than leave a
-        // "config (1).json" beside it, which is what an insert would do.
+        // "config (1).json" beside it, which is what an insert would do. The
+        // row may carry that suffix already; see `findDownload`.
         final Uri existing = findDownload(resolver, folder, name);
         if (existing != null) {
             try (OutputStream stream = resolver.openOutputStream(existing, "wt")) {
@@ -647,7 +658,7 @@ public class MainActivity extends NativeActivity {
                 }
                 stream.write(bytes);
             }
-            return EXPORT_FOLDER + "/" + name;
+            return EXPORT_FOLDER + "/" + downloadName(resolver, existing, name);
         }
 
         final ContentValues values = new ContentValues();
@@ -680,17 +691,47 @@ public class MainActivity extends NativeActivity {
                 resolver.update(target, publish, null, null);
             }
         }
-        return EXPORT_FOLDER + "/" + name;
+        // `MediaStore` keeps the name it was given unless a file of that name
+        // already sits in the folder without being in its index - a
+        // configuration dropped there by hand, say - and then it makes the name
+        // unique: "config (1).json". That is the name the viewer is told about,
+        // and the one the next export has to look for; see `findDownload`.
+        return EXPORT_FOLDER + "/" + downloadName(resolver, target, name);
+    }
+
+    /** The name `MediaStore` gave an entry, or `fallback` when it will not say. */
+    private static String downloadName(ContentResolver resolver, Uri uri, String fallback) {
+        final String[] columns = { MediaStore.Downloads.DISPLAY_NAME };
+        try (Cursor cursor = resolver.query(uri, columns, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst() && !cursor.isNull(0)) {
+                final String name = cursor.getString(0);
+                if (name != null && !name.isEmpty()) {
+                    return name;
+                }
+            }
+        } catch (RuntimeException error) {
+            android.util.Log.w("xgview", "cannot read the name of " + uri, error);
+        }
+        return fallback;
     }
 
     /** The entry `MediaStore` already holds for that file, if any. */
     private static Uri findDownload(ContentResolver resolver, String folder, String name) {
         final Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
         final String[] columns = { MediaStore.Downloads._ID };
-        final String where =
-                MediaStore.Downloads.DISPLAY_NAME + "=? AND " + MediaStore.Downloads.RELATIVE_PATH + "=?";
+        // The wanted name, or the one `MediaStore` made unique out of it. The
+        // rows in this folder are only ever the app's own - an install holds no
+        // storage permission, so it sees nothing else - which is what makes the
+        // "config (…).json" pattern safe to match: it can only be a previous
+        // export of this same file.
+        final int dot = name.lastIndexOf('.');
+        final String base = dot > 0 ? name.substring(0, dot) : name;
+        final String extension = dot > 0 ? name.substring(dot) : "";
+        final String where = MediaStore.Downloads.RELATIVE_PATH + "=? AND ("
+                + MediaStore.Downloads.DISPLAY_NAME + "=? OR "
+                + MediaStore.Downloads.DISPLAY_NAME + " LIKE ?)";
         // The relative path `MediaStore` reports keeps the trailing separator.
-        final String[] args = { name, folder + "/" };
+        final String[] args = { folder + "/", name, base + " (%" + extension };
         try (Cursor cursor = resolver.query(collection, columns, where, args, null)) {
             if (cursor != null && cursor.moveToFirst()) {
                 return ContentUris.withAppendedId(collection, cursor.getLong(0));

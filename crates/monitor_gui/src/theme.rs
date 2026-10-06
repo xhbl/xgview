@@ -47,6 +47,8 @@ pub const WARN: Color32 = Color32::from_rgb(255, 183, 77);
 pub const ERROR: Color32 = Color32::from_rgb(255, 99, 99);
 /// Primary text.
 pub const TEXT: Color32 = Color32::from_rgb(227, 233, 240);
+/// Text of a selected control - one step brighter than [`TEXT`], with a cooler tint.
+pub const TEXT_BRIGHT: Color32 = Color32::from_rgb(228, 242, 255);
 /// Secondary text.
 pub const TEXT_DIM: Color32 = Color32::from_rgb(146, 158, 175);
 /// Backdrop behind a tile's on-screen display.
@@ -117,7 +119,7 @@ pub fn install(ctx: &egui::Context) {
     // The stroke of a selected control is its *text*, not a border: egui hands
     // `selection.stroke` to the widget as `fg_stroke`. The focus ring is a
     // different thing and comes from `widgets.active` below.
-    visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(228, 242, 255));
+    visuals.selection.stroke = Stroke::new(1.0_f32, TEXT_BRIGHT);
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, TILE_BORDER);
     visuals.widgets.inactive.bg_fill = Color32::from_rgb(31, 36, 45);
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(45, 52, 64);

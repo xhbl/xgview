@@ -146,7 +146,7 @@ status-no-focus = no focus
 
 ## Wall and exit
 wall-empty-title = No camera configured
-wall-empty-hint = Press F2 — or click “Add devices” — to scan the network for ONVIF cameras
+wall-empty-hint = Click "+" or press F2 to scan for network cameras or manually add one
 exit-hint = Press BACK again to quit
 
 ## Toasts

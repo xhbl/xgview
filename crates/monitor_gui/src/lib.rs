@@ -242,7 +242,9 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
         config,
         config_path: Some(config_path.clone()),
         fullscreen: true,
-        from_autostart: true,
+        // Placeholder: on Android the launch intent - not this flag - says
+        // whether the boot receiver started us, so `App::new` asks the activity.
+        from_autostart: false,
         extra_lang_dir,
     };
 

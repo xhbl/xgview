@@ -547,8 +547,20 @@ impl XgViewApp {
         config_path: PathBuf,
         handle: Handle,
     ) -> Self {
-        let RunOptions { config, fullscreen, from_autostart, extra_lang_dir, .. } = options;
+        let RunOptions { config, fullscreen, extra_lang_dir, .. } = options;
         let mut config = config;
+
+        // Where this flag comes from is per platform, and reading it is what
+        // decides between the two start-up toasts. On the desktop it is the
+        // command line, and the value in `RunOptions` is the one the start-on-
+        // boot registration put there. On Android there is no command line: the
+        // launch intent says whether the boot receiver started us, so the
+        // activity is asked once it is up, and the value in `RunOptions` is a
+        // placeholder that is not read at all.
+        #[cfg(target_os = "android")]
+        let from_autostart = crate::android::from_autostart();
+        #[cfg(not(target_os = "android"))]
+        let from_autostart = options.from_autostart;
 
         // The interface language is chosen before the first frame is drawn:
         // English is embedded, and a pack beside the executable or under the
@@ -2311,7 +2323,7 @@ impl XgViewApp {
                 }
                 ui.separator();
                 match self.scheduler.focus() {
-                    Some(focus) => ui.label(monitor_i18n::tr_args("status-focus", &[("index", focus.into())])),
+                    Some(focus) => ui.label(monitor_i18n::tr_args("status-focus", &[("index", (focus + 1).into())])),
                     None => ui.label(monitor_i18n::tr("status-no-focus")),
                 };
                 // What the remote control is on, for the controls that carry a
@@ -2340,8 +2352,8 @@ impl XgViewApp {
                     // walk onto it, and pressing it opens the About tab, which
                     // carries the address - a `mailto:` is not something a remote
                     // can follow. All three keep the top bar's own text size, and
-                    // the author the top bar's text colour, so the bar reads as
-                    // one row.
+                    // the author the default control text colour, so the bar
+                    // reads as one row.
                     ui.label(
                         RichText::new(monitor_i18n::tr_args("status-copyright", &[("years", monitor_core::copyright_years().into())]))
                             .small()
@@ -2364,7 +2376,7 @@ impl XgViewApp {
                     let padding = ui.spacing().button_padding;
                     ui.spacing_mut().button_padding = egui::Vec2::ZERO;
                     let link = ui.add(
-                        egui::Button::selectable(false, RichText::new(author).small().color(theme::TEXT))
+                        egui::Button::selectable(false, RichText::new(author).small())
                             .small(),
                     );
                     ui.spacing_mut().button_padding = padding;
@@ -2486,10 +2498,6 @@ impl XgViewApp {
     fn settings_display(&mut self, ui: &mut egui::Ui) -> bool {
         let mut dirty = false;
 
-        if self.settings_language(ui) {
-            dirty = true;
-        }
-        ui.add_space(theme::space::S);
 
         ui.label(RichText::new(monitor_i18n::tr("settings-grid")).strong());
         ui.horizontal_wrapped(|ui| {
@@ -2559,6 +2567,11 @@ impl XgViewApp {
                     .small()
                     .color(theme::TEXT_DIM),
             );
+        }
+
+        ui.add_space(theme::space::S);
+        if self.settings_language(ui) {
+            dirty = true;
         }
 
         dirty

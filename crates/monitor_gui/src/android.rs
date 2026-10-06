@@ -63,6 +63,12 @@ pub fn set_reserve_navigation_bar(reserve: bool) {
     RESERVE_SENT.store(wanted, Ordering::Relaxed);
 }
 
+/// Whether the activity was started by the boot receiver, as read from the
+/// launch intent's `com.xhbl.xgview.FROM_AUTOSTART` extra; see `BootReceiver`.
+pub fn from_autostart() -> bool {
+    call_bool("getFromAutostart")
+}
+
 /// Whether XGView may draw over other apps.
 ///
 /// This is the permission that lifts Android's refusal to start an activity
