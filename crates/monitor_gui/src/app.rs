@@ -1513,7 +1513,19 @@ impl XgViewApp {
                 Act::Copy => crate::android::set_clipboard_text(&mirror.text),
                 Act::Paste => crate::keyboard::paste(crate::android::clipboard_text()),
                 Act::Clear => crate::keyboard::clear(),
-                Act::Done => self.editing = None,
+                Act::Done => {
+                    // Confirm the edit the way Enter would on a single-line
+                    // field: drop the focus, which drops the keyboard and the
+                    // floating box together, and hand it to the next control -
+                    // the same move the form makes for a value control that
+                    // confirms with Enter - rather than only closing the box.
+                    self.editing = None;
+                    ctx.memory_mut(|memory| memory.surrender_focus(mirror.id));
+                    if let Some(next) = self.nav.next_in_scope(mirror.id) {
+                        ctx.memory_mut(|memory| memory.request_focus(next));
+                        self.reveal_next = Some(next);
+                    }
+                }
             }
             ctx.request_repaint();
         }
