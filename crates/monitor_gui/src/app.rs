@@ -101,10 +101,25 @@ struct Chrome {
     /// away at once. The click that asks for full screen is itself input, so
     /// without this it would be read as a request to see the bars.
     hide_now: bool,
-    /// Whether the viewer did something this frame. Read before the keys are
-    /// handed out, because the application takes the ones it acts on out of the
-    /// queue. See [`XgViewApp::viewer_active`].
+    /// Whether the viewer asked for the bars this frame. Read before the keys
+    /// are handed out, because the application takes the ones it acts on out of
+    /// the queue. See [`XgViewApp::viewer_active`] for what counts as asking.
     input_seen: bool,
+    /// Where the two bars were the last time they were drawn.
+    ///
+    /// Kept while they are hidden, because that is when it is needed: a press
+    /// in the band a bar sits in is the pointer's way of asking for it back,
+    /// and while the bars are gone the wall covers that band - so the last
+    /// rectangle they were drawn in is the only description of where it is.
+    /// `None` until they have been drawn once.
+    bars: Option<(Rect, Rect)>,
+}
+
+/// The bar an arrow walked off the wall for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bar {
+    Toolbar,
+    Status,
 }
 
 /// The picture of one channel currently on the GPU, with the frame it came from.
@@ -422,6 +437,9 @@ pub struct XgViewApp {
     /// Horizontal centre of the focused tile, which is where the arrow that
     /// walks off the top of the wall comes back down from.
     grid_focus_x: Option<f32>,
+    /// When the viewer last did something on the wall, which is what the focus
+    /// ring is timed by while the bars are hidden. See `paint_view`.
+    wall_seen: Instant,
     /// Who answered the last frame's direction presses.
     owner: Owner,
     /// Explicit directional navigation for the windows that opted into it.
@@ -602,10 +620,12 @@ impl XgViewApp {
                 last_input: Instant::now(),
                 hide_now: false,
                 input_seen: false,
+                bars: None,
             },
             toolbar_items: Vec::new(),
             status_author: None,
             grid_focus_x: None,
+            wall_seen: Instant::now(),
             // The "Add devices" window, the settings panel and the top bar are
             // on this layer: each is a row (of tabs, or of controls) over a
             // column, which is the shape egui's walk handles worst. The wall
@@ -839,19 +859,19 @@ impl XgViewApp {
         changed
     }
 
+    /// Walks the grid one cell, with the slide a page turn uses.
+    ///
+    /// Only the grid: a magnified viewport is not a grid and steps along the
+    /// channel list instead. See [`Self::step_zoom`].
     fn navigate(&mut self, dir: Direction) -> NavigateOutcome {
         let previous_page = self.scheduler.page();
-        let previous_focus = self.scheduler.focus();
-        let zoomed = self.scheduler.is_zoomed();
         let outcome = self.scheduler.navigate(dir);
         if matches!(outcome, NavigateOutcome::Blocked) {
             return outcome;
         }
 
         let sign = if dir == Direction::Left { -1.0 } else { 1.0 };
-        let outgoing = if zoomed {
-            previous_focus.map(|index| PageView { layout: GridLayout::G1x1, cells: vec![Some(index)] })
-        } else if matches!(outcome, NavigateOutcome::PageTurned { .. }) {
+        let outgoing = if matches!(outcome, NavigateOutcome::PageTurned { .. }) {
             let layout = self.scheduler.layout();
             let total = self.config.enabled_count();
             Some(PageView { layout, cells: grid::page_cells(layout, previous_page, total) })
@@ -864,6 +884,39 @@ impl XgViewApp {
         self.needs_sync = true;
         self.mark_dirty();
         outcome
+    }
+
+    /// Moves the wall one step the way a swipe or a page key asked for: the
+    /// page turn on the grid, the channel step while magnified.
+    fn advance(&mut self, forward: bool) -> bool {
+        if self.scheduler.is_zoomed() {
+            self.step_zoom(forward)
+        } else {
+            self.turn_page(forward)
+        }
+    }
+
+    /// Steps the magnified viewport to the previous or next channel, with the
+    /// slide a page turn uses.
+    ///
+    /// The magnified view is one channel, not a grid, so its step is the
+    /// channel order the swipe preview already showed - see
+    /// [`Scheduler::zoom_step`] - and the ends are a stop. Without this a swipe
+    /// turned the grid page behind the magnification: the picture did not
+    /// change, and leaving the magnification landed on a different camera.
+    fn step_zoom(&mut self, forward: bool) -> bool {
+        let Some(current) = self.scheduler.zoom() else {
+            return false;
+        };
+        if !self.scheduler.zoom_step(forward) {
+            self.slide.drag = 0.0;
+            return false;
+        }
+        let outgoing = PageView { layout: GridLayout::G1x1, cells: vec![Some(current)] };
+        self.slide.start(if forward { 1.0 } else { -1.0 }, Some(outgoing));
+        self.needs_sync = true;
+        self.mark_dirty();
+        true
     }
 
     /// Hands the remote's focus from the wall to the top bar.
@@ -920,6 +973,24 @@ impl XgViewApp {
             .is_some_and(|id| ctx.memory(|memory| memory.focused()) == Some(id))
     }
 
+    /// Hands the remote's focus from the wall to the bar an arrow walked off it
+    /// for.
+    ///
+    /// Only into a bar that is on screen. With the bars hidden there is nothing
+    /// on the far side of the wall to land on, and waking them for an arrow that
+    /// walked off it is exactly the churn this is meant to stop: the bars come
+    /// back for Back, for a function key, or for a press in their band, and the
+    /// arrow finds them then. See [`Self::viewer_active`].
+    fn hand_off(&mut self, ctx: &egui::Context, to: Bar) {
+        if !self.chrome.visible {
+            return;
+        }
+        match to {
+            Bar::Toolbar => self.enter_toolbar(ctx),
+            Bar::Status => self.enter_status(ctx),
+        }
+    }
+
     fn zoom_in(&mut self) {
         if self.scheduler.zoom_in() {
             self.needs_sync = true;
@@ -935,8 +1006,14 @@ impl XgViewApp {
     }
 
     fn zoom_to(&mut self, index: usize) {
-        self.scheduler.set_focus(Some(index));
-        self.zoom_in();
+        // A double press toggles, the way Enter does: the magnified viewport
+        // goes back to the grid, and any other one is magnified in its place.
+        if self.scheduler.zoom() == Some(index) {
+            self.zoom_out();
+        } else {
+            self.scheduler.set_focus(Some(index));
+            self.zoom_in();
+        }
     }
 
     fn set_fullscreen(&mut self, ctx: &egui::Context, enabled: bool) {
@@ -951,7 +1028,110 @@ impl XgViewApp {
         self.chrome.last_input = Instant::now();
     }
 
-    /// Whether the viewer did something this frame.
+    /// Whether what the viewer did this frame is a request for the bars.
+    ///
+    /// Called before the keys are handed out: the application takes the ones it
+    /// acts on out of the queue, so a key this has to answer on must be read
+    /// here or not at all.
+    ///
+    /// There are exactly three ways to ask for the bars, and everything else is
+    /// the wall:
+    ///
+    /// * a press in the band a bar occupies - the pointer's way in, and the only
+    ///   one a finger has;
+    /// * Back, which is the one key on a remote control that reads as "the
+    ///   menus";
+    /// * the function keys, which are what opens a panel in the first place.
+    ///
+    /// None of the rest of it - walking the channels, turning a page, magnifying
+    /// one, picking a grid - is a request for the bars, and treating it as one is
+    /// what made the picture resize under the viewer every time they touched it:
+    /// the bars take their height from the wall rather than lying over it, so
+    /// bringing them back for a page turn moves every tile, and then they slide
+    /// away again 3.5 seconds later. See [`Self::wall_event`] for the whole of
+    /// the decision, one event at a time.
+    fn viewer_active(&self, ctx: &egui::Context) -> bool {
+        // The remote's focus is in a bar, in the settings panel or in a window:
+        // the viewer is in the menus, and everything they do belongs to them.
+        if self.owner != Owner::Grid {
+            return ctx.input(Self::any_input);
+        }
+        ctx.input(|input| {
+            input.events.iter().any(|event| {
+                Self::wall_event(self.chrome.bars, self.back_is_a_door(), event)
+            })
+        })
+    }
+
+    /// Whether a Back, on this frame, is the viewer asking for the bars.
+    ///
+    /// Back unwinds one layer at a time - the magnified viewport, then whatever
+    /// is open over the wall - and a Back that does that is the wall's, which is
+    /// not a request for the bars. With nothing left to unwind it is the viewer
+    /// asking for the menus instead, and it is the one key a remote control has
+    /// that reads that way: the bars are where the settings, the device window
+    /// and full screen are, and a remote has no function keys at all. See
+    /// [`Self::back`], which leaves the exit question to a Back that arrives
+    /// with the bars already on screen.
+    fn back_is_a_door(&self) -> bool {
+        !self.scheduler.is_zoomed() && !self.discovery.open && !self.show_settings
+    }
+
+    /// Whether one event, with the remote's focus on the wall, asks for the
+    /// bars. The wall's whole answer, one event at a time; see
+    /// [`Self::viewer_active`] for why.
+    ///
+    /// `back_is_a_door` is [`Self::back_is_a_door`], read once for the frame.
+    fn wall_event(
+        bars: Option<(Rect, Rect)>,
+        back_is_a_door: bool,
+        event: &egui::Event,
+    ) -> bool {
+        match event {
+            // Back is the wall's own key while there is something on the wall
+            // for it to unwind - see `back` - and the viewer asking for the
+            // menus when there is not.
+            egui::Event::Key { key, pressed: true, .. } => {
+                if matches!(*key, Key::Escape | Key::Backspace | Key::BrowserBack) {
+                    back_is_a_door
+                } else {
+                    !Self::wall_key(*key)
+                }
+            }
+            egui::Event::Key { pressed: false, .. } => false,
+            // A press on the wall is a press on the picture - a tile to focus,
+            // or a double press to magnify it - and a press in the band a bar
+            // sits in is the pointer asking for that bar. A release is the tail
+            // of a press that has already been answered, and never a request of
+            // its own.
+            egui::Event::PointerButton { pos, pressed: true, .. } => Self::in_a_bar_band(bars, *pos),
+            egui::Event::PointerButton { pressed: false, .. } => false,
+            // A touch is placed by where it is, whatever phase it is in. A tap
+            // on a touch screen arrives as a `Start` and an `End` at the same
+            // place, and the end is not a second request for the bars - reading
+            // it as one is what brought the bars back under every touch on the
+            // wall, however carefully its start had been placed.
+            egui::Event::Touch { pos, .. } => Self::in_a_bar_band(bars, *pos),
+            // What a printable key arrives as *on top of* its key event, which
+            // is why the grid digits are read as keys above: a character typed
+            // at the wall does nothing at all - there is no field on the wall to
+            // type into - and counting it would put the bars back every time the
+            // viewer picked a grid with `1`, `2`, `3` or `4`.
+            egui::Event::Text(_) => false,
+            egui::Event::PointerMoved(_)
+            | egui::Event::MouseMoved(_)
+            | egui::Event::WindowFocused(_)
+            | egui::Event::Screenshot { .. }
+            | egui::Event::PointerGone => false,
+            // The wheel, a dropped file, a pinch: the viewer, and none of it is
+            // something done on the wall. The bars are asked for by a press in
+            // their band, by Back or by a function key, and by nothing else.
+            _ => true,
+        }
+    }
+
+    /// Whether `input` holds anything the viewer did, as opposed to the
+    /// window's own bookkeeping.
     ///
     /// Only what a person does counts. The window being resized or focused is
     /// the system, and entering full screen makes both happen; a key or a button
@@ -969,24 +1149,72 @@ impl XgViewApp {
     ///   and which is therefore what lets a desktop wake the bars by moving the
     ///   mouse without a change of the window's shape doing it too.
     ///
-    /// Called before the keys are handed out: the application takes the ones it
-    /// acts on out of the queue, and the bars still have to hear about them.
-    fn viewer_active(ctx: &egui::Context) -> bool {
-        ctx.input(|input| {
-            input.pointer.any_down()
-                || input.events.iter().any(|event| match event {
-                    egui::Event::Key { pressed, .. } => *pressed,
-                    egui::Event::PointerButton { pressed, .. } => *pressed,
-                    // The window's own geometry, and the integration's own
-                    // bookkeeping, rather than anything the viewer did.
-                    egui::Event::PointerMoved(_)
-                    | egui::Event::WindowFocused(_)
-                    | egui::Event::Screenshot { .. }
-                    | egui::Event::PointerGone => false,
-                    // Raw mouse motion, the wheel, a touch, a key's text, a
-                    // dropped file: the viewer.
-                    _ => true,
-                })
+    /// This is the whole of [`Self::viewer_active`] for a viewer who is in the
+    /// menus: with the focus on a control there is no wall to leave alone, and
+    /// anything that keeps the control reachable keeps the bars - which the
+    /// control it is part of cannot be drawn without. See
+    /// [`Self::chrome_visible`].
+    fn any_input(input: &egui::InputState) -> bool {
+        input.pointer.any_down()
+            || input.events.iter().any(|event| match event {
+                egui::Event::Key { pressed, .. } => *pressed,
+                egui::Event::PointerButton { pressed, .. } => *pressed,
+                egui::Event::PointerMoved(_)
+                | egui::Event::WindowFocused(_)
+                | egui::Event::Screenshot { .. }
+                | egui::Event::PointerGone => false,
+                _ => true,
+            })
+    }
+
+    /// Keys that act on the wall and nowhere else.
+    ///
+    /// Enter and Space magnify the focused viewport and unwind it again;
+    /// PageUp and PageDown turn the page; the arrows move the focus, and turn
+    /// the page when the focus leaves a side; the digits pick a grid, which is
+    /// a shape of the wall and nothing else. The arrows that walk off the *top*
+    /// and *bottom* are not the way into the bars any more either: with the bars
+    /// hidden there is nothing for them to land on, and they are asked of
+    /// [`Self::hand_off`], which only hands over to a bar that is on screen.
+    ///
+    /// Back is not here on purpose. It is the one key a remote control has that
+    /// a viewer reads as "the menus" - the bars are where the settings, the
+    /// device window and full screen are, and a remote has no function keys at
+    /// all - so it is left to wake them, by the same rule that gives that job to
+    /// F1, F2 and F11. See [`Self::viewer_active`].
+    fn wall_key(key: Key) -> bool {
+        matches!(
+            key,
+            Key::ArrowLeft
+                | Key::ArrowRight
+                | Key::ArrowUp
+                | Key::ArrowDown
+                | Key::Enter
+                | Key::Space
+                | Key::PageUp
+                | Key::PageDown
+                | Key::Num1
+                | Key::Num2
+                | Key::Num3
+                | Key::Num4
+        )
+    }
+
+    /// Whether `pos` is in the band one of the bars occupies.
+    ///
+    /// The bands are the ones the bars were last drawn in; see [`Chrome::bars`].
+    /// Only their height is read: a bar spans the width of the window, and the
+    /// rectangles can be a frame or two old - the frame the bars are drawn in to
+    /// be measured, before a start in full screen takes them away again, is laid
+    /// out for a window that may still be on its way to the screen it ends up
+    /// on. Their height is what the viewer is aiming at either way.
+    ///
+    /// Before they have been drawn once there is no band at all, and a press
+    /// anywhere is a press on the wall.
+    fn in_a_bar_band(bars: Option<(Rect, Rect)>, pos: egui::Pos2) -> bool {
+        bars.is_some_and(|(top, bottom)| {
+            (top.top()..=top.bottom()).contains(&pos.y)
+                || (bottom.top()..=bottom.bottom()).contains(&pos.y)
         })
     }
 
@@ -1010,7 +1238,20 @@ impl XgViewApp {
             self.chrome.hide_now = false;
             return true;
         }
-        if std::mem::take(&mut self.chrome.hide_now) {
+        // Entering full screen asks for the picture and nothing else, and the
+        // request is answered at once - except on the frames before the bars have
+        // ever been drawn in this run. What they cover is only known as they are
+        // laid out, and the band they leave behind is where a pointer asks for
+        // them back: starting in full screen asks for the picture straight away,
+        // so they are drawn once - this frame - to be measured, and taken away on
+        // the next one. Waiting for a frame that draws them instead would wait
+        // for ever: this is the request that keeps them from being drawn.
+        if self.chrome.hide_now {
+            if self.chrome.bars.is_none() {
+                self.chrome.visible = true;
+                return true;
+            }
+            self.chrome.hide_now = false;
             self.chrome.visible = false;
             return false;
         }
@@ -1025,8 +1266,16 @@ impl XgViewApp {
 
     fn back(&mut self, ctx: &egui::Context) {
         // BACK / Esc unwinds one layer at a time: the magnified viewport, then
-        // whatever was opened over the wall. With nothing left to close the wall
-        // itself answers, and it asks before it leaves - see `arm_exit`.
+        // whatever was opened over the wall. With nothing left to close, the
+        // wall answers - and with the bars away that answer is the bars
+        // themselves, which this press has already asked for; the question of
+        // leaving is asked from the bars, where both it and the answer are on
+        // screen. Leaving the program is not something a press reaching for the
+        // menus should be able to start.
+        //
+        // `chrome.visible` is read here as the frame began: `chrome_visible`
+        // runs after the keys have been handed out, so this is the state the
+        // viewer was looking at.
         //
         // Full screen is not one of these layers any more: on a television the
         // viewer is in it from the start, so it cannot have been what the press
@@ -1041,8 +1290,10 @@ impl XgViewApp {
         } else if self.show_settings {
             self.show_settings = false;
             self.exit_armed = None;
-        } else {
+        } else if self.chrome.visible {
             self.arm_exit(ctx);
+        } else {
+            self.exit_armed = None;
         }
     }
 
@@ -1805,17 +2056,47 @@ impl XgViewApp {
             return;
         }
 
-        if keys.left {
-            self.navigate(Direction::Left);
+        // Anything a press does on the wall keeps the focus ring alive for a
+        // moment: it is a cursor, and with the bars hidden it is the only thing
+        // that shows the viewer which tile the remote moved to. See
+        // `paint_view`.
+        if keys.left
+            || keys.right
+            || keys.up
+            || keys.down
+            || keys.enter
+            || keys.back
+            || keys.page_prev
+            || keys.page_next
+            || keys.layout.iter().any(|pressed| *pressed)
+        {
+            self.wall_seen = Instant::now();
         }
-        if keys.right {
-            self.navigate(Direction::Right);
-        }
-        if keys.down && self.navigate(Direction::Down) == NavigateOutcome::Blocked {
-            self.enter_status(ctx);
-        }
-        if keys.up && self.navigate(Direction::Up) == NavigateOutcome::Blocked {
-            self.enter_toolbar(ctx);
+
+        if self.scheduler.is_zoomed() {
+            // A magnified viewport is one channel, not a grid: Right and Left
+            // are the next and previous channel in channel order, and Up and
+            // Down have no grid to walk - they do nothing here rather than
+            // moving by a row and reaching the bars. See `step_zoom`.
+            if keys.left {
+                self.step_zoom(false);
+            }
+            if keys.right {
+                self.step_zoom(true);
+            }
+        } else {
+            if keys.left {
+                self.navigate(Direction::Left);
+            }
+            if keys.right {
+                self.navigate(Direction::Right);
+            }
+            if keys.down && self.navigate(Direction::Down) == NavigateOutcome::Blocked {
+                self.hand_off(ctx, Bar::Status);
+            }
+            if keys.up && self.navigate(Direction::Up) == NavigateOutcome::Blocked {
+                self.hand_off(ctx, Bar::Toolbar);
+            }
         }
         if keys.enter {
             if self.scheduler.is_zoomed() {
@@ -3342,10 +3623,16 @@ impl XgViewApp {
                 camera: index.and_then(|index| cameras.get(index)),
                 channel: index.and_then(|index| self.channels.get(&index)),
                 video: index.and_then(|index| self.textures.get(&index)).map(|entry| entry.surface),
-                // The ring is a cursor, and in full screen with the bars faded
-                // out there is nothing to move it with: it would be marking a
-                // channel nobody is choosing between.
-                focused: interactive && self.chrome.visible && *index == focus,
+                // The ring is a cursor. While the bars are on screen it is what
+                // tells the viewer which tile the remote is on. With the bars
+                // gone it is kept for a moment after the last press on the wall
+                // instead: moving the focus and magnifying a viewport are done
+                // on the wall without the bars now, and both are blind without
+                // the ring - and a wall nobody is operating is a picture, which
+                // a cursor left standing on it is not part of.
+                focused: interactive
+                    && *index == focus
+                    && (self.chrome.visible || self.wall_seen.elapsed() < CHROME_IDLE),
                 interactive,
                 dim: !interactive,
                 osd: self.config.osd,
@@ -3438,9 +3725,9 @@ impl XgViewApp {
             self.slide.dragging = false;
             let threshold = area.width() * 0.18;
             if self.slide.drag <= -threshold {
-                self.turn_page(true);
+                self.advance(true);
             } else if self.slide.drag >= threshold {
-                self.turn_page(false);
+                self.advance(false);
             }
         }
         if let Some(index) = actions.focus {
@@ -3453,6 +3740,9 @@ impl XgViewApp {
                 self.needs_sync = true;
                 self.mark_dirty();
             }
+            // A pointer press is a press on the wall too, and the ring is what
+            // shows which tile it landed on. See `paint_view`.
+            self.wall_seen = Instant::now();
         }
         if let Some(index) = actions.zoom {
             self.zoom_to(index);
@@ -3527,8 +3817,9 @@ impl eframe::App for XgViewApp {
 
         // Read before the keys are handed out: `handle_keys` takes the ones the
         // application acts on out of the queue, and the bars still have to know
-        // a viewer was there. See `viewer_active`.
-        self.chrome.input_seen = Self::viewer_active(ctx);
+        // a viewer was there. What counts as asking for them is the whole of
+        // `viewer_active`.
+        self.chrome.input_seen = self.viewer_active(ctx);
 
         self.poll_events();
         // The navigation layer starts its frame here: the layout it collects
@@ -3613,19 +3904,60 @@ impl eframe::App for XgViewApp {
         // `chrome_visible`. The row is not inset on the right: the version
         // label that ends it is what keeps the touch screen's back-gesture band
         // clear of the controls; see `toolbar`.
+        //
+        // Whether the band of each bar has to be claimed this frame is read
+        // *before* the bars are asked for, because the frame a press in a band
+        // brings them back in is one of the frames that has to claim it.
+        let bands_hidden = !self.chrome.visible;
         if self.chrome_visible() {
-            egui::TopBottomPanel::top("xgview-toolbar").show(ctx, |ui| self.toolbar(ui));
-            egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| self.status_bar(ui));
+            let toolbar = egui::TopBottomPanel::top("xgview-toolbar").show(ctx, |ui| self.toolbar(ui));
+            let status = egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| self.status_bar(ui));
+            // Kept past this frame, when the bars are gone: the band a bar
+            // occupies is the pointer's way of asking for it back. See
+            // `Chrome::bars`.
+            self.chrome.bars = Some((toolbar.response.rect, status.response.rect));
         } else {
             // The bar is gone, and with it anything it could hand the remote's
             // focus to: keeping the list would point the focus at a control
             // that is not on screen.
             self.toolbar_items.clear();
             self.status_author = None;
-            // A wall nobody is operating is a picture, and a pointer sitting on
-            // it is the last thing left that is not part of it. Any input brings
-            // the bars back, and the pointer with them.
-            ctx.set_cursor_icon(egui::CursorIcon::None);
+            // A pointer the viewer cannot see is a pointer they cannot aim. The
+            // bars stay away - moving the mouse is not a request for them - but
+            // the cursor comes back with the first movement, so that a viewer
+            // can find the band they are meant to press.
+            if ctx.input(|input| input.pointer.is_moving()) {
+                ctx.set_cursor_icon(egui::CursorIcon::Default);
+            } else {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+            }
+        }
+        // The band each bar sat in is the pointer's way of asking for it back -
+        // see `viewer_active` - and the wall is drawn underneath it, so it has
+        // to be the pointer's alone: without this, the press that asks for the
+        // bars would land on the tile behind it as well, and a viewer reaching
+        // for the menu would also move the focus. A press is hit-tested against
+        // the widgets of the frame it lands in, which is why the frame that
+        // brings the bars back claims the band just like any other: by the time
+        // the press is placed the bars are drawn, and the band is over them.
+        if bands_hidden {
+            if let Some((top, bottom)) = self.chrome.bars {
+                for (id, band) in [("xgview-toolbar-band", top), ("xgview-status-band", bottom)] {
+                    // The size is given, and never left to the area's own
+                    // default: an area with none starts at `default_area_size`
+                    // and is then constrained back onto the screen, which for
+                    // the bottom band moves its top to the top of the window -
+                    // an overlay over the whole wall, eating every press on a
+                    // tile. See `band_overlay_area_is_the_band`.
+                    egui::Area::new(Id::new(id))
+                        .order(egui::Order::Middle)
+                        .fixed_pos(band.min)
+                        .default_size(band.size())
+                        .show(ctx, |ui| {
+                            ui.allocate_rect(band, egui::Sense::click());
+                        });
+                }
+            }
         }
         if self.show_settings {
             egui::SidePanel::right("xgview-settings")
@@ -3872,5 +4204,188 @@ impl eframe::App for XgViewApp {
         // egui's to move.
         #[cfg(target_os = "android")]
         ctx.output_mut(|output| output.ime = None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Pos2, pos2};
+
+    /// The band the two bars were drawn in, as `chrome.bars` holds it.
+    fn bars() -> Option<(Rect, Rect)> {
+        Some((
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1280.0, 36.0)),
+            Rect::from_min_max(pos2(0.0, 690.0), pos2(1280.0, 720.0)),
+        ))
+    }
+
+    /// What a viewer does while watching a wall must not bring the bars back:
+    /// they take their height from the wall, so every tile would move under the
+    /// press, and slide back a moment later.
+    #[test]
+    fn wall_keys_and_wall_presses_do_not_ask_for_the_bars() {
+        for key in [
+            Key::ArrowLeft,
+            Key::ArrowRight,
+            Key::ArrowUp,
+            Key::ArrowDown,
+            Key::Enter,
+            Key::Space,
+            Key::PageUp,
+            Key::PageDown,
+            Key::Num1,
+            Key::Num4,
+        ] {
+            assert!(XgViewApp::wall_key(key), "{key:?} acts on the wall");
+            assert!(!XgViewApp::wall_event(bars(), true, &press(key)), "{key:?} acts on the wall");
+        }
+        // A press on the picture, magnifying or not, is a press on the picture.
+        assert!(!XgViewApp::in_a_bar_band(bars(), Pos2::new(640.0, 360.0)));
+        assert!(!XgViewApp::wall_event(bars(), true, &egui::Event::PointerButton {
+            pos: Pos2::new(640.0, 360.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }));
+        // The release that ends that press is not a request of its own, wherever
+        // it lands: a tap arrives as a press and a release, and reading the
+        // release as the viewer would put the bars back under every touch on the
+        // wall.
+        for pos in [Pos2::new(640.0, 360.0), Pos2::new(640.0, 12.0)] {
+            assert!(
+                !XgViewApp::wall_event(bars(), true, &egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                }),
+                "a release at {pos:?} ends a press, it does not ask for anything"
+            );
+        }
+        // A press in the band a bar sat in is the pointer asking for it back.
+        assert!(XgViewApp::in_a_bar_band(bars(), Pos2::new(640.0, 12.0)));
+        assert!(XgViewApp::in_a_bar_band(bars(), Pos2::new(640.0, 705.0)));
+        // The band is read by height, so a rectangle measured before the window
+        // reached the size it ends up on still answers for a press near its edge.
+        assert!(XgViewApp::in_a_bar_band(bars(), Pos2::new(9000.0, 12.0)));
+        // Before the bars have been drawn once there is no band to press, and a
+        // press anywhere is a press on the wall.
+        assert!(!XgViewApp::in_a_bar_band(None, Pos2::new(640.0, 12.0)));
+    }
+
+    /// A printable key arrives as its own event *as well as* a key event, and
+    /// the grid digits are printable: read as text, choosing a grid would put
+    /// the bars back - which is what the digits are not supposed to do.
+    #[test]
+    fn the_text_half_of_a_printable_key_does_not_ask_for_the_bars() {
+        assert!(!XgViewApp::wall_event(bars(), true, &egui::Event::Text("3".to_owned())));
+    }
+
+    /// A tap on a touch screen reaches egui as a `Start` and an `End` at the
+    /// same place. Reading the end as a request for the bars - which is what the
+    /// events an integration does not name fall through to - brought them back
+    /// under every touch on the wall, however carefully the start was placed.
+    #[test]
+    fn both_halves_of_a_touch_are_placed_by_where_they_are() {
+        for phase in [egui::TouchPhase::Start, egui::TouchPhase::End] {
+            let at = |y: f32| egui::Event::Touch {
+                device_id: egui::TouchDeviceId(0),
+                id: egui::TouchId(0),
+                phase,
+                pos: Pos2::new(640.0, y),
+                force: None,
+            };
+            assert!(!XgViewApp::wall_event(bars(), true, &at(360.0)), "{phase:?} on the wall");
+            assert!(XgViewApp::wall_event(bars(), true, &at(12.0)), "{phase:?} in the toolbar band");
+        }
+    }
+
+    /// The keys that reach the menus are exactly the ones that are not the
+    /// wall's - the bars are the only way to the settings, the device window and
+    /// full screen, and a remote control has neither of the others, so Back
+    /// belongs with them.
+    #[test]
+    fn menu_keys_still_ask_for_the_bars() {
+        for key in [Key::F1, Key::F2, Key::F11] {
+            assert!(!XgViewApp::wall_key(key), "{key:?} opens the menus");
+            assert!(XgViewApp::wall_event(bars(), true, &press(key)), "{key:?} opens the menus");
+        }
+    }
+
+    /// Back is two things, and which one it is decides whether it asks for the
+    /// bars: the wall's own key while there is something on the wall for it to
+    /// unwind, and the remote's door to the menus when there is not. It is the
+    /// only key a remote has for that - a remote has no function keys.
+    #[test]
+    fn back_asks_for_the_bars_only_when_there_is_nothing_to_unwind() {
+        for key in [Key::Escape, Key::BrowserBack] {
+            assert!(
+                XgViewApp::wall_event(bars(), true, &press(key)),
+                "{key:?} with nothing to unwind is the door to the menus"
+            );
+            assert!(
+                !XgViewApp::wall_event(bars(), false, &press(key)),
+                "{key:?} with something to unwind is the wall's, and leaves the bars alone"
+            );
+        }
+    }
+
+    /// Moving the mouse is not a request for anything - the pointer's way in is
+    /// a press in the band a bar occupies.
+    #[test]
+    fn moving_the_mouse_does_not_ask_for_the_bars() {
+        assert!(!XgViewApp::wall_event(bars(), true, &egui::Event::MouseMoved(egui::vec2(4.0, 0.0))));
+    }
+
+    #[test]
+    fn band_overlay_area_is_the_band() {
+        // A phone in landscape is only a few hundred points tall, which is
+        // where an area left to its own default size grew over the whole wall.
+        let screen = Rect::from_min_max(pos2(0.0, 0.0), pos2(851.0, 393.0));
+        let top = Rect::from_min_max(pos2(0.0, 0.0), pos2(851.0, 36.0));
+        let bottom = Rect::from_min_max(pos2(0.0, 363.0), pos2(851.0, 393.0));
+        let ctx = egui::Context::default();
+        let run = |with_bands: bool| -> Vec<(String, Rect)> {
+            let mut last = Vec::new();
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                last.clear();
+                if with_bands {
+                    for (id, band) in [("xgview-toolbar-band", top), ("xgview-status-band", bottom)] {
+                        let r = egui::Area::new(Id::new(id))
+                            .order(egui::Order::Middle)
+                            .fixed_pos(band.min)
+                            .default_size(band.size())
+                            .show(ctx, |ui| {
+                                ui.allocate_rect(band, egui::Sense::click());
+                            });
+                        last.push((id.to_owned(), r.response.rect));
+                    }
+                }
+            });
+            last
+        };
+        for _ in 0..3 {
+            run(false);
+        }
+        for _ in 0..3 {
+            run(true);
+        }
+        for (id, rect) in run(true) {
+            let band = if id.contains("toolbar") { top } else { bottom };
+            assert_eq!(rect, band, "{id} overlay must be exactly its band");
+        }
+    }
+
+    /// A key going down, as egui reports it.
+    fn press(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
     }
 }

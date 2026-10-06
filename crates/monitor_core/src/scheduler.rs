@@ -360,6 +360,36 @@ impl Scheduler {
         self.zoom.take().is_some()
     }
 
+    /// Steps the magnified viewport to the previous or next channel.
+    ///
+    /// A magnified viewport is one channel, not a grid: there is no cell to
+    /// walk to, so the step is along the channel list - `Right` is the next
+    /// channel, `Left` the previous one - whatever the layout. The ends are a
+    /// stop rather than a wrap. The page follows the channel, so leaving the
+    /// magnification lands on the grid page that holds it.
+    ///
+    /// Returns false when nothing is magnified or the step is past either end.
+    pub fn zoom_step(&mut self, forward: bool) -> bool {
+        let Some(current) = self.zoom else {
+            return false;
+        };
+        let next = if forward {
+            if current + 1 >= self.channel_count {
+                return false;
+            }
+            current + 1
+        } else {
+            if current == 0 {
+                return false;
+            }
+            current - 1
+        };
+        self.focus = Some(next);
+        self.zoom = Some(next);
+        self.page = layout::page_of(next, self.layout.capacity());
+        true
+    }
+
     pub fn toggle_zoom(&mut self) -> bool {
         if self.is_zoomed() {
             self.zoom_out();
@@ -539,6 +569,38 @@ mod tests {
         assert_eq!(schedule.live().count(), 1);
         assert_eq!(schedule.mode_of(0), ChannelMode::Decode(StreamKind::Main));
         assert_eq!(schedule.mode_of(1), ChannelMode::Suspend);
+    }
+
+    /// A magnified viewport steps along the channel list, not the grid, and
+    /// keeps the page under it so leaving the magnification lands on the grid
+    /// that holds the channel.
+    #[test]
+    fn zoom_step_walks_channels_in_order_and_keeps_the_page() {
+        // Eight channels in 2x2: two pages of four.
+        let mut scheduler = Scheduler::new(GridLayout::G2x2, 0, Some(0), 8);
+        assert!(!scheduler.zoom_step(true), "nothing is magnified");
+        assert!(scheduler.zoom_in());
+        assert_eq!(scheduler.zoom(), Some(0));
+        // The first channel is one end: Left is a stop, not a wrap.
+        assert!(!scheduler.zoom_step(false));
+        assert_eq!(scheduler.zoom(), Some(0));
+        // Right is the next channel, past the end of the row included.
+        assert!(scheduler.zoom_step(true));
+        assert!(scheduler.zoom_step(true));
+        assert!(scheduler.zoom_step(true));
+        assert_eq!(scheduler.zoom(), Some(3));
+        // Crossing a page boundary moves the page with the channel.
+        assert!(scheduler.zoom_step(true));
+        assert_eq!(scheduler.zoom(), Some(4));
+        assert_eq!(scheduler.focus(), Some(4));
+        assert_eq!(scheduler.page(), 1);
+        // And the last channel is the other end.
+        for _ in 0..3 {
+            assert!(scheduler.zoom_step(true));
+        }
+        assert_eq!(scheduler.zoom(), Some(7));
+        assert!(!scheduler.zoom_step(true));
+        assert_eq!(scheduler.zoom(), Some(7));
     }
 
     #[test]

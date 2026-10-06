@@ -17,7 +17,7 @@ also builds natively on desktop Windows / Linux for development.
 | --- | --- |
 | Grid layouts | 1x1, 2x2, 3x3 and 4x4, switchable at runtime |
 | Pagination | Channels beyond the grid capacity are paged; swipe / PageUp / PageDown slides between pages |
-| Focus navigation | Arrow keys or an Android TV DPAD move a 2 px cyan focus ring; leaving an edge automatically turns the page |
+| Focus navigation | Arrow keys or an Android TV DPAD move a 2 px cyan focus ring; the sideways arrows turn the page at the left and right edges, and the vertical ones stop at the top and bottom, where the wall hands the keys to the bars |
 | Temporary zoom | Double click, `DPAD_CENTER` or `Enter` magnifies a viewport to 1x1; `BACK` / `Esc` restores the grid |
 | Stream switching | Every layout pulls the cheap sub stream (360P / 480P), the 1x1 grid included; only a magnified viewport switches to the main stream (1080P / 4K) |
 | Seamless transition | The last sub stream frame is held until the main stream delivers its first keyframe – no black or green frames |

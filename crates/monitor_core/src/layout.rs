@@ -186,7 +186,14 @@ pub enum NavigateOutcome {
 }
 
 /// Pure navigation math: computes the new focus (global channel index) and page
-/// for a DPAD move, turning the page when the focus leaves the current page.
+/// for a DPAD move.
+///
+/// The page turns with the sideways arrows: walking off the left or the right of
+/// the wall continues on the neighbouring page, which is what the wall was
+/// showing anyway. The vertical ones stop at the outermost row instead - a
+/// [`NavigateOutcome::Blocked`] - because above and below the wall are the two
+/// bars, and the wall's caller answers a blocked Up or Down by handing the keys
+/// over to them.
 ///
 /// `focus` is the currently focused global channel index.
 pub fn navigate(
@@ -232,23 +239,15 @@ pub fn navigate(
         Direction::Up => {
             if row > 0 {
                 NavigateOutcome::Moved { focus: focus - cols }
-            } else if page == 0 {
-                NavigateOutcome::Blocked
             } else {
-                let previous = page - 1;
-                let cell = clamp_cell(previous, (rows - 1) * cols + col);
-                NavigateOutcome::PageTurned { page: previous, focus: previous * capacity + cell }
+                NavigateOutcome::Blocked
             }
         }
         Direction::Down => {
             if row + 1 < rows && cell + cols < visible_len(page) {
                 NavigateOutcome::Moved { focus: focus + cols }
-            } else if page + 1 >= pages {
-                NavigateOutcome::Blocked
             } else {
-                let next = page + 1;
-                let cell = clamp_cell(next, col);
-                NavigateOutcome::PageTurned { page: next, focus: next * capacity + cell }
+                NavigateOutcome::Blocked
             }
         }
         Direction::Left => {
@@ -331,5 +330,23 @@ mod tests {
     fn page_turn_back_from_first_cell() {
         let outcome = navigate(GridLayout::G2x2, 1, Some(4), Direction::Left, 16);
         assert_eq!(outcome, NavigateOutcome::PageTurned { page: 0, focus: 1 });
+    }
+
+    /// The vertical arrows stop at the outermost row. Above and below the wall
+    /// are the two bars, and the page is turned by the sideways arrows, so a
+    /// blocked Up or Down is how the wall hands the keys over to them.
+    #[test]
+    fn up_and_down_stop_at_the_outermost_row() {
+        // The top row of a page that is not the first: no page turn.
+        let outcome = navigate(GridLayout::G2x2, 1, Some(4), Direction::Up, 16);
+        assert_eq!(outcome, NavigateOutcome::Blocked);
+        // The bottom row of a page that is not the last: no page turn either.
+        let outcome = navigate(GridLayout::G2x2, 0, Some(2), Direction::Down, 16);
+        assert_eq!(outcome, NavigateOutcome::Blocked);
+        // Inside the page they still walk between rows.
+        let outcome = navigate(GridLayout::G2x2, 0, Some(0), Direction::Down, 16);
+        assert_eq!(outcome, NavigateOutcome::Moved { focus: 2 });
+        let outcome = navigate(GridLayout::G2x2, 0, Some(2), Direction::Up, 16);
+        assert_eq!(outcome, NavigateOutcome::Moved { focus: 0 });
     }
 }
