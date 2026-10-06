@@ -1244,6 +1244,13 @@ impl XgViewApp {
             self.chrome.hide_now = false;
             return true;
         }
+        // No live cameras: the wall is empty, and hiding the bars would leave
+        // the viewer with no way to reach the settings or the device window.
+        if self.scheduler.current().and_then(|s| s.live().next()).is_none() {
+            self.chrome.visible = true;
+            self.chrome.hide_now = false;
+            return true;
+        }
         // Entering full screen asks for the picture and nothing else, and the
         // request is answered at once - except on the frames before the bars have
         // ever been drawn in this run. What they cover is only known as they are
