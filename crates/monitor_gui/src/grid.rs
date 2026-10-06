@@ -144,7 +144,9 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
     let state = tile.channel.map(|channel| channel.state).unwrap_or(ConnectionState::Idle);
     let detail = tile.channel.map(|channel| channel.detail.as_str()).unwrap_or("");
     match state {
-        ConnectionState::Streaming => live_canvas(&painter, body, tile, tier),
+        ConnectionState::Streaming | ConnectionState::Stalled => {
+            live_canvas(&painter, body, tile, tier)
+        }
         ConnectionState::Failed => {
             painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS_FAILED));
             painter.text(body.center() - vec2(0.0, 16.0), Align2::CENTER_CENTER, "!", FontId::proportional(26.0), theme::ERROR);
@@ -325,6 +327,7 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
             // images cannot answer from the images themselves.
             dot: Some(match channel.map(|channel| channel.state) {
                 Some(ConnectionState::Streaming) => theme::LIVE,
+                Some(ConnectionState::Stalled) => theme::WARN,
                 _ => theme::TEXT_DIM,
             }),
             text: channel

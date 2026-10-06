@@ -58,11 +58,13 @@ key-fullscreen = full screen
 streams-hint = The multi grid pulls the sub stream and the zoom-in viewport pulls the main stream.
 settings-reconnect = Reconnect
 streams-first-retry = first retry after
+streams-first-frame-retry = first frame retry after
 streams-then-at-most = then at most
 streams-change-note = A change applies to the connections opened afterwards
 streams-backoff = Backoff shape
 streams-factor = factor
 streams-jitter = jitter
+streams-spread = spread
 streams-attempts = attempts (0 = forever)
 settings-decoding = Decoding
 streams-prefer-hardware = Prefer hardware decoding
@@ -208,6 +210,7 @@ state-idle = Idle
 state-suspended = Suspended
 state-connecting = Connecting...
 state-streaming = Live
+state-stalled = Stalled
 state-reconnecting = Reconnecting...
 state-failed = Failed
 origin-manual = Manual
@@ -241,6 +244,7 @@ autostart-mechanism-unsupported = unsupported
 
 ## Grid tile states
 grid-stream-failed = Stream failed
+
 grid-suspended = suspended
 grid-switching-to = Switching to { $stream }…
 grid-holding-last = holding last { $tag } frame

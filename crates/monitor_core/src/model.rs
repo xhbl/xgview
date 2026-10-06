@@ -57,6 +57,10 @@ pub enum ConnectionState {
     Connecting,
     /// Receiving RTP packets.
     Streaming,
+    /// Picture frozen: the transport may still be alive, so the last frame is
+    /// held while waiting for the stream to recover rather than dropping to a
+    /// black reconnect screen.
+    Stalled,
     /// Lost the session, waiting for the backoff timer.
     Reconnecting,
     /// Retries exhausted, waiting for an explicit user action.
@@ -70,6 +74,7 @@ impl ConnectionState {
             ConnectionState::Suspended => "state-suspended",
             ConnectionState::Connecting => "state-connecting",
             ConnectionState::Streaming => "state-streaming",
+            ConnectionState::Stalled => "state-stalled",
             ConnectionState::Reconnecting => "state-reconnecting",
             ConnectionState::Failed => "state-failed",
         }

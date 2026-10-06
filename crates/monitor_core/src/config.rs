@@ -17,12 +17,21 @@ pub const CONFIG_VERSION: u32 = 1;
 pub struct ReconnectPolicy {
     /// Delay before the first retry.
     pub initial_delay_ms: u64,
+    /// Delay before the first retry when no picture has ever been produced.
+    /// A slow link needs longer than the running backoff before it is asked to
+    /// reconnect, because the handshake itself is what is slow.
+    pub first_frame_delay_ms: u64,
     /// Upper bound of the delay.
     pub max_delay_ms: u64,
     /// Growth factor applied on every attempt.
     pub multiplier: f64,
     /// Randomisation ratio applied to the delay (0.0 … 1.0).
     pub jitter: f64,
+    /// Per channel offset added to the delay so that simultaneous failures do
+    /// not all reconnect at once. Only applied to the first two attempts,
+    /// where the clustering is worst; later attempts are spread by the
+    /// exponential growth already.
+    pub spread_ms: u64,
     /// Maximum number of attempts, `0` meaning "retry forever".
     pub max_attempts: u32,
 }
@@ -31,27 +40,42 @@ impl Default for ReconnectPolicy {
     fn default() -> Self {
         Self {
             initial_delay_ms: 1_000,
+            first_frame_delay_ms: 5_000,
             max_delay_ms: 30_000,
             multiplier: 1.8,
             jitter: 0.2,
+            spread_ms: 100,
             max_attempts: 0,
         }
     }
 }
 
 impl ReconnectPolicy {
-    /// Delay to wait before the given attempt (1 based).
-    pub fn delay_for(&self, attempt: u32) -> Duration {
+    /// Delay to wait before the given attempt (1 based). `first_frame` selects
+    /// the longer initial delay used when no picture has ever been produced,
+    /// and `index` adds a per channel offset so simultaneous failures do not
+    /// all reconnect at once.
+    pub fn delay_for(&self, attempt: u32, first_frame: bool, index: u32) -> Duration {
+        let base = if first_frame {
+            self.first_frame_delay_ms
+        } else {
+            self.initial_delay_ms
+        };
         let exponent = attempt.max(1).saturating_sub(1).min(16) as i32;
-        let raw = self.initial_delay_ms as f64 * self.multiplier.powi(exponent);
-        let capped = raw.min(self.max_delay_ms.max(self.initial_delay_ms) as f64);
+        let raw = base as f64 * self.multiplier.powi(exponent);
+        let capped = raw.min(self.max_delay_ms.max(base) as f64);
         let jitter = self.jitter.clamp(0.0, 1.0);
         let factor = if jitter > 0.0 {
             1.0 - jitter + 2.0 * jitter * pseudo_random()
         } else {
             1.0
         };
-        Duration::from_millis((capped * factor).max(1.0) as u64)
+        let offset = if attempt <= 2 {
+            (index as u64).saturating_mul(self.spread_ms)
+        } else {
+            0
+        };
+        Duration::from_millis((capped * factor).max(1.0) as u64 + offset)
     }
 
     /// `false` when the retry budget is exhausted.
@@ -523,9 +547,9 @@ mod tests {
     #[test]
     fn backoff_grows_and_is_capped() {
         let policy = ReconnectPolicy { jitter: 0.0, ..Default::default() };
-        assert_eq!(policy.delay_for(1), Duration::from_millis(1_000));
-        assert!(policy.delay_for(3) > policy.delay_for(2));
-        assert!(policy.delay_for(30) <= Duration::from_millis(30_000));
+        assert_eq!(policy.delay_for(1, false, 0), Duration::from_millis(1_000));
+        assert!(policy.delay_for(3, false, 0) > policy.delay_for(2, false, 0));
+        assert!(policy.delay_for(30, false, 0) <= Duration::from_millis(30_000));
     }
 
     #[test]

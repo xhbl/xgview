@@ -173,6 +173,14 @@ impl ChannelUi {
             StreamEvent::State { state, detail, .. } => {
                 self.state = state;
                 self.detail = detail;
+                if matches!(
+                    state,
+                    ConnectionState::Reconnecting | ConnectionState::Connecting | ConnectionState::Failed
+                ) {
+                    self.fps = 0.0;
+                    self.bitrate_kbps = 0.0;
+                    self.total_frames = 0;
+                }
             }
             StreamEvent::Stats { stream, codec, width, height, hardware, fps, bitrate_kbps, total_frames, .. } => {
                 self.stream = Some(stream);
@@ -2823,6 +2831,8 @@ impl XgViewApp {
         let reconnect = &mut self.config.reconnect;
         let first = controls::slider(&mut self.nav, ui, &mut reconnect.initial_delay_ms, 100..=10_000, 100.0, " ms", &monitor_i18n::tr("streams-first-retry"), 1_000);
         dirty |= first.changed();
+        let first_frame = controls::slider(&mut self.nav, ui, &mut reconnect.first_frame_delay_ms, 1_000..=30_000, 500.0, " ms", &monitor_i18n::tr("streams-first-frame-retry"), 5_000);
+        dirty |= first_frame.changed();
         let second = controls::slider(&mut self.nav, ui, &mut reconnect.max_delay_ms, 1_000..=300_000, 1000.0, " ms", &monitor_i18n::tr("streams-then-at-most"), 30_000);
         dirty |= second.changed();
         ui.label(RichText::new(monitor_i18n::tr("streams-change-note")).small().color(theme::TEXT_DIM));
@@ -2836,6 +2846,8 @@ impl XgViewApp {
             dirty |= factor.changed();
             let jitter = controls::slider(nav, ui, &mut reconnect.jitter, 0.0..=1.0, 0.02, "", &monitor_i18n::tr("streams-jitter"), 0.2);
             dirty |= jitter.changed();
+            let spread = controls::slider(nav, ui, &mut reconnect.spread_ms, 0..=1_000, 50.0, " ms", &monitor_i18n::tr("streams-spread"), 100);
+            dirty |= spread.changed();
             let attempts = controls::slider(nav, ui, &mut reconnect.max_attempts, 0..=100, 1.0, "", &monitor_i18n::tr("streams-attempts"), 0);
             dirty |= attempts.changed();
         });

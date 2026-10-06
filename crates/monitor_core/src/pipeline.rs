@@ -41,6 +41,10 @@ const FIRST_PICTURE_CEILING: Duration = Duration::from_secs(20);
 /// Shortest interval between two key frames taken for a group of pictures rather
 /// than for two key frames of one session start.
 const MIN_PLAUSIBLE_GROUP: Duration = Duration::from_millis(500);
+/// How long a stalled session is held before reconnecting. The last frame
+/// stays on screen for this grace period, giving a flaky link time to recover
+/// without the black screen of a reconnect.
+const STALL_HARD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Time an MJPEG stream may go without a picture before it is considered dead.
 ///
 /// A deadline counted in pictures, the way [`StallDeadline`] counts them, has
@@ -546,7 +550,8 @@ async fn run_channel(
             return;
         }
 
-        let delay = policy.delay_for(attempt);
+        let first_frame = frames.published(index) == 0;
+        let delay = policy.delay_for(attempt, first_frame, index as u32);
         emit(
             &events,
             StreamEvent::State {
@@ -653,6 +658,10 @@ struct StallDeadline {
     last_picture: Instant,
     /// A picture has come out, so the session is held to the shorter deadline.
     running: bool,
+    /// When the session first exceeded its patience without a picture, `None`
+    /// while it is still delivering. The last frame is held for
+    /// [`STALL_HARD_TIMEOUT`] after this before reconnecting.
+    stalled_since: Option<Instant>,
 }
 
 impl StallDeadline {
@@ -670,6 +679,7 @@ impl StallDeadline {
             last_key: None,
             last_picture: Instant::now(),
             running: false,
+            stalled_since: None,
         }
     }
 
@@ -691,6 +701,7 @@ impl StallDeadline {
     fn picture(&mut self, now: Instant) {
         self.running = true;
         self.last_picture = now;
+        self.stalled_since = None;
     }
 
     /// How long the session has gone without one.
@@ -920,10 +931,32 @@ async fn run_session(
         let patience = stall.patience();
         let since_picture = stall.since_picture();
         if decoder.is_some() && since_picture >= patience {
-            return Err(crate::error::CoreError::rtsp(format!(
-                "no picture decoded for {} s",
-                since_picture.as_secs()
-            )));
+            // Soft timeout: the picture has frozen, but the transport may
+            // still be alive. Hold the last frame and keep waiting rather than
+            // dropping to a black reconnect screen, which is the worse
+            // experience on a flaky link. The state is announced once, when
+            // the stall begins, so the grid can mark it without a flood of
+            // events.
+            if stall.stalled_since.is_none() {
+                stall.stalled_since = Some(Instant::now());
+                emit(
+                    events,
+                    StreamEvent::State {
+                        index,
+                        camera_id: camera_id.to_string(),
+                        state: ConnectionState::Stalled,
+                        detail: format!("stalled for {} s", since_picture.as_secs()),
+                    },
+                );
+            }
+            // Hard timeout: the stall has gone on long enough that
+            // reconnecting is more likely to help than waiting.
+            if stall.stalled_since.unwrap().elapsed() >= STALL_HARD_TIMEOUT {
+                return Err(crate::error::CoreError::rtsp(format!(
+                    "stalled for {} s, giving up",
+                    since_picture.as_secs()
+                )));
+            }
         }
         if last_keep_alive.elapsed() >= keep_alive_interval {
             // Fire and forget. Waiting for the answer would discard every RTP
@@ -949,7 +982,17 @@ async fn run_session(
         // it has already consumed with it, and every packet after them is then
         // read at the wrong offset, which costs the session where the wait would
         // only have cost a wait.
-        let wait = READ_TIMEOUT.min(patience.saturating_sub(since_picture));
+        //
+        // While stalled the patience is already spent, so the wait would be
+        // zero and the loop would spin. A one second poll keeps it from
+        // busy-waiting without blocking long enough to miss the hard timeout.
+        let wait = if since_picture >= patience {
+            STALL_HARD_TIMEOUT
+                .saturating_sub(stall.stalled_since.unwrap().elapsed())
+                .min(Duration::from_secs(1))
+        } else {
+            READ_TIMEOUT.min(patience.saturating_sub(since_picture))
+        };
         match tokio::time::timeout(wait, client.wait_for_media()).await {
             Ok(result) => result?,
             Err(_) => {
@@ -1109,7 +1152,22 @@ async fn run_session(
                                 // in a GPU buffer there are no planes to publish,
                                 // and the stream is no less alive for it.
                                 if !decoded.is_empty() {
+                                    let was_stalled = stall.stalled_since.is_some();
                                     stall.picture(Instant::now());
+                                    if was_stalled {
+                                        emit(
+                                            events,
+                                            StreamEvent::State {
+                                                index,
+                                                camera_id: camera_id.to_string(),
+                                                state: ConnectionState::Streaming,
+                                                detail: format!(
+                                                    "receiving {} stream",
+                                                    stream.label()
+                                                ),
+                                            },
+                                        );
+                                    }
                                 }
                                 window_decoded += decoded.len() as u64;
                                 if let Some((picture_width, picture_height)) =

@@ -56,11 +56,13 @@ key-fullscreen = 全屏
 streams-hint = 多画面宫格拉取辅码流，放大视口拉取主码流。
 settings-reconnect = 重连
 streams-first-retry = 首次重试于
+streams-first-frame-retry = 首帧重试于
 streams-then-at-most = 其后至多
 streams-change-note = 更改仅对之后建立的连接生效
 streams-backoff = 重连退避策略
 streams-factor = 因子
 streams-jitter = 抖动
+streams-spread = 错峰
 streams-attempts = 尝试次数（0 = 无限）
 settings-decoding = 解码
 streams-prefer-hardware = 优先硬件解码
@@ -195,6 +197,7 @@ state-idle = 空闲
 state-suspended = 已挂起
 state-connecting = 连接中...
 state-streaming = 在线
+state-stalled = 冻结
 state-reconnecting = 重连中...
 state-failed = 失败
 origin-manual = 手动
@@ -228,6 +231,7 @@ autostart-mechanism-unsupported = 不支持
 
 ## 宫格格子状态
 grid-stream-failed = 码流失败
+
 grid-suspended = 已挂起
 grid-switching-to = 切换到 { $stream }…
 grid-holding-last = 保留上一 { $tag } 帧
