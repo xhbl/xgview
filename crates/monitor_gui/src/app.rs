@@ -13,6 +13,7 @@ use egui::{Align, Id, Key, Layout, Modifiers, Rect, RichText, vec2};
 use tokio::runtime::Handle;
 
 use monitor_core::autostart::{self, AutostartStatus};
+use monitor_core::power::{self, PowerStatus};
 use monitor_core::config::AppConfig;
 use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{ConnectionState, OsdItem, RtspTransport, StreamKind, TileAspect};
@@ -396,6 +397,9 @@ pub struct XgViewApp {
     /// Android section shows the system's own state instead and never reads it.
     #[cfg_attr(target_os = "android", allow(dead_code))]
     autostart: AutostartStatus,
+    /// What the platform is holding awake, and why it might be holding nothing.
+    /// Kept so the panel can say whether the switches took.
+    power: PowerStatus,
     decoder: &'static str,
     hardware_decoder: bool,
     /// Whether hardware and software decoding can be chosen between here. Left
@@ -587,6 +591,32 @@ impl XgViewApp {
             // The registry is the source of truth for the start-on-boot state.
             config.autostart = autostart.enabled;
         }
+        // Android's two halves are Java's, and the bridge to the activity lives
+        // in this crate rather than in `monitor_core`: hand it over before
+        // anything asks whether the platform can hold anything at all.
+        #[cfg(target_os = "android")]
+        power::install_android(crate::android::set_keep_awake);
+        // Before the first frame, and from this thread: a Windows execution
+        // state is per-thread, and this is the thread that stays alive. A
+        // platform with no mechanism is not an error to report here - the
+        // panel greys the switches out and says so.
+        if power::is_supported() {
+            if let Err(err) = power::apply(config.prevent_sleep, config.keep_screen_on) {
+                tracing::warn!(target: "xgview::power", %err, "the machine cannot be kept awake");
+            }
+        }
+        let power = power::status();
+        // Said out loud once, because a machine that no longer sleeps has
+        // nothing else pointing at the program that asked it not to.
+        tracing::info!(
+            target: "xgview::power",
+            supported = power.supported,
+            prevent_sleep = config.prevent_sleep,
+            keep_screen_on = config.keep_screen_on,
+            mechanism = power.mechanism,
+            applied = ?power.applied,
+            "power management at start-up"
+        );
         let discovery = DiscoveryUi::new(&config.discovery);
         let scheduler = Scheduler::new(config.layout, config.page, config.focus, config.enabled_count());
         let manager = ChannelManager::spawn(
@@ -617,6 +647,7 @@ impl XgViewApp {
             events_tx,
             events_rx,
             autostart,
+            power,
             decoder: capabilities.backend,
             hardware_decoder: capabilities.hardware,
             decoder_selectable: capabilities.selectable,
@@ -1356,6 +1387,12 @@ impl XgViewApp {
             let _ = ctx;
             self.save_now();
             self.manager.shutdown();
+            // Explicitly, and before the process ends: `exit` runs no
+            // destructors at all, so a `Drop` that released the wake request
+            // would never be reached and the lock would outlive the program.
+            if let Err(err) = power::release() {
+                tracing::warn!(target: "xgview::power", %err, "cannot take the wake request back");
+            }
             std::process::exit(0);
         }
         #[cfg(not(target_os = "android"))]
@@ -2672,6 +2709,28 @@ impl XgViewApp {
         dirty
     }
 
+    /// Applies the two power switches and records what the platform did with
+    /// them.
+    ///
+    /// Returns whether the configuration changed - which is to say whether the
+    /// panel has something to save. A request the machine refused still changed
+    /// the setting the viewer asked for; what went wrong is reported through
+    /// `power.error`, under the switches.
+    fn apply_power(&mut self, prevent_sleep: bool, keep_screen_on: bool) -> bool {
+        self.config.prevent_sleep = prevent_sleep;
+        self.config.keep_screen_on = keep_screen_on;
+        if let Err(err) = power::apply(prevent_sleep, keep_screen_on) {
+            self.flash(
+                monitor_i18n::tr_args("settings-power-failed", &[("error", err.to_string().into())]),
+                ToastKind::Error,
+            );
+        }
+        // Read back rather than assumed: the request may have been refused, and
+        // what the panel says is held should be what is held.
+        self.power = power::status();
+        true
+    }
+
     /// What the box does around the viewer: it starts it at boot, and it is the
     /// machine the decoder is chosen for.
     fn settings_system(&mut self, ui: &mut egui::Ui) -> bool {
@@ -2679,7 +2738,7 @@ impl XgViewApp {
         #[cfg(not(target_os = "android"))]
         let mut dirty = false;
         #[cfg(target_os = "android")]
-        let dirty = false;
+        let mut dirty = false;
 
         ui.label(RichText::new(monitor_i18n::tr("settings-startup")).strong());
         // Desktop: the registration is ours to make, so it is a checkbox. On
@@ -2731,6 +2790,42 @@ impl XgViewApp {
         }
         #[cfg(target_os = "android")]
         self.android_boot_section(ui);
+
+        ui.add_space(theme::space::L);
+        ui.label(RichText::new(monitor_i18n::tr("settings-power")).strong());
+        // Two switches, one request: `monitor_core::power` normalises them, so
+        // the line under them says what the pair actually asks the machine for
+        // rather than leaving the viewer to work out why one tick moved both.
+        let power_supported = self.power.supported;
+        let mut prevent_sleep = self.config.prevent_sleep;
+        let mut keep_screen_on = self.config.keep_screen_on;
+        ui.add_enabled_ui(power_supported, |ui| {
+            let sleep = ui.checkbox(&mut prevent_sleep, monitor_i18n::tr("settings-prevent-sleep"));
+            self.nav.item(&sleep);
+            if sleep.changed() {
+                dirty |= self.apply_power(prevent_sleep, keep_screen_on);
+            }
+            let screen = ui.checkbox(&mut keep_screen_on, monitor_i18n::tr("settings-keep-screen-on"));
+            self.nav.item(&screen);
+            if screen.changed() {
+                dirty |= self.apply_power(prevent_sleep, keep_screen_on);
+            }
+        });
+        ui.label(RichText::new(monitor_i18n::tr("settings-power-hint")).small().color(theme::TEXT_DIM));
+        if !power_supported {
+            ui.label(RichText::new(monitor_i18n::tr("settings-power-unsupported")).small().color(theme::TEXT_DIM));
+        }
+        ui.label(
+            RichText::new(monitor_i18n::tr_args(
+                "settings-mechanism",
+                &[("name", monitor_i18n::tr(self.power.mechanism).into())],
+            ))
+            .small()
+            .color(theme::TEXT_DIM),
+        );
+        if let Some(error) = &self.power.error {
+            ui.label(RichText::new(error).small().color(theme::ERROR));
+        }
 
         ui.add_space(theme::space::L);
         ui.label(RichText::new(monitor_i18n::tr("settings-keys")).strong());
@@ -3896,6 +3991,11 @@ impl eframe::App for XgViewApp {
         if ctx.input(|input| input.viewport().close_requested()) {
             self.save_now();
             self.manager.shutdown();
+            // The request outlives the viewport otherwise: on the desktop this
+            // is the last moment anything of ours runs.
+            if let Err(err) = power::release() {
+                tracing::warn!(target: "xgview::power", %err, "cannot take the wake request back");
+            }
         }
 
         // Read before the keys are handed out: `handle_keys` takes the ones the

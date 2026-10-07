@@ -57,7 +57,8 @@ android {
 
     defaultConfig {
         applicationId = "com.xhbl.xgview"
-        // The SOW targets Amlogic / Shield class boxes at API 28 or newer.
+        // The floor is a driver question, not an API one: the native library
+        // asks nothing of the platform that API 21 does not already ship.
         //
         // An API 22 box (Mi Box 3 Pro / MT8693, Android 5.1) installs and starts
         // - the native library only needs libraries API 21 ships - but its GLES
@@ -65,10 +66,15 @@ android {
         // calls (`glObjectLabel`), and it has no Vulkan to fall back on, so the
         // renderer aborts on its first labelled resource. Asking wgpu for a GLES
         // 3.1 context instead of the default 3.0 (`WGPU_GLES_MINOR_VERSION=1`)
-        // was tried: the driver still does not offer the entry point. The floor
-        // therefore stays at 28 rather than letting a device install an app that
-        // cannot draw.
-        minSdk = 28
+        // was tried: the driver still does not offer the entry point. That box
+        // is not worth a second renderer, so it is left unsupported.
+        //
+        // 27 rather than 28 for the Mi Pad 4 (Snapdragon 660 / Adreno 512,
+        // Android 8.1): an Adreno 512 has Vulkan, so wgpu takes its Vulkan
+        // backend there instead of GL and nothing above aborts. Declaring 28
+        // refused it as "there was a problem parsing the package"
+        // (`INSTALL_FAILED_OLDER_SDK`) before that could be found out.
+        minSdk = 27
         targetSdk = 34
         versionName = cargoVersion
         // Android wants one monotonically increasing integer, and the Rust

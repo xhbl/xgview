@@ -44,6 +44,12 @@ settings-startup = Start-up
 settings-autostart = Start with the system boot
 settings-autostart-unsupported = start-on-boot is not supported on this platform
 settings-mechanism = mechanism: { $name }
+settings-power = Keep awake
+settings-prevent-sleep = Keep the machine awake
+settings-keep-screen-on = Keep the screen on
+settings-power-hint = Keeping the screen on also keeps the machine awake.
+settings-power-unsupported = keeping the machine awake is not supported on this platform
+settings-power-failed = cannot keep the machine awake: { $error }
 settings-keys = Keys
 key-move-focus = move focus
 key-enter = OK / select / zoom
@@ -242,6 +248,11 @@ autostart-mechanism-windows = Registry (HKCU Run)
 autostart-mechanism-xdg = XDG autostart (.desktop)
 autostart-mechanism-android = Android BootReceiver (RECEIVE_BOOT_COMPLETED)
 autostart-mechanism-unsupported = unsupported
+power-mechanism-windows = SetThreadExecutionState
+power-mechanism-caffeinate = caffeinate
+power-mechanism-systemd = systemd-inhibit
+power-mechanism-android = WakeLock + FLAG_KEEP_SCREEN_ON
+power-mechanism-unsupported = unsupported
 
 ## Grid tile states
 grid-stream-failed = Stream failed

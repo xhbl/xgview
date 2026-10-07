@@ -42,6 +42,12 @@ settings-startup = 启动
 settings-autostart = 随系统开机启动
 settings-autostart-unsupported = 此平台不支持开机自启
 settings-mechanism = 机制：{ $name }
+settings-power = 保持唤醒
+settings-prevent-sleep = 阻止系统睡眠
+settings-keep-screen-on = 保持屏幕常亮
+settings-power-hint = 保持屏幕常亮时也会同时阻止系统睡眠。
+settings-power-unsupported = 此平台不支持阻止系统睡眠
+settings-power-failed = 无法保持唤醒：{ $error }
 settings-keys = 按键
 key-move-focus = 移动焦点
 key-enter = 确认 / 选择 / 缩放
@@ -229,6 +235,11 @@ autostart-mechanism-windows = 注册表（HKCU Run）
 autostart-mechanism-xdg = XDG 自启（.desktop）
 autostart-mechanism-android = Android BootReceiver（RECEIVE_BOOT_COMPLETED）
 autostart-mechanism-unsupported = 不支持
+power-mechanism-windows = SetThreadExecutionState
+power-mechanism-caffeinate = caffeinate
+power-mechanism-systemd = systemd-inhibit
+power-mechanism-android = WakeLock + FLAG_KEEP_SCREEN_ON
+power-mechanism-unsupported = 不支持
 
 ## 宫格格子状态
 grid-stream-failed = 码流失败

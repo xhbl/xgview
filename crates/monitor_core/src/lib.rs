@@ -17,6 +17,8 @@
 //! * [`pipeline`]   – non blocking per channel streaming supervisor with
 //!   exponential backoff reconnection.
 //! * [`autostart`]  – start-on-boot helpers for Windows / Linux / Android.
+//! * [`power`]      – keep the machine awake and the screen on for a wall that
+//!   is meant to stay visible.
 
 pub mod autostart;
 pub mod config;
@@ -28,6 +30,7 @@ pub mod layout;
 pub mod mjpeg;
 pub mod model;
 pub mod pipeline;
+pub mod power;
 pub mod rtcp;
 pub mod rtsp;
 pub mod scheduler;

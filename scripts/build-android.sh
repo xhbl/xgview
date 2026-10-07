@@ -9,12 +9,12 @@
 #   ANDROID_NDK_HOME (or ANDROID_NDK_ROOT) must point at an NDK r25+.
 #
 # The command below targets 64 bit ARM (the Amlogic S905X5M / Nvidia Shield TV
-# class of devices) and API level 28, as required by the SOW. The resulting
-# shared library is written to android-build/jniLibs/<abi>/.
+# class of devices) and API level 27, the `minSdk` the manifest declares. The
+# resulting shared library is written to android-build/jniLibs/<abi>/.
 #
 # Usage
 # -----
-#   scripts/build-android.sh                 # release, arm64-v8a, API 28
+#   scripts/build-android.sh                 # release, arm64-v8a, API 27
 #   API=30 scripts/build-android.sh          # override the API level
 #   PROFILE=debug scripts/build-android.sh   # debug build
 #   ABIS="arm64-v8a armeabi-v7a" scripts/build-android.sh
@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 ABIS="${ABIS:-arm64-v8a}"
-API="${API:-28}"
+API="${API:-27}"
 PROFILE="${PROFILE:-release}"
 OUT_DIR="${OUT_DIR:-android-build/jniLibs}"
 

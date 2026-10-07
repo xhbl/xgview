@@ -17,6 +17,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.PowerManager;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.InputType;
@@ -26,6 +27,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -150,6 +152,11 @@ public class MainActivity extends NativeActivity {
 
     @Override
     protected void onDestroy() {
+        // A wake lock is not released by losing the object that holds it, and
+        // the native side only lets go on its own quit path - so an activity
+        // the system destroys has to release it here, or it is a leak the
+        // battery pays for.
+        releaseWakeLock();
         if (instance == this) {
             instance = null;
         }
@@ -396,6 +403,71 @@ public class MainActivity extends NativeActivity {
             self.reserveNavigationBar = reserve;
             self.applySystemBars();
         });
+    }
+
+    // ----------------------------------------------------------------- power
+    //
+    // The two halves of `monitor_core::power` on this platform, called from
+    // `monitor_gui::android`. `FLAG_KEEP_SCREEN_ON` is a window flag and needs
+    // no permission; a `PARTIAL_WAKE_LOCK` keeps the CPU running with the
+    // screen off, and uses the WAKE_LOCK permission the manifest declares.
+
+    /** The CPU wake lock, held only while the native side asks for it. */
+    private static PowerManager.WakeLock wakeLock;
+
+    /**
+     * Keeps the CPU running. The screen may still go off, which is the point of
+     * this half: a wall whose display is dark keeps pulling its streams.
+     */
+    public static void setPreventSleep(final boolean wanted) {
+        final MainActivity self = instance;
+        if (self == null) {
+            return;
+        }
+        self.runOnUiThread(() -> {
+            if (!wanted) {
+                releaseWakeLock();
+                return;
+            }
+            if (wakeLock == null) {
+                final PowerManager manager =
+                        (PowerManager) self.getSystemService(Context.POWER_SERVICE);
+                if (manager == null) {
+                    return;
+                }
+                wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "xgview:wall");
+            }
+            if (!wakeLock.isHeld()) {
+                wakeLock.acquire();
+            }
+        });
+    }
+
+    /**
+     * Keeps the screen on.
+     *
+     * <p>A window flag rather than a wake lock, so it goes away with the window
+     * and needs no matching release.
+     */
+    public static void setKeepScreenOn(final boolean wanted) {
+        final MainActivity self = instance;
+        if (self == null) {
+            return;
+        }
+        self.runOnUiThread(() -> {
+            if (wanted) {
+                self.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            } else {
+                self.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        });
+    }
+
+    /** Lets go of the wake lock, whoever is holding it. */
+    private static void releaseWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) {
+            wakeLock.release();
+        }
     }
 
     /**

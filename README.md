@@ -194,7 +194,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -NoBuild -N
 rustup target add aarch64-linux-android
 cargo install cargo-ndk
 
-# Build the native library (arm64-v8a, API 28 by default).
+# Build the native library (arm64-v8a, API 27 by default).
 scripts/build-android.sh
 
 # Or override the targets / API level.

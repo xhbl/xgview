@@ -34,8 +34,10 @@ param(
     # (space separated for several).
     [string]$Abis = 'arm64-v8a',
 
-    # Android API level (cargo-ndk -P).
-    [int]$Api = 28,
+    # Android API level (cargo-ndk -P). Kept equal to `minSdk` in
+    # android\app\build.gradle.kts, so the library is never compiled against a
+    # platform the manifest refuses to install on.
+    [int]$Api = 27,
 
     # Build the debug APK instead of the release one. It is signed with this
     # machine's debug key and carries android:debuggable, so it is for

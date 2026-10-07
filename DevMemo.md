@@ -713,8 +713,9 @@ the floor the APK installs at, and the feature set travels with the firmware's
 GPU driver, so whether a newer one offers `GL_KHR_debug` is a coin flip that
 can only be settled by upgrading and measuring again. Making this box work
 would mean a second renderer (`egui_glow` plus a GL path for the video
-textures), which is the thing the device is not worth. `minSdk` stays at 28 so
-that a device cannot install an app that aborts on its first frame.
+textures), which is the thing the device is not worth, so the floor was set at
+28 rather than letting a device install an app that aborts on its first frame
+(see section 18 for why it later moved to 27).
 
 **The panic hook earned its place here.** Without it the only trace was
 `SIGABRT` with a backtrace ending inside our own `.so`: a Rust panic cannot
@@ -983,4 +984,125 @@ reorder buffer would buy back the occasional whole picture at the price of
 adding latency to every picture, and that trade was not taken. And the write
 path has no deadline — a send buffer that fills blocks the pump — which is left
 as the back-pressure it is.
+
+---
+
+## 17. H.265: the decoder half is already there, the ingest half is not
+
+*Nothing in this section is implemented, and nothing was measured: no H.265
+camera has been in front of the viewer. It is what a reading of the code says
+the work would be, written down while the question was open so that the next
+person does not have to walk it again.*
+
+**The decoder half is already in place**, which is not what was expected. `Codec`
+has carried `H265` for a while — `from_encoding` answers both `H265` and `HEVC`,
+`mime()` answers `video/hevc` — and the FFmpeg backend already maps it:
+
+```rust
+let id = match config.codec {
+    Codec::H264 => Id::H264,
+    Codec::H265 => Id::HEVC,
+```
+
+So `create_decoder(Codec::H265)` already returns the FFmpeg decoder on the
+desktop and `AMediaCodec` on Android. The hardware path of §7 needs no change
+either: its `Device` table is keyed on the device and its pixel format, not on
+the codec, and libavcodec picks the HEVC mode of DXVA / VAAPI / CUDA itself.
+FFmpeg's software H.265 decoder is in the build, so hardware-refused-software-
+retried works as it does for H.264. NV12, the texture path of §6, the stall
+detector of §8 and everything above the decoder are untouched.
+
+**What is missing is entirely on the ingest side.** Five pieces, largest first:
+
+1. **An RFC 7798 depacketizer.** `H264Depacketizer` is the only one and
+   `run_session` sends everything that is not MJPEG through it, so an H.265
+   stream is misread rather than refused. HEVC over RTP is not H.264's shape: a
+   two byte NAL header with the type in `(byte0 >> 1) & 0x3f`, VPS / SPS / PPS
+   as three parameter sets (32 / 33 / 34) rather than two, an aggregation packet
+   (48) whose NAL units carry a two byte length prefix, and key frames found by
+   IRAP type 16-23 rather than by one IDR type. The bones of `h264.rs` carry
+   over — splitting on start codes, closing a picture on a timestamp change or a
+   marker, caching parameter sets by (type, id), `invalidate_current` on a
+   sequence gap — so it is a sibling module, not a new design.
+2. **An H.265 SPS parser, for the size.** `monitor_codec::sps` is H.264
+   throughout: `picture_size`, `sps_info` and `needs_constrained_baseline` all
+   index the H.264 layout. The desktop can do without it, because FFmpeg reads
+   the size from the bitstream; Android cannot, and §9 is why — a reader whose
+   size is not the stream's refuses every picture with `-30003`.
+3. **Three CSD buffers on Android.** The mime is already right, but H.265 wants
+   `csd-0` = VPS, `csd-1` = SPS, `csd-2` = PPS where `amediacodec.rs` writes
+   `csd-0` = SPS and `csd-1` = PPS.
+4. **The SDP.** `sprop-parameter-sets` is one comma separated field; H.265
+   advertises `sprop-vps`, `sprop-sps` and `sprop-pps` separately.
+5. **The guards.** `video_decoder` refuses everything but H.264 and MJPEG, and
+   the H.264-only calls in `run_session` (`access_unit_sps`,
+   `needs_constrained_baseline`, `constrain_baseline`) have to be skipped for
+   H.265. They are harmless as they stand — none of them finds an H.264 NAL type
+   inside an H.265 access unit, so they quietly do nothing.
+
+**Two ways the picture would still be wrong once it decodes.**
+
+- **The colour matrix.** The fragment shader of §6 writes BT.601 and nothing
+  else, while H.265 streams are normally tagged BT.709, often in the limited
+  range. The picture would arrive with the colours a step off. `ColorSpace.matrix`
+  is already read from the stream — it is the shader that ignores it — so this
+  is a uniform and a second matrix in the WGSL.
+- **Ten bits.** `Main 10` is a different problem: the whole path is NV12, eight
+  bits per sample, one layout. A ten bit stream would fail at decode or at the
+  copy back, not at the depacketizer.
+
+**What happens today if one is plugged in.** Nothing breaks, which is worth
+knowing before buying one: the channel connects, negotiates, keeps reporting its
+statistics and shows a placeholder, with a single `no decoder for this codec`
+warning to say why. That is deliberate — `video_decoder` documents it as what an
+`H265` camera *should* look like, rather than a channel that never stops
+reconnecting.
+
+**How the work would be cut.** The first step needs neither the SPS parser nor
+Android: the depacketizer plus the guards, with FFmpeg left to learn the size
+from the stream, is enough to put a picture on a desktop. The second is Android
+and the polish — SPS parser, CSD layout, `sprop-*`, colour matrix.
+
+**For whoever buys the cameras.** `Main` (eight bit) rather than `Main 10`, and
+a model that still offers an H.264 profile on another stream, so that the camera
+is usable before any of this lands.
+
+## 18. The floor moves to 27: a Mi Pad 4 that could not be installed
+
+A Mi Pad 4 (Snapdragon 660, Adreno 512) refused the APK with the installer's
+generic "there was a problem parsing the package". The package itself was
+sound: the cause was in `AndroidManifest.xml`, whose `minSdkVersion` was 28
+while the tablet runs MIUI 10.3.2 on **Android 8.1, which is API 27**. The
+PackageManager rejects a manifest asking for a newer platform than the device
+offers (`INSTALL_FAILED_OLDER_SDK`), and the installer reports that as the same
+parse failure it shows for a truncated download, which is what makes this worth
+writing down. The ABI was never in question: the tablet is `arm64-v8a`, the one
+the build produces.
+
+The floor of 28 came from §12, and that reasoning does not cover this device. It
+was about a driver - the MT8693's PowerVR has no Vulkan and no `GL_KHR_debug`,
+so wgpu's GL backend finds no `glObjectLabel` and the process aborts on its
+first frame. An Adreno 512 has Vulkan, so wgpu should take its Vulkan backend
+and never reach that GL path at all. That is the assumption to confirm on the
+device; if it does not hold, §12's panic hook is what will name the failure in
+`adb logcat -s xgview` rather than leaving a `SIGABRT` with no message.
+
+Nothing else in the tree needs API 28, which is why lowering the floor is the
+whole fix:
+
+- The native library's `NEEDED` list stays what §12 measured - `liblog`,
+  `libandroid`, `libdl`, `libmediandk`, `libm`, `libc`, all API 21.
+- The Android decoder asks `AMediaCodec` and `AMediaFormat` only (API 21), and
+  reads pictures out in byte-buffer mode rather than through an `AImageReader`
+  (API 24); see §9 for why that path was chosen.
+- The configuration export already branches below Android 10: the
+  `MediaStore` route is `Q` and up, and the plain write below it needs
+  `WRITE_EXTERNAL_STORAGE`, which the manifest declares with
+  `android:maxSdkVersion="28"` - so API 27 still holds the permission that
+  route depends on.
+
+`minSdk` is 27 now, and both build scripts were moved with it - the API level
+the library is compiled against should not sit above the one the manifest
+installs on (`-Api` in `scripts/build-android.ps1`, `API` in
+`scripts/build-android.sh`).
 

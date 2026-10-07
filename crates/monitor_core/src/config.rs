@@ -189,6 +189,16 @@ pub struct AppConfig {
     /// wall, instead of hiding it and drawing under it. Ignored on the other
     /// platforms, which have no such bar.
     pub reserve_navigation_bar: bool,
+    /// Keep the machine awake while the wall is up, so a system that sleeps
+    /// does not cut the streams. See [`crate::power`] for what each platform
+    /// does with it, and for the platforms where it is not available.
+    pub prevent_sleep: bool,
+    /// Keep the display on while the wall is up.
+    ///
+    /// Asking for this also asks the system not to sleep: a screen that stays
+    /// lit while the system suspends underneath it is not a state worth being
+    /// able to ask for, and [`crate::power`] normalises the two.
+    pub keep_screen_on: bool,
     /// Interface language: a BCP-47 tag such as `zh-CN`, `auto` to follow the
     /// operating system, or `en` for English. A language that is not installed
     /// (no matching `.ftl` pack) falls back to English.
@@ -225,6 +235,8 @@ impl Default for AppConfig {
             autostart: false,
             start_fullscreen: false,
             reserve_navigation_bar: true,
+            prevent_sleep: true,
+            keep_screen_on: true,
             language: "auto".to_string(),
             prefer_hardware_decode: true,
             reconnect: ReconnectPolicy::default(),

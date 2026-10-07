@@ -175,6 +175,42 @@ fn call_void(method: &str) {
     let _ = env.call_static_method(class, method, "()V", &[]);
 }
 
+/// Asks Android to keep the CPU running and/or the screen on.
+///
+/// Installed as `monitor_core::power`'s Android implementation, because the two
+/// halves are Java's - a `PARTIAL_WAKE_LOCK` from `PowerManager`, and
+/// `FLAG_KEEP_SCREEN_ON` on the activity's window - and this is where the
+/// bridge to the activity lives.
+///
+/// A call that did not reach the activity is reported rather than swallowed:
+/// the two are separate requests on this platform, the panel shows the failure
+/// under the switches, and a wake request that silently did nothing is the one
+/// thing this module exists to avoid.
+pub fn set_keep_awake(system: bool, display: bool) -> monitor_core::Result<()> {
+    let sleep = call_void_bool("setPreventSleep", system);
+    let screen = call_void_bool("setKeepScreenOn", display);
+    if sleep && screen {
+        return Ok(());
+    }
+    Err(monitor_core::CoreError::unsupported(
+        "the activity did not take the wake request",
+    ))
+}
+
+/// Calls a Java static method taking one `boolean`, reporting whether it ran.
+fn call_void_bool(method: &str, value: bool) -> bool {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return false;
+    };
+    let called = env
+        .call_static_method(class, method, "(Z)V", &[JValue::Bool(u8::from(value))])
+        .is_ok();
+    // Cleared, as everywhere else here: an exception left pending aborts the
+    // process on the next JNI call.
+    clear_exception(&mut env);
+    called
+}
+
 fn class() -> Option<&'static GlobalRef> {
     crate::keyboard::activity_class()
 }
