@@ -17,6 +17,7 @@
 //! Neither socket nor decoder ever runs on the UI thread.
 
 pub mod app;
+pub mod blackout;
 pub mod controls;
 pub mod dialogs;
 pub mod fonts;

@@ -207,6 +207,9 @@ pub struct Scheduler {
     zoom: Option<usize>,
     channel_count: usize,
     current: Option<Schedule>,
+    /// Set while the wall is blacked out: every channel is parked regardless of
+    /// what the grid is showing.
+    suspended: bool,
 }
 
 impl Scheduler {
@@ -223,6 +226,7 @@ impl Scheduler {
             zoom: None,
             channel_count,
             current: None,
+            suspended: false,
         };
         scheduler.normalize();
         scheduler
@@ -268,6 +272,24 @@ impl Scheduler {
     pub fn set_channel_count(&mut self, count: usize) {
         self.channel_count = count;
         self.normalize();
+    }
+
+    /// Parks every channel, or lets them back on screen, and reports whether
+    /// that was a change.
+    ///
+    /// It goes through the ordinary schedule rather than around it: the diff
+    /// that stops the streams is the same one a layout change uses, so a
+    /// channel is parked exactly the way it is parked when the page turns, and
+    /// turning this off activates precisely what the grid is showing now.
+    pub fn set_suspended(&mut self, suspended: bool) -> bool {
+        let changed = self.suspended != suspended;
+        self.suspended = suspended;
+        changed
+    }
+
+    /// Whether the wall is blacked out.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended
     }
 
     pub fn set_layout(&mut self, layout: GridLayout) {
@@ -436,7 +458,12 @@ impl Scheduler {
             .iter()
             .enumerate()
             .map(|(index, camera)| {
-                let mode = if live.contains(&index) {
+                let mode = if self.suspended {
+                    // A blacked-out wall shows nothing, so nothing needs to be
+                    // pulled or decoded: the point of this mode is that no
+                    // socket stays open and no decoder stays running.
+                    ChannelMode::Suspend
+                } else if live.contains(&index) {
                     ChannelMode::Decode(if main_stream { StreamKind::Main } else { StreamKind::Sub })
                 } else {
                     ChannelMode::Suspend
@@ -547,6 +574,33 @@ mod tests {
         assert_eq!(schedule.page_info.page_count, 2);
         assert_eq!(schedule.live().count(), 16);
         assert_eq!(schedule.mode_of(16), ChannelMode::Suspend);
+    }
+
+    #[test]
+    fn a_blacked_out_wall_parks_every_channel_and_lets_them_back() {
+        let cameras = cameras(4);
+        let mut scheduler = Scheduler::new(GridLayout::G2x2, 0, Some(0), cameras.len());
+        assert_eq!(scheduler.refresh(&cameras).len(), 4);
+
+        // Blacking out parks all of them, and it does so through the ordinary
+        // diff rather than around it, so the streams are stopped the same way a
+        // page turn stops them.
+        assert!(scheduler.set_suspended(true));
+        let changes = scheduler.refresh(&cameras);
+        assert_eq!(changes.len(), 4);
+        assert!(changes.iter().all(|change| matches!(change, ScheduleChange::Suspend { .. })));
+        assert!(scheduler.schedule(&cameras).plans.iter().all(|plan| plan.mode.is_suspended()));
+
+        // Asking for the same thing again is not a change, so it redoes nothing.
+        assert!(!scheduler.set_suspended(true));
+        assert!(scheduler.refresh(&cameras).is_empty());
+
+        // Coming out of it activates exactly what the grid is showing.
+        assert!(scheduler.set_suspended(false));
+        let changes = scheduler.refresh(&cameras);
+        assert_eq!(changes.len(), 4);
+        assert!(changes.iter().all(|change| matches!(change, ScheduleChange::Activate { .. })));
+        assert_eq!(scheduler.schedule(&cameras).live().count(), 4);
     }
 
     /// The 1x1 layout is a grid like any other: it pulls the sub stream, and

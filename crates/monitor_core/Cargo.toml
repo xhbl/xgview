@@ -33,5 +33,10 @@ monitor_codec = { path = "../monitor_codec" }
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
 
+# `localtime_r` for the blackout schedule's local clock. Already in the tree
+# through the async runtime, so naming it costs nothing new.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

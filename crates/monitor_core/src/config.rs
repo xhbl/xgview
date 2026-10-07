@@ -172,6 +172,152 @@ impl SynologyConfig {
     }
 }
 
+/// Minutes in a week: the span a blackout window is measured against.
+pub const MINUTES_PER_WEEK: u32 = 7 * 24 * 60;
+
+/// Every day of the week, bit 0 = Monday.
+pub const EVERY_DAY: u8 = 0b0111_1111;
+
+/// One period during which the wall blacks itself out.
+///
+/// The times are minutes from midnight, and an end that is **not after** its
+/// start runs past midnight into the next day - 22:00 to 07:00 is the ordinary
+/// case of a night and has to be expressible. An end equal to the start lasts a
+/// full day from that start time, which is the only reading that leaves no
+/// window unusable.
+///
+/// Blacking out is not a sleep. The process stays up and keeps its window on
+/// screen showing nothing, so the display is never asked to power down and come
+/// back; what stops is the work - every camera socket is closed, no decoder is
+/// left running. See [`crate::blackout`] for the clock and the evaluation, and
+/// [`crate::scheduler`] for what parks a channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlackoutWindow {
+    /// Whether the period is in force. An unchecked entry is kept rather than
+    /// deleted, so one that is only unwanted for now can be turned back on.
+    pub enabled: bool,
+    /// Days the period starts on, bit 0 = Monday … bit 6 = Sunday.
+    pub days: u8,
+    /// Start, minutes from midnight.
+    pub start: u16,
+    /// End, minutes from midnight.
+    pub end: u16,
+}
+
+impl Default for BlackoutWindow {
+    /// Every day, 22:00 to 07:00: what "at night" means to most people, so a
+    /// new entry is useful before it has been edited.
+    fn default() -> Self {
+        Self { enabled: true, days: EVERY_DAY, start: 22 * 60, end: 7 * 60 }
+    }
+}
+
+impl BlackoutWindow {
+    /// How long the period lasts, in minutes. Never zero: an end equal to the
+    /// start lasts a full day from the start time.
+    pub fn duration(&self) -> u32 {
+        let start = self.start.min(24 * 60 - 1) as u32;
+        let end = self.end.min(24 * 60 - 1) as u32;
+        match end.cmp(&start) {
+            std::cmp::Ordering::Greater => end - start,
+            std::cmp::Ordering::Equal => 24 * 60,
+            std::cmp::Ordering::Less => 24 * 60 - start + end,
+        }
+    }
+
+    /// Whether `minute_of_week` (0 = Monday 00:00) falls inside the period.
+    pub fn covers(&self, minute_of_week: u32) -> bool {
+        self.minutes_left(minute_of_week).is_some()
+    }
+
+    /// Minutes from `minute_of_week` until the period ends, or `None` when it
+    /// does not cover that moment.
+    ///
+    /// The same arithmetic as [`Self::covers`] used to repeat, kept in one place
+    /// because the answer it gives is what says which of several periods a
+    /// viewer is actually inside.
+    fn minutes_left(&self, minute_of_week: u32) -> Option<u32> {
+        if !self.enabled || self.days == 0 {
+            return None;
+        }
+        let duration = self.duration();
+        // The longest a period can be is a whole day, so at most one of its
+        // windows is running at any moment; the largest is taken anyway, so
+        // that a change to that limit cannot quietly shorten the answer.
+        (0..7u32)
+            .filter_map(|day| {
+                if self.days & (1 << day) == 0 {
+                    return None;
+                }
+                let start = day * 24 * 60 + self.start as u32;
+                let elapsed = (minute_of_week + MINUTES_PER_WEEK - start) % MINUTES_PER_WEEK;
+                (elapsed < duration).then(|| duration - elapsed)
+            })
+            .max()
+    }
+}
+
+/// The periods during which the wall blacks itself out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Blackout {
+    /// Whether the schedule is in force at all. The periods below are kept
+    /// while this is off, so it is a switch rather than a way to delete them.
+    pub enabled: bool,
+    /// Minutes to wait after an interruption before blanking again. An
+    /// interruption is any input at all, so this is what keeps the wall visible
+    /// while somebody is using the machine. `0` means the interruption lasts
+    /// the rest of the period.
+    pub resume_after_minutes: u16,
+    pub entries: Vec<BlackoutWindow>,
+}
+
+impl Default for Blackout {
+    /// Off, one minute, no periods.
+    ///
+    /// Off, because this switch is the one that stops the wall showing anything
+    /// at all: a setting nobody has touched should not be able to blank a
+    /// viewer's screen, and a configuration written before this existed keeps
+    /// behaving the way it did. Adding a period is then a second, deliberate
+    /// step - and the switch has to be turned on for either to matter.
+    fn default() -> Self {
+        Self { enabled: false, resume_after_minutes: 1, entries: Vec::new() }
+    }
+}
+
+impl Blackout {
+    /// Whether any period is in force at `minute_of_week`.
+    pub fn covers(&self, minute_of_week: u32) -> bool {
+        self.entries.iter().any(|entry| entry.covers(minute_of_week))
+    }
+
+    /// The period in force at `minute_of_week` that lasts longest.
+    ///
+    /// With several periods in force at once - they are a union, so any one of
+    /// them is enough - what a viewer wants to know is when the last of them
+    /// lets go, not which one happened to be written first. The wall stays black
+    /// until that one ends.
+    pub fn covering(&self, minute_of_week: u32) -> Option<&BlackoutWindow> {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.minutes_left(minute_of_week).map(|left| (left, entry)))
+            .max_by_key(|(left, _)| *left)
+            .map(|(_, entry)| entry)
+    }
+
+    /// `true` when no period could ever come into force, so the caller can say
+    /// so rather than leave the list looking like it does something.
+    pub fn is_empty(&self) -> bool {
+        !self.entries.iter().any(|entry| entry.enabled && entry.days != 0)
+    }
+
+    /// Whether the schedule is switched on.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
 /// Persisted application configuration (`config.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -217,6 +363,8 @@ pub struct AppConfig {
     pub handshake_timeout_ms: u64,
     pub discovery: DiscoveryConfig,
     pub synology: SynologyConfig,
+    /// Periods during which the wall blanks itself and lets the streams go.
+    pub blackout: Blackout,
     /// What each corner of a tile shows. It is a property of the wall rather
     /// than of a camera: a viewer reads the same thing in the same corner
     /// wherever they look.
@@ -243,6 +391,7 @@ impl Default for AppConfig {
             handshake_timeout_ms: 15_000,
             discovery: DiscoveryConfig::default(),
             synology: SynologyConfig::default(),
+            blackout: Blackout::default(),
             osd: Osd::default(),
             cameras: Vec::new(),
         }

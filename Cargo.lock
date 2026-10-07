@@ -2219,7 +2219,7 @@ dependencies = [
 
 [[package]]
 name = "monitor_android"
-version = "1.1.81"
+version = "1.2.90"
 dependencies = [
  "android-activity",
  "eframe",
@@ -2231,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "monitor_codec"
-version = "1.1.81"
+version = "1.2.90"
 dependencies = [
  "bytes",
  "ffmpeg-next",
@@ -2246,13 +2246,14 @@ dependencies = [
 
 [[package]]
 name = "monitor_core"
-version = "1.1.81"
+version = "1.2.90"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bytes",
  "crossbeam-channel",
  "futures",
+ "libc",
  "md-5",
  "monitor_codec",
  "regex",
@@ -2272,7 +2273,7 @@ dependencies = [
 
 [[package]]
 name = "monitor_gui"
-version = "1.1.81"
+version = "1.2.90"
 dependencies = [
  "android-activity",
  "anyhow",
@@ -2293,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "monitor_i18n"
-version = "1.1.81"
+version = "1.2.90"
 dependencies = [
  "fluent-bundle",
  "sys-locale",
@@ -5260,7 +5261,7 @@ checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
 
 [[package]]
 name = "xgview"
-version = "1.1.81"
+version = "1.2.90"
 dependencies = [
  "anyhow",
  "monitor_codec",

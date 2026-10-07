@@ -24,6 +24,7 @@ settings-language-hint = Interface language. A new language appears here as soon
 settings-tab-display = Display
 settings-tab-cameras = Cameras
 settings-tab-streams = Streams
+settings-tab-blackout = Blackout
 settings-tab-system = System
 settings-tab-about = About
 settings-tab-cameras-count = Cameras ({ $count })
@@ -59,6 +60,30 @@ key-page = previous / next
 key-settings = settings
 key-add-devices = add devices
 key-fullscreen = full screen
+
+## Settings / Blackout
+settings-blackout = Blackout
+settings-blackout-hint = During these scheduled hours, the display wall goes fully dark and all cameras stop capturing: sockets are closed and decoding is halted to conserve resources. This state does not constitute system standby or sleep.
+settings-blackout-on = Blackout during selected schedules
+settings-blackout-off = Blackout is switched off.
+settings-blackout-resume = Blackout again after
+settings-blackout-minutes =  min
+settings-blackout-resume-hint = Specifies the standby timeout (minutes) for the wall to return back to blackout after being activated. Set to 0 to stay active until the schedules end.
+settings-blackout-active = Blackout until { $until }.
+settings-blackout-idle = No schedule is in force now.
+settings-blackout-empty = No schedules yet: the wall never blacks itself out.
+settings-blackout-enabled = whether this schedule is in force
+settings-blackout-days = days
+settings-blackout-to = to
+settings-blackout-remove = remove this schedule
+settings-blackout-add = Add a schedule
+settings-day-mon = Mon
+settings-day-tue = Tue
+settings-day-wed = Wed
+settings-day-thu = Thu
+settings-day-fri = Fri
+settings-day-sat = Sat
+settings-day-sun = Sun
 
 ## Settings / Streams
 streams-hint = The multi grid pulls the sub stream and the zoom-in viewport pulls the main stream.
@@ -181,8 +206,8 @@ toast-imported-document =
        *[other] { $count } cameras
     } from the picked file
 toast-import-failed = cannot import: { $error }
-toast-started-autostart = XGView { $version } started automatically ({ $decoder } decoder)
-toast-started = XGView { $version } — { $decoder } decoder
+toast-started-autostart = XGView v{ $version } started automatically ({ $decoder } decoder)
+toast-started = XGView v{ $version } — { $decoder } decoder
 toast-camera-added = added { $name }
 toast-camera-import-failed = { $name }: { $error }
 toast-synology-found =

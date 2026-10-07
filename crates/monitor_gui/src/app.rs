@@ -263,22 +263,32 @@ struct Toast {
 
 /// Page of the settings side panel.
 ///
-/// The panel used to be one long column. Five sections of it are read by five
+/// The panel used to be one long column. Six sections of it are read by
 /// different people - the wall's layout, the camera list, the stream policy,
-/// the machine it runs on, and the version - and scrolling past four of them to
-/// reach the fifth is what the tabs remove.
+/// the machine it runs on, the hours it blanks itself, and the version - and
+/// scrolling past five of them to reach the sixth is what the tabs remove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SettingsTab {
     #[default]
     Display,
     Cameras,
     Streams,
+    Blackout,
     System,
     About,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 5] = [Self::Display, Self::Cameras, Self::Streams, Self::System, Self::About];
+    /// How many there are.
+    ///
+    /// Named so that anything holding one entry per tab - the strip's ids, for
+    /// one - is sized from the list itself and cannot fall behind it. It did:
+    /// a sixth tab read past the end of a five-entry array and took the whole
+    /// panel down on the frame it was opened.
+    const COUNT: usize = 6;
+
+    const ALL: [Self; Self::COUNT] =
+        [Self::Display, Self::Cameras, Self::Streams, Self::Blackout, Self::System, Self::About];
 
     fn label(self) -> &'static str {
         match self {
@@ -286,6 +296,7 @@ impl SettingsTab {
             Self::Cameras => "settings-tab-cameras",
             Self::Streams => "settings-tab-streams",
             Self::System => "settings-tab-system",
+            Self::Blackout => "settings-tab-blackout",
             Self::About => "settings-tab-about",
         }
     }
@@ -400,6 +411,11 @@ pub struct XgViewApp {
     /// What the platform is holding awake, and why it might be holding nothing.
     /// Kept so the panel can say whether the switches took.
     power: PowerStatus,
+    /// The blank the schedule asks for, and the mark that wanders over it.
+    blackout: crate::blackout::BlackoutState,
+    /// Whether the wall was blank on the last frame, so that going into and out
+    /// of it is acted on once rather than on every frame of it.
+    blackout_on: bool,
     decoder: &'static str,
     hardware_decoder: bool,
     /// Whether hardware and software decoding can be chosen between here. Left
@@ -658,6 +674,8 @@ impl XgViewApp {
             body_scroll: None,
             dialog_handoff: Handoff::default(),
             discovery,
+            blackout: crate::blackout::BlackoutState::new(),
+            blackout_on: false,
             slide: Slide::default(),
             needs_sync: true,
             dirty: false,
@@ -2200,9 +2218,75 @@ impl XgViewApp {
                 self.slide.outgoing = None;
             }
         }
+        self.blackout.advance(dt);
+    }
+
+    /// Settles whether the wall is blank on this frame, and keeps the rest of
+    /// the program out of the way while it is.
+    fn update_blackout(&mut self, ctx: &egui::Context) {
+        let mut on = self.blackout.evaluate(&self.config.blackout, self.time);
+        if on && self.blackout.notice_input(ctx, self.time) {
+            // Input asks for the wall back, and how long it stays back is the
+            // schedule's own setting: the wall is not simply left visible, and
+            // it is not taken away again a second later either.
+            on = false;
+        }
+        // The streams follow the blank exactly. It is asked of the scheduler
+        // rather than done to the channels, so they are parked the way a page
+        // turn parks them, and the same diff brings back what the grid is
+        // showing once the blank ends.
+        if self.scheduler.set_suspended(on) {
+            self.needs_sync = true;
+        }
+        if self.blackout_on != on {
+            self.blackout_on = on;
+            tracing::info!(
+                target: "xgview::blackout",
+                blank = on,
+                channels_parked = self.scheduler.is_suspended(),
+                "the wall's blank changed"
+            );
+            self.apply_power_for_blackout();
+        }
+        if on {
+            // Nothing behind the blank may act on this frame's input: a click
+            // aimed at a black screen must not press a button that cannot be
+            // seen, and the pointer should not be there to aim with either.
+            ctx.input_mut(|input| input.events.clear());
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
+    }
+
+    /// Asks for what the settings imply, and for what the blank needs on top.
+    ///
+    /// A blank wall is a reason to keep the display awake that the viewer did
+    /// not choose, and it has to outrank the setting: a screen that goes black
+    /// and is then powered down is the state this feature exists to avoid. What
+    /// the viewer chose is left alone - the blank borrows the request, it does
+    /// not change it.
+    fn apply_power_for_blackout(&mut self) {
+        if !power::is_supported() {
+            return;
+        }
+        let blackout = self.blackout_on;
+        let prevent_sleep = self.config.prevent_sleep || blackout;
+        let keep_screen_on = self.config.keep_screen_on || blackout;
+        if let Err(err) = power::apply(prevent_sleep, keep_screen_on) {
+            tracing::warn!(
+                target: "xgview::power",
+                %err,
+                blackout,
+                "cannot hold the machine awake for the blank"
+            );
+        }
+        self.power = power::status();
     }
 
     fn needs_animation(&self) -> bool {
+        // The mark breathes, so a blank wall is never still.
+        if self.blackout_on {
+            return true;
+        }
         if self.slide.is_animating() || self.discovery.running || self.discovery.synology_busy {
             return true;
         }
@@ -2478,7 +2562,7 @@ impl XgViewApp {
         // between the tabs and select as they land - the panel follows the
         // focus the way it follows a click - and Down drops into the body.
         ui.horizontal_wrapped(|ui| {
-            let mut ids = [Id::NULL; 5];
+            let mut ids = [Id::NULL; SettingsTab::COUNT];
             let mut focused = None;
             self.nav.open("settings-tabs");
             for (slot, tab) in SettingsTab::ALL.into_iter().enumerate() {
@@ -2540,6 +2624,7 @@ impl XgViewApp {
                     SettingsTab::Cameras => self.settings_cameras(ui),
                     SettingsTab::Streams => self.settings_streams(ui),
                     SettingsTab::System => self.settings_system(ui),
+                    SettingsTab::Blackout => self.settings_blackout(ui),
                     SettingsTab::About => {
                         self.settings_about(ui);
                         false
@@ -2729,6 +2814,140 @@ impl XgViewApp {
         // what the panel says is held should be what is held.
         self.power = power::status();
         true
+    }
+
+    /// The hours the wall blacks itself out, and what that does.
+    fn settings_blackout(&mut self, ui: &mut egui::Ui) -> bool {
+        // The tab strip already says which tab this is, so the body opens with
+        // its hint - small and dim, as the other tabs open.
+        ui.label(
+            RichText::new(monitor_i18n::tr("settings-blackout-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+        ui.add_space(theme::space::M);
+
+        // The navigation layer and the schedule are taken as locals for the
+        // whole body: its rows are drawn inside layout closures, and a closure
+        // cannot borrow `self` while the rows are walking it.
+        let nav = &mut self.nav;
+        let blackout = &mut self.config.blackout;
+        let enabled = blackout.enabled;
+        let mut dirty = false;
+
+        // The switch comes first because everything below it is inert while it
+        // is off, and the rows are greyed rather than hidden so that what is
+        // being switched off can still be read. Named above itself, the way the
+        // other tabs name a block and put its controls under it.
+        ui.label(RichText::new(monitor_i18n::tr("settings-blackout-on")).strong());
+        let switch = ui.checkbox(&mut blackout.enabled, "");
+        nav.item(&switch);
+        dirty |= switch.changed();
+
+        // The wait after an interruption. Zero is a real choice - the
+        // interruption then lasts the period out - so it is a slider value
+        // rather than something hidden behind a checkbox.
+        let resume = controls::slider(
+            nav,
+            ui,
+            &mut blackout.resume_after_minutes,
+            0..=60,
+            1.0,
+            &monitor_i18n::tr("settings-blackout-minutes"),
+            &monitor_i18n::tr("settings-blackout-resume"),
+            1,
+        );
+        dirty |= resume.changed();
+        // Shown whether or not the wait is zero: what zero means has to be
+        // readable at the moment it is chosen.
+        ui.label(
+            RichText::new(monitor_i18n::tr("settings-blackout-resume-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+        ui.add_space(theme::space::M);
+
+        // Which period is in force, or why none can be: a viewer should be able
+        // to tell a wall that is about to blank from one that will not.
+        let status = if !blackout.enabled {
+            monitor_i18n::tr("settings-blackout-off")
+        } else if let Some(window) = monitor_core::blackout::current(blackout) {
+            monitor_i18n::tr_args(
+                "settings-blackout-active",
+                &[("until", monitor_core::blackout::format_clock(window.end).into())],
+            )
+        } else if blackout.is_empty() {
+            monitor_i18n::tr("settings-blackout-empty")
+        } else {
+            monitor_i18n::tr("settings-blackout-idle")
+        };
+        ui.label(RichText::new(status).small().color(theme::TEXT_DIM));
+        ui.add_space(theme::space::M);
+
+        // Borrowed only now, so that the status line above could read the whole
+        // schedule: a mutable borrow of the entries would have excluded it.
+        let entries = &mut blackout.entries;
+        let mut remove = None;
+        ui.add_enabled_ui(enabled, |ui| {
+            for (index, window) in entries.iter_mut().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    let switch = ui.checkbox(&mut window.enabled, "");
+                    nav.item(&switch);
+                    dirty |= switch.changed();
+                    // Last, because it takes the response with it.
+                    switch.on_hover_text(monitor_i18n::tr("settings-blackout-enabled"));
+
+                    ui.label(monitor_i18n::tr("settings-blackout-days"));
+                    for day in 0..7u8 {
+                        let on = window.days & (1 << day) != 0;
+                        let label = monitor_i18n::tr(crate::blackout::DAY_KEYS[usize::from(day)]);
+                        let toggle = ui.selectable_label(on, label);
+                        nav.item(&toggle);
+                        if toggle.clicked() {
+                            window.days ^= 1 << day;
+                            dirty = true;
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    dirty |= clock_field(nav, ui, &mut window.start);
+                    ui.label(monitor_i18n::tr("settings-blackout-to"));
+                    dirty |= clock_field(nav, ui, &mut window.end);
+                    let trash = icons::button(
+                        ui,
+                        icons::Icon::Trash,
+                        false,
+                        &monitor_i18n::tr("settings-blackout-remove"),
+                    );
+                    nav.item(&trash);
+                    if trash.clicked() {
+                        remove = Some(index);
+                    }
+                });
+                ui.add_space(8.0);
+            }
+
+            if let Some(index) = remove {
+                entries.remove(index);
+                dirty = true;
+            }
+            let add = ui.add_enabled(
+                enabled,
+                egui::Button::new(monitor_i18n::tr("settings-blackout-add")),
+            );
+            nav.item(&add);
+            if add.clicked() {
+                entries.push(monitor_core::config::BlackoutWindow::default());
+                dirty = true;
+            }
+        });
+
+        if dirty {
+            // The blank is worked out from the configuration on every frame, so
+            // there is nothing to hand to anything: the next frame acts on this.
+            self.needs_sync = true;
+        }
+        dirty
     }
 
     /// What the box does around the viewer: it starts it at boot, and it is the
@@ -3962,9 +4181,54 @@ impl XgViewApp {
     }
 }
 
+/// A clock field for a blackout time, reporting whether it was changed.
+///
+/// A `DragValue` in the shape [`controls::drag_value`] gives the other tabs -
+/// the same navigation entry, the same Left/Right stepping, the same trick of
+/// applying the step before the widget runs - with the clock's own formatting on
+/// top: the value is a minute of the day, it reads as `HH:MM`, and typing
+/// `07:00` into it is what anyone would try.
+fn clock_field(nav: &mut crate::nav::Nav, ui: &mut egui::Ui, minutes: &mut u16) -> bool {
+    let id = ui.next_auto_id();
+    let steps = f64::from(nav.value_step());
+    let mut value = f64::from(*minutes);
+    if steps != 0.0 && ui.memory(|memory| memory.has_focus(id)) {
+        value = (value + steps * 5.0).clamp(0.0, 1439.0);
+        // The focused field is showing a text buffer of its own rather than the
+        // value behind it, so the step would otherwise be invisible until the
+        // focus left - the tab had to be left and come back to see it. Clearing
+        // the buffer makes it regenerate the text from the new value in this
+        // frame. This is the second half of the trick, not an extra: see the
+        // note on `controls::drag_value`, which does the same.
+        ui.data_mut(|data| data.remove_temp::<String>(id));
+    }
+    let response = ui.add(
+        egui::DragValue::new(&mut value)
+            .range(0.0..=1439.0)
+            .speed(5.0)
+            .custom_formatter(|value, _| {
+                monitor_core::blackout::format_clock(value.round().clamp(0.0, 1439.0) as u16)
+            })
+            .custom_parser(|text| monitor_core::blackout::parse_clock(text).map(f64::from)),
+    );
+    nav.item_kind(crate::nav::Kind::DragValue, &response);
+    let changed = response.changed() || value != f64::from(*minutes);
+    if changed {
+        *minutes = value.round().clamp(0.0, 1439.0) as u16;
+    }
+    changed
+}
+
 impl eframe::App for XgViewApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.time = ctx.input(|input| input.time);
+
+        // Settled before anything else is drawn: whether the wall is blank
+        // decides what the rest of the frame does, and the input that asks for
+        // it back has to be out of the queue before a widget can read it - one
+        // click must not both wake the wall and press whatever is behind the
+        // black.
+        self.update_blackout(ctx);
 
         // The start-up full screen is asked for here, on the first frame the
         // window is on its monitor, rather than on the viewport builder: asked
@@ -4026,7 +4290,12 @@ impl eframe::App for XgViewApp {
             self.swallow_enter -= 1;
             ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
         }
-        self.handle_keys(ctx);
+        // While the wall is blank the keys belong to it: `update_blackout` has
+        // already emptied the queue, and skipping this stops a held modifier
+        // from being read as a shortcut.
+        if !self.blackout_on {
+            self.handle_keys(ctx);
+        }
         // The reorder mode belongs to the Cameras tab: leaving the tab, or the
         // panel, drops the arrangement that was being previewed. The focus is
         // not sent back - the control it would return to is leaving too.
@@ -4206,6 +4475,11 @@ impl eframe::App for XgViewApp {
 
         self.draw_toast(ctx);
         self.draw_exit_hint(ctx);
+        // After everything else, and on its own layer: the blank covers the
+        // toolbar, the status bar and the tiles, not only the wall.
+        if self.blackout_on {
+            self.blackout.draw(ctx, self.time);
+        }
         self.autosave();
 
         // A panel that appears takes the remote's focus, once: without it the
