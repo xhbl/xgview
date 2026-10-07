@@ -1,77 +1,113 @@
-# XGView 多语言（i18n）方案
+# XGView internationalisation (i18n)
 
-> 状态：方案归档，暂未实施。
-> 选型：Fluent `.ftl` 语言包，运行时加载，可只翻部分并回退英文。
+> Status: **implemented**. Interface text is keyed and translated at run time
+> through Fluent (`.ftl`) language packs. English is embedded in the binary;
+> every other language is an external file that may be partial and falls back
+> to English.
 
-## 1. 背景与现状
+## 1. Where the strings were, and where they are now
 
-当前仓库**没有任何 i18n / locale / 翻译相关代码或依赖**，全部界面文案为英文硬编码，约 **350+ 条**，分布如下：
+The repository started with no i18n at all: every interface string was a
+hard-coded English literal, some 350 of them. They are now Fluent message keys
+resolved against the active pack, and `monitor_core` no longer returns finished
+wording - it returns the key, and the UI layer translates it.
 
-| 文件 | 约数 | 说明 |
-|---|---|---|
-| `crates/monitor_gui/src/app.rs` | 200+ | 设置面板、状态栏、toast、About、键盘表 |
-| `crates/monitor_gui/src/dialogs.rs` | 120+ | Add devices 三个 tab、字段名、校验消息 |
-| `crates/monitor_core/src/model.rs` | ~30 | 枚举 `label()/as_str()/tag()`，被全 UI 引用 |
-| `crates/monitor_gui/src/grid.rs` | ~15 | tile OSD 文案 |
-| `crates/monitor_core/src/error.rs` | 10 | `thiserror` 错误前缀 |
-| `src/main.rs` | ~15 | HELP、命令行输出 |
-| `layout.rs` / `discovery/mod.rs` / `autostart.rs` | 若干 | 隐式上屏文案 |
+Key ownership, after the migration:
 
-**字体现状**：`crates/monitor_gui/src/fonts.rs` 已从系统加载 UI / Mono / CJK 三类字体，CJK 面追加到字体族末尾兜底，中文/日文/韩文字形可正常渲染。**唯一细节风险**：`CJK_FACES` 只取 Noto CJK 的 **SC（简体）字形面**（`fonts.rs:113/120/122/123` 的 `index: 2`），切到日文时同源汉字会显示简体字形。
+| Area | What it owns |
+|---|---|
+| `crates/monitor_gui/src/app.rs` | settings panel, status bar, toasts, About, key list, power and blackout tabs |
+| `crates/monitor_gui/src/dialogs.rs` | the three "Add devices" tabs, field labels, validation messages |
+| `crates/monitor_gui/src/grid.rs` | tile OSD text (stream tags, decoder mode, and the corner items) |
+| `crates/monitor_gui/src/blackout.rs` | weekday keys for the blackout schedule |
+| `crates/monitor_core/src/model.rs` | `StreamKind` / `ConnectionState` / `CameraOrigin` / `TileAspect` / `OsdItem` labels, returned as keys |
+| `crates/monitor_core/src/discovery/mod.rs` | discovery stage keys (`discovery-source-*`) |
+| `crates/monitor_core/src/autostart.rs`, `power.rs` | mechanism keys (`autostart-mechanism-*`, `power-mechanism-*`) |
+| `src/main.rs` | command line help - English only, see §12 |
 
-**配置现状**：`crates/monitor_core/src/config.rs:154` 的 `AppConfig` 为 serde + JSON，类上有 `#[serde(default)]`，新增字段对旧 `config.json` 完全兼容，无需迁移、无需升 `CONFIG_VERSION`。
+## 2. Goals and constraints
 
-## 2. 目标与约束
+- Default English; interface text decoupled from the code.
+- Languages are **external files**: drop a pack in and it takes effect, no
+  rebuild required.
+- A pack may translate only part of the interface; missing keys fall back to
+  English and then to the key itself.
+- Correct Chinese / Japanese / Korean glyphs (the face is chosen for the
+  language).
+- No perceptible cost inside the render loop.
 
-- 默认英文；界面文案与代码解耦。
-- 语言以**外部文件**形式附加，放进目录即生效，新增语言**无需重新编译**。
-- 语言包可只翻一部分，缺失项自动回退英文，最终回退到 key 本身。
-- 中文/日文/韩文字形正确（按语言选字体面）。
-- 不引入渲染循环内的可感开销。
+## 3. Technology
 
-## 3. 技术选型
+Fluent, for the reasons it was chosen: it is plain text a translator can edit
+without a compiler, it has variable interpolation, word reordering and CLDR
+plurals built in (so no `format!` string splicing with the wrong word order),
+it loads from arbitrary files at run time, and it provides a fallback chain.
 
-使用 **Fluent（`.ftl`）**，理由：
-
-- 纯文本，非程序员可直接编辑、审阅。
-- 原生支持变量内插、语序重排、CLDR 复数，避免 `format!` 直拼导致的语序错误。
-- 运行时可从任意文件加载，天然满足“附加语言包”诉求。
-- 提供 fallback 链机制。
-
-新增依赖（纯 Rust，无 C 依赖）：
+`crates/monitor_i18n/Cargo.toml`:
 
 ```toml
-fluent = "0.16"
 fluent-bundle = "0.15"
 unic-langid = "0.9"
-sys-locale = "0.3"   # 仅在 language = "auto" 时用于探测系统语言
+sys-locale = "0.3"   # only for language = "auto"
+tracing = "0.1"
 ```
 
-## 4. 总体架构
+Only `fluent-bundle` is used, not the higher-level `fluent` crate: the bundle
+API plus `unic-langid` covers the whole of what is needed here. All of it is
+pure Rust, with no C dependency, and `sys-locale` is reached for only when the
+setting is `auto`.
 
-新增独立 crate `monitor_i18n`（加入根 `Cargo.toml` 的 `[workspace] members`）：
+## 4. Architecture
+
+One crate, `crates/monitor_i18n`, in a single `src/lib.rs` (the original plan
+proposed splitting it into `catalog` / `loader` / `plural` modules; the whole
+thing fits comfortably in one file and reads better that way):
 
 ```
-monitor_i18n
-  ├─ catalog.rs   全局目录：当前 bundle + en 兜底 bundle + 可用语言列表
-  ├─ loader.rs    发现/解析 langs/*.ftl，内嵌 en
-  ├─ plural.rs    复数与变量格式化封装
-  └─ lib.rs       tr() / tr_args() / init() / set_language() / available()
+monitor_i18n/
+├── src/lib.rs        catalogue, loader, formatting, API
+└── langs/en.ftl      the embedded fallback (include_str!)
 ```
 
-**核心约定：`monitor_core` 不再返回成品文案，只返回稳定的 key。**
+- **English is embedded** with `include_str!("../langs/en.ftl")`, so the
+  interface can always be drawn, in any deployment, from any directory.
+- The active catalogue lives in a `thread_local!`. egui draws on one thread, so
+  the translation path takes no lock and costs no atomic; a background thread
+  that asked for a translation would simply see the same one.
+- **`monitor_core` returns keys, not prose.** `StreamKind::label()` answers
+  `stream-kind-main`, `ConnectionState::label()` answers `state-streaming`, and
+  so on. A background thread therefore never depends on the global translation
+  state, and word order and plurals are entirely the pack's business.
 
-- `model.rs` 的 `StreamKind::label()`、`ConnectionState::label()`、`CameraOrigin::label()`、`TileAspect::label()`、`OsdItem::label()` 等改为返回 key（或保留枚举、由 UI 层翻译）。
-- `error.rs` 的 `thiserror` 文案前缀 key 化；底层 `{0}` 仍是 `std::io` / `reqwest` 的英文，不强行翻译。
-- 好处：后台线程不依赖全局翻译状态；语序/复数完全交给语言包处理。
+### The catalogue
 
-## 5. 语言包格式与目录
+```
+Catalog { lang, current, fallback, available, dirs }
+```
 
-示例 `zh-CN.ftl`：
+`current` is the active pack, `fallback` is English, `available` is the
+discovered language list and `dirs` is kept so a later `set_language` can read
+the newly chosen pack without being told the directories again.
+
+- `tr(key)` → current → English → the key itself.
+- `tr_args(key, args)` → the same, with substitutions.
+- A missing key is logged at `warn` with the key, so a missing translation is
+  visible in the log and easy to grep for.
+- A pack that fails to parse keeps the messages that did parse; one bad line
+  does not cost the whole language.
+- Bidi isolation marks are turned off (`set_use_isolating(false)`): egui has no
+  glyph for them and the interface is not laid out bidirectionally, so they
+  would only be invisible characters inside every formatted string.
+
+## 5. Pack format and directories
+
+### Format
+
+A pack is an `.ftl` file. The `### name:` comment line names the language in
+its own script, which is what the settings panel shows.
 
 ```ftl
 ### name: 简体中文
-### code: zh-CN
 
 add-devices = 添加设备
 save = 保存
@@ -83,211 +119,268 @@ cameras-count =
        *[other] { $count } 台相机
     }
 
-remove-confirm = 删除 “{ $name }”？
-discovery-done = 发现完成：{ $onvif } 台 ONVIF 设备，{ $ports } 个开放端口
+remove-confirm = 删除 "{ $name }"？
 ```
 
-**目录与优先级**（后者覆盖前者）：
+The file name is the BCP-47 tag (`en`, `zh-CN`, `ja`, `zh-TW`).
 
-1. 内嵌 `en.ftl`（`include_str!`，永不缺失的兜底）。
-2. `monitor_core::config::config_dir()/xgview/langs/*.ftl`（用户级）。
-3. `<exe_dir>/langs/*.ftl`（随分发包附加）。
+### Search order and priority
 
-文件名即 BCP-47 语言 tag（`en`、`zh-CN`、`ja`、`zh-TW`）；`### name:` 注释供设置面板显示本地化语言名。
+Lookup order, later overriding earlier for a file of the same language and a
+key of the same name:
 
-**附加语言包** = 把 `zh-CN.ftl` 复制进 `langs/` 目录，重启即出现在语言列表。
+| Platform | Language pack search path |
+|---|---|
+| All | embedded English (the fallback, never missing) |
+| Desktop | `<exe_dir>/langs/` → `config_dir()/langs/` |
+| Android | `<exe_dir>/langs/` → `config_dir()/langs/` (extracted assets) → `external_data_path()/langs/` |
 
-## 6. 运行时 API
+Missing keys resolve current → English → the key itself.
+
+**Adding a language** is copying `xx-YY.ftl` into one of those directories and
+restarting; it appears in the settings list. There is one official pack in the
+tree today, `langs/zh-CN.ftl`.
+
+## 6. Runtime API
 
 ```rust
-pub fn init(wanted: &str);                    // "en" | "zh-CN" | "auto"
-pub fn tr(key: &str) -> String;               // 无变量
+pub fn init(wanted: &str, extra_dirs: &[PathBuf]);   // "en" | "zh-CN" | "auto" | ""
+pub fn tr(key: &str) -> String;
 pub fn tr_args(key: &str, args: &[(&str, ArgValue)]) -> String;
-pub fn available() -> Vec<LanguageInfo>;      // { id, native_name, coverage_percent }
-pub fn set_language(id: &str) -> bool;        // 切换，返回是否变化
+pub fn available() -> Vec<LanguageInfo>;             // { id, name, builtin }
+pub fn set_language(id: &str) -> bool;               // whether the active language changed
+pub fn current_language() -> String;
 ```
 
-- 查找顺序：当前语言 → `en` → 返回 key 字符串本身（并只告警一次，便于发现漏翻）。
-- 全局状态用 `thread_local!`（egui 全在 UI 线程），无锁、零原子开销。
-- 调用点改动最小：`ui.label("Add devices")` → `ui.label(tr("add-devices"))`。
-- `"auto"` 用 `sys-locale` 探测系统语言。
+- `init` always searches `<exe_dir>/langs` first, then `extra_dirs` in order.
+- An unknown or uninstalled language resolves to English rather than failing;
+  `auto` (or an empty string) asks `sys-locale` for the system locale, matching
+  an installed pack first by full tag and then by base language (`zh-CN` also
+  matches a `zh` pack).
+- `set_language` ignores a language that is not installed (returning `false`),
+  so the caller can keep its setting in step.
+- `ArgValue` is `Str(String) | Int(i64) | Float(f64)`, with `From`
+  implementations for `&str` / `String` / `i64` / `usize` / `f64`.
 
-## 7. 配置与切换
+## 7. Configuration and switching
 
-`crates/monitor_core/src/config.rs:154` 的 `AppConfig` 新增：
+`AppConfig` (`crates/monitor_core/src/config.rs`) carries:
 
 ```rust
-#[serde(default = "default_language")]
-pub language: String,   // 默认 "en"
+#[serde(default = ...)]   // via the struct-level #[serde(default)]
+pub language: String,     // default "auto"
 ```
 
-- 旧 `config.json` 缺该字段时自动取默认，**无需版本迁移**。
-- `language` 随导出/导入走；“Only import the cameras” 分支不会覆盖它（符合预期）。
-- 设置面板新增 **Language** 区（建议放 Display tab 顶部或 About 旁），用 `ComboBox` 列出 `available()`。
-- 切换流程：`set_language()` → `ctx.request_repaint()` → 重新 `fonts::install_for(ctx, lang)`。
+- Old `config.json` files without the field take the default - there is no
+  version bump and no migration, because `AppConfig` is annotated
+  `#[serde(default)]` at the struct level.
+- `language` travels with export / import; the "only import the cameras" branch
+  does not overwrite it, which is the intended behaviour.
+- The control is a **cycle button** in the settings **Display** tab: `Auto`
+  first, then every discovered language. It is built on the same
+  left/right/Enter cycling helper the OSD corner selectors use, so the whole
+  list never has to fit on the panel and the remote needs no extra gesture.
+  (The original plan proposed a `ComboBox`; a cycle button was used instead
+  because it fits the focus-based remote navigation the rest of the panel
+  uses.)
+- Choosing a language records the explicit choice even when it equals the one
+  `auto` picked, so the user leaves auto mode. Switching calls
+  `monitor_i18n::set_language`, reinstalls the fonts and requests a repaint.
 
-## 8. 字体联动
+## 8. Fonts
 
-将 `fonts.rs` 的 `install(ctx)` 改为 `install_for(ctx, lang)`：
+`crates/monitor_gui/src/fonts.rs` exposes `install_for(ctx, language)` (with
+`install(ctx)` as the English shorthand).
 
-- 拉丁 UI 面、Mono 面不变。
-- CJK 候选表按语言选取字形面：Noto CJK TTC 顺序为 JP=0 / KR=1 / SC=2 / TC=3 / HK=4；Windows 无 Noto CJK 时分别用 `msgothic`（日）/ `malgun`（韩）/ `msjh`（繁）。
-- 切换语言时重新安装字体，避免同源汉字显示错误字形。
+- The Latin UI face leads the proportional family, the monospace face leads the
+  monospace family, and a CJK face is appended to both as the last fallback -
+  only what the earlier faces cannot draw reaches it.
+- The CJK face is chosen **for the language**. The Noto CJK `.ttc` collections
+  order their faces JP / KR / SC / TC / HK, and a Han character shared between
+  languages is drawn in the face's own form, so the simplified face is asked
+  for by index (`index: 2`) while a single-face file takes index 0. Windows
+  uses `msyh` for simplified, `msjh` for traditional, and `msgothic` /
+  `malgun` for Japanese / Korean.
+- Switching language reinstalls the fonts, so a shared Han character is not
+  left drawn in the previous language's form.
+- A system with none of the candidate files keeps egui's built-in fonts: the
+  interface still reads, and only the non-Latin text a camera name carries is
+  left as boxes. That is a miss, not a failure, so it is logged at `warn`.
 
-## 9. 变量 / 复数 / 语序（必须专门处理的清单）
+## 9. Variables, plurals and word order
 
-**复数**（英文用 `(s)` 偷懒，其它语言必须 ICU plural）：
+These were the places that `format!` could not translate and that had to become
+whole-sentence keys:
 
-- `app.rs:1746` `format!("{live}/{} live", ...)`
-- `app.rs:1803` `format!("Cameras ({})", ...)`
-- `dialogs.rs:269-273` `format!("discovery finished: {} ONVIF device(s), {} open port(s)", ...)`
-- `dialogs.rs:289` `format!("{} camera(s) on the NAS ...", ...)`
-- `dialogs.rs:543` `format!("{targets} target address(es)")`
-- `dialogs.rs:605` `format!("Other open ports ({})")`
-- `main.rs:130-137` `format!("... {} live channel(s) [{}]", ...)`
+**Plurals** (ICU plural, not an `(s)` suffix - the three that needed it):
 
-**语序 / 句子拼接**（需重构成整句 key）：
+- `toast-imported` / `toast-imported-document` ("imported N camera(s)")
+- `toast-synology-found` ("N camera(s) found on Surveillance Station")
 
-- `app.rs:2648-2662` 版本 / 作者 / 版权拆成三个 label → 语序无法整体翻译。
-- `app.rs:2712-2720` `import_hint()` 的 `{body}` 内插与拼接。
-- `app.rs:2595` `format!("Remove \"{name}\"?")` 引号包裹变量。
-- `dialogs.rs:869-872` `format!("{} {name}", if ... {"updated"} else {"added"})` 动词 + 名词拼接。
+**Counted and variable messages** (a plain substitution, kept as one key so a
+language can reorder it):
 
-**宽度相关**：
+- the live channel count in the status bar (`status-live`)
+- the camera count in the settings tab strip (`settings-tab-cameras-count`),
+  the ONVIF device and open-port counts in the discovery dialog, and the
+  Synology fetch count (`dialog-synology-count`)
+- the target address count and other-open-port count in the scan settings
 
-- `app.rs:2603` `center_offset(ui, &["Keep", "Remove"])` 依赖字符串宽度做居中；翻译后按新宽度自动计算即可。
+**Word order / sentence assembly** (split into a single key per sentence):
 
-**动态来源（翻译表需覆盖 core）**：
+- the About block, previously three separate labels (version / author /
+  copyright), is one composed message (`about-title`, `about-version-by`,
+  `about-copyright`).
+- the import hint is a Fluent term, so `about-import-hint-android` can refer to
+  `about-import-hint` rather than splicing it in.
+- the remove confirmation had a variable inside quotation marks
+  (`remove-title`), and the add/update message had a verb spliced onto a name
+  (`dialog-added-msg` / `dialog-updated-msg`).
 
-- `model.rs:21-37/69-74/96-98/122-123/190-205/269-276` 各 `label()/as_str()/tag()`。
-- `layout.rs:49-54`（`"1x1"…"4x4"` 纯数字不译）。
-- `discovery/mod.rs:99/113/133` 阶段文案。
-- `autostart.rs:55-67/135` mechanism。
+**Width-sensitive**: `center_offset` lays out `Keep` / `Remove` by string
+width, so a translation is centred from its own measurements automatically.
 
-**含特殊符号**：`app.rs:2910` 的弯引号 `“Add devices”`、`app.rs:1753` 的 `·`、`app.rs:2642` 的 `· ©`，本地化时统一处理。
+**Dynamic sources**: the `model.rs` enum labels, the `discovery` stage names,
+and the `autostart` / `power` mechanism names are all keys now, so the packs
+cover them.
 
-## 10. 性能
+**Not translated**: pure numeric layout labels (`1x1` … `4x4`) and the
+underlying `std::io` / `reqwest` error text.
 
-- FTL 解析只在加载时发生一次；每帧仅 hash 查表 + 极轻量格式化。
-- UI 每秒仅数十次字符串调用，相对 wgpu 渲染开销可忽略。
-- 无每帧锁、无分配热点；`tr` 可返回 `Cow` 进一步减少分配（非必需）。
-- 语言切换是一次性重载，不进入渲染循环。
+## 10. Performance
 
-## 11. 迁移阶段（建议顺序）
+- The FTL parse happens once, when the pack is loaded.
+- Each frame does a hash lookup and a very light format; the UI makes a few
+  dozen string calls a second, against wgpu's rendering cost.
+- No per-frame lock, no allocation hotspot; the catalogue is thread-local.
+- A language switch is a one-off reload and is not part of the render loop.
 
-1. 新增 `monitor_i18n` crate：内置 `en.ftl`、全局 API、完善 `tr` 回退与告警。
-2. `AppConfig` 加 `language` 字段 + 默认值。
-3. 抽 `app.rs`（含状态栏 / toast / About / 键盘表）。
-4. 抽 `dialogs.rs`、`grid.rs`。
-5. core 枚举 key 化：`model.rs`、`layout.rs`、`discovery/mod.rs`、`autostart.rs`。
-6. `error.rs` 前缀 key 化（底层英文不动）。
-7. 设置面板 Language 选择 + `fonts::install_for` 字体联动。
-8. `main.rs` 的 HELP / 命令行输出（可选，视是否面向终端本地化）。
-9. 发布 `zh-CN.ftl` 作为首个附加语言，全链路验证。
+## 11. Release layout
 
-## 12. 风险与注意
+### Principle
 
-- **打包**：需要把 `langs/` 目录随桌面/Android 分发包一起复制到可执行文件旁；Android 下建议同时支持 `config_dir()/langs`。
-- **覆盖率显示**：语言包可部分翻译，`available()` 中展示 `coverage_percent`，避免用户以为没生效。
-- **字体缺失**：极端精简系统若没有任何 CJK 面，非拉丁文案仍显示为方框（现有行为，`fonts.rs:180` 已有告警）。
-- **底层错误英文**：`error.rs` 的 `{0}` 来自 std / reqwest，彻底本地化成本高，方案只译前缀。
-- **relayout**：切语言后长句宽度变化，`request_repaint` 必须触发，工具栏自适应缩放（`app.rs:1605-1620`）需实测。
-## 13. 发布目录结构
+- **English is compiled in** (`include_str!`), so any deployment, in any
+  directory, can always draw. It is the only embedded language today.
+- **Every other language is external**, including the official `zh-CN.ftl`:
+  plain `.ftl` files that are copied next to the binary (or extracted from the
+  APK assets) at packaging time. Put one in place and it appears and overrides
+  a built-in language of the same name.
 
-### 核心原则
-
-- **官方语言包编进二进制**（`include_str!` 内嵌 en 及随版本发布的语言），保证任何发布形态、任何目录都可用。
-- **附加语言包走外部目录**（纯 `.ftl`），放进即生效、即出现、即覆盖同名内置语言。
-
-### 源码仓库布局
+### Source tree
 
 ```
 xgview/
-├─ langs/                         官方语言包源文件，由构建脚本复制进发布目录
-│  ├─ en.ftl                      模板 + 与内嵌一致，供翻译者参照
-│  ├─ zh-CN.ftl
-│  └─ ja.ftl
+├─ langs/                          official pack sources, copied into releases
+│  └─ zh-CN.ftl
 ├─ crates/monitor_i18n/
-│  ├─ src/...
-│  └─ langs/en.ftl                编译期内嵌的兜底（include_str!）
-└─ scripts/                       需新增 langs 复制逻辑
+│  ├─ src/lib.rs
+│  └─ langs/en.ftl                 embedded fallback (include_str!)
+└─ scripts/                        copies langs/ into the staged release
 ```
 
-### Windows 发布包 / 安装目录
-
-zip 解压后（或 `install-windows.ps1` 的 `%LOCALAPPDATA%\XGView\`）：
+### Windows
 
 ```
-xgview-1.1.12-x64\                 (= %LOCALAPPDATA%\XGView\)
+xgview-x.y.z-x64\                  (= %LOCALAPPDATA%\XGView\)
 ├─ xgview.exe
-├─ avcodec-63.dll / avformat-63.dll / avutil-63.dll / swscale-*.dll / swresample-*.dll
+├─ avcodec-*.dll / avformat-*.dll / avutil-*.dll / swscale-*.dll / ...
 └─ langs\
-   ├─ en.ftl
    ├─ zh-CN.ftl
-   ├─ ja.ftl
-   └─ <用户/第三方新增>.ftl
+   └─ <user / third-party>.ftl
 ```
 
-用户级附加与覆盖（最高优先级）：
+User-level additions and overrides (highest priority):
 
 ```
 %APPDATA%\xgview\
-├─ config.json                    含 "language": "zh-CN"
+├─ config.json                     contains "language": "zh-CN"
 └─ langs\
    └─ zh-TW.ftl
 ```
 
+Both `scripts/build-windows.ps1` and `scripts/install-windows.ps1` copy
+`langs\*.ftl` from the repository into the staged / installed directory.
+
 ### Android
 
-官方语言（en）内嵌进 `libmonitor_android.so`；附加语言随 APK assets 分发，启动时由 `extract_lang_assets` 提取到 `config_dir/langs/`（即 `internal_data_path/xgview/langs/`）：
+English is embedded in `libmonitor_android.so`; other packs ship as APK assets
+and are extracted on start-up:
 
 ```
 APK
 └─ assets/
-   └─ zh-CN.ftl                   Gradle 从仓库 langs/ 打入
+   └─ zh-CN.ftl                   Gradle packages it from the repo's langs/
 
-/data/data/com.xhbl.xgview/files/xgview/   config_dir（internal_data_path/xgview）
+/data/data/com.xhbl.xgview/files/xgview/     config_dir
 ├─ config.json
 └─ langs/
-   └─ zh-CN.ftl                   启动时从 assets 提取（每次覆盖，保证更新）
+   └─ zh-CN.ftl                   extracted from assets every launch
 
 /storage/emulated/0/Android/data/com.xhbl.xgview/files/   external_data_path
 └─ langs/
-   └─ ja.ftl                      adb push 的用户附加包（最高优先级）
+   └─ ja.ftl                      adb push, highest priority
 ```
 
-机制：
-1. `android/app/build.gradle.kts` 的 `sourceSets.main.assets.srcDirs("../../langs")` 把仓库 `langs/*.ftl` 打进 APK assets。
-2. `monitor_gui::run_android` 启动时调 `extract_lang_assets`，用 `ndk::asset::AssetManager` 遍历 assets 根，把每个 `.ftl` 写到 `config_dir/langs/`。
-3. `monitor_i18n::init` 已搜索 `config_dir/langs/`，自动发现。`external_data_path/langs/` 仍可 `adb push` 覆盖（优先级更高）。
+Mechanism:
+
+1. `android/app/build.gradle.kts` has
+   `sourceSets.main.assets.srcDirs("../../langs")`, which packs the repository's
+   `langs/*.ftl` into the APK assets.
+2. `monitor_gui::run_android` calls `extract_lang_assets`, which walks the
+   assets root with `ndk::asset::AssetManager` and writes every `.ftl` to
+   `config_dir/langs/`, overwriting each launch so pack updates land without a
+   manual clear.
+3. `monitor_i18n::init` already searches `config_dir/langs/`, so it discovers
+   them. `external_data_path/langs/` remains available for an `adb push`
+   override (higher priority).
 
 ### Linux / macOS
 
 ```
-/usr/bin/xgview                    二进制（官方语言内嵌）
-/usr/share/xgview/langs/*.ftl      发行包语言（只读，可选）
+/usr/bin/xgview                     binary (official languages embedded)
+/usr/share/xgview/langs/*.ftl       distribution packs (read-only, optional)
 ~/.config/xgview/
 ├─ config.json
-└─ langs/*.ftl                     用户附加（最高优先级）
+└─ langs/*.ftl                      user additions (highest priority)
 ```
 
-### 运行时搜索与优先级
+## 12. Deviations from the original plan, and known gaps
 
-查找顺序（后者覆盖前者同名 key / 同名语言文件）：
+- **Only English is embedded.** The plan described compiling the official
+  packs into the binary; the implementation embeds English alone (the fallback)
+  and ships every other language as an external `.ftl`, including the official
+  `zh-CN.ftl`. The effect is the same for the end user - a released build
+  carries `zh-CN.ftl` beside the binary / in the APK assets - but there is no
+  `include_str!` for a second language.
+- **`error.rs` was not keyed.** The plan proposed turning the `thiserror`
+  prefixes into keys; the errors still carry English prefixes (`io error:`,
+  `rtsp error:`, …). The underlying `{0}` was always going to stay English, and
+  the prefixes are logged far more often than shown, so keying them was dropped.
+- **The command line help is English only.** `src/main.rs` initialises the
+  catalogue with `en` and translates only the autostart mechanism name used in
+  `--print-schedule`; `HELP` is a hard-coded English constant. The plan listed
+  CLI localisation as optional.
+- **`LanguageInfo` carries `builtin`, not `coverage_percent`.** The plan's
+  coverage display was not built; the settings list shows each language's own
+  name and whether it is compiled in.
+- **The default is `auto`, not `en`.** The plan proposed `"en"`; the shipped
+  default follows the system locale and falls back to English.
+- **The settings control is a cycle button**, not a `ComboBox` (see §7).
+- **A missing key warns on every lookup**, not once as the plan suggested. A
+  key absent from both packs will log on each call; this is deliberate for
+  visibility but can be noisy if a pack omits a key used in a per-frame path.
 
-| 平台 | 语言包搜索路径 |
-|---|---|
-| 全部 | 内嵌（en 兜底 + 随版本官方语言） |
-| 桌面 | `<exe_dir>/langs/` → `config_dir()/xgview/langs/` |
-| Android | `config_dir()/langs/`（assets 提取）→ `external_data_path()/langs/`（adb push，优先级更高） |
+## 13. Risks
 
-缺失 key 的解析：当前语言 → `en` → 返回 key 本身（告警一次）。
-
-### 需要改动的脚本点
-
-- `scripts/build-windows.ps1:128-137`：staging 阶段把 `langs\` 复制到 `$stage\langs\`。
-- `scripts/install-windows.ps1:128-148`：把 `langs\` 复制到 `$InstallDir\langs\`，并创建 `$configRoot\langs`。
-- `scripts/build-android.ps1`：无需改动（Gradle assets 自动打包）。
-- `android/app/build.gradle.kts`：`sourceSets.main.assets.srcDirs("../../langs")` 把语言包打进 APK。
-- `crates/monitor_gui/src/lib.rs`：`extract_lang_assets` 在 `run_android` 启动时把 assets 提取到 `config_dir/langs/`。
-- 新增仓库 `langs\` 并纳入版本管理。
+- **Packaging**: `langs/` has to travel with the desktop and Android release,
+  which both build scripts already do; on Android the assets route covers it.
+- **Partial packs**: a language may translate only part of the interface and
+  silently fall back to English for the rest. Adding coverage reporting (the
+  dropped `coverage_percent`) would make that visible.
+- **Missing fonts**: a stripped-down system with no CJK face still shows
+  non-Latin text as boxes - the pre-existing behaviour, now with a `warn`.
+- **Underlying error text stays English**: the `{0}` inside `CoreError` comes
+  from `std` / `reqwest`; localising it fully was judged not worth the cost.
+- **Relayout**: a longer translation changes control widths, so switching
+  language requests a repaint; the toolbar's adaptive scaling should be
+  re-checked when a new pack lands.

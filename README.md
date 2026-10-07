@@ -4,8 +4,8 @@
 
 XGView is a production grade, cross platform surveillance wall written in Rust.
 It targets TV boxes / living room displays (Android TV, e.g. Amlogic S905X5M or
-Nvidia Shield TV) and Windows Mini PCs that run unattended around the clock, and
-also builds natively on desktop Windows / Linux for development.
+Nvidia Shield TV) and Windows Mini PCs that run unattended around the clock; it
+also runs on desktop Windows and Linux.
 
 ---
 
@@ -22,73 +22,26 @@ also builds natively on desktop Windows / Linux for development.
 | Stream switching | Every layout pulls the cheap sub stream (360P / 480P), the 1x1 grid included; only a magnified viewport switches to the main stream (1080P / 4K) |
 | Seamless transition | The last sub stream frame is held until the main stream delivers its first keyframe – no black or green frames |
 | Suspend | Channels on a non visible page are suspended to save bandwidth, CPU and decoder handles |
-| Reconnection | Exponential backoff self healing with a non blocking "reconnecting…" overlay |
+| Reconnection | Exponential backoff self healing with a non blocking "reconnecting…" overlay; the backoff shape and the handshake timeout are configurable and reach channels already running |
+| Decoding | Hardware where the machine offers a decoder for the stream (Direct3D 11 / CUDA on Windows, VAAPI / CUDA on Linux, `AMediaCodec` on Android), software elsewhere; each tile shows `HW` or `SW` |
+| On-screen display | Each tile corner shows one of: none, name, number + name, stream, transport + rate, frame rate, size + shape, or all statistics. Chosen per corner in the settings panel |
+| Power management | Keeps the machine awake and/or the screen on while the wall is up (`SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` on Linux, `WakeLock` + `FLAG_KEEP_SCREEN_ON` on Android); both switches default on |
+| Blackout | Scheduled periods, per weekday, in which the wall blanks itself and parks every channel - sockets closed, decoders dropped; input brings it back for a chosen number of minutes |
+| Language | English, Chinese, or any language added as an external `.ftl` pack; a partial pack falls back to English key by key |
+| Toolbar | On-screen bar for the layout, paging, full screen, settings and adding cameras; usable with a mouse, touch or a remote |
 | Discovery | ONVIF WS-Discovery multicast probe, cross subnet unicast scan, TCP 554/80/8000 fallback probe, GetProfiles / GetStreamUri |
 | NVR | Synology Surveillance Station import via `SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera` |
+| Cameras | Add, edit, reorder and remove cameras; per-camera display aspect and RTSP transport (UDP when a relay damages the TCP interleaving) |
 | Start on boot | Windows `HKCU\...\Run` registry entry (or a scheduled task) and an Android `BOOT_COMPLETED` receiver |
-| Configuration | Everything persisted to a cross platform `config.json` |
-
-### Workspace layout
-
-```
-xgview/
-├── Cargo.toml                  # workspace root + the `xgview` binary
-├── crates/
-│   ├── monitor_core/           # platform independent logic
-│   │   ├── model.rs            #   camera / stream data model
-│   │   ├── layout.rs           #   1x1 … 4x4 grids and pagination math
-│   │   ├── scheduler.rs        #   which channel decodes which stream on which page
-│   │   ├── config.rs           #   JSON persistence
-│   │   ├── discovery/          #   ONVIF (WS-Discovery / SOAP), TCP scan, Synology
-│   │   ├── rtsp.rs             #   async RTSP client (TCP interleaved)
-│   │   ├── pipeline.rs         #   per channel supervisor + backoff reconnection
-│   │   └── autostart.rs        #   start on boot helpers
-│   ├── monitor_codec/          # platform decoder: Android AMediaCodec, Windows FFmpeg, null fallback
-│   ├── monitor_gui/            # egui + wgpu UI, grid, slide animation, dialogs
-│   └── monitor_android/        # NativeActivity entry point + Android manifest sample
-└── scripts/                    # Windows install and cargo-ndk / adb deployment helpers
-```
-
-### Architecture principles
-
-* **Non blocking UI** – the egui thread never touches a socket or a decoder. All
-  network I/O and decoding run on a tokio runtime; results reach the UI through
-  lock free channels (`crossbeam-channel` upward, `tokio::sync::mpsc` downward).
-* **Hardware decoding on every target** – Android decodes with `AMediaCodec` and
-  reads the pictures back through an `AImageReader`, so they reach the renderer
-  as the same NV12 planes the Windows/Linux backends produce.
-* **Conditional compilation** – `#[cfg(target_os = "android")]` /
-  `#[cfg(target_os = "windows")]` select the decoder and the start on boot
-  mechanism. A plain `cargo run` on Windows is enough to get going.
+| Configuration | Everything persisted to a cross platform `config.json`, with export / import |
 
 ---
 
 ## Usage
 
-### Requirements
-
-* Rust 1.80 or newer (Edition 2021). Install it with [rustup](https://rustup.rs).
-* Windows / Linux: no extra system dependency for the default build.
-* Android: the Android NDK (r25+), the `aarch64-linux-android` target and
-  `cargo-ndk`.
-
-### Build and run (Windows / Linux)
-
-```bash
-cargo run                 # windowed
-cargo run -- --fullscreen # kiosk / TV deployment
-```
-
-The first launch creates a configuration file next to the user profile:
-
-| Platform | Path |
-| --- | --- |
-| Windows | `%APPDATA%\xgview\config.json` |
-| Linux | `$XDG_CONFIG_HOME/xgview/config.json` (or `~/.config/xgview/config.json`) |
-| Android | the app private files directory (set through `XGVIEW_HOME`) |
-
-Set `XGVIEW_CONFIG_DIR` to override the location entirely (portable / USB stick
-deployments).
+Setting up a machine, building and deploying are in
+[docs/CONFIG.md](docs/CONFIG.md); what follows is what the viewer does, and how
+it is driven.
 
 ### Command line
 
@@ -102,6 +55,7 @@ xgview [OPTIONS]
   --install-autostart  Register XGView for start-on-boot and exit
   --remove-autostart   Remove the start-on-boot registration and exit
   --print-schedule     Print the resolved grid / channel schedule and exit
+  --console            Open a console window for log output (Windows only)
   -h, --help           Print this help
   -V, --version        Print the version
 ```
@@ -119,11 +73,46 @@ stream.
 | `Esc` / `Backspace` / `BACK` | Leave the magnified view |
 | `PageUp` / `PageDown` | Previous / next page |
 | `1` `2` `3` `4` | Select the 1x1 / 2x2 / 3x3 / 4x4 layout |
-| `F1` | Settings panel (layout, streams, start on boot) |
+| `F1` | Settings panel |
 | `F2` | Camera discovery / management window |
 | `F11` | Toggle full screen |
 
-Mouse and touch dragging horizontally over the grid also turns the page.
+Mouse and touch dragging horizontally over the grid also turns the page. The
+toolbar across the top offers the same layout, paging, full screen, settings and
+add-camera actions as buttons, for a device without a keyboard.
+
+### Settings panel
+
+`F1` opens a tabbed panel, navigable with the arrows and `Enter` on a remote:
+
+| Tab | What it holds |
+| --- | --- |
+| Display | Interface **language**, grid, the four OSD corners, full screen at start-up, the Android navigation bar |
+| Cameras | The camera list: add, edit, reorder, remove; display aspect and RTSP transport per camera (the "Confirm order" step) |
+| Streams | Reconnect timings (first retry, first-frame retry, max delay, handshake timeout, backoff factor / jitter / spread, attempts) and the hardware-decoding preference |
+| Blackout | The blank schedule: on/off, the periods (weekday, start, end), and how long the wall stays back after input |
+| System | Start on boot, **keep awake** (prevent sleep / keep the screen on) with the mechanism in use, the key list, and the Android boot helpers |
+| About | Version, author, decoder in use, config path, export / import |
+
+### Language
+
+The interface is English by default; Chinese ships as `langs/zh-CN.ftl`. Any
+other language is a plain `.ftl` file: put it beside the executable (`langs/`) or
+under the configuration directory (`langs/`) and it appears in the **Language**
+selector in the Display tab. A pack may translate only part of the interface -
+anything it leaves out falls back to English. `Automatic` follows the system
+locale.
+
+### Keep awake
+
+The **System** tab can hold the machine awake and keep the screen on while the
+wall is up, so a display that would blank or a system that would sleep does not
+cut the streams. Both switches are on by default; keeping the screen on also
+keeps the system awake. The mechanism per platform is `SetThreadExecutionState`
+(Windows), `caffeinate` (macOS), `systemd-inhibit` (Linux) and `WakeLock` +
+`FLAG_KEEP_SCREEN_ON` (Android), and is shown in the panel. The request is
+released when the viewer exits; see
+[docs/power-management-plan.md](docs/power-management-plan.md).
 
 ### Adding cameras
 
@@ -148,8 +137,8 @@ xgview.exe --install-autostart
 
 which writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Remove it with
 `xgview.exe --remove-autostart`. For a machine that must start without an
-interactive logon, install a scheduled task instead (see the install script
-below) or register the binary as a Windows service.
+interactive logon, install a scheduled task instead (see
+[docs/CONFIG.md](docs/CONFIG.md)) or register the binary as a Windows service.
 
 **Android.** The manifest registers a `BootReceiver` for `BOOT_COMPLETED`, which
 relaunches the activity after the box booted. Android 10+ refuses to start an
@@ -171,52 +160,11 @@ From a computer, the first is one command:
 adb shell appops set com.xhbl.xgview SYSTEM_ALERT_WINDOW allow
 ```
 
-### Windows Mini PC deployment
+### Deployment
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
-```
-
-The script builds the release binary, copies it to `%LOCALAPPDATA%\XGView`, and
-registers the start on boot entry. Useful switches:
-
-```powershell
-# Register a scheduled task with restart-on-failure instead of the Run key.
-powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -TaskScheduler
-
-# Package an existing build, do not touch the start on boot entry.
-powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -NoBuild -NoAutostart
-```
-
-### Android build and deployment
-
-```bash
-rustup target add aarch64-linux-android
-cargo install cargo-ndk
-
-# Build the native library (arm64-v8a, API 27 by default).
-scripts/build-android.sh
-
-# Or override the targets / API level.
-ABIS="arm64-v8a armeabi-v7a" API=30 scripts/build-android.sh
-```
-
-The generated `android-build/jniLibs/<abi>/libmonitor_android.so` goes into the
-`app/src/main/jniLibs/` folder of the Android Gradle project, together with
-[crates/monitor_android/android/AndroidManifest.xml](crates/monitor_android/android/AndroidManifest.xml),
-its `java/` sources and its `res/` folder. The manifest is a ready to use sample:
-it declares `INTERNET`, `RECEIVE_BOOT_COMPLETED` and the NativeActivity whose
-`android.app.lib_name` matches the `monitor_android` crate.
-
-Once the APK exists, deploy it over the network (wireless debugging):
-
-```bash
-scripts/deploy-android.sh 192.168.10.42
-```
-
-The script runs `adb connect <ip>:5555`, installs the APK with all runtime
-permissions granted (`adb install -r -g`) so the unattended box never shows a
-dialog, launches the app and follows its logcat output.
+Packaging the Windows Mini PC install, building and signing the Android APK,
+and what to carry by hand to a fresh clone are all in
+[docs/CONFIG.md](docs/CONFIG.md).
 
 ---
 

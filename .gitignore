@@ -10,6 +10,10 @@
 /android/app/build/
 /android/local.properties
 
+# Android release signing: the private key and its plaintext passwords
+/android/xgview-release.jks
+/android/keystore.properties
+
 # Local configuration
 /config.json
 

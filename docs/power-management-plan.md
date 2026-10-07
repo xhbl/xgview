@@ -1,153 +1,172 @@
-# XGView 电源管理方案（阻止睡眠 / 屏幕常亮 / Android 前台保活）
+# XGView power management (prevent sleep / keep the screen on / Android keep-alive)
 
-> 状态：方案归档，待实施。
-> 目标：程序运行期间阻止系统睡眠与显示器关闭；Android 上的前台保活列为三期。
-> 决策：`prevent_sleep` 与 `keep_screen_on` 两个独立开关，**默认均开启**（监控墙场景）。
+> Status: **implemented** on Windows, macOS, Linux and Android (screen + CPU).
+> Android foreground-service keep-alive is the one part still outstanding; see
+> §2.2 and §10.
+> Decision: `prevent_sleep` and `keep_screen_on` are two independent switches,
+> **both on by default** (the monitoring-wall case).
 
-## 修订记录
+## 1. What this is, and where it lives
 
-本版按**当前磁盘上的代码**逐条核对初稿，修正了若干处会让实现编不过或不生效的写法：
+A monitoring wall is meant to stay up 7×24. A machine that sleeps or blanks its
+display stops showing the cameras, and the streams are then cut and reconnected
+for nothing. `crates/monitor_core/src/power.rs` holds the request for each
+platform, and the settings panel offers it.
 
-| # | 初稿 | 问题 | 本版 |
-|---|---|---|---|
-| 1 | Linux 用 `systemd-inhibit … cat` | `cat` 遇 stdin EOF 立即退出，抑制锁随之释放，等于没加 | 改为 `sleep infinity`，子进程 stdin 设 `null` |
-| 2 | Android 在 `static` 方法里调 `getWindow()` | 编不过：`getWindow()` 是实例方法 | 改用**已有的** `static instance` + `runOnUiThread`；`setReserveNavigationBar` 就是现成模板 |
-| 3 | 复用 `android.rs` 的 `call_void` / `call_bool` | 两者签名写死 `"()V"` / `"()Z"`，不支持参数 | Java 侧拆成两个单参方法，Rust 加 `call_void_bool` |
-| 4 | "复用现有 `default_true()`" | 该函数不存在；而且不需要 | 只在 `impl Default` 里给两个 `true`（`AppConfig` 已有结构级 `#[serde(default)]`） |
-| 5 | i18n 键用 `streams-prevent-sleep` 等 | 前缀属于 Streams 页；System 页用 `settings-*` | 改为 `settings-*`，并复用已存在的 `settings-mechanism` |
-| 6 | 把"前台保活"列为本期能力 | 本期只有 `FLAG_KEEP_SCREEN_ON` 与 `PARTIAL_WAKE_LOCK`，**都不阻止进程回收** | 移出本期，单列三期 |
-| 7 | 二期第 8 步"放开一期的 UI gate" | 一期并没有单独的 gate——置灰来自 `is_supported()` 为假 | 取消 gate 这一概念：`is_supported()` 在 Android 上就等于"钩子装没装上"（§4.2） |
-
-此外补充了初稿没有的几块：两个开关组合的语义矛盾（§2）、可测性切分（§4.1）、Android 钩子为什么必须存在（§4.2）、以及残留与泄漏（§5 / §7 / §8）。
-
-## 1. 背景与现状
-
-监控墙为 7×24 常驻显示场景，设备不应因系统空闲而休眠或关闭显示器，否则画面中断、重连抖动。当前项目**没有任何电源管理代码**：
-
-| 搜索项 | 结果 |
-|---|---|
-| `SetThreadExecutionState` | 零匹配 |
-| `WakeLock` / `PARTIAL_WAKE_LOCK` | 零匹配 |
-| `FLAG_KEEP_SCREEN_ON` | 零匹配 |
-| `startForeground` / `<service>` | 零匹配 |
-
-**现成入口**：`crates/monitor_android/android/AndroidManifest.xml:47` 已声明 `android.permission.WAKE_LOCK`，其注释本身写的就是 "Keep the screen on while the surveillance wall is displayed"——这个能力当初就是预留的，只是没有任何代码去获取它。
-
-**可参考的既有跨平台模式**：`crates/monitor_core/src/autostart.rs`（257 行）——顶层平台无关 API + 各平台 `imp` 模块 + 错误经 `CoreError` 上报。注意它的 `imp` 只有 windows / `all(unix, not(target_os = "android"))` / android / 兜底四块：**Linux 与 macOS 合在一个 `unix` 模块里**，因为两者机制相同（都是写文件）。电源管理这边两者机制完全不同（`caffeinate` vs `systemd-inhibit`），因此本方案**有意拆成两个 `imp`**——这是对模板的偏离，不是疏忽。
-
-**Android 侧已有可复用的结构**：`MainActivity` 已持有 `private static MainActivity instance`（`onCreate` 赋值、`onDestroy` 置空），且所有 native 入口都是 `instance` + `runOnUiThread` 的形状，实现不需要新建静态引用。
-
-## 2. 目标与需求
-
-三个能力，其中只有前两个在本期交付：
-
-| 能力 | 含义 | 平台范围 | 本期交付 |
-|---|---|---|---|
-| **阻止系统睡眠** | 系统不进待机 | 全平台 | 是 |
-| **保持屏幕常亮** | 显示器不自动关闭、不触发屏保 | 全平台 | 是 |
-| **前台保活** | 全屏显示期间防止系统回收进程 | Android | **否**，见 §2.2 |
-
-配置为两个独立开关：
-
-- `prevent_sleep`：阻止系统进入睡眠。
-- `keep_screen_on`：保持屏幕常亮。
-- 两者默认均 **开启**。
-
-### 2.1 "屏幕常亮"不蕴含"系统不睡"
-
-这一点必须在实现里处理掉，否则两个开关能组合出自相矛盾的状态。
-
-三个平台的"屏幕常亮"机制都**只作用于显示**，都不阻止系统整体进入睡眠：
-
-- Windows：`ES_DISPLAY_REQUIRED` 只重置显示空闲计时器；
-- macOS：`caffeinate -d` 只针对显示；
-- Linux：`systemd-inhibit --what=idle` 只挡 idle（屏保/熄灭）。
-
-于是"勾了常亮、取消阻止睡眠"会得到一个怪状态：屏幕亮着，但系统仍可能整体睡眠——而系统一睡屏幕自然也灭了，等于这个组合没有意义。
-
-**处理方式：在 `apply()` 里归一化——`keep_screen_on` 为真时，同时请求系统不睡。** UI 文案按此说明，不要把它描述成两个正交的开关。
-
-### 2.2 "前台保活"不在本期
-
-本期的 Android 实现只有 `FLAG_KEEP_SCREEN_ON` 与 `PARTIAL_WAKE_LOCK`。前者是 Activity 级窗口标志、随窗口销毁自动清除；后者只让 CPU 不进入低功耗——**两者都不能阻止系统在内存紧张或后台限制下回收进程**。
-
-真正的保活需要前台服务：manifest 里的 `<service>` + `FOREGROUND_SERVICE` 权限 + 一个常驻通知，Android 14+ 还需要 `foregroundServiceType`（并因此需要对应的 `FOREGROUND_SERVICE_*` 权限）。这与本期两块的成本不在一个量级，**单列为三期**；在它落地之前，UI 不应宣称"保活"。
-
-## 3. 平台 API 矩阵
-
-| 能力 | Windows | macOS | Linux | Android |
-|---|---|---|---|---|
-| 阻止睡眠 | `SetThreadExecutionState(ES_CONTINUOUS \| ES_SYSTEM_REQUIRED)` | `caffeinate -i` | `systemd-inhibit --what=sleep` | `PARTIAL_WAKE_LOCK` |
-| 屏幕常亮 | 同上 `+ ES_DISPLAY_REQUIRED` | 再加 `-d` | 再加 `:idle` | `FLAG_KEEP_SCREEN_ON` |
-| 前台保活 | 不适用 | 不适用 | 不适用 | 前台服务（三期） |
-
-释放方式四者各不相同，这是本实现最容易出错的地方：
-
-| 平台 | 释放 | 注意 |
+| Platform | No sleep | Screen on |
 |---|---|---|
-| Windows | `SetThreadExecutionState(ES_CONTINUOUS)` | **per-thread** 状态，必须在长寿线程上设置与清除 |
-| macOS | kill 子进程 | 加 `-w <pid>` 让它随主进程退出，避免孤儿 |
-| Linux | kill 子进程 | `systemd-inhibit` 没有 `-w` 等价物，崩溃会留下残留锁 |
-| Android | 清 flag / `release()` WakeLock | WakeLock 必须在 Java 的 `onDestroy` 里也释放一次 |
+| Windows | `SetThreadExecutionState(ES_CONTINUOUS \| ES_SYSTEM_REQUIRED)` | `+ ES_DISPLAY_REQUIRED` |
+| macOS | `caffeinate -i` | `+ -d`, with `-w <pid>` |
+| Linux | `systemd-inhibit --what=sleep … sleep infinity` | `+ :idle` |
+| Android | `PARTIAL_WAKE_LOCK` | `FLAG_KEEP_SCREEN_ON` |
 
-## 4. 架构设计
+Two facts shape the whole design:
 
-新建 `crates/monitor_core/src/power.rs`，模仿 `autostart.rs` 的结构。
+- What is held is a **request**, not a setting. Every mechanism is released when
+  the process ends, which is why the quit path matters (§7).
+- The project had no power-management code before this. The Android manifest
+  already declared `android.permission.WAKE_LOCK`, with a comment that named
+  exactly this feature - the permission existed, nothing used it.
+
+## 2. Goals and requirements
+
+Three capabilities; two are delivered:
+
+| Capability | Meaning | Platforms | Delivered |
+|---|---|---|---|
+| **Prevent system sleep** | The system does not suspend | all | yes |
+| **Keep the screen on** | The display does not blank or screensaver | all | yes |
+| **Keep-alive** | Stop the system reclaiming the process while it is on screen | Android | **no**, see §2.2 |
+
+Two independent configuration switches:
+
+- `prevent_sleep`: do not let the system suspend.
+- `keep_screen_on`: keep the display on.
+- Both default to **on**.
+
+### 2.1 "Screen on" implies "system awake"
+
+This has to be handled in the implementation, or the two switches can be
+combined into a state that means nothing.
+
+On all three desktop platforms the "screen on" mechanism acts on the **display
+only** and does not stop the system suspending:
+
+- Windows: `ES_DISPLAY_REQUIRED` only resets the display idle timer.
+- macOS: `caffeinate -d` is display-only.
+- Linux: `systemd-inhibit --what=idle` blocks idle (blank/screensaver) only.
+
+So "screen on, sleep allowed" is a strange state: the screen is lit, but the
+system may still suspend underneath it - and a suspension takes the screen with
+it, so the combination is pointless.
+
+**How it is handled: `plan()` normalises - asking for the screen also asks for
+the system.** The UI says so (`settings-power-hint`), rather than presenting
+them as two orthogonal switches.
+
+### 2.2 Keep-alive is not delivered
+
+The Android implementation today is `FLAG_KEEP_SCREEN_ON` plus
+`PARTIAL_WAKE_LOCK`. The first is an activity window flag cleared with the
+window; the second only keeps the CPU out of low-power states. **Neither stops
+the system reclaiming the process** under memory pressure or background
+restrictions.
+
+Real keep-alive needs a foreground service: a `<service>` in the manifest, the
+`FOREGROUND_SERVICE` permission, a persistent notification, and on Android 14+
+a `foregroundServiceType` with its corresponding `FOREGROUND_SERVICE_*`
+permission. That is a different order of cost from the two halves above, so it
+is left as a separate phase; until it lands the UI must not claim "keep-alive".
+
+## 3. Platform API matrix
+
+| Capability | Windows | macOS | Linux | Android |
+|---|---|---|---|---|
+| No sleep | `SetThreadExecutionState(ES_CONTINUOUS \| ES_SYSTEM_REQUIRED)` | `caffeinate -i` | `systemd-inhibit --what=sleep` | `PARTIAL_WAKE_LOCK` |
+| Screen on | the same `+ ES_DISPLAY_REQUIRED` | `+ -d` | `+ :idle` | `FLAG_KEEP_SCREEN_ON` |
+| Keep-alive | n/a | n/a | n/a | foreground service (not built) |
+
+Release differs on every one of them, and that is the easiest thing to get
+wrong:
+
+| Platform | Release | Note |
+|---|---|---|
+| Windows | `SetThreadExecutionState(ES_CONTINUOUS)` | **per-thread** state; must be set and cleared on a long-lived thread |
+| macOS | kill the child | `-w <pid>` makes it exit with us, so no orphan |
+| Linux | kill the child | `systemd-inhibit` has no `-w` equivalent, so a crash leaves the lock behind |
+| Android | clear the flag / `release()` the wake lock | the wake lock must also be released in Java's `onDestroy` |
+
+## 4. Architecture
+
+`crates/monitor_core/src/power.rs`, modelled on `autostart.rs`: a
+platform-independent API on top, one `imp` module per platform, errors reported
+through `CoreError`.
 
 ```
 power.rs
-├── struct Applied { system: bool, display: bool }        // 已施加的状态
-├── fn plan(applied: Applied, prevent_sleep: bool, keep_screen: bool) -> Option<Applied>
+├── struct Applied { system: bool, display: bool }        // what is being held
+├── fn plan(applied, prevent_sleep, keep_screen) -> Option<Applied>
 ├── pub struct PowerStatus { supported, applied, mechanism, error: Option<String> }
 ├── pub fn is_supported() -> bool
 ├── pub fn mechanism() -> &'static str
-├── pub fn apply(prevent_sleep: bool, keep_screen: bool) -> Result<()>   // 幂等、重入安全
+├── pub fn apply(prevent_sleep: bool, keep_screen: bool) -> Result<()>   // idempotent
 ├── pub fn release() -> Result<()>
 ├── pub fn status() -> PowerStatus
 ├── #[cfg(target_os = "android")] pub type AndroidRequest = fn(bool, bool) -> Result<()>
 ├── #[cfg(target_os = "android")] pub fn install_android(request: AndroidRequest)
 ├── #[cfg(windows)]                    mod imp — SetThreadExecutionState FFI
-├── #[cfg(target_os = "macos")]        mod imp — caffeinate 子进程
-├── #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
-│                                      mod imp — systemd-inhibit 子进程
-├── #[cfg(all(unix, not(target_os = "android")))] mod holder — 启子进程，并确认它没有立刻退出
-├── #[cfg(target_os = "android")]      mod imp — 转发给 GUI 装上的 AndroidRequest
+├── #[cfg(target_os = "macos")]        mod imp — caffeinate child process
+├── #[cfg(all(unix, not(any(macos, android))))] mod imp — systemd-inhibit child process
+├── #[cfg(all(unix, not(android)))]    mod holder — spawn a child and check it did not exit at once
+├── #[cfg(target_os = "android")]      mod imp — forward to the AndroidRequest the GUI installed
 └── #[cfg(not(any(windows, unix)))]    mod imp — CoreError::unsupported
 ```
 
-> 注意 `not()` 只接受一个谓词，`#[cfg(unix, not(macos, android))]` 是无效语法；上面按 `autostart.rs` 的写法展开。
+**State**: `static Mutex<State>` holds the current `Applied` and the last error.
+`apply` is idempotent - repeating the same request does nothing, and moving one
+switch leaves the other where it was. The mutexes guard a few booleans and a
+child handle, so a poisoned lock is recovered rather than propagated: refusing
+to lock would turn a panic elsewhere into a process that can never take back
+the wakefulness it asked for.
 
-**内部状态**：`static Mutex<InnerState>` 保存子进程 handle / WakeLock 状态 / 当前 `Applied`。`apply` 幂等——重复调用相同参数不重复施加，参数变化时只做增量调整。
+**Error reporting**: `CoreError::config` / `CoreError::unsupported`, as in
+`autostart.rs`. A failure must be visible to the UI (§6), never silently
+treated as success.
 
-**错误上报**：复用 `CoreError::unsupported` / `CoreError::config`，与 `autostart.rs` 一致。失败要能被 UI 看见（见 §6），不能静默当作成功。
+### 4.1 The testable half
 
-### 4.1 可测的那一半
-
-`imp` 直接调 OS API，逻辑全包在里面就没法测——而单测又不能真的去改系统电源状态。按仓库里 `StallDeadline` / `ReconnectPolicy` 的先例（纯状态 + 断言），把"该做什么"抽成纯函数：
+`imp` calls the operating system directly, and no unit test can change the
+machine's real power state. Following the `StallDeadline` / `ReconnectPolicy`
+precedent in the repository, "what to do" is a pure function:
 
 ```rust
-/// 归一化后的目标与当前已施加状态的差量；`None` 表示无需动作。
+/// The normalised target against what is already held; `None` means no change.
 fn plan(applied: Applied, prevent_sleep: bool, keep_screen: bool) -> Option<Applied>;
 ```
 
-`plan` 只做两件事：归一化（`keep_screen ⇒ system`，见 §2.1）与幂等判断（与 `applied` 相同则返回 `None`）。**单测覆盖它**；`apply()` 只负责按 `plan` 的结果去调 `imp`。
+`plan` does two things: normalise (`keep_screen ⇒ system`, §2.1) and detect a
+no-op (equal to `applied` → `None`). **This is what the unit tests cover**;
+`apply` only carries out what `plan` returns.
 
-### 4.2 为什么 Android 是一个钩子
+### 4.2 Why Android is a hook
 
-Android 的两半——`PARTIAL_WAKE_LOCK` 与 `FLAG_KEEP_SCREEN_ON`——都要经 JNI 到达 Activity，而**整个进程里唯一会跟 Java 打交道的地方在 `monitor_gui`**：`keyboard` 持有 VM 与 Activity 的 class 引用，`android` 是它的调用层。`monitor_core` 够不着它，因为依赖方向是 gui → core，反过来不成立。
+Android's two halves - `PARTIAL_WAKE_LOCK` and `FLAG_KEEP_SCREEN_ON` - both
+reach the activity through JNI, and **the only place in the process that talks
+to Java is `monitor_gui`**: `keyboard` holds the VM and the activity's class
+reference, and `android` is its call layer. `monitor_core` cannot reach it,
+because the dependency direction is gui → core and not the other way.
 
-三个选择，取第三个：
+Options considered, third taken:
 
-| 方案 | 问题 |
+| Option | Problem |
 |---|---|
-| 在 `monitor_core` 里再写一份 JNI 引导（VM、class 引用、线程 attach、异常清理） | 进程里出现两处"知道怎么跟 Java 说话"的代码，且必须永远同步 |
-| 把 Android 分支整个搬到 `monitor_gui` | `apply` / `release` / `status` 被劈成两半，UI 到处 `cfg`，`PowerStatus` 还要复制一份 |
-| **`imp(android)` 转发给一个由 GUI 装上的函数指针** | 多一层间接，换来依赖方向与单一职责都保持干净 |
+| A second JNI bootstrap inside `monitor_core` | Two places in the process "know how to talk to Java", and they must stay in step forever |
+| Move the whole Android branch into `monitor_gui` | `apply` / `release` / `status` split in half, `cfg` scattered through the UI, `PowerStatus` duplicated |
+| **`imp(android)` forwards to a function pointer the GUI installs** | One layer of indirection, and the dependency direction and single responsibility stay clean |
 
-于是 `power.rs` 公开一个类型和一个安装函数：
+So `power.rs` exposes one type and one installer:
 
 ```rust
-/// 由 GUI crate 提供的 Android 实现。
 #[cfg(target_os = "android")]
 pub type AndroidRequest = fn(system: bool, display: bool) -> Result<()>;
 
@@ -155,38 +174,47 @@ pub type AndroidRequest = fn(system: bool, display: bool) -> Result<()>;
 pub fn install_android(request: AndroidRequest);
 ```
 
-`monitor_gui::app` 在 `App::new` 里装上它，**且在任何人问"这平台能不能保持唤醒"之前**：
+`monitor_gui::app` installs it in `App::new`, **before anything asks whether the
+platform can hold a wake request**:
 
 ```rust
 #[cfg(target_os = "android")]
 power::install_android(crate::android::set_keep_awake);
 ```
 
-`is_supported()` 在 Android 上就等于"装上了没有"：
+`is_supported()` on Android is simply "is the hook installed":
 
-- 装上了 → `true`，面板正常显示两个开关；
-- 还没装 → `false`，面板照 §6 置灰并给出说明。
+- installed → `true`, the panel shows both switches normally;
+- not installed yet → `false`, the panel greys them out and says why (§6).
 
-这样"还没实现"与"实现了但此处不可用"共用一个出口，**不需要额外的 gate 开关**：一期在 Android 上自动置灰、二期装上钩子后自动可用，都是这一个判断的结果。
+That gives "not implemented here" and "implemented but unavailable here" a
+single exit, with **no separate gate flag**: a platform with no mechanism greys
+out automatically, and Android becomes available automatically once the hook is
+installed.
 
-钩子的另一头是 `monitor_gui::android::set_keep_awake`，它用 §5.4 那两个 Java 方法，经一个带参的 JNI 助手调用：
+The other end is `monitor_gui::android::set_keep_awake`, which calls the two
+Java methods through a JNI helper that takes a parameter:
 
 ```rust
-/// 调用一个带 `boolean` 的 Java 静态方法，签名 `"(Z)V"`。
+/// Calls a Java static method taking one `boolean`, signature `"(Z)V"`.
 fn call_void_bool(method: &str, value: bool) -> bool;
 ```
 
-参数是必须的：`android.rs` 里原有的 `call_void` / `call_bool` 把签名写死成 `"()V"` / `"()Z"`，**不收参数**。它同时按该文件一贯的做法清掉挂起的 Java 异常——留一个挂起异常会让下一次 JNI 调用直接终止进程。
+The parameter is necessary: the file's existing `call_void` / `call_bool` hard
+code the signature as `"()V"` / `"()Z"` and take no argument. The helper also
+clears a pending Java exception the way the rest of the file does - leaving one
+pending aborts the process on the next JNI call. `set_keep_awake` returns an
+error unless both calls reached the activity, so a wake request that silently
+did nothing cannot pass.
 
-## 5. 各平台实现细节
+## 5. Platform implementation
 
 ### 5.1 Windows
 
-手写 FFI，无需新增 crate（现有 `windows-sys` 仅为 `FreeConsole` 引入，此处可直接 `#[link]`）：
+Hand-written FFI, no new crate (`kernel32` is linked by the standard library):
 
 ```rust
-// edition 2024 下 extern 块必须是 `unsafe extern`。
-unsafe extern "system" {
+extern "system" {
     fn SetThreadExecutionState(flags: u32) -> u32;
 }
 const ES_CONTINUOUS: u32 = 0x8000_0000;
@@ -194,70 +222,114 @@ const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
 const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
 ```
 
-- 组合：`prevent_sleep` → `ES_CONTINUOUS | ES_SYSTEM_REQUIRED`；`keep_screen_on` → 再加 `ES_DISPLAY_REQUIRED`。
-- 释放：`SetThreadExecutionState(ES_CONTINUOUS)`。
-- **判返回值**：失败返回 `0`，应转为 `CoreError` 上报，不要静默当作成功。
-- ⚠️ **关键坑**：`ES_CONTINUOUS` 是 **per-thread** 状态。必须在长寿线程（eframe `update` 的主线程）设置与清除，不能丢到临时线程，否则锁随线程结束失效。因此 `apply` / `release` 均从主线程调用。
+- Combine: `prevent_sleep` → `ES_CONTINUOUS | ES_SYSTEM_REQUIRED`;
+  `keep_screen_on` → add `ES_DISPLAY_REQUIRED`.
+- Release: `SetThreadExecutionState(ES_CONTINUOUS)`.
+- **Check the return value**: it is `0` on failure, which is turned into a
+  `CoreError` rather than being taken for success. (On success the first call
+  returns the previous state, `0x80000000` by default, so "zero means failure"
+  holds.)
+- **The key trap**: `ES_CONTINUOUS` is **per-thread** state. It has to be set
+  and cleared on a long-lived thread (eframe's `update` main thread), not on a
+  temporary one, or the lock dies with the thread. `apply` / `release` are
+  therefore called from the main thread.
+
+The `extern` block is written **without** `unsafe`: this crate is edition 2021,
+and the `unsafe extern` form would raise the effective minimum compiler past
+the 1.80 the workspace declares.
 
 ### 5.2 macOS
 
-外部命令方案，避免 IOKit FFI 复杂度，符合项目既有外部命令风格（`app.rs` 的 `xdg-open`）：
+An external command, to avoid IOKit FFI, in keeping with the project's existing
+use of external commands (the `xdg-open` in `monitor_gui`):
 
-- `prevent_sleep` → `caffeinate -i`（阻止 idle sleep）。
-- `keep_screen_on` → 再加 `-d`（阻止 display sleep）。
-- **加 `-w <our_pid>`**：`caffeinate -w <pid>` 会在指定进程退出时自行结束。没有它，xgview 崩溃后 `caffeinate` 会变成孤儿，断言一直挂着直到注销。
-- 子进程的 stdin/stdout/stderr 一律 `Stdio::null()`。
-- 保存 `std::process::Child` handle；`release` 时 `kill()`。
+- `prevent_sleep` → `caffeinate -i` (block idle sleep).
+- `keep_screen_on` → add `-d` (block display sleep).
+- **Add `-w <our_pid>`**: `caffeinate -w <pid>` exits when that process does.
+  Without it, a crash leaves `caffeinate` orphaned and the assertion held until
+  the next log out.
+- The child's stdin and stdout are detached (`Stdio::null()`) and its stderr is
+  piped, via `holder::watch`, so a refusal that comes back on stderr can be
+  reported (see §5.3).
+- The `std::process::Child` is kept in a static; `release` kills and reaps it.
+  Because `caffeinate`'s switches are one assertion set, changing the request
+  means starting a new process rather than re-arguing a running one.
 
 ### 5.3 Linux
 
-外部命令 `systemd-inhibit` 持有抑制锁：**子进程存活期间抑制生效，子进程一退出就释放**。
+`systemd-inhibit` holds the lock: **the inhibition lasts as long as the child
+lives and is released the moment it exits.**
 
-- `prevent_sleep` → `--what=sleep`
-- `keep_screen_on` → 再加 `:idle`
-- 完整命令：
+- `prevent_sleep` → `--what=sleep`; `keep_screen_on` → add `:idle`.
+- Full command:
 
 ```text
-systemd-inhibit --what=sleep:idle --mode=block --why="xgview monitoring wall" sleep infinity
+systemd-inhibit --what=sleep:idle --mode=block --why="XGView is showing a surveillance wall" sleep infinity
 ```
 
-- ⚠️ **不要用 `cat` 当 COMMAND。** `systemd-inhibit` 在 COMMAND 退出时释放锁，而 `cat` 读 stdin 遇到 EOF 就退出——GUI 进程的 stdin 要么是 `/dev/null`（立刻 EOF），要么是终端（`cat` 反而会去抢终端输入）。两种都等于没加锁。用 `sleep infinity`，并把子进程 stdin 设成 `null`。
-- ⚠️ **崩溃残留**：`systemd-inhibit` 没有 macOS `-w` 那样的参数，主进程被杀后它会活下来继续持锁，直到注销。要么用 `pre_exec` + `PR_SET_PDEATHSIG`（unsafe、Linux 专有），要么接受这一已知残留并在文档里写明。
-- **没有 `xdg-screensaver` 之类的 fallback**，虽然初稿写了一个：它是 X11 工具，在 Wayland 会话里什么都不做，而"开关看起来能用但实际无效"比"面板明确置灰"糟得多。
-- ⚠️ **`is_supported()` 必须真的去问一次，不能只看二进制在不在 PATH。** 没有 seat 的环境里 logind 会直接拒绝：`systemd-inhibit` 立刻退出 1 并打印 `Failed to inhibit: Access denied`——容器和 WSL 会话就是这样。只查 PATH 会让开关显示为可用却什么也不做。做法是用一条会立刻结束的命令探测一次（`systemd-inhibit … true`），结果用 `OnceLock` 缓存，因为 `is_supported()` 会被设置面板每帧问到。
-- ⚠️ **子进程秒退必须被察觉。** 两个子进程方案都只在子进程存活期间持有锁，所以"起来就死"就等于请求被拒——而原因只写在它的 stderr 上。因此 spawn 之后要看它一小段时间（150 ms）：一旦已经退出就返回错误并带上 stderr，例如 `systemd-inhibit refused the request (exit status: 1): Failed to inhibit: Access denied`。**这不是为了好看**：没有这一步，开关会显示"已生效"而实际什么都没持有——这个缺陷正是在 WSL 上实跑时发现的（`apply` 返回 ok、`status` 显示 `applied = { system: true, display: true }`，而 `systemd-inhibit --list` 里根本没有我们的锁）。macOS 的 `caffeinate` 走同一个 `holder` 助手。
+- **Do not use `cat` as the COMMAND.** `systemd-inhibit` releases the lock when
+  its COMMAND exits, and `cat` exits on stdin EOF - a GUI process's stdin is
+  either `/dev/null` (immediate EOF) or a terminal `cat` would consume. Either
+  way the lock is gone before it can be used. `sleep infinity` is used instead,
+  with the child's stdin set to `null`.
+- **Crash residue**: `systemd-inhibit` has no macOS `-w` equivalent, so if the
+  main process is killed the holder survives and holds the lock until log out.
+  This is a known residue, documented rather than fixed.
+- **No `xdg-screensaver` fallback**: it is an X11 tool that does nothing in a
+  Wayland session, and a switch that silently does nothing is worse than one the
+  panel greys out.
+- **`is_supported()` must actually ask, not just look on `PATH`.** Where there
+  is no seat, logind refuses outright: `systemd-inhibit` exits 1 with `Failed to
+  inhibit: Access denied` (containers and WSL sessions do this). So support is
+  probed once with a command that ends at once (`systemd-inhibit … true`) and
+  cached in a `OnceLock`, because `is_supported()` is reached every frame by the
+  settings panel.
+- **A child that dies at once must be noticed.** Both child-process mechanisms
+  hold their lock only while the child lives, so "started and already dead"
+  means the request was refused - and the reason is only on its stderr. After
+  spawning, the child is watched for 150 ms (`holder::watch`); if it has exited
+  the call fails with its stderr, e.g. `systemd-inhibit refused the request
+  (exit status: 1): Failed to inhibit: Access denied`. **This is not cosmetic**:
+  without it a switch reads "on" while nothing is held - a defect found by
+  running the Linux side for real, where `apply` returned ok, `status` reported
+  `applied = { system: true, display: true }`, and `systemd-inhibit --list`
+  showed no lock of ours. macOS's `caffeinate` goes through the same `holder`
+  helper.
 
-### 5.4 Android（本期：屏幕常亮 + CPU 不睡）
+### 5.4 Android (this phase: screen on + CPU awake)
 
-Java 侧 `MainActivity` 加两个**静态单参**方法（不是初稿里的两参方法，理由见 §修订记录 #3），全部走已有形状：
+Java's `MainActivity` gains two **static, single-argument** methods, both in the
+existing shape (`instance` + `runOnUiThread`):
 
 ```java
 private static PowerManager.WakeLock wakeLock;
 
-/** 保持 CPU 运行（屏幕可关）。权限 WAKE_LOCK 已声明。 */
+/** Keeps the CPU running (the screen may still go off). WAKE_LOCK is declared. */
 public static void setPreventSleep(final boolean wanted) {
     final MainActivity self = instance;
     if (self == null) {
         return;
     }
     self.runOnUiThread(() -> {
-        if (wanted) {
-            if (wakeLock == null) {
-                final PowerManager manager =
-                        (PowerManager) self.getSystemService(Context.POWER_SERVICE);
-                wakeLock = manager.newWakeLock(
-                        PowerManager.PARTIAL_WAKE_LOCK, "xgview:wall");
+        if (!wanted) {
+            releaseWakeLock();
+            return;
+        }
+        if (wakeLock == null) {
+            final PowerManager manager =
+                    (PowerManager) self.getSystemService(Context.POWER_SERVICE);
+            if (manager == null) {
+                return;
             }
-            if (!wakeLock.isHeld()) {
-                wakeLock.acquire();
-            }
-        } else if (wakeLock != null && wakeLock.isHeld()) {
-            wakeLock.release();
+            wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "xgview:wall");
+        }
+        if (!wakeLock.isHeld()) {
+            wakeLock.acquire();
         }
     });
 }
 
-/** 保持屏幕常亮。Activity 级窗口标志，无需权限。 */
+/** Keeps the screen on. An activity window flag; no permission needed. */
 public static void setKeepScreenOn(final boolean wanted) {
     final MainActivity self = instance;
     if (self == null) {
@@ -273,95 +345,182 @@ public static void setKeepScreenOn(final boolean wanted) {
 }
 ```
 
-- 与 `setReserveNavigationBar` 完全同构：读 `instance`、判空、`runOnUiThread`。**不要**在静态方法里直接调 `getWindow()`。
-- 需要新增两个 import：`android.os.PowerManager` 与 `android.view.WindowManager`（`Context` 与 `Window` 已在文件里引用）。
-- **怎么被调到**：由 §4.2 的钩子接上 `monitor_core::power`，另一头是 `monitor_gui::android::set_keep_awake`，它用 `call_void_bool` 调这两个方法。两个调用只要有一个没到达活动就返回错误，面板在开关下方显示——一次没生效的唤醒请求不该静默通过。
-- 实现里比上面的形状多两处防护：`getSystemService` 可能返回 null（此时直接返回，不建锁）；释放收敛进一个 `releaseWakeLock()` 私有助手，好让 `onDestroy` 与关掉开关走同一句。
-- **`onDestroy` 必须补一次释放**：现有 `onDestroy` 只把 `instance` 置空；活动被系统销毁（低内存、旋转以外的重建）时，`WakeLock` 对象会随之失去引用但**锁本身不会释放**，就成了真泄漏。加一句 `if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();`。`FLAG_KEEP_SCREEN_ON` 随窗口自动清除，不需要处理。
-- `FLAG_KEEP_SCREEN_ON` 与 `applySystemBars()` 不冲突：后者用的是 `setSystemUiVisibility` / insets，不碰窗口 flag。
-- **注意语义**：`prevent_sleep` 而 `keep_screen_on` 关时，屏幕会熄灭、Activity 进入 stopped，CPU 靠 WakeLock 保持运行，RTSP 与解码继续——这正是监控墙"关屏但别断流"的用法。但屏幕已灭，此时 UI 不可见，这一点要在 UI 文案里说清。
+- **Never call `getWindow()` from a static method** - it is an instance method;
+  reading `instance`, null-checking it, and running on the UI thread is the
+  shape used everywhere in this file.
+- Two imports are needed: `android.os.PowerManager` and
+  `android.view.WindowManager`.
+- **How it is reached**: the hook of §4.2 wires `monitor_core::power` to
+  `monitor_gui::android::set_keep_awake`, which calls these two methods with
+  `call_void_bool`. If either call does not reach the activity, `set_keep_awake`
+  returns an error and the panel shows it under the switches - a wake request
+  that did not take effect must not pass silently.
+- The real code adds two guards over the shape above: `getSystemService` may
+  return null (return without creating a lock), and release is folded into a
+  `releaseWakeLock()` helper so the switch and `onDestroy` use one line.
+- **`onDestroy` releases once more**: `WakeLock` is not released by losing the
+  object that holds it, so an activity the system destroys (memory pressure, a
+  rebuild) would leak the lock. `FLAG_KEEP_SCREEN_ON` clears with the window and
+  needs no handling.
+- `FLAG_KEEP_SCREEN_ON` does not conflict with `applySystemBars()`, which uses
+  `setSystemUiVisibility` / insets and does not touch window flags.
+- **Semantics**: with `prevent_sleep` on and `keep_screen_on` off, the screen
+  goes dark, the activity becomes stopped, and the CPU keeps running on the wake
+  lock - RTSP and decoding continue. That is the "screen off, streams still on"
+  monitoring-wall case, and the UI text must make clear that the panel is not
+  visible while the screen is dark.
 
-## 6. 配置与 UI
+## 6. Configuration and UI
 
-`crates/monitor_core/src/config.rs` 的 `AppConfig` 新增两个字段：
+`AppConfig` (`crates/monitor_core/src/config.rs`) carries two fields:
 
 ```rust
 pub prevent_sleep: bool,
 pub keep_screen_on: bool,
 ```
 
-- **不需要 `default_true()`**（该函数不存在，也不必新增）：`AppConfig` 本身带结构级 `#[serde(default)]`，缺字段会回落到 `AppConfig::default()`。只要在 `impl Default for AppConfig` 里写 `prevent_sleep: true, keep_screen_on: true`，旧配置即自动兼容。
+No `default_true()` helper is needed: `AppConfig` is annotated
+`#[serde(default)]` at the struct level, so a missing field falls back to
+`AppConfig::default()`, where both are `true`. Old configurations upgrade with
+no version bump.
 
-> ⚠️ 默认开启意味着普通桌面用户首次运行、以及旧配置升级后，会立即开始阻止睡眠 + 常亮。监控墙场景合理，但必须在 UI 提供关闭入口。
+> Both defaulting to **on** means a normal desktop user starts blocking sleep
+> and blanking immediately after the first run, and after an upgrade. That is
+> right for a monitoring wall, but the switch must be easy to find and turn off.
 
-**启动时要打日志。** 用 `tracing::info!` 记下开了哪个开关、用的什么机制。一个用户发现机器不再睡眠时，唯一能指向 xgview 的线索就是这行日志——这与仓库里"日志必须说明原因"的一贯要求一致。
+**Start-up logs it.** `tracing::info!` records which switches were on, the
+mechanism, and the resulting `Applied` - the only line pointing at XGView when a
+user notices the machine no longer sleeps.
 
-**UI 落点**：System tab（`settings_system`），与 autostart 同段，加两个 checkbox，变更时立即重新 `apply()`。
+**UI location**: the **System** tab (`settings_system`), in the same section
+pattern as autostart, under a "Keep awake" heading:
 
-- **不支持的平台要禁用而不是沉默**：`is_supported()` 为假（或无 systemd）时把 checkbox 置灰，并给出说明——沿用已有的 `settings-autostart-unsupported` 先例与 `decoder_selectable` 的 gate 写法。
-- **`apply()` 失败要可见**：把错误显示在该段文字里（或走已有的 toast），不要让用户勾了却什么都没发生。
-- **一期在 Android 上先禁用**：一期只有桌面三平台，Android 要等二期；在那之前勾了不生效——这正是"优先硬件解码"在 Android 上那个已知 wart 的同类问题，别再复制一次。
+- two checkboxes (`settings-prevent-sleep`, `settings-keep-screen-on`), applied
+  immediately on change;
+- a hint line stating that keeping the screen on also keeps the machine awake;
+- **unsupported platforms are disabled, not silent**: the checkboxes are drawn
+  inside `add_enabled_ui(power_supported)` and an explanation
+  (`settings-power-unsupported`) is shown below them, following the existing
+  `settings-autostart-unsupported` precedent;
+- **a failed `apply()` is visible**: the error is shown under the switches (and
+  a toast is raised via `settings-power-failed`), never swallowed;
+- the mechanism name is shown through the generic `settings-mechanism` wrapper,
+  with the value keyed per platform.
 
-**i18n**（`en.ftl` 与 `langs/zh-CN.ftl` 各加）：
+**i18n keys** (`en.ftl` and `langs/zh-CN.ftl`):
 
-- `settings-prevent-sleep` —— 注意前缀是 `settings-`（System 页），不是初稿里的 `streams-`；
-- `settings-keep-screen-on`（文案需体现 §2.1：常亮同时也会阻止系统睡眠）；
-- `settings-power-unsupported`；
-- 机制串**复用已存在的通用键** `settings-mechanism = mechanism: { $name }`，不必新建 `power-mechanism-*`。
+- `settings-power`, `settings-prevent-sleep`, `settings-keep-screen-on`,
+  `settings-power-hint`, `settings-power-unsupported`, `settings-power-failed`;
+- `settings-mechanism` is reused as the wrapper
+  (`mechanism: { $name }`), with the values in `power-mechanism-windows`,
+  `power-mechanism-caffeinate`, `power-mechanism-systemd`,
+  `power-mechanism-android`, `power-mechanism-unsupported`.
 
-## 7. 生命周期集成
+## 7. Lifecycle integration
 
-| 时机 | 动作 | 落点 |
+| Moment | Action | Where |
 |---|---|---|
-| 启动 | 按配置 `apply()`，并 `info!` 记录机制 | `App::new` |
-| 设置变更 | 重新 `apply()` | System tab checkbox 回调 |
-| 桌面退出 | **显式** `release()` | `close_requested` 分支 |
-| Android 退出 | **显式** `release()` | `quit()`，且必须在 `std::process::exit(0)` **之前** |
-| Android 活动销毁 | Java 侧释放 WakeLock | `MainActivity.onDestroy` |
+| Start-up | `apply()` from the config, then `info!` the mechanism and result | `App::new` |
+| Setting changed | re-`apply()` | System tab checkbox |
+| Desktop exit | **explicit** `release()` | the `close_requested` branch of `update` |
+| Android exit | **explicit** `release()` | `quit()`, before `std::process::exit(0)` |
+| Android activity destroyed | Java releases the wake lock | `MainActivity.onDestroy` |
 
-⚠️ **不要指望 `Drop` 释放。** Android 的 `quit()` 走 `std::process::exit(0)`，**析构函数不会执行**；桌面退出路径同理不可依赖 RAII。`release()` 必须是退出前的一次显式调用——这是硬约束，不是风格选择。
+⚠️ **Do not rely on `Drop` to release.** Android's `quit()` goes through
+`std::process::exit(0)`, which runs **no destructors**; the desktop exit path is
+equally undependable for RAII. `release()` must be an explicit call before the
+process ends - a hard constraint, not a style choice.
 
-## 8. 风险
+## 8. The blackout interaction
 
-- **功耗**：屏幕常亮 + 阻止睡眠显著增加耗电，电池设备尤甚。
-- **OLED 烧屏**：静态监控画面长期常亮有烧屏风险。
-- **默认开启的行为变更**：旧配置升级后自动开启，需在 UI 显式可关，并在启动日志里留痕。
-- **Windows 线程约束**：必须在主线程调用 `SetThreadExecutionState`，否则锁失效。
-- **Linux 碎片化 / 抑制被拒**：没有 systemd、或环境本身没有 seat（容器、WSL）时，logind 会拒绝抑制请求。`is_supported()` 通过一次真实探测如实反映，`apply()` 把拒绝原因显示在面板上——两条路都不会静默通过。
-- **Linux 孤儿抑制锁**：`systemd-inhibit` 无 `-w` 等价物，主进程崩溃会留下持锁的孤儿进程（macOS 用 `caffeinate -w` 已规避）。
-- **Android WakeLock 泄漏**：Java 侧必须成对 acquire/release，且 `onDestroy` 也要释放一次。
-- **开关组合的语义**：不加 §2.1 的归一化，"常亮但不阻止睡眠"会产生自相矛盾的状态。
-- **不可用平台上的空开关**：`is_supported()` 为假时若不置灰，用户会以为生效了。
+The blackout feature (a wall that blanks itself on a schedule) arrived after
+this design and borrows the power request while it is active. In
+`apply_power_for_blackout`:
 
-## 9. 实施计划
+- the two switches are the viewer's setting **or** `blackout_on`, so a blank
+  wall asks for both;
+- the blank borrows the request rather than changing the setting - when it ends,
+  `apply_power_for_blackout` re-derives from the config and the power request
+  returns to what the viewer chose;
+- a failure to hold the machine awake for the blank is logged at `warn` and does
+  not disturb the setting.
 
-### 一期：桌面三平台
+The reason it outranks the setting: a screen that goes black and is then powered
+down is precisely the state the blackout exists to avoid.
 
-1. 新建 `crates/monitor_core/src/power.rs`：
-   - `Applied` + `plan()`（纯函数，带单测）；
-   - 平台无关 API（`is_supported` / `mechanism` / `apply` / `release` / `status`）；
-   - 三个 `imp`：Windows（`SetThreadExecutionState`，判返回值）、macOS（`caffeinate -i -d -w <pid>`）、Linux（`systemd-inhibit … sleep infinity`）。两个子进程方案一律 `Stdio::null()`。
-2. `config.rs`：在 `impl Default` 里加 `prevent_sleep: true` / `keep_screen_on: true`，字段本身加到结构体。
-3. `app.rs`：`App::new` 按配置 `apply()` 并 `info!`；`close_requested` 分支显式 `release()`。
-4. System tab：两个 checkbox + 变更时重新 `apply()`；不支持的平台置灰并说明；**Android 上本期先置灰**。
-5. i18n：`settings-prevent-sleep` / `settings-keep-screen-on` / `settings-power-unsupported`；机制串复用 `settings-mechanism`。
-6. `cargo test` + `cargo clippy` 验证。
+## 9. Risks
 
-### 二期：Android
+- **Power draw**: screen on plus no sleep increases consumption, most of all on
+  battery devices.
+- **OLED burn-in**: a static wall lit for a long time risks burn-in.
+- **A changed default behaviour**: old configurations start blocking sleep
+  automatically; the switch must be visibly available and the start-up log must
+  record it.
+- **Windows thread constraint**: `SetThreadExecutionState` must be called from
+  the main thread or the lock is lost.
+- **Linux fragmentation / refused inhibition**: without systemd, or without a
+  seat (containers, WSL), logind refuses. `is_supported()` reflects that
+  truthfully via a real probe, and `apply()` shows the refusal in the panel;
+  neither path passes silently.
+- **Linux orphan lock**: `systemd-inhibit` has no `-w` equivalent, so a crash
+  leaves a holder behind (macOS avoids it with `caffeinate -w`).
+- **Android wake-lock leak**: Java must pair acquire/release, and `onDestroy`
+  must release once more.
+- **Switch combination semantics**: without the §2.1 normalisation, "screen on
+  but sleep allowed" is a contradictory state.
+- **Dead switches on unsupported platforms**: if `is_supported()` is false and
+  the panel does not grey out, the user believes it took effect.
 
-7. `MainActivity.java`：加 `setPreventSleep(boolean)` / `setKeepScreenOn(boolean)`（§5.4）；`onDestroy` 释放 WakeLock。
-8. `android.rs`：加 `call_void_bool(method, value)`（签名 `"(Z)V"`，`call_void` / `call_bool` 不收参数）与 `set_keep_awake(system, display)`；`power.rs` 加 `install_android` 钩子（§4.2），`app.rs` 在 `App::new` 里安装它。装上之后 `is_supported()` 即为真，一期的置灰自动消失——**没有单独的 gate 需要放开**。
-9. `quit()` 里 `release()`，位于 `std::process::exit(0)` 之前。
+## 10. Implementation status and remaining work
 
-### 三期：前台保活（可选，独立评估）
+- **Phase 1 - desktop (Windows / macOS / Linux): done.** `power.rs` with
+  `Applied` + `plan()` (unit-tested), the platform-independent API, and the
+  three `imp` modules; `AppConfig` fields and defaults; `App::new` apply +
+  `info!` and the close path `release()`; the System-tab switches with the
+  disabled-when-unsupported handling; the i18n keys.
+- **Phase 2 - Android: done.** `MainActivity.setPreventSleep` /
+  `setKeepScreenOn` (and `releaseWakeLock` in `onDestroy`); `call_void_bool` and
+  `set_keep_awake` in `android.rs`; `install_android` wired in `App::new`;
+  `release()` in `quit()` before `std::process::exit(0)`. With the hook
+  installed, `is_supported()` is true and the phase-1 grey-out disappears with
+  no separate gate to open.
+- **Phase 3 - keep-alive (optional, separate evaluation): not started.** Add
+  `<service>` + `FOREGROUND_SERVICE` (and `foregroundServiceType` plus its
+  permission on Android 14+), a persistent notification, and a user-facing way
+  to turn it off. **Only at that point may the UI claim "keep-alive".**
 
-10. manifest 加 `<service>` + `FOREGROUND_SERVICE`（Android 14+ 另加 `foregroundServiceType` 及对应权限）；常驻通知；处理用户的关闭入口。**只有到这一步，UI 才可以宣称"保活"。**
+## 11. Verification
 
-## 10. 验证
-
-- **单元测试**：`plan()` 的归一化（`keep_screen ⇒ system`）与幂等（相同参数返回 `None`）；`is_supported` / `mechanism` 的平台分支。全程不依赖真实系统调用。
-- **手动验证**：
-  - Windows：`powercfg /requests` 观察 SYSTEM / DISPLAY 请求——**它需要管理员权限，非提升的命令行会被直接拒绝**。拿不到提升权限时读应用自己的日志即可：`xgview::power` 的 `execution state requested` 与 `power management at start-up`（`applied` 为真）。之所以够用，是因为 `SetThreadExecutionState` 成功时**不会**返回 0——实测默认状态下首次调用返回 `0x80000000`（`ES_CONTINUOUS`），所以"返回 0 即失败"的判据成立，日志里没有失败告警就等于请求被接受。若仍要独立观察，把电源计划超时改到 1 分钟直接看是否关屏/睡眠。
-  - macOS：`pmset -g assertions` 观察 caffeinate 断言；另需确认 kill 掉 xgview 后 `caffeinate` 也随之消失（验证 `-w` 生效）。
-  - Linux：`systemd-inhibit --list` 看抑制锁、`loginctl` 看 idle；再杀掉进程确认锁已释放（否则就是 §8 的孤儿问题）。**在容器或 WSL 里通常拿不到抑制**——那里 `systemd-inhibit` 直接回 `Failed to inhibit: Access denied`、退出 1，于是 `is_supported()` 为 `false`、面板置灰，这是期望行为而不是缺陷；要验"真的抑制住了"得用有 seat 的真 Linux 桌面会话。
-  - Android：三条互相独立的证据一起看——`adb shell dumpsys power` 里有 `PARTIAL_WAKE_LOCK 'xgview:wall' (uid=…)`；`adb shell dumpsys window windows` 里我们自己窗口的 `fl=` 含 `KEEP_SCREEN_ON`，且 `mHoldScreenWindow` 指向该窗口；`adb logcat -s xgview` 里 `power management at start-up` 显示 `supported=true` 与 `applied=Applied { system: true, display: true }`。前两条证明的是**效果**，最后一条证明的是钩子装上了、且两个 JNI 调用都成功。另外主动触发活动销毁后确认 WakeLock 没有残留。
+- **Unit tests** (`power.rs`): `plan()`'s normalisation (`keep_screen ⇒ system`)
+  and idempotence (the same request returns `None`), release covering all four
+  switch combinations, the mechanism name being a translatable key, and
+  `status()` agreeing with `is_supported()`. None of these touch the real
+  system.
+- **Manual checks**:
+  - **Windows**: `powercfg /requests` shows the SYSTEM / DISPLAY request - but
+    it **needs administrator rights** and a non-elevated shell is refused
+    outright. Without elevation, read the application's own log:
+    `xgview::power`'s `execution state requested` and `power management at
+    start-up` with `applied` true. (This is enough because
+    `SetThreadExecutionState` does not return 0 on success; no failure warning
+    in the log means the request was accepted.) To observe it independently,
+    set the power-plan timeout to one minute and watch whether the screen blanks
+    or the machine sleeps.
+  - **macOS**: `pmset -g assertions` shows the caffeinate assertion; also
+    confirm `caffeinate` disappears when XGView is killed (`-w` working).
+  - **Linux**: `systemd-inhibit --list` shows the lock, `loginctl` shows idle;
+    then kill the process and confirm the lock is gone (otherwise it is the §9
+    orphan). **In a container or WSL this usually cannot be held** -
+    `systemd-inhibit` answers `Failed to inhibit: Access denied` and exits 1, so
+    `is_supported()` is false and the panel greys out, which is the expected
+    behaviour rather than a defect; verifying a real inhibition needs a real
+    Linux desktop session with a seat.
+  - **Android**: read three independent pieces of evidence together -
+    `adb shell dumpsys power` has `PARTIAL_WAKE_LOCK 'xgview:wall' (uid=…)`;
+    `adb shell dumpsys window windows` shows our window's `fl=` containing
+    `KEEP_SCREEN_ON` with `mHoldScreenWindow` pointing at it; and
+    `adb logcat -s xgview` shows `power management at start-up` with
+    `supported=true` and `applied=Applied { system: true, display: true }`. The
+    first two prove the effect; the last proves the hook was installed and both
+    JNI calls succeeded. Also destroy the activity deliberately and confirm no
+    wake lock is left behind.

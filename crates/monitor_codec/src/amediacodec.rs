@@ -12,9 +12,9 @@
 //! - whatever usage the reader is built with. A control app that runs the same
 //! `MediaCodec -> AImageReader` path without a GPU surface in the process
 //! decodes happily, and this backend with no surface at all decodes happily too.
-//! DevMemo §9 holds the evidence and the variants that were ruled out. The price
-//! is the copy out of the codec's buffer; on this device it is the difference
-//! between a picture and an abort.
+//! `docs/DevMemo.md` §9 holds the evidence and the variants that were ruled
+//! out. The price is the copy out of the codec's buffer; on this device it is
+//! the difference between a picture and an abort.
 //!
 //! The session is opened once, from [`VideoDecoder::configure`], and lives as
 //! long as the channel does. A codec rebuilt for every packet never reaches a
