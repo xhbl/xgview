@@ -399,5 +399,5 @@ This project is licensed under the [MIT License](LICENSE). All code in this repo
 ---
 
 ## Contact
-**E-mail**: [Send Email](mailto:newxhbl@hotmail.com?subject=[RustApps]%20Inquiry)  
-**Issues**: [Open Issue](../../../issues)  
+**E-mail**: [Send Email](mailto:newxhbl@hotmail.com?subject=[XGView]%20Inquiry)  
+**Issues**: [Open Issue](../../issues)  

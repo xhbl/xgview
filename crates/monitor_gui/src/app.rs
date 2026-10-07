@@ -68,7 +68,7 @@ const SETTINGS_WIDTH: f32 = 360.0;
 const SETTINGS_MIN_WIDTH: f32 = 300.0;
 
 /// The project's page on GitHub, shown in the About tab.
-const REPOSITORY_URL: &str = "https://github.com/xhbl/RustApps/tree/master/xgview";
+const REPOSITORY_URL: &str = "https://github.com/xhbl/xgview";
 
 /// How far a direction press scrolls the settings body when it has nowhere left
 /// to move the focus, as a fraction of the window's height.

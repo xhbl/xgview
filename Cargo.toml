@@ -48,11 +48,11 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.2.94"
+version = "1.2.95"
 authors = ["XHBL <newxhbl@hotmail.com>"]
 description = "A grid viewer for surveillance cameras"
 license = "MIT"
-repository = "https://github.com/xhbl/RustApps/xgview"
+repository = "https://github.com/xhbl/xgview"
 edition = "2021"
 rust-version = "1.80"
 
