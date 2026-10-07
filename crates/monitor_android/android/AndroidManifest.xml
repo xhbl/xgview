@@ -16,8 +16,12 @@
       landscape that bar lies along the right edge, over the toolbar.
     * `android.app.lib_name` must match the `[lib] name` of the crate, which is
       `monitor_android`.
-    * No launcher icon is referenced on purpose: the sample does not ship
-      `@mipmap` / `@drawable` resources, so the platform default is used.
+    * The launcher icon comes from the `mipmap-*` densities beside this file:
+      the legacy bitmaps (`ic_launcher`, `ic_launcher_round`) and the adaptive
+      pair (`mipmap-anydpi-v26` over the foreground bitmaps). The TV launcher
+      additionally draws the `drawable-xhdpi/ic_launcher_banner.png`. All of
+      them are placeholders until real artwork replaces them; see
+      `scripts/make-icons.py`.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -73,7 +77,9 @@
         android:label="@string/app_name"
         android:allowBackup="false"
         android:hardwareAccelerated="true"
-        android:icon="@android:drawable/ic_menu_camera"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:banner="@drawable/ic_launcher_banner"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 

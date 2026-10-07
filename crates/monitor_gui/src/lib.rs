@@ -96,14 +96,34 @@ fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 /// the command from its first frame instead, once the monitor is known; see the
 /// `fullscreen_pending` field on `XgViewApp`.
 fn native_options() -> eframe::NativeOptions {
+    let viewport = egui::ViewportBuilder::default()
+        .with_title(monitor_core::APP_DISPLAY_NAME)
+        .with_inner_size([1280.0, 720.0])
+        .with_min_inner_size([560.0, 360.0]);
+
+    // The desktop window carries the same artwork the executable and the app
+    // bundle do. Android takes its launcher icon from the APK resources
+    // instead, and a `ViewportBuilder` icon means nothing to it.
+    #[cfg(not(target_os = "android"))]
+    let viewport = viewport.with_icon(std::sync::Arc::new(window_icon()));
+
     eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(monitor_core::APP_DISPLAY_NAME)
-            .with_inner_size([1280.0, 720.0])
-            .with_min_inner_size([560.0, 360.0]),
+        viewport,
         vsync: true,
         ..Default::default()
     }
+}
+
+/// The window / taskbar icon of the desktop builds, decoded at startup from the
+/// PNG the Linux package installs by the same name (see `assets/icons/`). The
+/// Windows executable carries the `.ico` over this, so the two stay the same
+/// picture by construction rather than by being kept in sync by hand.
+#[cfg(not(target_os = "android"))]
+fn window_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!(
+        "../../../assets/icons/linux/hicolor/256x256/apps/xgview.png"
+    ))
+    .expect("window icon: assets/icons/linux/hicolor/256x256/apps/xgview.png is not a valid PNG")
 }
 
 /// Starts the viewer on the desktop targets (Windows / Linux / macOS).

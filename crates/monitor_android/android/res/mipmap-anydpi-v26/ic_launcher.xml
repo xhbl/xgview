@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive launcher icon, API 26 and later.
+
+  The platform composites `foreground` over `background` and applies the
+  launcher's own mask (circle, squircle, rounded square), so the two layers are
+  separate drawables rather than one pre-composed image. The foreground is a
+  density-specific `mipmap` - a placeholder until real artwork replaces it -
+  and the background is the flat colour below.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

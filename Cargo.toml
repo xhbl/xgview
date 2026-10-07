@@ -30,6 +30,13 @@ monitor_i18n = { path = "crates/monitor_i18n" }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_System_Console", "Win32_Foundation"] }
 
+# The application icon and the version block are compiled into the
+# executable's resource section at link time. It is a build dependency because
+# the resource is produced before the binary is linked, and it is Windows-only
+# because no other target has a resource section; see build.rs.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
 [workspace]
 members = [
     "crates/monitor_core",
@@ -41,7 +48,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.2.90"
+version = "1.2.92"
 authors = ["XHBL <newxhbl@hotmail.com>"]
 description = "A grid viewer for surveillance cameras"
 license = "MIT"

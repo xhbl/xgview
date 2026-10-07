@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backing colour of the adaptive launcher icon (see
+  `mipmap-anydpi-v26/ic_launcher.xml`). A flat colour is all the placeholder
+  needs; real artwork can make it a gradient by pointing `@drawable` at a
+  shape instead.
+-->
+<resources>
+    <color name="ic_launcher_background">#101418</color>
+</resources>
