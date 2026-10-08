@@ -1106,3 +1106,89 @@ the library is compiled against should not sit above the one the manifest
 installs on (`-Api` in `scripts/build-android.ps1`, `API` in
 `scripts/build-android.sh`).
 
+## 19. Vulkan 1.0, caught: a version gate, and a restart that has to terminate
+
+*OPPO PBAM00 (Snapdragon 450, Adreno 506), Android 8.1 / API 27 — 2026-10-07*
+
+§12 left this device family on a marker: a launch that loses its Vulkan device
+writes a file, the next launch reads it and takes the GL backend. It works, but
+the first launch always dies - and it dies the loudest way there is, `SIGABRT`
+with a backtrace ending inside our own `.so`. The work here is making that first
+launch survivable, on the same package, without giving up the marker.
+
+**The device, measured.** `ro.build.version.sdk` is 27, and `pm list features`
+carries `android.hardware.vulkan.version=4194307` - `VK_MAKE_VERSION(1, 0, 3)`.
+So wgpu does take its Vulkan backend (an Adreno 506 has one), enumerates an
+adapter, is handed a device, and loses that device while the first
+`create_render_pipeline` is built.
+
+**Which of the two endings it is decides everything.** The logcat line
+
+```text
+E xgview: panicked wgpu error: Validation Error
+  In Device::create_render_pipeline, label = 'egui_pipeline'
+    Parent device is lost
+```
+
+is emitted by our own panic hook, so the path is a Rust panic, not a driver
+calling `abort()` - a distinction that cannot be made from the `SIGABRT` alone,
+because both end in one. It also is not a caller's `unwrap`: wgpu 25's
+`create_render_pipeline` is infallible to its caller and the panic comes from
+wgpu's own uncaptured-error handler. That matters because a panic is catchable
+and an `abort()` is not.
+
+**The catch has to sit inside `run_android`, not around `android_main`.**
+`android-activity` 0.6.1 already wraps its call to `android_main` in a
+`catch_unwind` (`native_activity/glue.rs`, `rust_glue_entry`). It cannot help:
+our entry point is `extern "C"`, a nounwind boundary, so Rust aborts *inside* it
+before the panic ever reaches the glue. That is the `panic in a function that
+cannot unwind` §12 recorded, and the `SIGABRT` on `name: android_main`. A
+`catch_unwind` around `eframe::run_native` is inside that boundary, which is what
+makes it the first place the panic can actually be intercepted.
+
+**The fallback is a new process, because a retry is not available.** winit
+allows one event loop per process on Android - `EventLoop can't be recreated`,
+which this project has hit before - so a caught panic cannot be answered by
+re-running the loop with `WGPU_BACKEND=gl`. The activity schedules
+`AlarmManager` + `PendingIntent` before the process goes away instead; the alarm
+is held by `system_server`, so it outlives the exit and brings the wall back
+without a remote. Measured: process gone at `19:59:53.192`, the next one up at
+`19:59:58.520`. Five seconds, and the 700 ms alarm is not what costs - cold
+starting the 13 MB `.so` is.
+
+**The gate is the main path; the catch is the net under it.** A driver's
+behaviour cannot be asked about in advance, but its version can:
+`PackageManager.hasSystemFeature(FEATURE_VULKAN_HARDWARE_VERSION, 0x401000)` is
+"Vulkan 1.1 or better", and this device reports `4194307`, so it answers
+`false`. Being sent to GL up front is worth more than recovering well, so the
+gate is asked first and the catch exists for the drivers it cannot name. The
+gate lives in Java because `PackageManager` is a Java API - and the handoff to
+the native side is a marker file written from `onCreate` **before**
+`super.onCreate`, because `android-activity` starts the native thread inside
+`super.onCreate` and anything written after that races it. The ordering, not the
+file, is the reason the split is where it is.
+
+**Two shapes of the state machine were wrong, and neither was visible from a
+single run.** Both were found by walking the states before trusting them:
+
+- `force-vulkan` - the switch that overrides the gate so the fallback can be
+  exercised on the very device the gate keeps off Vulkan - first overrode the
+  attempt marker as well. The restart it triggered then forced Vulkan again, so
+  the device restarted in a loop. The switch overrides the *gate* only; a
+  previous abort always wins.
+- a launch that comes back on GL and panics there would restart forever, and a
+  device that can draw on neither backend (§12's PowerVR: GLES 3.1 without
+  `GL_KHR_debug`) would never come to rest. A restart only happens where there
+  is a backend left to come back on, which means only out of a Vulkan launch;
+  a GL panic is reported and left down, as it was before any of this.
+
+**What was measured, and one thing that was not.** On the device: the gate sends
+the first launch to GL with no panic at all; `force-vulkan` produces the full
+sequence - panic caught, payload logged, no `SIGABRT`
+(`logcat -d | grep -E 'Fatal signal|Abort message'` is empty), and the wall back
+on GL by itself. Not measured: the GL-panics-therefore-no-restart branch, which the
+OPPO cannot exercise because its GL driver works and there is no switch to make
+it fail. The marker written *before* Vulkan is tried is what covers even that
+case - a panic that cannot be caught (one raised while already unwinding, say)
+still leaves the mark, so the launch after it lands on GL rather than repeating.
+

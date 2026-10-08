@@ -89,6 +89,21 @@ pub fn open_overlay_settings() {
     call_void("openOverlaySettings");
 }
 
+/// Asks the activity to bring itself back up a moment from now, in a fresh
+/// process.
+///
+/// Called from the fallback the renderer's panic is caught in: the process is
+/// about to exit and the wall has to come back without anyone touching the
+/// remote, which an activity cannot do from a process that is going away. The
+/// activity hands the relaunch to `AlarmManager`, whose alarm is held by the
+/// system rather than by this process; see `MainActivity.restartSoon`.
+///
+/// The next launch reads the marker the caught panic wrote and takes the GL
+/// backend, so this is a restart onto a backend that works.
+pub fn restart_soon() {
+    call_void("restartSoon");
+}
+
 /// Opens the system screen that chooses the device's home app.
 pub fn open_home_settings() {
     call_void("openHomeSettings");

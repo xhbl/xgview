@@ -1,6 +1,8 @@
 package com.xhbl.xgview;
 
+import android.app.AlarmManager;
 import android.app.NativeActivity;
+import android.app.PendingIntent;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ContentResolver;
@@ -18,6 +20,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.InputType;
@@ -136,6 +139,11 @@ public class MainActivity extends NativeActivity {
     protected void onCreate(Bundle savedInstanceState) {
         Intent launch = getIntent();
         fromAutostart = launch != null && launch.getBooleanExtra("com.xhbl.xgview.FROM_AUTOSTART", false);
+        // Before super.onCreate, and so before android-activity starts the
+        // native thread: the marker it writes is what the native side reads to
+        // choose its backend, and the choice has to be made before the renderer
+        // exists. Anything after super.onCreate races the native thread.
+        applyVulkanGate();
         super.onCreate(savedInstanceState);
         instance = this;
         applySystemBars();
@@ -403,6 +411,115 @@ public class MainActivity extends NativeActivity {
             self.reserveNavigationBar = reserve;
             self.applySystemBars();
         });
+    }
+
+    // ------------------------------------------------------- graphics backend
+    //
+    // Which renderer the native side may build is decided here, before the
+    // native thread starts, because a backend cannot be swapped once the event
+    // loop exists. One old driver family needs it: a device whose Vulkan is
+    // older than 1.1 - Adreno on Android 8.x, Vulkan 1.0 - enumerates an
+    // adapter, hands out a device, then loses that device while the first
+    // pipeline is built, which panics inside wgpu and, without the marker
+    // below, costs a launch. The version, unlike the behaviour, is knowable in
+    // advance, and `PackageManager` is where it is known. See
+    // `monitor_gui::run_android`.
+
+    /** `VK_MAKE_VERSION(1, 1, 0)`: the oldest Vulkan this viewer will try. */
+    private static final int VULKAN_1_1 = 0x401000;
+
+    /** The file whose presence tells the native side not to try Vulkan. */
+    private static final String VULKAN_GATE_MARKER = "xgview/wgpu-vulkan-unsupported";
+
+    /**
+     * Marks the launch for the GL backend when the device's Vulkan is too old
+     * to keep a device, and clears the mark when it is new enough.
+     *
+     * <p>Called from {@link #onCreate} before {@code super.onCreate}, so that
+     * the marker is on disk before the native thread - which android-activity
+     * starts during {@code super.onCreate} - can look for it. The native side
+     * never asks about versions itself: {@code PackageManager} is a Java API,
+     * and this is the one moment the answer can be acted on without racing the
+     * renderer.
+     *
+     * <p>The delete is for a device whose driver was updated out from under the
+     * marker: the gate is not meant to outlive the reason for it.
+     */
+    private void applyVulkanGate() {
+        final PackageManager packages = getPackageManager();
+        final boolean vulkan11 = packages != null
+                && packages.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION, VULKAN_1_1);
+        final File marker = new File(getFilesDir(), VULKAN_GATE_MARKER);
+        if (vulkan11) {
+            if (marker.exists() && !marker.delete()) {
+                android.util.Log.w("xgview", "cannot clear " + marker);
+            }
+            return;
+        }
+        android.util.Log.i("xgview",
+                "no Vulkan 1.1 on this device; the GL backend is marked for this launch");
+        try {
+            final File dir = marker.getParentFile();
+            if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
+                android.util.Log.w("xgview", "cannot create " + dir);
+                return;
+            }
+            if (!marker.exists() && !marker.createNewFile()) {
+                android.util.Log.w("xgview", "cannot create " + marker);
+            }
+        } catch (IOException error) {
+            android.util.Log.w("xgview", "cannot write the Vulkan gate marker", error);
+        }
+    }
+
+    /**
+     * Brings the activity back up a moment from now, in a fresh process.
+     *
+     * <p>Called from the native side when a panic in the renderer was caught and
+     * the process is about to exit: an activity cannot start itself from a
+     * process that is going away, so the relaunch is handed to
+     * {@code AlarmManager}, whose alarm is held by the system and fires after
+     * this process is gone. The next launch reads the marker that panic wrote
+     * and takes the GL backend.
+     *
+     * <p>Called on the native thread, and must return before that thread exits
+     * the process - so it does no posting to the UI thread. Everything it
+     * touches (alarms, pending intents, the package manager) is usable from any
+     * thread, and posting would only risk the process dying before the alarm
+     * was set.
+     */
+    public static void restartSoon() {
+        final MainActivity self = instance;
+        if (self == null) {
+            return;
+        }
+        try {
+            final Intent launch = self.getPackageManager()
+                    .getLaunchIntentForPackage(self.getPackageName());
+            if (launch == null) {
+                android.util.Log.w("xgview", "no launcher intent to restart with");
+                return;
+            }
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            final PendingIntent pending = PendingIntent.getActivity(self, 0, launch,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            final AlarmManager alarms =
+                    (AlarmManager) self.getSystemService(Context.ALARM_SERVICE);
+            if (alarms == null) {
+                android.util.Log.w("xgview", "no alarm service to restart with");
+                return;
+            }
+            // A plain `set` rather than an exact alarm: an exact one needs the
+            // permission Android 12 added, and a few hundred milliseconds either
+            // way does not matter for bringing the wall back.
+            alarms.set(AlarmManager.ELAPSED_REALTIME,
+                    SystemClock.elapsedRealtime() + 700, pending);
+            android.util.Log.i("xgview", "restarting XGView on the GL backend");
+        } catch (RuntimeException error) {
+            android.util.Log.w("xgview", "cannot schedule a restart", error);
+        }
     }
 
     // ----------------------------------------------------------------- power

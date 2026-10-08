@@ -29,6 +29,7 @@ the hand.
 - [Why XGView](#why-xgview)
 - [Features](#features)
 - [Supported platforms](#supported-platforms)
+  - [Android: what the device needs](#android-what-the-device-needs)
 - [Getting started](#getting-started)
 - [Usage](#usage)
   - [The wall at a glance](#the-wall-at-a-glance)
@@ -107,6 +108,32 @@ graphics does; a machine that offers neither decodes on the CPU, where the wall
 still runs - comfortable for a grid of sub streams, and heavier once it starts
 pulling main streams. A tile whose corner is set to the frame-rate item shows
 `HW` or `SW`, so you can see at a glance which path a camera is on.
+
+### Android: what the device needs
+
+- **Android 8.1 or newer.** The APK declares `minSdkVersion 27`, so an older
+  device refuses it with "there was a problem parsing the package" instead of
+  installing it.
+- **A GPU with Vulkan 1.1, or OpenGL ES 3.2 / `GL_KHR_debug`.** XGView draws
+  through wgpu, which takes the **Vulkan** backend wherever the device offers one
+  it can use. A device with **no Vulkan at all, or only Vulkan 1.0** (Adreno on
+  Android 8.x) is sent to the **OpenGL ES** backend instead - and that is decided
+  before the renderer is built, so such a device comes up on GL from its first
+  launch rather than failing once and recovering on the next.
+- **H.264 is decoded in hardware** (`AMediaCodec`) where the chip offers it;
+  MJPEG is always decoded on the CPU. A tile whose corner shows the frame-rate
+  item says `HW` or `SW`.
+
+Two kinds of device fall below that floor and are refused rather than half run: a
+box that offers only **OpenGL ES 2.0** - an Amlogic S905 / Mali-450 on its stock
+Android 9, for instance - has no adapter to draw with, and one whose OpenGL ES
+3.x driver lacks `GL_KHR_debug` cannot be given the resource labels the GL
+backend asks for. In both cases the viewer says so in its log and closes.
+
+If a launch ever does fail while the first frame is being built, the failure is
+caught and written to the log, and the app brings itself back on the GL backend a
+few seconds later - no remote needed. A device that can draw on neither backend
+is left closed rather than restarting itself in a loop.
 
 ---
 
@@ -387,9 +414,18 @@ starts; `--console` keeps it for log output.
 - **The APK does not come back after a reboot.** Grant the *Display over other
   apps* permission, or set XGView as the home app - see
   [Start on boot](#start-on-boot).
-- **Where are the logs?** Set the `RUST_LOG` environment variable (for example
-  `RUST_LOG=xgview=debug`) before starting; on Windows run with `--console` to
-  see them in a console window.
+- **The Android app closes a moment after launch.** Its GPU has no backend the
+  renderer can use; see
+  [Android: what the device needs](#android-what-the-device-needs). A device that
+  offers only OpenGL ES 2.0, or an OpenGL ES 3.x driver without `GL_KHR_debug`,
+  has nothing to draw with and exits - watch for `No suitable graphics adapter
+  found` in the log (see below). A Vulkan driver older than 1.1 is routed to
+  OpenGL ES before the renderer is built, so a `Parent device is lost` panic
+  should not appear at all; if one does, the app logs it and brings itself back
+  on OpenGL ES a few seconds later.
+- **Where are the logs?** On Android, `adb logcat -s xgview`. On the desktop, set
+  the `RUST_LOG` environment variable (for example `RUST_LOG=xgview=debug`); on
+  Windows run with `--console` to see them in a console window.
 
 ---
 

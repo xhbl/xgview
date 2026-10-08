@@ -214,21 +214,31 @@ fn init_android_logging() {
         .try_init();
 }
 
+/// The message a panic payload carries, or a stand-in when it carries none.
+#[cfg(target_os = "android")]
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic without a message".to_string())
+}
+
 /// Sends a Rust panic to logcat.
 ///
 /// A panic that leaves `android_main` cannot unwind - it is an `extern "C"`
-/// entry point - so the process is aborted and the activity finishes with
-/// nothing in the log but a `SIGABRT` whose backtrace ends inside the library.
-/// The hook is what turns that into the message and the source location.
+/// entry point, and Rust aborts at such a boundary rather than unwinding out of
+/// it - so the process dies with a `SIGABRT` and nothing in the log but a
+/// backtrace ending inside the library. The hook is what turns that into the
+/// message and the source location.
+///
+/// The hook itself neither aborts nor exits: it logs and lets the panic carry
+/// on unwinding, which is what leaves the `catch_unwind` in [`run_android`] a
+/// chance to intercept it.
 #[cfg(target_os = "android")]
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|panic| {
-        let message = panic
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|text| (*text).to_string())
-            .or_else(|| panic.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "panic without a message".to_string());
+        let message = panic_message(panic.payload());
         let location = panic
             .location()
             .map(|at| format!("{}:{}:{}", at.file(), at.line(), at.column()))
@@ -269,18 +279,216 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
         extra_lang_dir,
     };
 
+    // Pick the backend before the event loop - and with it the renderer - is
+    // built, because neither can be replaced afterwards.
+    //
+    // Two signals send a launch to the GL backend, and one overrides both:
+    //
+    // * the Vulkan gate. `MainActivity` writes its marker before the native
+    //   thread is even started when the device's Vulkan driver is older than
+    //   1.1 - the family whose drivers lose the device while the first pipeline
+    //   is built - so it is already in place here; see [`vulkan_gate_marker`].
+    // * the attempt marker, written just below before Vulkan is tried, and left
+    //   behind by a launch that panicked or aborted before its first frame; see
+    //   [`vulkan_attempt_marker`].
+    //
+    // A `force-vulkan` file overrides the gate, so the fallback can still be
+    // exercised on the very device the gate keeps off Vulkan; see
+    // [`force_vulkan_requested`]. It deliberately does *not* override an
+    // attempt that already failed: the launch it forces onto Vulkan is the one
+    // that may not come back, so the launch after it has to fall back rather
+    // than force its way into the same abort - and the restart the caught panic
+    // asks for is itself a launch like that.
+    let marker = vulkan_attempt_marker();
+    let previous_attempt_aborted = marker.as_deref().is_some_and(|path| path.exists());
+    let gated_off_vulkan = vulkan_gate_marker()
+        .as_deref()
+        .is_some_and(|path| path.exists());
+    let forced = force_vulkan_requested(&app);
+    let use_gl = previous_attempt_aborted || (gated_off_vulkan && !forced);
+
+    // The gate is a reason of its own, and one that does not go away, so an
+    // attempt marker sitting under it says nothing true: the launch before this
+    // one did not abort because Vulkan failed, it never tried Vulkan. Dropping
+    // the marker keeps the log honest and leaves a forced run repeatable - the
+    // next launch without `force-vulkan` clears it and returns to the gate.
+    if gated_off_vulkan && !forced && previous_attempt_aborted {
+        if let Some(path) = &marker {
+            let _ = std::fs::remove_file(path);
+            tracing::info!(
+                target: "xgview",
+                "the version gate supersedes the previous attempt; its marker is cleared"
+            );
+        }
+    }
+
+    if forced && gated_off_vulkan && !previous_attempt_aborted {
+        tracing::warn!(
+            target: "xgview",
+            "force-vulkan is present; trying Vulkan although this device has no Vulkan 1.1"
+        );
+    }
+    if use_gl {
+        if gated_off_vulkan {
+            tracing::warn!(
+                target: "xgview",
+                "this device has no Vulkan 1.1; using the GL backend"
+            );
+        } else {
+            tracing::warn!(
+                target: "xgview",
+                "the previous launch did not reach its first frame; using the GL backend"
+            );
+        }
+        std::env::set_var("WGPU_BACKEND", "gl");
+    } else if let Some(path) = &marker {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, b"");
+        tracing::info!(
+            target: "xgview",
+            "marked this launch as a Vulkan attempt; the mark is cleared once the renderer is up"
+        );
+    }
+
     let mut native = native_options();
     native.android_app = Some(app);
 
-    eframe::run_native(
-        monitor_core::APP_DISPLAY_NAME,
-        native,
-        Box::new(move |cc| {
-            Ok(Box::new(XgViewApp::new(cc, options, config_path, handle)) as Box<dyn eframe::App>)
-        }),
-    )
-    .map_err(|err| anyhow::anyhow!("cannot start the viewer: {err}"))
+    // The renderer is built inside this call, and on the drivers this whole
+    // dance exists for the device is lost while the first pipeline is made:
+    // wgpu's uncaptured error handler panics. Left alone the panic runs to the
+    // `extern "C" android_main` entry point, which cannot unwind - Rust aborts
+    // there and the process dies with a `SIGABRT` whose only readable trace is
+    // the hook's line. Catching it here keeps the payload, records the marker
+    // and hands the launch to a fresh process, which comes up on the GL
+    // backend; see [`restart_soon`].
+    //
+    // This is the fallback, not the main path: the gate above is meant to keep
+    // a known-old driver off Vulkan in the first place.
+    let marker_for_run = marker.clone();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        eframe::run_native(
+            monitor_core::APP_DISPLAY_NAME,
+            native,
+            Box::new(move |cc| {
+                // Reaching this point means the renderer - and with it the
+                // pipeline whose creation aborts the drivers described above -
+                // came up, so an attempt that got here did not abort and may
+                // clear its marker. The GL fallback keeps it: that is what
+                // stops the next launch from trying Vulkan all over again.
+                if !use_gl {
+                    if let Some(path) = &marker_for_run {
+                        let _ = std::fs::remove_file(path);
+                        tracing::info!(
+                            target: "xgview",
+                            "the renderer came up on Vulkan; its attempt marker is cleared"
+                        );
+                    }
+                }
+                Ok(Box::new(XgViewApp::new(cc, options, config_path, handle))
+                    as Box<dyn eframe::App>)
+            }),
+        )
+    }));
+
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(anyhow::anyhow!("cannot start the viewer: {err}")),
+        Err(payload) => {
+            let message = panic_message(payload.as_ref());
+            // A restart is only worth a process when there is a backend left to
+            // come back on. Landing here from a GL launch means there is not:
+            // GL is the fallback, so the panic would be replayed exactly - a
+            // device whose driver can do neither backend (§12's PowerVR, whose
+            // GLES 3.1 has no `GL_KHR_debug`) would restart itself forever
+            // instead of coming to rest. That launch is left down, as it was
+            // before any of this, and reported as the error it is.
+            if use_gl {
+                tracing::error!(
+                    target: "xgview",
+                    %message,
+                    "the renderer panicked on the GL backend; there is nothing left to fall back to"
+                );
+                return Err(anyhow::anyhow!("the renderer panicked: {message}"));
+            }
+            tracing::error!(
+                target: "xgview",
+                %message,
+                "the renderer panicked before its first frame; the next launch uses the GL backend"
+            );
+            // Belt to the marker's braces: it was written before Vulkan was
+            // tried, but a launch forced past it still has to leave one behind.
+            if let Some(path) = &marker {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(path, b"");
+            }
+            android::restart_soon();
+            std::process::exit(0);
+        }
+    }
 }
+
+/// The file whose presence says the Vulkan backend aborted a launch before it
+/// could draw, so the next one should use the GL backend instead.
+///
+/// Some old Android Vulkan drivers - Adreno on Android 8.x, Vulkan 1.0 -
+/// enumerate an adapter and hand out a device, then lose that device while the
+/// first pipeline is built, which aborts the process before anything is drawn.
+/// Nothing can be asked about that in advance, so the attempt is the test: the
+/// marker is written before Vulkan is used and survives such an abort, and the
+/// next launch reads it and falls back to GL, which those drivers serve. A
+/// machine with a working Vulkan never notices it, because the launch that
+/// draws clears it again.
+///
+/// It sits beside the configuration and is only ever a marker; its contents are
+/// not read.
+#[cfg(target_os = "android")]
+fn vulkan_attempt_marker() -> Option<PathBuf> {
+    AppConfig::default_path().parent().map(|dir| dir.join("wgpu-no-vulkan"))
+}
+
+/// The file whose presence says the device's Vulkan driver is older than 1.1,
+/// so Vulkan should not be tried at all.
+///
+/// The attempt marker below is the only way to find *some* old drivers out, and
+/// it costs a launch: the first one aborts. The version, unlike the behaviour,
+/// can be asked about in advance - `PackageManager` reports what the device
+/// declares - so the launch that would abort is skipped altogether. That is a
+/// Java question, and `MainActivity.onCreate` answers it before the native
+/// thread is started, writing this marker when the answer is "no Vulkan 1.1"
+/// and deleting a stale one when it is not. See `MainActivity.applyVulkanGate`.
+///
+/// It sits beside the configuration and is only ever a marker; its contents are
+/// not read.
+#[cfg(target_os = "android")]
+fn vulkan_gate_marker() -> Option<PathBuf> {
+    AppConfig::default_path()
+        .parent()
+        .map(|dir| dir.join("wgpu-vulkan-unsupported"))
+}
+
+/// Whether Vulkan is to be tried even where the *version gate* says not to.
+///
+/// The switch is a `force-vulkan` file in the application's external data
+/// directory - the one place on Android a file transfer can put one - so the
+/// `catch_unwind` fallback can still be exercised on the very device the gate
+/// keeps off Vulkan (`adb push` an empty file there, or `adb shell touch
+/// /sdcard/Android/data/com.xhbl.xgview/files/force-vulkan`). It exists for
+/// nothing else, and a launch that finds it says so in the log.
+///
+/// The attempt marker is not overridden, only the gate: see the note on
+/// `use_gl` in [`run_android`]. Deleting the attempt marker alongside this file
+/// is what makes the fallback run again.
+#[cfg(target_os = "android")]
+fn force_vulkan_requested(app: &android_activity::AndroidApp) -> bool {
+    app.external_data_path()
+        .map(|dir| dir.join("force-vulkan").exists())
+        .unwrap_or(false)
+}
+
 /// Copies the language packs shipped as APK assets to the configuration
 /// directory, where `monitor_i18n` discovers them.
 ///

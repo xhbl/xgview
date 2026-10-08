@@ -93,6 +93,27 @@ powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1 -DebugBuild -
 The toolchain (NDK, JDK, Gradle, SDK) is looked up under `XGVIEW_ANDROID_ROOT`,
 or `C:\Android` by default.
 
+**The device** needs Android 8.1 (API 27) or newer, and a GPU the renderer can
+use. The viewer draws through wgpu, which wants **Vulkan 1.1** or
+**OpenGL ES 3.2 / `GL_KHR_debug`**; a box with only OpenGL ES 2.0 - an Amlogic
+S905 / Mali-450 on its stock Android 9, say - has no adapter, and the app closes
+a moment after launch with `No suitable graphics adapter found` in its logcat
+(`adb logcat -s xgview`). A device whose Vulkan driver is older than 1.1
+(Adreno on Android 8.x, Vulkan 1.0) is sent to the GL backend before the renderer
+is built - the activity reads the version and leaves a marker the native side
+acts on - so it comes up on GL from the first launch. If a launch does fail while
+the first frame is being built, the renderer's panic is caught and the app
+restarts itself on GL within a second, so nothing has to be relaunched by hand.
+
+To force the Vulkan path on a device the gate would keep off it - to exercise the
+fallback by hand - drop an empty file at
+`/sdcard/Android/data/com.xhbl.xgview/files/force-vulkan`; the launch then says
+so in its logcat. That file overrides the *version gate* only: a launch that
+panicked still leaves its own marker behind and stays on GL, which is what stops
+the restart from forcing its way back into the same panic. Removing the file and
+launching once clears that marker and returns to the gate, so the sequence
+`touch` - launch - `rm` - launch repeats the fallback without wiping anything.
+
 ### Linux / macOS: library, then Gradle
 
 ```bash
