@@ -25,8 +25,8 @@
     powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1
 
 .EXAMPLE
-    # The debug variant, another ABI and API level (cargo-ndk flags).
-    powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1 -DebugBuild -Abis armeabi-v7a -Api 30
+    # The debug variant and another API level (cargo-ndk flags).
+    powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1 -DebugBuild -Api 30
 #>
 [CmdletBinding()]
 param(

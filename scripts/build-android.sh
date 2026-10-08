@@ -17,7 +17,6 @@
 #   scripts/build-android.sh                 # release, arm64-v8a, API 27
 #   API=30 scripts/build-android.sh          # override the API level
 #   PROFILE=debug scripts/build-android.sh   # debug build
-#   ABIS="arm64-v8a armeabi-v7a" scripts/build-android.sh
 #
 set -euo pipefail
 

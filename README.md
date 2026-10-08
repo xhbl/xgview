@@ -98,7 +98,7 @@ the hand.
 
 | Platform | Typical device | Decoding |
 | --- | --- | --- |
-| **Android** (arm64-v8a, armeabi-v7a) | TV box, phone, tablet | `AMediaCodec` - hardware |
+| **Android** (arm64-v8a) | TV box, phone, tablet | `AMediaCodec` - hardware |
 | **Windows** x64 | mini PC, kiosk, desktop | Direct3D 11 Video or CUDA - hardware, with a CPU fallback |
 | **Linux** x64 | desktop, mini PC | VAAPI or CUDA - hardware, with a CPU fallback |
 
@@ -111,6 +111,7 @@ pulling main streams. A tile whose corner is set to the frame-rate item shows
 
 ### Android: what the device needs
 
+- **A 64-bit ARM device** (`arm64-v8a`) - the only ABI the APK is built for.
 - **Android 8.1 or newer.** The APK declares `minSdkVersion 27`, so an older
   device refuses it with "there was a problem parsing the package" instead of
   installing it.

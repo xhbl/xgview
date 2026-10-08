@@ -86,8 +86,8 @@ without installing it.
 powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1
 # -> target\xgview-<version>-arm64-v8a.apk
 
-# The debug variant, another ABI and API level.
-powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1 -DebugBuild -Abis armeabi-v7a -Api 30
+# The debug variant, and another API level.
+powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1 -DebugBuild -Api 30
 ```
 
 The toolchain (NDK, JDK, Gradle, SDK) is looked up under `XGVIEW_ANDROID_ROOT`,
@@ -129,7 +129,7 @@ rustup target add aarch64-linux-android
 cargo install cargo-ndk
 
 scripts/build-android.sh                       # -> android-build/jniLibs/<abi>/libmonitor_android.so
-ABIS="arm64-v8a armeabi-v7a" API=30 scripts/build-android.sh
+API=30 scripts/build-android.sh                # another API level
 gradle -p android assembleRelease
 ```
 
