@@ -31,7 +31,7 @@ The viewer persists everything to one JSON file, created on first launch:
 | --- | --- |
 | Windows | `%APPDATA%\xgview\config.json` |
 | Linux | `$XDG_CONFIG_HOME/xgview/config.json` (or `~/.config/xgview/config.json`) |
-| Android | the app private files directory (the entry point sets `XGVIEW_HOME` to it) |
+| Android | the app private files directory (supplied by the entry point) |
 
 - `XGVIEW_CONFIG_DIR` overrides the directory entirely (portable / USB stick
   deployments).
@@ -217,7 +217,6 @@ where its paths are read from.
 | `XGVIEW_ANDROID_ROOT` | `build-android.ps1` | toolchain root (NDK, JDK, Gradle, SDK); `C:\Android` by default |
 | `ANDROID_NDK_HOME`, `ANDROID_HOME`, `JAVA_HOME` | cargo-ndk / Gradle | set by the build script from `XGVIEW_ANDROID_ROOT`; set them yourself when building with the `.sh` scripts |
 | `XGVIEW_CONFIG_DIR` | the viewer | overrides the configuration directory (portable deployments) |
-| `XGVIEW_HOME` | the viewer | the base directory `config_dir()` falls back to; the Android entry point sets it to the app's private storage |
 | `RUST_LOG` | the viewer | log filter, e.g. `RUST_LOG=xgview=debug` |
 
 ## 8. Repository layout

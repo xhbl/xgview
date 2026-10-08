@@ -595,8 +595,9 @@ impl AppConfig {
 
 /// Root directory holding the configuration.
 ///
-/// `XGVIEW_CONFIG_DIR` always wins, which is what Android and portable
-/// deployments use.
+/// `XGVIEW_CONFIG_DIR` always wins, which is what a portable deployment uses;
+/// the Android entry point hands its own over with [`set_config_home`], because
+/// the platform has no directory of its own to ask for.
 pub fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("XGVIEW_CONFIG_DIR") {
         return PathBuf::from(dir);
@@ -620,13 +621,34 @@ fn platform_config_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
 }
 
+/// The base directory the entry point handed over, if it did. See
+/// [`set_config_home`].
+#[cfg(target_os = "android")]
+static CONFIG_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Hands the base directory of the configuration over, in place of the one the
+/// platform would be asked for.
+///
+/// The Android entry point calls this with the app's private storage - the only
+/// writable place guaranteed to exist on every Android version - before
+/// anything reads the configuration. It is an argument rather than an
+/// environment variable because setting one (`std::env::set_var`) is not
+/// something the standard library promises is safe once a process has threads,
+/// and the entry point has started its runtime by the time the path is known.
+/// The first call wins; later ones are ignored.
+#[cfg(target_os = "android")]
+pub fn set_config_home(dir: impl Into<PathBuf>) {
+    let _ = CONFIG_HOME.set(dir.into());
+}
+
 #[cfg(target_os = "android")]
 fn platform_config_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("XGVIEW_HOME") {
-        return Some(PathBuf::from(home));
+    if let Some(home) = CONFIG_HOME.get() {
+        return Some(home.clone());
     }
-    // Application private storage; the Android entry point sets XGVIEW_HOME to
-    // the app specific files directory whenever it is available.
+    // What is left when the entry point never handed a directory over: writable
+    // on most builds, and never where a viewer with a working entry point keeps
+    // its configuration.
     Some(PathBuf::from("/data/local/tmp"))
 }
 

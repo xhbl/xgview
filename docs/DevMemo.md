@@ -1149,7 +1149,7 @@ makes it the first place the panic can actually be intercepted.
 **The fallback is a new process, because a retry is not available.** winit
 allows one event loop per process on Android - `EventLoop can't be recreated`,
 which this project has hit before - so a caught panic cannot be answered by
-re-running the loop with `WGPU_BACKEND=gl`. The activity schedules
+re-running the loop on the GL backend. The activity schedules
 `AlarmManager` + `PendingIntent` before the process goes away instead; the alarm
 is held by `system_server`, so it outlives the exit and brings the wall back
 without a remote. Measured: process gone at `19:59:53.192`, the next one up at
@@ -1166,7 +1166,13 @@ gate lives in Java because `PackageManager` is a Java API - and the handoff to
 the native side is a marker file written from `onCreate` **before**
 `super.onCreate`, because `android-activity` starts the native thread inside
 `super.onCreate` and anything written after that races it. The ordering, not the
-file, is the reason the split is where it is.
+file, is the reason the split is where it is. The backend itself is asked for in
+egui-wgpu's setup - `instance_descriptor.backends` - and not through the
+`WGPU_BACKEND` variable the first version set: that meant `std::env::set_var` in
+a process which, by then, already had threads, which the standard library does
+not promise is safe. Overriding the one field keeps the rest of egui-wgpu's
+descriptor, including the `WGPU_GLES_MINOR_VERSION` knob inside
+`BackendOptions::from_env_or_default`.
 
 **Two shapes of the state machine were wrong, and neither was visible from a
 single run.** Both were found by walking the states before trusting them:
@@ -1179,8 +1185,15 @@ single run.** Both were found by walking the states before trusting them:
 - a launch that comes back on GL and panics there would restart forever, and a
   device that can draw on neither backend (§12's PowerVR: GLES 3.1 without
   `GL_KHR_debug`) would never come to rest. A restart only happens where there
-  is a backend left to come back on, which means only out of a Vulkan launch;
-  a GL panic is reported and left down, as it was before any of this.
+  is a backend left to come back on, which means only out of a Vulkan launch; a
+  GL panic is reported and left down, as it was before any of this.
+
+Both were cells of one table, so the table is where it now lives:
+`monitor_gui::backend` holds the decision, out of `run_android`, and its tests
+read every combination of the three markers on the host - including the
+composition of the two tables, which asserts the invariant neither wrong shape
+respected. The old code was Android-only, so the only way to check a cell was to
+flash a device and try it.
 
 **A panic after the renderer is up is not a launch that could not draw.** The
 `catch_unwind` covers the whole life of the process, not just its start, which

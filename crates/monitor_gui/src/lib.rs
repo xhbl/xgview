@@ -17,6 +17,8 @@
 //! Neither socket nor decoder ever runs on the UI thread.
 
 pub mod app;
+#[cfg(any(target_os = "android", test))]
+pub(crate) mod backend;
 pub mod blackout;
 pub mod controls;
 pub mod dialogs;
@@ -284,9 +286,12 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
     let handle = runtime.handle().clone();
 
     // Application private storage is the only writable location guaranteed to
-    // exist on every Android version.
+    // exist on every Android version. Handed to the configuration rather than
+    // put in the environment: `std::env::set_var` is not something the standard
+    // library promises is safe once a process has threads, and the runtime
+    // started just above has some.
     if let Some(dir) = app.internal_data_path() {
-        std::env::set_var("XGVIEW_HOME", dir);
+        monitor_core::config::set_config_home(dir);
     }
     // The language packs shipped as APK assets are extracted to the
     // configuration directory before `XgViewApp::new` runs, so the catalogue
@@ -308,39 +313,39 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
     };
 
     // Pick the backend before the event loop - and with it the renderer - is
-    // built, because neither can be replaced afterwards.
+    // built, because neither can be replaced afterwards. Three markers say what
+    // to pick, and [`backend::decide`] is the whole of what they mean:
     //
-    // Two signals send a launch to the GL backend, and one overrides both:
-    //
-    // * the Vulkan gate. `MainActivity` writes its marker before the native
-    //   thread is even started when the device's Vulkan driver is older than
-    //   1.1 - the family whose drivers lose the device while the first pipeline
-    //   is built - so it is already in place here; see [`vulkan_gate_marker`].
-    // * the attempt marker, written just below before Vulkan is tried, and left
-    //   behind by a launch that panicked or aborted before its first frame; see
+    // * the gate marker, which `MainActivity` writes before the native thread is
+    //   even started when the device's Vulkan driver is older than 1.1 - the
+    //   family whose drivers lose the device while the first pipeline is built;
+    //   see [`vulkan_gate_marker`].
+    // * the attempt marker, written just below before Vulkan is tried and left
+    //   behind by a launch that did not reach the renderer; see
     //   [`vulkan_attempt_marker`].
+    // * a `force-vulkan` file, which overrides the gate so the fallback can be
+    //   exercised on the very device the gate keeps off Vulkan; see
+    //   [`force_vulkan_requested`].
     //
-    // A `force-vulkan` file overrides the gate, so the fallback can still be
-    // exercised on the very device the gate keeps off Vulkan; see
-    // [`force_vulkan_requested`]. It deliberately does *not* override an
-    // attempt that already failed: the launch it forces onto Vulkan is the one
-    // that may not come back, so the launch after it has to fall back rather
-    // than force its way into the same abort - and the restart the caught panic
-    // asks for is itself a launch like that.
+    // The table the three make lives in `backend` with the tests that read every
+    // cell of it, because the shapes that were wrong here were cells rather than
+    // devices, and only a device could run the code when it was inline.
     let marker = vulkan_attempt_marker();
-    let previous_attempt_aborted = marker.as_deref().is_some_and(|path| path.exists());
-    let gated_off_vulkan = vulkan_gate_marker()
-        .as_deref()
-        .is_some_and(|path| path.exists());
-    let forced = force_vulkan_requested(&app);
-    let use_gl = previous_attempt_aborted || (gated_off_vulkan && !forced);
+    let decision = backend::decide(
+        marker.as_deref().is_some_and(|path| path.exists()),
+        vulkan_gate_marker()
+            .as_deref()
+            .is_some_and(|path| path.exists()),
+        force_vulkan_requested(&app),
+    );
+    let tries_vulkan = decision.backend.tries_vulkan();
 
     // The gate is a reason of its own, and one that does not go away, so an
     // attempt marker sitting under it says nothing true: the launch before this
-    // one did not abort because Vulkan failed, it never tried Vulkan. Dropping
-    // the marker keeps the log honest and leaves a forced run repeatable - the
-    // next launch without `force-vulkan` clears it and returns to the gate.
-    if gated_off_vulkan && !forced && previous_attempt_aborted {
+    // one did not fail on Vulkan, it never tried. Dropping the marker keeps the
+    // log honest and leaves a forced run repeatable - the next launch without
+    // `force-vulkan` clears it and returns to the gate.
+    if decision.clear_attempt_marker {
         if let Some(path) = &marker {
             let _ = std::fs::remove_file(path);
             tracing::info!(
@@ -349,38 +354,53 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
             );
         }
     }
-
-    if forced && gated_off_vulkan && !previous_attempt_aborted {
+    if decision.forced_past_gate {
         tracing::warn!(
             target: "xgview",
             "force-vulkan is present; trying Vulkan although this device has no Vulkan 1.1"
         );
     }
-    if use_gl {
-        if gated_off_vulkan {
-            tracing::warn!(
-                target: "xgview",
-                "this device has no Vulkan 1.1; using the GL backend"
-            );
-        } else {
-            tracing::warn!(
-                target: "xgview",
-                "the previous launch did not reach its first frame; using the GL backend"
-            );
+
+    match decision.backend {
+        backend::Backend::Gl(reason) => {
+            match reason {
+                backend::GlReason::Gate => tracing::warn!(
+                    target: "xgview",
+                    "this device has no Vulkan 1.1; using the GL backend"
+                ),
+                backend::GlReason::PreviousAttempt => tracing::warn!(
+                    target: "xgview",
+                    "the previous launch did not reach its first frame; using the GL backend"
+                ),
+            }
         }
-        std::env::set_var("WGPU_BACKEND", "gl");
-    } else if let Some(path) = &marker {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        backend::Backend::Vulkan => {
+            if let Some(path) = &marker {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(path, b"");
+                tracing::info!(
+                    target: "xgview",
+                    "marked this launch as a Vulkan attempt; the mark is cleared once the renderer is up"
+                );
+            }
         }
-        let _ = std::fs::write(path, b"");
-        tracing::info!(
-            target: "xgview",
-            "marked this launch as a Vulkan attempt; the mark is cleared once the renderer is up"
-        );
     }
 
     let mut native = native_options();
+    // The GL backend is asked for in the wgpu setup rather than through the
+    // `WGPU_BACKEND` variable: setting that means `std::env::set_var`, which the
+    // standard library does not promise is safe once the process has threads -
+    // and this one started its runtime, and android-activity its own, well
+    // before here. Only `backends` is overridden, so the rest of egui-wgpu's
+    // default descriptor stands: the instance flags, and `BackendOptions::
+    // from_env_or_default` with the `WGPU_GLES_MINOR_VERSION` knob it carries.
+    if !tries_vulkan {
+        let mut setup = egui_wgpu::WgpuSetupCreateNew::default();
+        setup.instance_descriptor.backends = wgpu::Backends::GL;
+        native.wgpu_options.wgpu_setup = egui_wgpu::WgpuSetup::CreateNew(setup);
+    }
     native.android_app = Some(app);
 
     // The renderer is built inside this call, and on the drivers this whole
@@ -407,10 +427,10 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
                 // not draw; see the `match` below.
                 RENDERER_CAME_UP.store(true, std::sync::atomic::Ordering::Relaxed);
                 // Reaching this point also means an attempt that got here did
-                // not abort and may clear its marker. The GL fallback keeps it:
-                // that is what stops the next launch from trying Vulkan all
-                // over again.
-                if !use_gl {
+                // not fail and may clear its marker. A GL launch never had one:
+                // the marker belongs to a Vulkan attempt and is what stops the
+                // next launch from trying Vulkan all over again.
+                if tries_vulkan {
                     if let Some(path) = &marker_for_run {
                         let _ = std::fs::remove_file(path);
                         tracing::info!(
@@ -430,44 +450,52 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
         Ok(Err(err)) => Err(anyhow::anyhow!("cannot start the viewer: {err}")),
         Err(payload) => {
             let message = panic_message(payload.as_ref());
-            // The catch covers the whole life of the process, so which panic
-            // this is decides what is left to do. Only the last case is a
-            // launch that could not draw on the backend it was handed.
-            if RENDERER_CAME_UP.load(std::sync::atomic::Ordering::Relaxed) {
-                // The wall was up, so the backend is not what broke. Restart
-                // the process and leave the markers alone: writing them here is
-                // exactly what would pin a healthy device to GL for good.
-                tracing::error!(
-                    target: "xgview",
-                    %message,
-                    "the renderer panicked while running; restarting the viewer"
-                );
-            } else if use_gl {
-                // GL is the fallback, so there is nothing left to come back on
-                // and a restart would only replay it - a device whose driver can
-                // do neither backend (§12's PowerVR, whose GLES 3.1 has no
-                // `GL_KHR_debug`) would loop forever. Leave it down and report
-                // the panic as the error it is.
-                tracing::error!(
-                    target: "xgview",
-                    %message,
-                    "the renderer panicked before it came up, on the GL backend; there is nothing left to fall back to"
-                );
-                return Err(anyhow::anyhow!("the renderer panicked: {message}"));
-            } else {
-                tracing::error!(
-                    target: "xgview",
-                    %message,
-                    "the renderer panicked before it came up; the next launch uses the GL backend"
-                );
-                // Belt to the marker's braces: it was written before Vulkan was
-                // tried, but a launch forced past that marker still has to leave
-                // one behind.
-                if let Some(path) = &marker {
-                    if let Some(dir) = path.parent() {
-                        let _ = std::fs::create_dir_all(dir);
+            // The catch covers the whole life of the process, so how far the
+            // launch got decides what is left to do - a table in `backend`,
+            // because the choice is the same one the markers above feed.
+            match backend::panic_action(
+                RENDERER_CAME_UP.load(std::sync::atomic::Ordering::Relaxed),
+                !tries_vulkan,
+            ) {
+                backend::PanicAction::Restart => {
+                    // The wall was up, so the backend is not what broke.
+                    // Restart the process and leave the markers alone: writing
+                    // them here is exactly what would pin a healthy device to
+                    // GL for good.
+                    tracing::error!(
+                        target: "xgview",
+                        %message,
+                        "the renderer panicked while running; restarting the viewer"
+                    );
+                }
+                backend::PanicAction::GiveUp => {
+                    // GL is the fallback, so there is nothing left to come back
+                    // on and a restart would only replay it - a device whose
+                    // driver can do neither backend (§12's PowerVR, whose GLES
+                    // 3.1 has no `GL_KHR_debug`) would loop forever. Leave it
+                    // down and report the panic as the error it is.
+                    tracing::error!(
+                        target: "xgview",
+                        %message,
+                        "the renderer panicked before it came up, on the GL backend; there is nothing left to fall back to"
+                    );
+                    return Err(anyhow::anyhow!("the renderer panicked: {message}"));
+                }
+                backend::PanicAction::MarkAndRestart => {
+                    tracing::error!(
+                        target: "xgview",
+                        %message,
+                        "the renderer panicked before it came up; the next launch uses the GL backend"
+                    );
+                    // Belt to the marker's braces: it was written before Vulkan
+                    // was tried, but a launch forced past that marker still has
+                    // to leave one behind.
+                    if let Some(path) = &marker {
+                        if let Some(dir) = path.parent() {
+                            let _ = std::fs::create_dir_all(dir);
+                        }
+                        let _ = std::fs::write(path, b"");
                     }
-                    let _ = std::fs::write(path, b"");
                 }
             }
             // The two cases that have a backend to come back on ask for a fresh
