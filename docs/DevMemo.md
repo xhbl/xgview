@@ -1182,6 +1182,28 @@ single run.** Both were found by walking the states before trusting them:
   is a backend left to come back on, which means only out of a Vulkan launch;
   a GL panic is reported and left down, as it was before any of this.
 
+**A panic after the renderer is up is not a launch that could not draw.** The
+`catch_unwind` covers the whole life of the process, not just its start, which
+gave the state machine a third way to be wrong: a panic on the main thread hours
+into a run would write the attempt marker and pin a device that had been drawing
+perfectly to GL for good. One `AtomicBool`, set at the top of the app-creator
+closure - which eframe calls after `Painter::set_window` built the very pipeline
+these drivers fail, and before the first frame (`native/wgpu_integration.rs`,
+`set_window` then `app_creator`) - tells the two apart. Before it: the marker and
+the GL fallback. After it: a restart, with the markers left alone, because the
+backend has plainly worked. The restart is capped as well, three within ten
+minutes, counted in shared preferences so the count outlives what it counts; past
+that the process is left down rather than fed back into a deterministic panic.
+The way out is `_exit` and not `std::process::exit`: the libc exit path runs
+`atexit` handlers and flushes, through a driver that has already failed once.
+
+**The attempt marker stopped being permanent.** It is a claim about the
+environment that wrote it, so `MainActivity` now drops it when the app version or
+`Build.FINGERPRINT` has changed - a fixed app or a fixed driver is exactly what
+would make it a lie, and without this one bad launch kept a device off Vulkan for
+ever. The gate was already self-clearing for the same reason; this is that idea
+applied to the other half.
+
 **What was measured, and one thing that was not.** On the device: the gate sends
 the first launch to GL with no panic at all; `force-vulkan` produces the full
 sequence - panic caught, payload logged, no `SIGABRT`

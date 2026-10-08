@@ -10,6 +10,7 @@ import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.database.Cursor;
@@ -74,8 +75,16 @@ import java.nio.charset.StandardCharsets;
  */
 public class MainActivity extends NativeActivity {
 
-    /** The activity the native side talks back to, set in {@link #onCreate}. */
-    private static MainActivity instance;
+    /**
+     * The activity the native side talks back to, set in {@link #onCreate}.
+     *
+     * <p>Volatile: the native thread reads it, and the markers that hang off it,
+     * with none of the Java thread's synchronisation. It is also set only after
+     * {@code super.onCreate}, which is where the native thread starts, so a
+     * panic early enough can still find it null - {@link #restartSoon} says so
+     * rather than returning quietly.
+     */
+    private static volatile MainActivity instance;
 
     /** Whether {@code monitor_android} is loaded, so a native method may be called. */
     private boolean nativeLoaded;
@@ -417,13 +426,13 @@ public class MainActivity extends NativeActivity {
     //
     // Which renderer the native side may build is decided here, before the
     // native thread starts, because a backend cannot be swapped once the event
-    // loop exists. One old driver family needs it: a device whose Vulkan is
-    // older than 1.1 - Adreno on Android 8.x, Vulkan 1.0 - enumerates an
-    // adapter, hands out a device, then loses that device while the first
-    // pipeline is built, which panics inside wgpu and, without the marker
-    // below, costs a launch. The version, unlike the behaviour, is knowable in
-    // advance, and `PackageManager` is where it is known. See
-    // `monitor_gui::run_android`.
+    // loop exists. Two things need it: a device whose Vulkan is older than 1.1 -
+    // Adreno on Android 8.x, Vulkan 1.0 - enumerates an adapter, hands out a
+    // device, then loses that device while the first pipeline is built, which
+    // panics inside wgpu; and a launch that failed there must not be tried
+    // again for ever. The version, unlike the behaviour, is knowable in advance,
+    // and `PackageManager` is where it is known. See `monitor_gui::run_android`
+    // and DevMemo §19.
 
     /** `VK_MAKE_VERSION(1, 1, 0)`: the oldest Vulkan this viewer will try. */
     private static final int VULKAN_1_1 = 0x401000;
@@ -431,33 +440,64 @@ public class MainActivity extends NativeActivity {
     /** The file whose presence tells the native side not to try Vulkan. */
     private static final String VULKAN_GATE_MARKER = "xgview/wgpu-vulkan-unsupported";
 
+    /** The file the native side writes before it tries Vulkan, and may leave behind. */
+    private static final String VULKAN_ATTEMPT_MARKER = "xgview/wgpu-no-vulkan";
+
+    /** Preference file: which build last launched, and when it last restarted. */
+    private static final String PREFS = "xgview";
+
+    private static final String KEY_ENV = "env";
+
+    private static final String KEY_RESTARTS = "restarts";
+
+    /** How many restarts are allowed within {@link #RESTART_WINDOW_MS}. */
+    private static final int RESTART_LIMIT = 3;
+
+    private static final long RESTART_WINDOW_MS = 10 * 60 * 1000L;
+
     /**
      * Marks the launch for the GL backend when the device's Vulkan is too old
-     * to keep a device, and clears the mark when it is new enough.
+     * to keep a device, and drops a marker left by an attempt made in an
+     * environment this one no longer is.
      *
      * <p>Called from {@link #onCreate} before {@code super.onCreate}, so that
-     * the marker is on disk before the native thread - which android-activity
-     * starts during {@code super.onCreate} - can look for it. The native side
-     * never asks about versions itself: {@code PackageManager} is a Java API,
-     * and this is the one moment the answer can be acted on without racing the
-     * renderer.
+     * everything it writes is on disk before the native thread - which
+     * android-activity starts during {@code super.onCreate} - reads it. The
+     * native side never asks about versions itself: {@code PackageManager} is a
+     * Java API, and this is the one moment the answer can be acted on without
+     * racing the renderer.
      *
-     * <p>The delete is for a device whose driver was updated out from under the
-     * marker: the gate is not meant to outlive the reason for it.
+     * <p>The attempt marker is the native side's, written before it tries
+     * Vulkan and left behind by a launch that failed there. It is only ever a
+     * claim about the environment that made it, so it is dropped once that
+     * environment changes - a new app version, or a new device build, which is
+     * how a Vulkan driver is updated. Otherwise one bad launch would keep a
+     * device off Vulkan for good, including after the driver was fixed.
+     *
+     * <p>The gate's own delete is for the same reason, seen from the version:
+     * it is not meant to outlive the driver that justified it.
      */
     private void applyVulkanGate() {
+        final SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        final String env = Build.FINGERPRINT + " #" + appVersion();
+        if (!env.equals(prefs.getString(KEY_ENV, null))) {
+            if (deleteMarker(VULKAN_ATTEMPT_MARKER)) {
+                android.util.Log.i("xgview",
+                        "this is a different build or ROM; the Vulkan attempt marker is cleared");
+            }
+            prefs.edit().putString(KEY_ENV, env).commit();
+        }
+
         final PackageManager packages = getPackageManager();
         final boolean vulkan11 = packages != null
                 && packages.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION, VULKAN_1_1);
-        final File marker = new File(getFilesDir(), VULKAN_GATE_MARKER);
         if (vulkan11) {
-            if (marker.exists() && !marker.delete()) {
-                android.util.Log.w("xgview", "cannot clear " + marker);
-            }
+            deleteMarker(VULKAN_GATE_MARKER);
             return;
         }
         android.util.Log.i("xgview",
                 "no Vulkan 1.1 on this device; the GL backend is marked for this launch");
+        final File marker = new File(getFilesDir(), VULKAN_GATE_MARKER);
         try {
             final File dir = marker.getParentFile();
             if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
@@ -472,33 +512,68 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    /** The version name the platform reports, or a stand-in when it will not say. */
+    private String appVersion() {
+        try {
+            final String name = getPackageManager()
+                    .getPackageInfo(getPackageName(), 0).versionName;
+            return name == null ? "unknown" : name;
+        } catch (PackageManager.NameNotFoundException impossible) {
+            return "unknown";
+        }
+    }
+
+    /** Deletes one of the markers beside the configuration; true when one went. */
+    private boolean deleteMarker(final String name) {
+        final File marker = new File(getFilesDir(), name);
+        if (!marker.exists()) {
+            return false;
+        }
+        if (!marker.delete()) {
+            android.util.Log.w("xgview", "cannot clear " + marker);
+            return false;
+        }
+        return true;
+    }
+
     /**
-     * Brings the activity back up a moment from now, in a fresh process.
+     * Brings the activity back up a moment from now, in a fresh process, and
+     * reports whether an alarm was actually set.
      *
      * <p>Called from the native side when a panic in the renderer was caught and
      * the process is about to exit: an activity cannot start itself from a
      * process that is going away, so the relaunch is handed to
      * {@code AlarmManager}, whose alarm is held by the system and fires after
-     * this process is gone. The next launch reads the marker that panic wrote
-     * and takes the GL backend.
+     * this process is gone.
+     *
+     * <p>A panic that happens the same way every time would otherwise restart
+     * the app for ever, so no more than {@link #RESTART_LIMIT} restarts are
+     * allowed within {@link #RESTART_WINDOW_MS}; past that the answer is false
+     * and the caller leaves the process down instead of feeding the loop.
      *
      * <p>Called on the native thread, and must return before that thread exits
-     * the process - so it does no posting to the UI thread. Everything it
-     * touches (alarms, pending intents, the package manager) is usable from any
-     * thread, and posting would only risk the process dying before the alarm
-     * was set.
+     * the process - so it posts nothing to the UI thread. Everything it touches
+     * (alarms, pending intents, the package manager, shared preferences) is
+     * usable from any thread, and posting would only risk the process dying
+     * before the alarm was set.
      */
-    public static void restartSoon() {
+    public static boolean restartSoon() {
         final MainActivity self = instance;
         if (self == null) {
-            return;
+            android.util.Log.w("xgview", "no activity to restart with; leaving the viewer down");
+            return false;
+        }
+        if (!self.mayRestart()) {
+            android.util.Log.w("xgview", "restarted " + RESTART_LIMIT + " times within "
+                    + (RESTART_WINDOW_MS / 60_000) + " minutes; leaving the viewer down");
+            return false;
         }
         try {
             final Intent launch = self.getPackageManager()
                     .getLaunchIntentForPackage(self.getPackageName());
             if (launch == null) {
                 android.util.Log.w("xgview", "no launcher intent to restart with");
-                return;
+                return false;
             }
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -509,17 +584,53 @@ public class MainActivity extends NativeActivity {
                     (AlarmManager) self.getSystemService(Context.ALARM_SERVICE);
             if (alarms == null) {
                 android.util.Log.w("xgview", "no alarm service to restart with");
-                return;
+                return false;
             }
             // A plain `set` rather than an exact alarm: an exact one needs the
             // permission Android 12 added, and a few hundred milliseconds either
-            // way does not matter for bringing the wall back.
+            // way does not matter for bringing the wall back. On Android 10 and
+            // newer the start itself can be refused as a background one unless
+            // the app may draw over other apps; see the manifest.
             alarms.set(AlarmManager.ELAPSED_REALTIME,
                     SystemClock.elapsedRealtime() + 700, pending);
-            android.util.Log.i("xgview", "restarting XGView on the GL backend");
+            android.util.Log.i("xgview", "restarting XGView in a fresh process");
+            return true;
         } catch (RuntimeException error) {
             android.util.Log.w("xgview", "cannot schedule a restart", error);
+            return false;
         }
+    }
+
+    /**
+     * Records this restart and says whether it is within the limit.
+     *
+     * <p>The times live in shared preferences rather than in memory: the whole
+     * point of them is to outlive the restarts they count.
+     */
+    private boolean mayRestart() {
+        final long now = System.currentTimeMillis();
+        final SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        final StringBuilder kept = new StringBuilder();
+        int recent = 0;
+        for (final String part : prefs.getString(KEY_RESTARTS, "").split(",")) {
+            final long when;
+            try {
+                when = Long.parseLong(part.trim());
+            } catch (NumberFormatException notATime) {
+                continue;
+            }
+            if (now - when >= RESTART_WINDOW_MS) {
+                continue;
+            }
+            recent++;
+            kept.append(when).append(',');
+        }
+        if (recent >= RESTART_LIMIT) {
+            return false;
+        }
+        kept.append(now);
+        prefs.edit().putString(KEY_RESTARTS, kept.toString()).commit();
+        return true;
     }
 
     // ----------------------------------------------------------------- power

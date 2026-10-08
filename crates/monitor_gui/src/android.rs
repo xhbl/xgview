@@ -90,7 +90,7 @@ pub fn open_overlay_settings() {
 }
 
 /// Asks the activity to bring itself back up a moment from now, in a fresh
-/// process.
+/// process, and reports whether it agreed.
 ///
 /// Called from the fallback the renderer's panic is caught in: the process is
 /// about to exit and the wall has to come back without anyone touching the
@@ -98,10 +98,22 @@ pub fn open_overlay_settings() {
 /// activity hands the relaunch to `AlarmManager`, whose alarm is held by the
 /// system rather than by this process; see `MainActivity.restartSoon`.
 ///
-/// The next launch reads the marker the caught panic wrote and takes the GL
-/// backend, so this is a restart onto a backend that works.
-pub fn restart_soon() {
-    call_void("restartSoon");
+/// `false` means no alarm was set: there was no activity to talk to (a panic
+/// early enough that `onCreate` had not registered one), or the activity's own
+/// accounting says the app is in a crash loop and another restart would only
+/// feed it. Either way the caller has a process it cannot bring back.
+pub fn restart_soon() -> bool {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return false;
+    };
+    let scheduled = env
+        .call_static_method(class, "restartSoon", "()Z", &[])
+        .and_then(|value| value.z())
+        .unwrap_or(false);
+    // Cleared, as everywhere else here: an exception left pending aborts the
+    // process on the next JNI call.
+    clear_exception(&mut env);
+    scheduled
 }
 
 /// Opens the system screen that chooses the device's home app.

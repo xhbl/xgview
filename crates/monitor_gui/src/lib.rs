@@ -247,6 +247,34 @@ fn install_panic_hook() {
     }));
 }
 
+/// Whether the renderer - and with it the pipeline whose creation the old
+/// Vulkan drivers fail - has come up in this process.
+///
+/// Set at the top of the app-creator closure, which eframe calls after
+/// `Painter::set_window` has built that pipeline and before the first frame. It
+/// is what separates a launch that could not draw - where the GL fallback is the
+/// answer - from a panic hours into a run, where the backend has plainly worked
+/// and the markers must be left alone. Without it, one panic on the main thread
+/// at any time would write the attempt marker and leave a healthy device on GL
+/// for good.
+#[cfg(target_os = "android")]
+static RENDERER_CAME_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Leaves the process at once, without unwinding, flushing or `atexit`.
+///
+/// `std::process::exit` is the wrong tool on the way out of a process whose
+/// graphics driver has already failed: it runs the libc exit path, and a thread
+/// still inside a driver call can block there or crash a second time. `_exit` is
+/// the syscall itself.
+#[cfg(target_os = "android")]
+fn exit_now() -> ! {
+    extern "C" {
+        fn _exit(status: std::ffi::c_int) -> !;
+    }
+    // Safety: `_exit` takes a plain int and does not return.
+    unsafe { _exit(0) }
+}
+
 /// Starts the viewer from the Android `android_main` entry point.
 #[cfg(target_os = "android")]
 pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
@@ -372,11 +400,16 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
             monitor_core::APP_DISPLAY_NAME,
             native,
             Box::new(move |cc| {
-                // Reaching this point means the renderer - and with it the
-                // pipeline whose creation aborts the drivers described above -
-                // came up, so an attempt that got here did not abort and may
-                // clear its marker. The GL fallback keeps it: that is what
-                // stops the next launch from trying Vulkan all over again.
+                // eframe calls this after `Painter::set_window` has built the
+                // render pipeline - the very `create_render_pipeline` the
+                // drivers above fail - and before the first frame, so from here
+                // on a panic is a run-time one rather than a launch that could
+                // not draw; see the `match` below.
+                RENDERER_CAME_UP.store(true, std::sync::atomic::Ordering::Relaxed);
+                // Reaching this point also means an attempt that got here did
+                // not abort and may clear its marker. The GL fallback keeps it:
+                // that is what stops the next launch from trying Vulkan all
+                // over again.
                 if !use_gl {
                     if let Some(path) = &marker_for_run {
                         let _ = std::fs::remove_file(path);
@@ -397,36 +430,53 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
         Ok(Err(err)) => Err(anyhow::anyhow!("cannot start the viewer: {err}")),
         Err(payload) => {
             let message = panic_message(payload.as_ref());
-            // A restart is only worth a process when there is a backend left to
-            // come back on. Landing here from a GL launch means there is not:
-            // GL is the fallback, so the panic would be replayed exactly - a
-            // device whose driver can do neither backend (§12's PowerVR, whose
-            // GLES 3.1 has no `GL_KHR_debug`) would restart itself forever
-            // instead of coming to rest. That launch is left down, as it was
-            // before any of this, and reported as the error it is.
-            if use_gl {
+            // The catch covers the whole life of the process, so which panic
+            // this is decides what is left to do. Only the last case is a
+            // launch that could not draw on the backend it was handed.
+            if RENDERER_CAME_UP.load(std::sync::atomic::Ordering::Relaxed) {
+                // The wall was up, so the backend is not what broke. Restart
+                // the process and leave the markers alone: writing them here is
+                // exactly what would pin a healthy device to GL for good.
                 tracing::error!(
                     target: "xgview",
                     %message,
-                    "the renderer panicked on the GL backend; there is nothing left to fall back to"
+                    "the renderer panicked while running; restarting the viewer"
+                );
+            } else if use_gl {
+                // GL is the fallback, so there is nothing left to come back on
+                // and a restart would only replay it - a device whose driver can
+                // do neither backend (§12's PowerVR, whose GLES 3.1 has no
+                // `GL_KHR_debug`) would loop forever. Leave it down and report
+                // the panic as the error it is.
+                tracing::error!(
+                    target: "xgview",
+                    %message,
+                    "the renderer panicked before it came up, on the GL backend; there is nothing left to fall back to"
                 );
                 return Err(anyhow::anyhow!("the renderer panicked: {message}"));
-            }
-            tracing::error!(
-                target: "xgview",
-                %message,
-                "the renderer panicked before its first frame; the next launch uses the GL backend"
-            );
-            // Belt to the marker's braces: it was written before Vulkan was
-            // tried, but a launch forced past it still has to leave one behind.
-            if let Some(path) = &marker {
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
+            } else {
+                tracing::error!(
+                    target: "xgview",
+                    %message,
+                    "the renderer panicked before it came up; the next launch uses the GL backend"
+                );
+                // Belt to the marker's braces: it was written before Vulkan was
+                // tried, but a launch forced past that marker still has to leave
+                // one behind.
+                if let Some(path) = &marker {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    let _ = std::fs::write(path, b"");
                 }
-                let _ = std::fs::write(path, b"");
             }
-            android::restart_soon();
-            std::process::exit(0);
+            // The two cases that have a backend to come back on ask for a fresh
+            // process. The activity declines when its own accounting says the
+            // app is in a crash loop, in which case this one is left down too.
+            if android::restart_soon() {
+                exit_now();
+            }
+            Err(anyhow::anyhow!("the renderer panicked: {message}"))
         }
     }
 }

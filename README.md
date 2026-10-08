@@ -130,10 +130,14 @@ Android 9, for instance - has no adapter to draw with, and one whose OpenGL ES
 3.x driver lacks `GL_KHR_debug` cannot be given the resource labels the GL
 backend asks for. In both cases the viewer says so in its log and closes.
 
-If a launch ever does fail while the first frame is being built, the failure is
-caught and written to the log, and the app brings itself back on the GL backend a
-few seconds later - no remote needed. A device that can draw on neither backend
-is left closed rather than restarting itself in a loop.
+If a launch does fail before the renderer comes up, the failure is written to the
+log and the app brings itself back on the GL backend a few seconds later - no
+remote needed. A panic later in a run restarts the viewer on the backend that had
+plainly been working, rather than changing it. Restarts are capped at three in
+ten minutes, and a device that can draw on neither backend is left closed instead
+of restarted in a loop. On Android 10 and newer the restart can be refused as a
+background start unless XGView may *display over other apps* - the same permission
+[start on boot](#start-on-boot) uses.
 
 ---
 

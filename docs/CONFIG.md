@@ -101,9 +101,17 @@ a moment after launch with `No suitable graphics adapter found` in its logcat
 (`adb logcat -s xgview`). A device whose Vulkan driver is older than 1.1
 (Adreno on Android 8.x, Vulkan 1.0) is sent to the GL backend before the renderer
 is built - the activity reads the version and leaves a marker the native side
-acts on - so it comes up on GL from the first launch. If a launch does fail while
-the first frame is being built, the renderer's panic is caught and the app
-restarts itself on GL within a second, so nothing has to be relaunched by hand.
+acts on - so it comes up on GL from the first launch. If a launch does fail
+before the renderer comes up, the panic is caught and the app brings itself back
+on GL a few seconds later, so nothing has to be relaunched by hand. A panic later
+in a run restarts the viewer on the backend that was plainly working, without
+touching the markers. At most three restarts are allowed within ten minutes,
+after which the viewer is left down rather than restarted in a loop.
+
+On Android 10 and newer the framework can refuse that automatic restart as a
+background start, and the wall then simply stays closed; granting *Display over
+other apps* is what lifts the refusal, the same permission start-on-boot already
+wants (see the manifest's `SYSTEM_ALERT_WINDOW`).
 
 To force the Vulkan path on a device the gate would keep off it - to exercise the
 fallback by hand - drop an empty file at
