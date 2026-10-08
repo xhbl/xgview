@@ -453,6 +453,9 @@ pub struct XgViewApp {
     /// Doing it on the viewport builder instead leaves a window-sized full
     /// screen on Windows; see `native_options` in `lib.rs`.
     fullscreen_pending: bool,
+    /// Whether the window still has to be given a windowed size, having been
+    /// created full screen with none asked for; see `set_fullscreen`.
+    windowed_size_pending: bool,
     /// Whether the top and bottom bars are on screen right now.
     chrome: Chrome,
     /// The controls of the top bar with the rectangle each was drawn in, left to
@@ -684,6 +687,7 @@ impl XgViewApp {
             exit_armed: None,
             fullscreen,
             fullscreen_pending: fullscreen,
+            windowed_size_pending: fullscreen && crate::FULLSCREEN_ON_THE_BUILDER,
             chrome: Chrome {
                 visible: true,
                 last_input: Instant::now(),
@@ -1087,6 +1091,16 @@ impl XgViewApp {
     fn set_fullscreen(&mut self, ctx: &egui::Context, enabled: bool) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enabled));
         self.fullscreen = enabled;
+        // A window created full screen was never given a windowed size - asking
+        // for one at creation is what drops it back out of full screen, see
+        // `native_options` - so the first time full screen is left it is handed
+        // one rather than coming back at whatever size it happens to be.
+        if !enabled && std::mem::take(&mut self.windowed_size_pending) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                crate::WINDOWED_SIZE[0],
+                crate::WINDOWED_SIZE[1],
+            )));
+        }
         // Leaving full screen brings the bars back on an explicit action, not
         // on a timer: the viewer is about to use them. Entering it is the
         // opposite request - the picture and nothing else - so they go at once

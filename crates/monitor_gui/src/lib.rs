@@ -89,19 +89,51 @@ fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
         .build()?)
 }
 
+/// The size the window is asked to open at when the viewer does not start full
+/// screen - and the size it is given back when full screen is left, if it was
+/// created full screen and so never had one.
+pub(crate) const WINDOWED_SIZE: [f32; 2] = [1280.0, 720.0];
+
+/// Whether a full-screen start is arranged on the viewport builder rather than
+/// from the app's first frame. Every desktop, and not Android: there the window
+/// is the activity's, and its size is not this program's to set.
+pub(crate) const FULLSCREEN_ON_THE_BUILDER: bool = !cfg!(target_os = "android");
+
 /// Window options for the targets that run eframe: the desktop and Android.
 ///
-/// Full screen is deliberately not asked for on the `ViewportBuilder`: it is
-/// applied before the window knows which monitor it is on, and on Windows that
-/// leaves the window covering a window-sized area rather than the screen - the
-/// same wrong geometry that toggling F11 twice repairs by hand. The app sends
-/// the command from its first frame instead, once the monitor is known; see the
-/// `fullscreen_pending` field on `XgViewApp`.
-fn native_options() -> eframe::NativeOptions {
-    let viewport = egui::ViewportBuilder::default()
+/// Full screen is asked for on the `ViewportBuilder`, and the windowed size is
+/// asked for only when the viewer does not start full screen. Both are on the
+/// builder because that is what makes the window the screen before it is seen:
+/// eframe does not show the window until the first frame has been painted, while
+/// the full-screen command the app sends from that frame is answered by a resize
+/// that arrives after it - from the command alone the window is shown at its
+/// window size and opens out a moment later, the jump from a window to the
+/// screen.
+///
+/// An inner size asked for on the builder *and* a full screen are not compatible
+/// in this version of egui: `egui-winit` gives the window its size once it has
+/// been created, by which time the full-screen request has been carried out, and
+/// a window that is resized drops back out of full screen. Given no size to
+/// apply, nothing drops it back - which is why the windowed size is left out
+/// rather than corrected afterwards. Leaving full screen hands it one; see
+/// `set_fullscreen` on `XgViewApp`.
+///
+/// Asking the builder for full screen on its own is not enough either: answered
+/// before the window knows which monitor it is on, it leaves the window covering
+/// a window-sized area on Windows - the geometry that toggling F11 twice repairs
+/// by hand. The command the app sends from its first frame, once the monitor is
+/// known, is still the one that gets that right, and the builder's request is
+/// what keeps the window from being seen as a window first.
+fn native_options(starts_fullscreen: bool) -> eframe::NativeOptions {
+    let fullscreen = starts_fullscreen && FULLSCREEN_ON_THE_BUILDER;
+    let mut viewport = egui::ViewportBuilder::default()
         .with_title(monitor_core::APP_DISPLAY_NAME)
-        .with_inner_size([1280.0, 720.0])
         .with_min_inner_size([560.0, 360.0]);
+    viewport = if fullscreen {
+        viewport.with_fullscreen(true)
+    } else {
+        viewport.with_inner_size(WINDOWED_SIZE)
+    };
 
     // The desktop window carries the same artwork the executable and the app
     // bundle do. Android takes its launcher icon from the APK resources
@@ -136,7 +168,7 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
 
     eframe::run_native(
         monitor_core::APP_DISPLAY_NAME,
-        native_options(),
+        native_options(options.fullscreen),
         Box::new(move |cc| {
             Ok(Box::new(XgViewApp::new(cc, options, config_path, handle)) as Box<dyn eframe::App>)
         }),
@@ -388,7 +420,10 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
         }
     }
 
-    let mut native = native_options();
+    // Android's window is the activity's, and full screen there is the activity
+    // being full screen: it is never created hidden, so the "show it again after
+    // the full-screen command" half of `HIDE_UNTIL_FULLSCREEN` never applies.
+    let mut native = native_options(false);
     // The GL backend is asked for in the wgpu setup rather than through the
     // `WGPU_BACKEND` variable: setting that means `std::env::set_var`, which the
     // standard library does not promise is safe once the process has threads -
