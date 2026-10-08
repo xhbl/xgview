@@ -46,6 +46,11 @@ if [ -z "${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}" ]; then
 fi
 
 echo "==> building monitor_android (${PROFILE}) for ${ABIS} at API ${API}"
+# A library an earlier build left here for another ABI is packaged into the APK
+# too - the Android project takes the whole jniLibs tree - while the APK's own
+# name mentions only the ABIs of this run. Empty the tree so what is packaged is
+# what was built.
+rm -rf "${OUT_DIR}"
 # `-P` is cargo-ndk's own platform flag. The lowercase `-p` is passed through to
 # cargo as `--package`, so it takes a crate name and not an API level.
 # shellcheck disable=SC2086

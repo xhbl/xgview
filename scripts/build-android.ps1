@@ -114,6 +114,12 @@ if (-not $DebugBuild) {
 Push-Location $repoRoot
 try {
     Write-Host "==> native library ($Abis, API $Api, release)" -ForegroundColor Cyan
+    # A library an earlier build left here for another ABI is packaged into this
+    # APK too - Gradle takes the whole jniLibs tree - while the APK's own name
+    # mentions only the ABIs of this run. A stale 32 bit .so once rode along in
+    # a package called `-arm64-v8a` that way, carrying code from before every
+    # fix since. Empty the tree so what is packaged is what was built.
+    Remove-Item -Recurse -Force 'android-build/jniLibs' -ErrorAction SilentlyContinue
     & cargo ndk -t $Abis -P $Api -o android-build/jniLibs build --release -p monitor_android
     if ($LASTEXITCODE -ne 0) { throw "cargo ndk failed (exit $LASTEXITCODE)" }
 
