@@ -83,13 +83,26 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 
+        <!-- Landscape, either way up. `landscape` pins the activity to one
+             direction and ignores the sensor, so a phone mounted the other way
+             round - or turned 180 degrees - keeps a wall that is upside down.
+             `userLandscape` allows both landscape directions and follows the
+             device sensor, while still respecting the user's rotation lock;
+             portrait is not allowed either way. Available since API 18, and
+             `minSdk` here is 27.
+
+             The activity is not recreated when the display turns: `orientation`
+             and `screenSize` are in `configChanges` above. That matters because
+             the native side owns a winit event loop, and winit refuses to
+             create a second one; the insets are re-read instead, which is what
+             puts the reserved navigation bar strip back on the right side. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
             android:launchMode="singleTask"
             android:resizeableActivity="false"
-            android:screenOrientation="landscape"
+            android:screenOrientation="userLandscape"
             android:windowSoftInputMode="stateAlwaysHidden">
 
             <!-- Entry point of the native library. Must match `[lib] name`. -->
