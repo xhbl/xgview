@@ -603,6 +603,16 @@ pub struct RtspClient {
     /// Challenge advertised by the server, cached so that only the first
     /// request pays for the `401` round trip.
     challenge: Option<Challenge>,
+    /// Channel pair the server confirmed for the video track's interleaved
+    /// transport, `(rtp, rtcp)`, `None` until `SETUP` answers.
+    ///
+    /// The pair a server *answers* with is the authoritative one: RFC 2326 lets
+    /// it pick its own, and it does not have to be the pair that was asked for.
+    /// go2rtc numbers the channels by track index, so a video track that
+    /// follows an audio one is framed on `2-3` even when `0-1` was requested -
+    /// reading channel `0` there returns the audio's packets and never a
+    /// picture, which leaves the session looking stuck on "connecting".
+    interleaved: Option<(u8, u8)>,
     /// Address of the RTSP server. With the UDP transport the TCP connection
     /// carries only the control plane, and the media is delivered here.
     peer_addr: Option<SocketAddr>,
@@ -676,6 +686,7 @@ impl RtspClient {
             timeout,
             credentials,
             challenge: None,
+            interleaved: None,
             peer_addr,
             rtp: None,
             rtcp: None,
@@ -1018,6 +1029,9 @@ impl RtspClient {
     }
 
     /// `SETUP` using the TCP interleaved transport.
+    ///
+    /// The pair returned is the one the server confirmed in the answer, which
+    /// is not necessarily the one requested - see [`RtspClient::interleaved`].
     pub async fn setup_interleaved(&mut self, control: &str, rtp_channel: u8) -> Result<u8> {
         let track_uri = self.resolve_control(control);
         let transport = format!(
@@ -1029,9 +1043,20 @@ impl RtspClient {
             .request("SETUP", &track_uri, &[("Transport", transport)], None)
             .await?;
         self.update_session(&response);
-        self.expect_success(response, "SETUP")?;
+        let response = self.expect_success(response, "SETUP")?;
+        // The server's answer decides the framing. It may keep the channels
+        // asked for, or number them itself - go2rtc puts the second track on
+        // `2-3` - so the pair it names is what media is read from. Without an
+        // `interleaved` parameter in the answer there is nothing to honour, and
+        // the requested pair stands.
+        let (rtp, rtcp) = response
+            .header("Transport")
+            .and_then(|header| transport_ports(header, "interleaved"))
+            .map(|(rtp, rtcp)| (rtp as u8, rtcp as u8))
+            .unwrap_or((rtp_channel, rtp_channel + 1));
+        self.interleaved = Some((rtp, rtcp));
         self.state = RtspSessionState::Setup;
-        Ok(rtp_channel)
+        Ok(rtp)
     }
 
     /// `SETUP` using RTP over UDP.
@@ -1194,7 +1219,8 @@ impl RtspClient {
     }
 
     /// Sends a control packet (a receiver report) on whichever transport is in
-    /// use: the RTCP socket on UDP, interleaved channel 1 on TCP.
+    /// use: the RTCP socket on UDP, the `SETUP`-confirmed RTCP interleaved
+    /// channel on TCP.
     pub async fn send_rtcp(&mut self, payload: &[u8]) -> Result<()> {
         match (self.rtcp.as_ref(), self.rtcp_server) {
             (Some(socket), Some(target)) => socket
@@ -1202,8 +1228,21 @@ impl RtspClient {
                 .await
                 .map(|_| ())
                 .map_err(|err| CoreError::rtsp(format!("send rtcp failed: {err}"))),
-            _ => self.send_interleaved(1, payload).await,
+            _ => {
+                let channel = self.rtcp_channel();
+                self.send_interleaved(channel, payload).await
+            }
         }
+    }
+
+    /// Channel a receiver report goes out on over the interleaved transport.
+    fn rtcp_channel(&self) -> u8 {
+        self.interleaved.map(|(_, rtcp)| rtcp).unwrap_or(1)
+    }
+
+    /// Channel media is framed on over the interleaved transport.
+    fn rtp_channel(&self) -> u8 {
+        self.interleaved.map(|(rtp, _)| rtp).unwrap_or(0)
     }
 
     /// Reads the next interleaved payload, ignoring control responses.
@@ -1246,7 +1285,7 @@ impl RtspClient {
     pub async fn read_media(&mut self) -> Result<MediaPacket> {
         if self.rtp.is_none() {
             let (channel, payload) = self.read_interleaved().await?;
-            return Ok(if channel == 0 {
+            return Ok(if channel == self.rtp_channel() {
                 MediaPacket::Rtp(payload)
             } else {
                 MediaPacket::Rtcp(payload)
@@ -1652,6 +1691,87 @@ a=control:trackID=1\r\n";
         let mut client = RtspClient::connect(&url).await.unwrap();
         let error = client.start_with_transport(RtspTransport::Udp).await.unwrap_err();
         assert!(matches!(error, CoreError::Transport(_)), "got {error}");
+    }
+
+    /// A server may frame the video on interleaved channels of its own choosing.
+    /// go2rtc numbers them by track index, so a video track that follows an
+    /// audio one is answered with `interleaved=2-3` even though `0-1` was asked
+    /// for. The client has to read the channel the server confirmed: reading
+    /// channel `0` there returns the audio, and the picture never arrives, which
+    /// leaves the channel looking stuck on "connecting".
+    #[tokio::test]
+    async fn reads_the_video_from_the_channel_the_server_confirmed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Audio first, video second, the way go2rtc describes a proxied camera.
+        let sdp = "v=0\r\n\
+m=audio 0 RTP/AVP 96\r\n\
+a=rtpmap:96 PCMU/8000\r\n\
+a=control:trackID=0\r\n\
+m=video 0 RTP/AVP 97\r\n\
+a=rtpmap:97 H264/90000\r\n\
+a=control:trackID=1\r\n";
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            loop {
+                let request = read_request(&mut reader).await;
+                if request.is_empty() {
+                    break;
+                }
+                let method = request[0].clone();
+                if method.starts_with("OPTIONS") {
+                    write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
+                } else if method.starts_with("DESCRIBE") {
+                    write_response(
+                        &mut write_half,
+                        &format!(
+                            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
+                             Content-Length: {}\r\n\r\n{sdp}",
+                            sdp.len()
+                        ),
+                    )
+                    .await;
+                } else if method.starts_with("SETUP") {
+                    // Confirm a pair of its own rather than the requested 0-1.
+                    write_response(
+                        &mut write_half,
+                        "RTSP/1.0 200 OK\r\nCSeq: 3\r\nSession: 1234\r\n\
+                         Transport: RTP/AVP/TCP;unicast;interleaved=2-3\r\n\r\n",
+                    )
+                    .await;
+                } else if method.starts_with("PLAY") {
+                    write_response(
+                        &mut write_half,
+                        "RTSP/1.0 200 OK\r\nCSeq: 4\r\nSession: 1234\r\n\r\n",
+                    )
+                    .await;
+                    // One RTP packet on channel 2, the channel the server named.
+                    let payload = [0x80u8, 0x61, 0x00, 0x2a, 0, 0, 0, 1, 0, 0, 0, 1, 0xab, 0xcd];
+                    let mut frame = vec![b'$', 2, 0, payload.len() as u8];
+                    frame.extend_from_slice(&payload);
+                    write_half.write_all(&frame).await.unwrap();
+                    write_half.flush().await.unwrap();
+                } else {
+                    write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 5\r\n\r\n").await;
+                }
+            }
+        });
+
+        let url = format!("rtsp://127.0.0.1:{port}/cam_front_door_2");
+        let mut client = RtspClient::connect(&url).await.unwrap();
+        let tracks = client.start().await.unwrap();
+        assert!(tracks.iter().any(|track| track.is_video()));
+        assert_eq!(client.interleaved, Some((2, 3)));
+        match client.read_media().await.unwrap() {
+            MediaPacket::Rtp(payload) => assert_eq!(payload.len(), 14),
+            MediaPacket::Rtcp(_) => panic!("the video arrived on the wrong channel"),
+        }
+        drop(client);
+        server.await.unwrap();
     }
 
     /// Full UDP handshake against a minimal RTSP server: the client has to bind

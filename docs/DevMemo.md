@@ -1259,3 +1259,72 @@ it fail. The marker written *before* Vulkan is tried is what covers even that
 case - a panic that cannot be caught (one raised while already unwinding, say)
 still leaves the mark, so the launch after it lands on GL rather than repeating.
 
+## 20. go2rtc frames the video on another interleaved channel
+
+*Two live channels, the second one a go2rtc re-publish of the first camera —
+2026-10-09*
+
+A wall with two live RTSP channels: the first is a camera pulled directly
+(`rtsp://192.168.27.40:88/videoSub`), the second the same camera re-published by
+go2rtc (`rtsp://192.168.17.88:8554/cam_front_door_2`). The first tile streams;
+the second sits on `connecting` for good. The same URL plays in VLC and
+`ffplay`, so the stream and the credentials are not in question.
+
+**The client assumed channel 0 is the video.** `RtspClient` framed the video
+track with `SETUP ... interleaved=0-1` and then treated *every* interleaved
+channel except 0 as RTCP:
+
+```rust
+let (channel, payload) = self.read_interleaved().await?;
+MediaPacket::Rtp  if channel == 0
+MediaPacket::Rtcp otherwise
+```
+
+That holds for the camera - asked for `0-1`, it answers `0-1` and sends the
+video there. It does not hold for go2rtc. RFC 2326 lets the server choose its
+own channels, and go2rtc numbers them by **track index**: its SDP lists the
+audio track first (`a=control:trackID=0`, PCMU) and the video second (`trackID=1`,
+H264), so the video is framed on `2-3` whatever the client asked for. The client
+read channel 2, called it RTCP, and threw the video away - no picture ever
+reached the decoder, so the tile never left `connecting` (the stall detector
+eventually recycled it, but nothing was ever going to decode).
+
+**Measured with the handshake dumped by hand**, first against go2rtc:
+
+```text
+track[0] media=audio enc=PCMU  pt=96 control=trackID=0
+track[1] media=video enc=H264  pt=97 control=trackID=1
+SETUP video control="trackID=1" interleaved=0-1
+12s window: rtp_packets=0 rtcp_packets=782   rtp_bytes=0
+```
+
+and, with the raw channels printed, the 782 "RTCP" packets were all on channel
+**2**, payload type 97 - plainly the video, discarded. The camera, by contrast,
+answered `0-1` and put its video (`pt=96`) on channel 0, which is why it had
+always worked.
+
+**The pair the server answers with is the client's.** `SETUP` now reads the
+`interleaved=RTP-RTCP` parameter out of the answer's `Transport` header, keeps
+it on the client as `(rtp, rtcp)`, and frames from there: `read_media` compares
+against the negotiated RTP channel, and a receiver report goes out on the
+negotiated RTCP channel instead of a hardcoded channel 1. When the answer names
+no pair, the requested `0-1` stands, so nothing changes for a camera that
+answers the way it was asked. After the change, the same go2rtc URL:
+
+```text
+SETUP video control="trackID=1" interleaved=0-1
+SETUP -> channel 2
+12s window: rtp_packets=766 rtcp_packets=0 rtp_bytes=964949 first_pt=Some(97)
+```
+
+The regression test (`rtsp::tests::reads_the_video_from_the_channel_the_server_confirmed`)
+runs an SDP with audio ahead of video and a server that answers `interleaved=2-3`
+whatever was requested, then asserts the video RTP framed on channel 2 is
+delivered as `MediaPacket::Rtp`.
+
+**What generalises.** A device list ordered audio-first is the tell: a server
+that numbers channels by track order will hand the video a pair other than the
+requested one exactly when a track precedes it. Honouring the answer rather than
+the request is the fix; the request was only ever a suggestion.
+
+
