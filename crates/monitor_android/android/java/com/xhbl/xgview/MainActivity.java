@@ -48,18 +48,18 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * XGView's activity: the {@link NativeActivity} the whole UI runs in, with the
- * status bar kept hidden, the navigation bar left in place, and a soft keyboard
- * that can be typed into.
+ * status bar kept hidden, the navigation bar left to the viewer's setting, and
+ * a soft keyboard that can be typed into.
  *
  * <p>The status bar has to be hidden from Java: a {@code NativeActivity} tells
  * the native library where to draw but says nothing about the system UI. The
- * navigation bar is deliberately *not* hidden. On a landscape phone it is a
- * strip along the right edge; hiding it lets the wall run under it, and keeping
- * it means the wall is narrower - which is what the viewer wants, with the
- * native side mirroring the same width on the left so the wall sits centred.
- * Its width is reported with the window insets; a television and an external
- * display have no navigation bar, so there it is zero and the wall stays edge
- * to edge.
+ * navigation bar is the viewer's to keep or to hide. Where it is kept it is a
+ * strip along one edge - the right one or the left one on a landscape phone,
+ * the bottom one on a tablet whose natural orientation is landscape - and the
+ * wall leaves that strip free; hiding it instead draws the wall under it. The
+ * four insets are reported with the window insets; a television and an external
+ * display have no navigation bar, so there they are zero and the wall stays
+ * edge to edge.
  *
  * <p>Note that a device using gesture navigation has no bar to hide, and keeps
  * a back-gesture band along each edge of the screen instead. That band is not
@@ -93,8 +93,13 @@ public class MainActivity extends NativeActivity {
      * Whether the navigation bar keeps its strip, or the wall hides it and draws
      * full screen. Set from the native side; see {@link #setReserveNavigationBar}
      * and {@link #applySystemBars}.
+     *
+     * <p>Starts at the default the configuration applies when it says nothing at
+     * all about the setting, so that the first frames already show the bars a
+     * viewer who has never chosen would get; the native side reports the
+     * configured value as soon as it has read the configuration.
      */
-    private boolean reserveNavigationBar = true;
+    private boolean reserveNavigationBar = false;
 
     /** Whether the activity was started by the boot receiver, read from the launch intent. */
     private static boolean fromAutostart = false;
@@ -317,15 +322,15 @@ public class MainActivity extends NativeActivity {
 
     /**
      * Applies the bars for the mode {@link #setReserveNavigationBar} chose, and
-     * reports the navigation bar's width to the native side.
+     * reports the navigation bar's insets to the native side.
      *
-     * <p>With the bar reserved (the default) the wall is drawn edge to edge under
-     * the bars - {@code setDecorFitsSystemWindows(false)}, and the matching
-     * layout flags on older Android - but only the status bar is hidden. The
-     * navigation bar stays, so a landscape phone keeps its strip along one side;
-     * the insets say how wide that strip is, and the wall leaves that width free
-     * on the same side. A television and an external display have no navigation
-     * bar, so there the insets are zero and the wall is edge to edge.
+     * <p>With the bar reserved the wall is drawn edge to edge under the bars -
+     * {@code setDecorFitsSystemWindows(false)}, and the matching layout flags on
+     * older Android - but only the status bar is hidden. The navigation bar
+     * stays, along whichever edge the device puts it on; the insets say which,
+     * and the wall leaves that strip free. A television and an external display
+     * have no navigation bar, so there the insets are zero and the wall is edge
+     * to edge.
      *
      * <p>With the bar hidden (immersive) both bars are hidden as they were, and
      * nothing is reserved.
@@ -336,24 +341,37 @@ public class MainActivity extends NativeActivity {
      */
     private void applySystemBars() {
         final Window window = getWindow();
-        // Reported on every change: the navigation bar can move to the other
-        // side, appear, or go as the keyboard comes and goes.
+        // Reported on every change: the navigation bar can move to another edge,
+        // appear, or go as the keyboard comes and goes.
         window.getDecorView().setOnApplyWindowInsetsListener((view, insets) -> {
             final int left;
+            final int top;
             final int right;
+            final int bottom;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 final Insets bars = insets.getInsets(WindowInsets.Type.navigationBars());
                 left = bars.left;
+                top = bars.top;
                 right = bars.right;
+                bottom = bars.bottom;
                 onImeVisibility(insets.isVisible(WindowInsets.Type.ime()));
             } else {
+                // The status bar is hidden in this mode and has never been
+                // reserved for, so only the other three edges are taken - the
+                // navigation bar's strip can lie along the bottom here too.
                 left = insets.getSystemWindowInsetLeft();
+                top = 0;
                 right = insets.getSystemWindowInsetRight();
+                bottom = insets.getSystemWindowInsetBottom();
             }
             // The library is loaded late in `onCreate`, and the first insets can
             // arrive before that. Nothing is reserved while the bar is hidden.
             if (nativeLoaded) {
-                nativeInsets(reserveNavigationBar ? left : 0, reserveNavigationBar ? right : 0);
+                if (reserveNavigationBar) {
+                    nativeInsets(left, top, right, bottom);
+                } else {
+                    nativeInsets(0, 0, 0, 0);
+                }
             }
             return view.onApplyWindowInsets(insets);
         });
@@ -1228,6 +1246,9 @@ public class MainActivity extends NativeActivity {
      */
     private static native void nativeConfigPicked(String text, String error);
 
-    /** The window insets, in pixels: the width of the navigation bar's strip. */
-    private static native void nativeInsets(int left, int right);
+    /**
+     * The window insets, in pixels: the strip the navigation bar keeps, one
+     * figure per edge. Which edge it lies on belongs to the device.
+     */
+    private static native void nativeInsets(int left, int top, int right, int bottom);
 }

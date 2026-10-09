@@ -101,15 +101,17 @@ pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeConfigPicked(
     monitor_gui::android::java_config_picked(&mut env, &text, &error);
 }
 
-/// The window insets changed: how wide the navigation bar's strip is, in
-/// pixels. See `monitor_gui::android`.
+/// The window insets changed: the strip the navigation bar keeps, one figure
+/// per edge, in pixels. See `monitor_gui::android`.
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeInsets(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
     left: jni::sys::jint,
+    top: jni::sys::jint,
     right: jni::sys::jint,
+    bottom: jni::sys::jint,
 ) {
-    monitor_gui::android::set_horizontal_insets(left, right);
+    monitor_gui::android::set_insets(left, top, right, bottom);
 }

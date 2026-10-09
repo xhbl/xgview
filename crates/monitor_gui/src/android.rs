@@ -1,6 +1,6 @@
 //! Android helpers that ask the activity to do what the native side cannot:
 //! report the start-on-boot state, open the two system screens that grant it,
-//! say how wide the navigation bar's strip is, and export / import the
+//! say which edge the navigation bar's strip is on, and export / import the
 //! configuration through the public Downloads folder and the system's document
 //! picker.
 //!
@@ -15,27 +15,35 @@ use std::sync::Mutex;
 use jni::objects::{GlobalRef, JString, JValue};
 use jni::JNIEnv;
 
-/// The horizontal window insets, in physical pixels, as last reported by the
-/// activity: the navigation bar's strip. Zero on a television and on an external
-/// display, which have no navigation bar.
+/// The window insets, in physical pixels, as last reported by the activity: the
+/// strip the navigation bar keeps. Which edge it lies on is the device's to
+/// decide - a landscape phone carries it along a short edge, a tablet whose
+/// natural orientation is landscape along the bottom one - so all four are
+/// reported and the wall leaves each of them free. Zero on a television and on
+/// an external display, which have no navigation bar.
 static INSET_LEFT_PX: AtomicI32 = AtomicI32::new(0);
+static INSET_TOP_PX: AtomicI32 = AtomicI32::new(0);
 static INSET_RIGHT_PX: AtomicI32 = AtomicI32::new(0);
+static INSET_BOTTOM_PX: AtomicI32 = AtomicI32::new(0);
 
-/// Records the horizontal insets the activity reported.
+/// Records the window insets the activity reported.
 ///
 /// Called from the JNI entry point in `monitor_android`, on the UI thread.
-pub fn set_horizontal_insets(left_px: i32, right_px: i32) {
+pub fn set_insets(left_px: i32, top_px: i32, right_px: i32, bottom_px: i32) {
     INSET_LEFT_PX.store(left_px, Ordering::Relaxed);
+    INSET_TOP_PX.store(top_px, Ordering::Relaxed);
     INSET_RIGHT_PX.store(right_px, Ordering::Relaxed);
+    INSET_BOTTOM_PX.store(bottom_px, Ordering::Relaxed);
 }
 
-/// The horizontal window insets, in physical pixels, as last reported by the
-/// activity: the navigation bar's strip. Zero on a television and on an external
-/// display, which have no navigation bar.
-pub fn horizontal_insets_px() -> (i32, i32) {
+/// The window insets, in physical pixels, as last reported by the activity:
+/// the strip the navigation bar keeps. See the statics above.
+pub fn insets_px() -> (i32, i32, i32, i32) {
     (
         INSET_LEFT_PX.load(Ordering::Relaxed).max(0),
+        INSET_TOP_PX.load(Ordering::Relaxed).max(0),
         INSET_RIGHT_PX.load(Ordering::Relaxed).max(0),
+        INSET_BOTTOM_PX.load(Ordering::Relaxed).max(0),
     )
 }
 

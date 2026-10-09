@@ -47,8 +47,14 @@ val cargoVersion: String = run {
     found ?: throw GradleException("no version = \"x.y.z\" under [workspace.package] in $manifest")
 }
 val cargoVersionParts = cargoVersion.split(".").map { it.toInt() }
-require(cargoVersionParts.size == 3 && cargoVersionParts.all { it in 0..99 }) {
-    "unexpected version in Cargo.toml: $cargoVersion (want three components, each 0..99)"
+require(
+    cargoVersionParts.size == 3 &&
+        cargoVersionParts[0] in 0..99 &&
+        cargoVersionParts[1] in 0..99 &&
+        cargoVersionParts[2] in 0..999
+) {
+    "unexpected version in Cargo.toml: $cargoVersion " +
+        "(want three components: major and minor 0..99, patch 0..999)"
 }
 
 android {
@@ -79,9 +85,13 @@ android {
         versionName = cargoVersion
         // Android wants one monotonically increasing integer, and the Rust
         // version only ever grows in its last component, so packing the three
-        // into one keeps that order: 1.1.8 -> 10108. This is what an install
-        // over an older one is compared with, so it has to keep growing.
-        versionCode = cargoVersionParts[0] * 10_000 + cargoVersionParts[1] * 100 + cargoVersionParts[2]
+        // into one keeps that order: 1.1.8 -> 1001008. The last component gets
+        // three digits - it is the one that grows, and the width is what keeps
+        // it from carrying into the one above - and the first two two apiece.
+        // This is what an install over an older one is compared with, so it has
+        // to keep growing; the widths are what keep two versions from packing
+        // to the same number.
+        versionCode = cargoVersionParts[0] * 1_000_000 + cargoVersionParts[1] * 1_000 + cargoVersionParts[2]
     }
 
     sourceSets {

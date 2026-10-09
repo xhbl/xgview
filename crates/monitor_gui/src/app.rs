@@ -4331,26 +4331,30 @@ impl eframe::App for XgViewApp {
         // offer the status line. See `focus_names`.
         self.focus_names.clear();
 
-        // Android: the navigation bar keeps its strip on one side of a landscape
-        // phone. The wall leaves exactly that width free on that side, so no
+        // Android: the navigation bar keeps a strip along one edge, and which
+        // edge that is belongs to the device - a landscape phone carries it
+        // along a short edge, a tablet whose natural orientation is landscape
+        // along the bottom one. The wall leaves exactly that strip free, so no
         // control sits under the bar. A television and an external display have
-        // no navigation bar, so both insets are zero and everything stays edge
-        // to edge. The setting chooses this or the immersive full screen, and is
-        // passed to the activity here; see the inset it reports back.
+        // no navigation bar, so every inset is zero and everything stays edge to
+        // edge. The setting chooses this or the immersive full screen, and is
+        // passed to the activity here; see the insets it reports back.
         #[cfg(target_os = "android")]
-        let (inset_left, inset_right) = {
+        let (inset_left, inset_top, inset_right, inset_bottom) = {
             crate::android::set_reserve_navigation_bar(self.config.reserve_navigation_bar);
             if self.config.reserve_navigation_bar {
-                crate::android::horizontal_insets_px()
+                crate::android::insets_px()
             } else {
-                (0, 0)
+                (0, 0, 0, 0)
             }
         };
         #[cfg(not(target_os = "android"))]
-        let (inset_left, inset_right) = (0_i32, 0_i32);
+        let (inset_left, inset_top, inset_right, inset_bottom) = (0_i32, 0_i32, 0_i32, 0_i32);
         let pixels_per_point = ctx.pixels_per_point();
         let inset_left = inset_left as f32 / pixels_per_point;
+        let inset_top = inset_top as f32 / pixels_per_point;
         let inset_right = inset_right as f32 / pixels_per_point;
+        let inset_bottom = inset_bottom as f32 / pixels_per_point;
         if inset_left >= 1.0 {
             egui::SidePanel::left("xgview-gutter-left")
                 .resizable(false)
@@ -4362,6 +4366,20 @@ impl eframe::App for XgViewApp {
             egui::SidePanel::right("xgview-gutter-right")
                 .resizable(false)
                 .exact_width(inset_right)
+                .frame(egui::Frame::default().fill(theme::BACKGROUND))
+                .show(ctx, |_| {});
+        }
+        if inset_top >= 1.0 {
+            egui::TopBottomPanel::top("xgview-gutter-top")
+                .resizable(false)
+                .exact_height(inset_top)
+                .frame(egui::Frame::default().fill(theme::BACKGROUND))
+                .show(ctx, |_| {});
+        }
+        if inset_bottom >= 1.0 {
+            egui::TopBottomPanel::bottom("xgview-gutter-bottom")
+                .resizable(false)
+                .exact_height(inset_bottom)
                 .frame(egui::Frame::default().fill(theme::BACKGROUND))
                 .show(ctx, |_| {});
         }

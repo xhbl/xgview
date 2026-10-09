@@ -382,7 +382,7 @@ impl Default for AppConfig {
             focus: None,
             autostart: false,
             start_fullscreen: false,
-            reserve_navigation_bar: true,
+            reserve_navigation_bar: false,
             prevent_sleep: true,
             keep_screen_on: true,
             language: "auto".to_string(),
