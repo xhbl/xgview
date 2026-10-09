@@ -3308,7 +3308,7 @@ impl XgViewApp {
                 }
                 ui.label(RichText::new(camera.short_label(18)).strong());
                 if let Some(sub) = camera.rtsp_sub.as_deref() {
-                    let inferred = sub == monitor_core::model::infer_sub_stream(&camera.rtsp_main).unwrap_or_default();
+                    let inferred = sub_is_derived(camera, sub);
                     ui.label(
                         RichText::new(monitor_i18n::tr(if inferred { "cameras-sub-derived" } else { "cameras-sub-set" }))
                             .small()
@@ -4696,6 +4696,18 @@ impl eframe::App for XgViewApp {
     }
 }
 
+/// Whether a camera's sub stream address was guessed from its main URL.
+///
+/// The badge this feeds is about where the address came from, not about what it
+/// looks like. An ONVIF profile that produced `…/videoSub` (Foscam's `prof1`) is
+/// a real address even though it reads exactly like what the `/videoMain` ->
+/// `/videoSub` rule would have derived. `sub_profile` records that a profile
+/// produced it, so a camera that has one is never shown as inferred.
+fn sub_is_derived(camera: &CameraSource, sub: &str) -> bool {
+    camera.sub_profile.is_none()
+        && sub == monitor_core::model::infer_sub_stream(&camera.rtsp_main).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4707,6 +4719,24 @@ mod tests {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1280.0, 36.0)),
             Rect::from_min_max(pos2(0.0, 690.0), pos2(1280.0, 720.0)),
         ))
+    }
+
+    /// The sub badge is about provenance, not shape: a Foscam's ONVIF sub stream
+    /// is byte-identical to what the URL rule would derive, and must not be
+    /// reported as inferred.
+    #[test]
+    fn a_sub_stream_a_profile_produced_is_not_reported_as_derived() {
+        let mut camera = CameraSource::new("front door", "rtsp://10.0.0.1:88/videoMain");
+        camera.rtsp_sub = Some("rtsp://10.0.0.1:88/videoSub".to_string());
+        // The rule's own answer, with no profile behind it: derived.
+        assert!(sub_is_derived(&camera, camera.rtsp_sub.as_deref().unwrap()));
+        // The same address, produced by profile `prof1`: not derived.
+        camera.sub_profile = Some("prof1".to_string());
+        assert!(!sub_is_derived(&camera, camera.rtsp_sub.as_deref().unwrap()));
+        // An address the rule would never produce is never reported as derived.
+        camera.sub_profile = None;
+        camera.rtsp_sub = Some("rtsp://10.0.0.1:88/low".to_string());
+        assert!(!sub_is_derived(&camera, camera.rtsp_sub.as_deref().unwrap()));
     }
 
     /// What a viewer does while watching a wall must not bring the bars back:
