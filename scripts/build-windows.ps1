@@ -42,6 +42,12 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $exeName = 'xgview.exe'
 $sourceExe = Join-Path $repoRoot "target\release\$exeName"
+# The command line entry point, built as the cargo target `xgview-cli` and
+# shipped as `xgview.com`: a shell finds that before `xgview.exe` - `.COM` comes
+# first in PATHEXT - and waits for it, being a console application. It looks for
+# the viewer above beside itself, so the two travel together.
+$cliName = 'xgview.com'
+$sourceCli = Join-Path $repoRoot 'target\release\xgview-cli.exe'
 
 function Write-Step([string]$Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
@@ -131,6 +137,8 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 Copy-Item -Path $sourceExe -Destination (Join-Path $stage $exeName) -Force
 Write-Host "    $exeName"
+Copy-Item -Path $sourceCli -Destination (Join-Path $stage $cliName) -Force
+Write-Host "    $cliName"
 # Language packs: every .ftl in the repo's langs/ directory travels beside the
 # executable so a viewer can switch language without rebuilding.
 $langsSource = Join-Path $repoRoot 'langs'

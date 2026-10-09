@@ -60,6 +60,13 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $exeName = 'xgview.exe'
 $sourceExe = Join-Path $repoRoot "target\release\$exeName"
 $targetExe = Join-Path $InstallDir $exeName
+# The command line entry point, built as the cargo target `xgview-cli` and
+# installed as `xgview.com`: a shell finds that before `xgview.exe` - `.COM`
+# comes first in PATHEXT - and waits for it, being a console application. It
+# looks for the viewer above beside itself, so the two are installed together.
+$cliName = 'xgview.com'
+$sourceCli = Join-Path $repoRoot 'target\release\xgview-cli.exe'
+$targetCli = Join-Path $InstallDir $cliName
 
 function Write-Step([string]$Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
@@ -128,6 +135,8 @@ Write-Step "Installing into $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item -Path $sourceExe -Destination $targetExe -Force
 Write-Host "    $targetExe"
+Copy-Item -Path $sourceCli -Destination $targetCli -Force
+Write-Host "    $targetCli"
 # Language packs: every .ftl in the repo's langs/ directory travels beside the
 # executable so a viewer can switch language without rebuilding.
 $langsSource = Join-Path $repoRoot 'langs'
@@ -192,8 +201,12 @@ elseif ($TaskScheduler) {
 }
 else {
     Write-Step 'Registering the HKCU Run entry (xgview --install-autostart)'
-    & $targetExe --install-autostart
-    if ($LASTEXITCODE -ne 0) { throw "registering start-on-boot failed with exit code $LASTEXITCODE" }
+    # The binary is a GUI application, and the shell does not wait for one, so
+    # its exit code has to be waited for explicitly. `-NoNewWindow` keeps the
+    # line it prints in this console.
+    $register = Start-Process -FilePath $targetExe -ArgumentList '--install-autostart' `
+        -NoNewWindow -Wait -PassThru
+    if ($register.ExitCode -ne 0) { throw "registering start-on-boot failed with exit code $($register.ExitCode)" }
 }
 
 # ---------------------------------------------------------------- summary

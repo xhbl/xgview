@@ -16,6 +16,13 @@ rust-version.workspace = true
 name = "xgview"
 path = "src/main.rs"
 
+# The command line entry point. A console application, so that a shell waits for
+# it; the viewer above is a GUI application, so that starting it shows no console
+# window. See the head of the file.
+[[bin]]
+name = "xgview-cli"
+path = "src/bin/xgview-cli.rs"
+
 [dependencies]
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
@@ -28,7 +35,7 @@ monitor_gui = { path = "crates/monitor_gui" }
 monitor_i18n = { path = "crates/monitor_i18n" }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_System_Console", "Win32_Foundation"] }
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }
 
 # The application icon and the version block are compiled into the
 # executable's resource section at link time. It is a build dependency because

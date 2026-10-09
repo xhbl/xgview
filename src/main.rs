@@ -5,6 +5,11 @@
 //! command line switches so that the Windows / Android install scripts can
 //! register the start-on-boot entry without any UI interaction.
 
+// A Windows GUI application: the loader creates no console window for the
+// process, so a double-click, a shortcut or the start-on-boot entry shows
+// nothing at all before the viewer's own window. The command line still
+// prints - see `setup_console`.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
 
@@ -158,8 +163,8 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
-/// Write to stdout and flush. Under the console subsystem `println!` handles
-/// line endings correctly, so this is a plain write + flush.
+/// Write to stdout and flush. `\n` alone is handed over: a console ends its own
+/// lines, and a redirected file is written as the bytes were given.
 fn cli_print(text: &str) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
@@ -167,30 +172,70 @@ fn cli_print(text: &str) {
     let _ = out.flush();
 }
 
-/// Release the console window when launching the GUI without `--console`.
+/// Opens the console window `--console` asks for, on a Windows build that has
+/// none of its own.
 ///
-/// The binary runs under the console subsystem (no `windows_subsystem`
-/// attribute), so `println!` works normally and `\n` is translated to
-/// `\r\n` by the console. When starting the GUI — no CLI switch, no
-/// `--console` — call `FreeConsole` to close the console window. There is a
-/// brief flash on double-click launch before `FreeConsole` runs, but CLI
-/// output is always correct.
+/// The executable is linked as a GUI application (the `windows_subsystem`
+/// attribute at the top of this file), so nothing is on screen before the
+/// viewer's own window: a console subsystem binary gets its console window from
+/// the loader, before `main` runs, and closing it from here only ever closes a
+/// window that has already been seen - which is the flash this avoids.
+///
+/// It is also why nothing is done here for the switches that print: a GUI
+/// process is not given the console of the shell it was launched from, so their
+/// output would have nowhere to go. The command line is served by `xgview.com`
+/// beside the viewer, which a shell finds before `xgview.exe` and waits for -
+/// see the `xgview-cli` binary. A standard output that is already a file or a
+/// pipe is written to as it always was.
+///
+/// `--console` is the one case left: it asks for a console window to watch the
+/// log in, so one is attached to - the shell's, if the shell has one - or made,
+/// for a double-click. A standard output that already has somewhere to go is
+/// left alone, which is what keeps `xgview --console > log.txt` a file.
 #[cfg(windows)]
 fn setup_console(args: &[String]) {
-    use windows_sys::Win32::System::Console::FreeConsole;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        AllocConsole, AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS,
+        STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    };
 
-    let want_console = args.iter().any(|a| a == "--console");
-    let is_cli = args.iter().any(|a| {
-        matches!(
-            a.as_str(),
-            "-h" | "--help" | "-V" | "--version"
-                | "--install-autostart" | "--remove-autostart" | "--print-schedule"
-        )
-    });
-    if !want_console && !is_cli {
-        unsafe {
-            FreeConsole();
+    if !args.iter().any(|a| a == "--console") {
+        return;
+    }
+
+    // Redirected to a file or a pipe: that handle is the one to write to.
+    let stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    if stdout != 0 && stdout != INVALID_HANDLE_VALUE {
+        return;
+    }
+
+    unsafe {
+        // The console of the shell that ran us, which needs no window of its
+        // own. With nothing to attach to there is a console window to make.
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 && AllocConsole() == 0 {
+            return;
         }
+        // Neither call hands over handles of its own: the console is opened by
+        // name instead, and the standard handles are pointed at it.
+        let conout: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+        let handle = CreateFileW(
+            conout.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            0,
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return;
+        }
+        SetStdHandle(STD_OUTPUT_HANDLE, handle);
+        SetStdHandle(STD_ERROR_HANDLE, handle);
     }
 }
 

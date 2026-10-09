@@ -397,8 +397,23 @@ xgview [OPTIONS]
 
 `--print-schedule` is useful to validate a configuration on a headless box: it
 lists every page of every layout and shows which camera is decoded on which
-stream. On Windows the console window is released automatically when the GUI
-starts; `--console` keeps it for log output.
+stream.
+
+On Windows the viewer is a GUI application, so starting it opens no console
+window. Its command line is served by `xgview.com`, installed beside it: a shell
+finds that before `xgview.exe`, `.COM` coming first in its search order, and
+waits for it, being a console application. So the switches above are typed as
+above, and so is the viewer itself:
+
+```powershell
+xgview --print-schedule      # every line on its own line, cursor after the last
+xgview --install-autostart   # a non-zero exit code if the registration failed
+xgview                       # the viewer in the foreground, log in this console
+```
+
+`xgview.exe` takes the same switches, and is what a shortcut and the start-on-boot
+entry run. It is the GUI application, though, and prints nothing of its own: the
+command line is `xgview`, which is `xgview.com` installed beside it.
 
 ### Troubleshooting
 
@@ -430,7 +445,9 @@ starts; `--console` keeps it for log output.
   on OpenGL ES a few seconds later.
 - **Where are the logs?** On Android, `adb logcat -s xgview`. On the desktop, set
   the `RUST_LOG` environment variable (for example `RUST_LOG=xgview=debug`); on
-  Windows run with `--console` to see them in a console window.
+  Windows, `xgview` with no switches runs the viewer in the foreground and its
+  log arrives in that console, and `--console` opens a console window for it
+  when the viewer is started outside a shell.
 
 ---
 
