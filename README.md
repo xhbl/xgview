@@ -147,15 +147,18 @@ background start unless XGView may *display over other apps* - the same permissi
 XGView is a GUI: start `xgview` (or double-click `xgview.exe`) and the wall comes
 up with whatever cameras are already in its configuration.
 
-1. **Get the build.** Windows ships as a zip you unpack anywhere; Android ships
-   as a signed APK; or build from source. See [docs/CONFIG.md](docs/CONFIG.md).
+1. **Get the build.** Windows ships as a zip you unpack anywhere; Linux as a
+   self-contained `tar.gz` that comes with its own `install.sh`; Android as a
+   signed APK; or build from source. See [docs/CONFIG.md](docs/CONFIG.md).
 2. **Add cameras.** On the first run the grid is empty - press `F2` to discover
    cameras on the network, or add one by hand.
 3. **Make it yours.** Press `F1` for the settings panel: layout, OSD, language,
    reconnect timings, the blackout schedule and start on boot.
 
 Nothing is installed and nothing is registered behind your back; the Windows
-package is a directory you can delete to uninstall.
+package is a directory you can delete to uninstall, and on Linux the installer
+says exactly what it puts where - `./install.sh --uninstall` takes it all back
+out again.
 
 ### Where the settings live
 

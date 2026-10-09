@@ -1,0 +1,40 @@
+# Build environment for the XGView Linux portable package
+# (`scripts/build-linux.sh --docker`).
+#
+# rockylinux:8 carries glibc 2.28, and that is the whole point of building in a
+# container: every GLIBC_* symbol the linker leaves in the executable and in the
+# FFmpeg libraries is then one that RHEL 8, Debian 10, Ubuntu 20.04 and Fedora
+# 32 and newer all provide. Building on a modern host instead pins the package
+# to that host's glibc.
+#
+# Everything the script's host path expects of the machine is installed once
+# here, so a later `docker run` never pays for it: a C/C++ compiler for OpenH264
+# and for the FFmpeg build, nasm for FFmpeg's hand written SIMD, curl/tar/xz to
+# fetch and unpack the FFmpeg source, pkg-config, clang/libclang for the crates
+# that read C headers at build time, and gawk/findutils for FFmpeg's configure.
+#
+# The base image is a build argument so `--docker-image` can pick another RHEL 8
+# rebuild (AlmaLinux, CentOS, Oracle Linux); they all carry glibc 2.28 and all
+# name the "CodeReady Builder" repository `powertools`, which is the only place
+# nasm is packaged.
+ARG BASE_IMAGE=rockylinux:8
+FROM ${BASE_IMAGE}
+
+RUN dnf install -y --allowerasing --setopt=install_weak_deps=False \
+        --enablerepo=powertools \
+        gcc gcc-c++ make nasm curl tar xz pkgconfig clang gawk which findutils \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf /var/cache/yum
+
+# A minimal stable tool chain, installed the same way a developer would install
+# it. `--no-modify-path` keeps the Dockerfile's own PATH authoritative.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        -o /tmp/rustup-init.sh \
+    && sh /tmp/rustup-init.sh -y --no-modify-path --profile minimal \
+        --default-toolchain stable \
+    && rm -f /tmp/rustup-init.sh \
+    && rustc --version && cargo --version

@@ -6,9 +6,10 @@
 .DESCRIPTION
     Builds the release binary and packs everything it needs to run - the
     executable and the FFmpeg runtime it links against - into a single zip under
-    `target`, named after the version and the architecture it was built for:
+    `target`, named after the version, the platform and the architecture it was
+    built for:
 
-        target\xgview-<version>-<arch>.zip
+        target\xgview-<version>-windows-<arch>.zip
 
     The zip holds the files at its root, with no folder around them, so it can
     be extracted anywhere and `xgview.exe` run from there. The same set is left
@@ -124,12 +125,12 @@ if (-not $hostLine -or $hostLine -notmatch 'host:\s*(\S+)') {
     throw 'cannot read the host target from `rustc -vV`'
 }
 $arch = switch -Wildcard ($matches[1]) {
-    'x86_64*' { 'x64' }
-    'i686*' { 'x86' }
+    'x86_64*' { 'x86_64' }
+    'i686*' { 'i686' }
     'aarch64*' { 'arm64' }
     default { throw "unsupported host architecture: $($matches[1])" }
 }
-$zip = Join-Path $repoRoot "target\xgview-$version-$arch.zip"
+$zip = Join-Path $repoRoot "target\xgview-$version-windows-$arch.zip"
 
 Write-Step "Collecting the runtime into $stage"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }

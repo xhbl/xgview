@@ -153,6 +153,38 @@ before spending a build of FFmpeg from source to match.
 the features the crate enables by default. A missing one stops the build naming
 the `.pc` file it went looking for, which is the whole diagnosis.
 
+**Packaging for Linux.** A distribution's FFmpeg is linked against the whole
+world - x264, x265, dav1d, rav1e, libplacebo, librsvg - so `ldd` on a binary
+built against it names close to two hundred libraries, none of which a machine
+that never installed them can load, and some of which (`libGL`, `libvulkan`,
+`libX11`) must not travel in a package at all. `scripts/build-linux.sh` builds
+its own trimmed FFmpeg instead - the decoders the pipeline asks for, and no
+third party dependency - and stages it with the executable, which finds the
+seven shared libraries beside it through an `$ORIGIN` rpath:
+`target/xgview-<version>-linux-x86_64.tar.gz` unpacks and runs. The FFmpeg
+release is pinned by `FFMPEG_VERSION` (8.0.3, so `avcodec-62`; Windows' vcpkg
+builds `avcodec-63` - the crate carries a branch for each). The trim costs two
+things, both visible in the script: the x86 SIMD paths need `nasm` on the build
+machine, and hardware decoding needs `--enable-vaapi` and its `libva` headers -
+without either, the package decodes on the CPU alone.
+
+The glibc floor is the build machine's, which is what `--docker` is for: a
+release is built by running the same script inside a `rockylinux:8` container,
+whose 2.28 lets the package run from Ubuntu 20.04 / Debian 10 / RHEL 8 on,
+where a build on an Ubuntu 24.04 host asks for 2.39. The container's toolchain
+is baked into an image (`scripts/Dockerfile.linux-build`) and its working tree
+is kept in a docker volume, so only the first run pays for either. Every build
+ends by printing the floor it measured.
+
+The package also carries its icons and an `install.sh`. Running it puts the
+bundle in `~/.local/opt/xgview` (or `/opt/xgview` with `sudo ./install.sh
+--system`), the icons into the hicolor theme and a desktop entry into the
+application grid, with a symlink on `PATH` beside them; `--uninstall` takes the
+same four things back out and leaves the configuration in `~/.config/xgview`
+alone. The folder stays whole because the `$ORIGIN` rpath is what finds the
+libraries - there is no `bin/` and `lib/` split to install into, which is why
+`/opt` is the shape it fits.
+
 **Building on Android.** Neither FFmpeg nor OpenH264 is needed there, and the
 manifests say so: both are declared for targets other than Android, so enabling
 the crate's default features pulls neither into the Android dependency graph.

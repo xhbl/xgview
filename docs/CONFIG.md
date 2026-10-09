@@ -15,7 +15,8 @@ behind the decoder and the cameras, see [DevMemo.md](DevMemo.md).
 | Target | Needs |
 |---|---|
 | Windows / Linux desktop (default build) | Rust 1.80+ (Edition 2021, via [rustup](https://rustup.rs)); the FFmpeg **development** libraries, found through `VCPKG_ROOT` (`vcpkg install ffmpeg:x64-windows`); **libclang** for `bindgen` (`winget install LLVM.LLVM`, then set `LIBCLANG_PATH`) |
-| Windows / Linux desktop (runtime) | the matching FFmpeg libraries beside the executable or on `PATH` |
+| Linux package (`scripts/build-linux.sh`) | gcc / make, `pkg-config`, `nasm` (the x86 SIMD paths) and **libclang**; the FFmpeg source is fetched and built by the script itself, or by the container image with `--docker` |
+| Windows / Linux desktop (runtime) | the matching FFmpeg libraries beside the executable or on `PATH`; the Linux package carries its own |
 | Android | the Android NDK (r25+), the `aarch64-linux-android` target and `cargo-ndk`; a JDK, Gradle and the Android SDK for the APK |
 
 Neither FFmpeg nor OpenH264 is used on Android - decoding is `AMediaCodec`.
@@ -55,7 +56,9 @@ The desktop decoder links FFmpeg dynamically, so at run time the `av*` / `sw*`
 DLLs (Windows) or `.so` files (Linux) have to be resolvable - beside the
 executable, or on `PATH` as vcpkg leaves them on the build machine. On Windows
 `scripts\build-windows.ps1` gathers them from `VCPKG_ROOT` / `FFMPEG_DIR` into
-the staged package, which is what makes a build copyable to another machine.
+the staged package, which is what makes a build copyable to another machine. On
+Linux `scripts/build-linux.sh` goes further and builds an FFmpeg of its own, so
+that the package carries everything it needs; see §5.
 
 ## 4. Windows Mini PC deployment
 
@@ -78,13 +81,52 @@ powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -NoBuild -N
 `scripts\build-windows.ps1` produces the same layout as a zip under `target/`
 without installing it.
 
-## 5. Android build and deployment
+## 5. Linux build and deployment
+
+```bash
+scripts/build-linux.sh                       # package built on this machine
+scripts/build-linux.sh --docker              # ... inside a rockylinux:8 container
+# -> target/xgview-<version>-linux-x86_64.tar.gz
+```
+
+The script builds a trimmed FFmpeg of its own - the decoders the viewer asks
+for, and no third party dependency - and stages it beside the executable, which
+finds the libraries there through an `$ORIGIN` rpath. A distribution's own
+FFmpeg cannot be used for this; [DevMemo.md](DevMemo.md) §4 says why, and what
+the package is shaped like.
+
+`--docker` runs that same build inside a `rockylinux:8` container, and is how a
+release is built: the container's glibc 2.28 is what lets the package run from
+Ubuntu 20.04 / Debian 10 / RHEL 8 on, where a build on a newer machine asks for
+a newer glibc than those machines have. The toolchain is baked into an image
+(`scripts/Dockerfile.linux-build`) and the build tree lives in a docker volume,
+so only the first run pays for either. Every build prints the floor it measured.
+
+The archive is self contained, and comes with its own installer:
+
+```bash
+tar xzf xgview-<version>-linux-x86_64.tar.gz
+cd xgview-<version>-linux-x86_64
+./install.sh                 # ~/.local/opt/xgview, for this user
+sudo ./install.sh --system   # /opt/xgview, for every user
+./install.sh --uninstall     # the same install, taken back out
+```
+
+`install.sh` copies the bundle into one directory - it cannot be split over
+`bin/` and `lib/`, because the `$ORIGIN` rpath is what finds the libraries,
+which is why `/opt` is the shape it fits - installs the icons into the hicolor
+theme, writes `xgview.desktop` so XGView appears in the application grid, and
+links the executable onto `PATH`. It leaves `~/.config/xgview` alone, on install
+and on uninstall alike, and running it again over an existing install replaces
+that install rather than adding to it.
+
+## 6. Android build and deployment
 
 ### Windows: one script, library and APK
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1
-# -> target\xgview-<version>-arm64-v8a.apk
+# -> target\xgview-<version>-android-arm64-v8a.apk
 
 # The debug variant, and another API level.
 powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1 -DebugBuild -Api 30
@@ -156,7 +198,7 @@ permissions granted (`adb install -r -g`) so the unattended box never shows a
 dialog, grants the special `SYSTEM_ALERT_WINDOW` permission the boot start
 needs, launches the app and follows its logcat output.
 
-## 6. Android release signing: what to carry to a new clone
+## 7. Android release signing: what to carry to a new clone
 
 The release APK is signed with a private key that is deliberately **not** in the
 repository (see `.gitignore`). Cloning elsewhere therefore needs two files
@@ -204,22 +246,24 @@ They are generated, and are ignored by `.gitignore`:
 | `android/local.properties` | not used: `build-android.ps1` finds the SDK/JDK/NDK through environment variables |
 | `config.json` (at the repository root) | a local configuration, if one was put there |
 
-The Android toolchain itself is an installation, not a file to copy: see §7 for
+The Android toolchain itself is an installation, not a file to copy: see §8 for
 where its paths are read from.
 
-## 7. Environment variables
+## 8. Environment variables
 
 | Variable | Used by | Purpose |
 |---|---|---|
 | `VCPKG_ROOT` | desktop build | where the FFmpeg development libraries are found (`ffmpeg-sys-next`) |
 | `FFMPEG_DIR` | Windows packaging | alternative root for the FFmpeg runtime DLLs, beside `VCPKG_ROOT` |
 | `LIBCLANG_PATH` | desktop build | `libclang.dll` / `libclang.so` for `bindgen` |
+| `FFMPEG_VERSION` | `build-linux.sh` | which FFmpeg release the package's own copy is built from (`8.0.3` by default) |
+| `XGVIEW_OUT_ROOT`, `XGVIEW_DOCKER`, `XGVIEW_DOCKER_VOLUME` | `build-linux.sh` | where the package is written, and which docker client and volume the `--docker` build uses; the script's usage block lists the rest |
 | `XGVIEW_ANDROID_ROOT` | `build-android.ps1` | toolchain root (NDK, JDK, Gradle, SDK); `C:\Android` by default |
 | `ANDROID_NDK_HOME`, `ANDROID_HOME`, `JAVA_HOME` | cargo-ndk / Gradle | set by the build script from `XGVIEW_ANDROID_ROOT`; set them yourself when building with the `.sh` scripts |
 | `XGVIEW_CONFIG_DIR` | the viewer | overrides the configuration directory (portable deployments) |
 | `RUST_LOG` | the viewer | log filter, e.g. `RUST_LOG=xgview=debug` |
 
-## 8. Repository layout
+## 9. Repository layout
 
 ```
 xgview/
@@ -245,10 +289,11 @@ xgview/
 ├── langs/                      # language packs shipped with a release (`zh-CN.ftl`, …)
 ├── docs/                       # this file, design notes, and `DevMemo.md`
 ├── android/                    # the Gradle project that turns the library into an APK
-└── scripts/                    # Windows install and cargo-ndk / adb deployment helpers
+└── scripts/                    # packaging and deployment helpers: Windows install, Android
+                                #   cargo-ndk / adb, the Linux package and its installer
 ```
 
-## 9. Architecture principles
+## 10. Architecture principles
 
 * **Non blocking UI** – the egui thread never touches a socket or a decoder. All
   network I/O and decoding run on a tokio runtime; results reach the UI through

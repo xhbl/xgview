@@ -9,8 +9,8 @@
     cargo-ndk, assembles the APK with Gradle, and leaves it in `target` named
     after the version and the ABI(s) it carries:
 
-        target\xgview-<version>-<abi>.apk          release (the default)
-        target\xgview-<version>-<abi>-debug.apk    with -DebugBuild
+        target\xgview-<version>-android-<abi>.apk          release (the default)
+        target\xgview-<version>-android-<abi>-debug.apk    with -DebugBuild
 
     The release APK is signed with the project's own keystore, kept under
     `android\` and created the first time a release build runs; see the signing
@@ -137,7 +137,7 @@ try {
     # the release APK a previous run left under the plain name.
     $platform = ($Abis -split '\s+') -join '-'
     $suffix = if ($DebugBuild) { '-debug' } else { '' }
-    $apk = Join-Path $repoRoot "target\xgview-$version-$platform$suffix.apk"
+    $apk = Join-Path $repoRoot "target\xgview-$version-android-$platform$suffix.apk"
     Copy-Item $built $apk -Force
 
     Write-Host ''
