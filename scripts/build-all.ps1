@@ -28,8 +28,10 @@ function Write-Step([string]$Message) {
 }
 
 # Bump the patch component of `version` inside `[workspace.package]`. The file
-# starts with a UTF-8 BOM, so it is read and written back with the same encoding
-# to keep the diff down to the one line that actually changed.
+# starts with a UTF-8 BOM and uses LF endings, so it is read and written back
+# with the same encoding and the same endings: `WriteAllLines` would write CRLF
+# on Windows and rewrite every line of the manifest, burying the one line this
+# script actually changed.
 $lines = [System.IO.File]::ReadAllLines($cargoToml)
 $inSection = $false
 $bumped = $false
@@ -48,7 +50,7 @@ if (-not $bumped) {
     throw "no version = `"x.y.z`" under [workspace.package] in $cargoToml"
 }
 
-[System.IO.File]::WriteAllLines($cargoToml, $lines, (New-Object System.Text.UTF8Encoding($true)))
+[System.IO.File]::WriteAllText($cargoToml, ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($true)))
 
 Write-Step "Version bumped to $newVersion"
 
