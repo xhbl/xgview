@@ -87,6 +87,38 @@ pub struct ResolvedDevice {
     pub sub_profile: Option<String>,
 }
 
+/// Picks the main and sub stream profiles out of a device's media profiles.
+///
+/// The main stream is the largest profile. The sub stream is the smallest one
+/// that names itself like a low resolution stream; when none does - FOSCAM
+/// calls its profiles `prof0` / `prof1`, which carries no such hint - the
+/// smallest genuinely *smaller* profile is taken instead, so a real URI is
+/// fetched rather than leaving the sub stream to the URL inference. It has to
+/// be smaller, so a device with several equally sized profiles does not get an
+/// arbitrary one labelled as its sub stream.
+fn select_streams(profiles: &[OnvifProfile]) -> (Option<OnvifProfile>, Option<OnvifProfile>) {
+    let main = profiles
+        .iter()
+        .filter(|profile| !profile.looks_like_sub())
+        .max_by_key(|profile| profile.pixels())
+        .or_else(|| profiles.iter().max_by_key(|profile| profile.pixels()))
+        .cloned();
+    let sub = profiles
+        .iter()
+        .filter(|profile| profile.looks_like_sub())
+        .min_by_key(|profile| profile.pixels())
+        .cloned()
+        .or_else(|| {
+            let main = main.as_ref()?;
+            profiles
+                .iter()
+                .filter(|profile| profile.pixels() > 0 && profile.pixels() < main.pixels())
+                .min_by_key(|profile| profile.pixels())
+                .cloned()
+        });
+    (main, sub)
+}
+
 /// Minimal ONVIF SOAP client.
 #[derive(Debug, Clone)]
 pub struct OnvifClient {
@@ -387,17 +419,7 @@ impl OnvifClient {
         };
         let profiles = self.get_profiles().await?;
 
-        let main = profiles
-            .iter()
-            .filter(|profile| !profile.looks_like_sub())
-            .max_by_key(|profile| profile.pixels())
-            .or_else(|| profiles.iter().max_by_key(|profile| profile.pixels()))
-            .cloned();
-        let sub = profiles
-            .iter()
-            .filter(|profile| profile.looks_like_sub())
-            .min_by_key(|profile| profile.pixels())
-            .cloned();
+        let (main, sub) = select_streams(&profiles);
 
         let mut resolved = ResolvedDevice { device, profiles, ..Default::default() };
         if let Some(profile) = &main {
@@ -730,6 +752,42 @@ mod tests {
         };
         assert!(profile.looks_like_sub());
         assert_eq!(profile.resolution().as_deref(), Some("640x360"));
+    }
+
+    /// A device that names no profile like a sub stream still gets a real one:
+    /// the smallest genuinely smaller profile is taken, so the sub URI is
+    /// fetched instead of being left to the URL inference.
+    #[test]
+    fn falls_back_to_the_smaller_profile_when_no_name_says_sub() {
+        let video = |token: &str, width: u32, height: u32| OnvifProfile {
+            token: token.into(),
+            name: format!("{token}_name"),
+            encoding: Some("H264".into()),
+            width: Some(width),
+            height: Some(height),
+            fps: None,
+            bitrate_kbps: None,
+        };
+
+        // FOSCAM, in the flesh: `prof0` 1080p and `prof1` 480p, neither named.
+        let (main, sub) = select_streams(&[video("prof0", 1920, 1080), video("prof1", 640, 480)]);
+        assert_eq!(main.unwrap().token, "prof0");
+        assert_eq!(sub.unwrap().token, "prof1");
+
+        // A named sub stream still wins over the resolution fallback.
+        let named = OnvifProfile { name: "SubStream".into(), ..video("s", 320, 240) };
+        let (main, sub) = select_streams(&[video("prof0", 1920, 1080), named]);
+        assert_eq!(main.unwrap().token, "prof0");
+        assert_eq!(sub.unwrap().token, "s");
+
+        // One profile has no sub to fall back to.
+        let (main, sub) = select_streams(&[video("prof0", 1920, 1080)]);
+        assert!(main.is_some());
+        assert!(sub.is_none());
+
+        // Several equally sized profiles are not a main / sub pair.
+        let (_, sub) = select_streams(&[video("a", 1920, 1080), video("b", 1920, 1080)]);
+        assert!(sub.is_none());
     }
 
     #[test]

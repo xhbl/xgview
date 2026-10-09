@@ -1327,4 +1327,54 @@ that numbers channels by track order will hand the video a pair other than the
 requested one exactly when a track precedes it. Honouring the answer rather than
 the request is the fix; the request was only ever a suggestion.
 
+## 21. A camera that names no sub stream still has one
+
+*A 192.168.27.40-49 block of FOSCAMs and one Reolink — 2026-10-09*
+
+Adding the block by scan, one camera came up with a real sub stream address
+while the rest only had an inferred one. The guess was right - FOSCAM's
+`/videoMain` -> `/videoSub` is in the inference table - but the question was why
+one camera could be *discovered* and the others could not.
+
+**Both kinds answer ONVIF; the difference is the profile names.** Probing the
+block: `.40`-`.48` are FOSCAM (ONVIF on `:888`, HTTP Basic), `.49` a Reolink
+(ONVIF on `:80`/`:8000`, HTTP Digest). All of them resolve a main stream fine.
+They part company on `GetProfiles`:
+
+```text
+FOSCAM MCS2020 / C2   prof0 prof0_name 1920x1080  looks_like_sub=false
+                      prof1 prof1_name  640x480  looks_like_sub=false
+Reolink doorbell      000 Profile000_MainStream 2560x1920  looks_like_sub=false
+                      001 Profile001_SubStream   640x480  looks_like_sub=true
+```
+
+`looks_like_sub` is a name match - `sub`, `second`, `low`, `small`, `stream2`,
+`_2`. Reolink labels its second profile `…SubStream`, so it is recognised and
+`GetStreamUri` returns the real `Preview_01_sub`. FOSCAM names its profiles
+`prof0` / `prof1`, which carries no such hint, so no profile looked like a sub
+stream, `sub_uri` stayed `None`, and `import_device` fell back to
+`apply_sub_inference` - a URL guess that happens to be right here and would not
+be for a camera whose scheme is not in the table.
+
+**The fallback: the smaller profile is the sub.** `select_streams` now picks the
+main as the largest profile and the sub as the smallest profile that names
+itself like one; **when none does, the smallest genuinely smaller profile is
+taken instead**, so the URI is fetched rather than guessed. It has to be
+*smaller*, which keeps a device with several equally sized profiles from having
+an arbitrary one labelled as its sub stream, and a single-profile device still
+falls back to the URL inference as before. After the change the FOSCAMs answer
+with a real sub stream:
+
+```text
+main_profile=Some("prof0") main_uri=Some("rtsp://192.168.27.40:88/videoMain")
+sub_profile=Some("prof1")  sub_uri=Some("rtsp://192.168.27.40:88/videoSub")
+```
+
+The choice is a pure function of the profile list (`discovery::onvif::select_streams`),
+so the cases are unit-tested without a device -
+`falls_back_to_the_smaller_profile_when_no_name_says_sub` covers the FOSCAM
+names, a named sub winning over the resolution fallback, one profile, and two
+equally sized ones.
+
+
 
