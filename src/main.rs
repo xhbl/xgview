@@ -94,8 +94,9 @@ fn main() -> Result<()> {
     tracing::info!(
         target: "xgview",
         path = %config_path.display(),
-        cameras = config.cameras.len(),
-        layout = config.layout.label(),
+        cameras = config.group_camera_count(config.active_group),
+        group = config.active_group + 1,
+        layout = config.group().layout.label(),
         "starting {APP_DISPLAY_NAME} {}",
         env!("CARGO_PKG_VERSION")
     );
@@ -112,45 +113,61 @@ fn main() -> Result<()> {
     })
 }
 
-/// Prints the decoding plan of every page, which is handy to validate a
-/// configuration on a headless deployment.
+/// Prints the decoding plan of every page of every group, which is handy to
+/// validate a configuration on a headless deployment.
 fn print_schedule(config: &AppConfig, path: &Path) {
-    let cameras = config.active_cameras();
     cli_print(&format!("configuration : {}\n", path.display()));
-    cli_print(&format!(
-        "cameras       : {} enabled / {} total\n",
-        cameras.len(),
-        config.cameras.len()
-    ));
     cli_print(&format!(
         "backend       : {} (hardware: {})\n",
         monitor_codec::capabilities().backend,
         monitor_codec::capabilities().hardware
     ));
 
-    for layout in GridLayout::ALL {
-        let mut scheduler = Scheduler::new(layout, 0, None, cameras.len());
-        let pages = scheduler.page_count();
-        for page in 0..pages {
-            let _ = scheduler.set_page(page);
-            let schedule = scheduler.schedule(&cameras);
-            let live = schedule
-                .plans
-                .iter()
-                .filter(|plan| !plan.mode.is_suspended())
-                .map(|plan| {
-                    let name = cameras.get(plan.index).map(|camera| camera.name.as_str()).unwrap_or("?");
-                    format!("{name} ({})", plan.mode.label())
-                })
-                .collect::<Vec<_>>();
-            cli_print(&format!(
-                "  {:<4} page {}/{}: {} live channel(s) [{}]\n",
-                layout.label(),
-                page + 1,
-                pages,
-                live.len(),
-                live.join(", ")
-            ));
+    for (index, group) in config.groups.iter().enumerate() {
+        let held: Vec<_> = config
+            .cameras
+            .iter()
+            .filter(|camera| usize::from(camera.group) == index)
+            .cloned()
+            .collect();
+        let cameras: Vec<_> = held.iter().filter(|camera| camera.enabled).cloned().collect();
+        let title = if group.name.trim().is_empty() {
+            format!("group {}", index + 1)
+        } else {
+            format!("group {} ({})", index + 1, group.name.trim())
+        };
+        let on_the_wall = if index == config.active_group { ", on the wall" } else { "" };
+        cli_print(&format!(
+            "\n{title}{on_the_wall}: {} enabled / {} total, grid {}\n",
+            cameras.len(),
+            held.len(),
+            group.layout.label()
+        ));
+
+        for layout in GridLayout::ALL {
+            let mut scheduler = Scheduler::new(layout, 0, None, cameras.len());
+            let pages = scheduler.page_count();
+            for page in 0..pages {
+                let _ = scheduler.set_page(page);
+                let schedule = scheduler.schedule(&cameras);
+                let live = schedule
+                    .plans
+                    .iter()
+                    .filter(|plan| !plan.mode.is_suspended())
+                    .map(|plan| {
+                        let name = cameras.get(plan.index).map(|camera| camera.name.as_str()).unwrap_or("?");
+                        format!("{name} ({})", plan.mode.label())
+                    })
+                    .collect::<Vec<_>>();
+                cli_print(&format!(
+                    "  {:<4} page {}/{}: {} live channel(s) [{}]\n",
+                    layout.label(),
+                    page + 1,
+                    pages,
+                    live.len(),
+                    live.join(", ")
+                ));
+            }
         }
     }
 }

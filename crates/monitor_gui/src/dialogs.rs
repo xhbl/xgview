@@ -779,8 +779,13 @@ fn onvif_tab(
         let host = device.host().unwrap_or_default();
         // Only the address is known until the device is resolved, so that is
         // what "already on the wall" is judged on here: an approximate check,
-        // where the Synology list can compare the whole camera.
-        let added = config.cameras.iter().any(|known| known.host.eq_ignore_ascii_case(&host));
+        // where the Synology list can compare the whole camera. It is judged
+        // within the group the wall is on: the same device may sit in another
+        // group as an entry of its own.
+        let added = config
+            .cameras
+            .iter()
+            .any(|known| config.in_active_group(known) && known.host.eq_ignore_ascii_case(&host));
         ui.horizontal(|ui| {
             let busy = state.busy.is_some();
             let label = if added { monitor_i18n::tr("dialog-added") } else { monitor_i18n::tr("dialog-add") };
@@ -942,9 +947,15 @@ enum AddOffer {
 /// "The same camera" is [`CameraSource::identity`] - scheme, host, port and
 /// path, with the way the address is written taken out - so a camera added by
 /// hand, by ONVIF or by Synology is all recognised, and not only the ones this
-/// tab imported.
+/// tab imported. It is searched for in the group the wall is on: the groups are
+/// not deduplicated against each other, so the same camera sitting in another
+/// group is a separate entry, and adding it here is a new one.
 fn add_offer(config: &AppConfig, camera: &CameraSource) -> AddOffer {
-    let Some(known) = config.cameras.iter().find(|known| known.identity() == camera.identity()) else {
+    let known = config
+        .cameras
+        .iter()
+        .find(|known| config.in_active_group(known) && known.identity() == camera.identity());
+    let Some(known) = known else {
         return AddOffer::Add;
     };
     if same_settings(known, camera) {

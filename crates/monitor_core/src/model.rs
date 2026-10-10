@@ -349,6 +349,11 @@ pub struct CameraSource {
     /// ONVIF profile token of the sub stream.
     #[serde(default)]
     pub sub_profile: Option<String>,
+    /// Which camera group this entry belongs to, as an index into
+    /// [`crate::config::AppConfig::groups`]. The groups are not deduplicated
+    /// against each other, so the same camera may be an entry in more than one.
+    #[serde(default)]
+    pub group: u8,
 }
 
 impl CameraSource {
@@ -377,6 +382,7 @@ impl CameraSource {
             aspect: TileAspect::default(),
             main_profile: None,
             sub_profile: None,
+            group: 0,
         }
     }
 

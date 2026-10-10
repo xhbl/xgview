@@ -3,6 +3,42 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.3.9
+
+Changes since 1.3.7. The wall can hold four camera groups and switch between
+them, and a few controls were cleared up.
+
+### Groups
+
+- **Four camera groups, switched from the settings.** Each group is its own set
+  of cameras with its own grid layout and paging, so a two-camera view and a
+  nine-camera one need no re-arranging to move between. The group is a strip of
+  tabs at the top of the *Cameras* settings page, each showing its name and the
+  number of cameras it holds, and the field that names the one on the wall sits
+  at the foot of the page; an unnamed group reads as "Group N".
+- **The groups are not deduplicated against each other.** The same camera may be
+  an entry in more than one, added and removed independently - an import into a
+  group only ever matches an entry of that group - and reordering likewise moves
+  only the group being looked at.
+- **Each group keeps its view.** The layout, the page and the focused tile are
+  held per group and restored when it is switched to.
+- `--print-schedule` prints every group in turn, each with its name, camera
+  counts and grid.
+
+### Controls
+
+- A camera that carries a sub stream is marked `w/sub` rather than `sub`, which
+  read as though the row *was* the sub stream.
+- The add-devices window closes with a cross rather than the word "Close".
+- The discovery summary under *Add devices* is gone, and the blackout switch
+  carries its own label instead of a bare box under a heading.
+
+### Internals
+
+- A camera entry records the group it belongs to, and the configuration holds
+  the four groups' names and views. A `config.json` written before groups has
+  its layout folded into the first group rather than reset.
+
 ## 1.3.7
 
 Changes since 1.2.107. Almost all of it the *add devices* window: two more

@@ -14,7 +14,7 @@ use tokio::runtime::Handle;
 
 use monitor_core::autostart::{self, AutostartStatus};
 use monitor_core::power::{self, PowerStatus};
-use monitor_core::config::AppConfig;
+use monitor_core::config::{AppConfig, GROUP_COUNT};
 use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{ConnectionState, OsdItem, RtspTransport, StreamKind, TileAspect};
 use monitor_core::pipeline::{ChannelManager, StreamEvent};
@@ -637,7 +637,8 @@ impl XgViewApp {
             "power management at start-up"
         );
         let discovery = DiscoveryUi::new(&config.discovery);
-        let scheduler = Scheduler::new(config.layout, config.page, config.focus, config.enabled_count());
+        let view = config.group();
+        let scheduler = Scheduler::new(view.layout, view.page, view.focus, config.enabled_count());
         let manager = ChannelManager::spawn(
             &handle,
             config.reconnect.clone(),
@@ -826,9 +827,13 @@ impl XgViewApp {
             self.textures.remove(&index);
         }
 
-        self.config.layout = self.scheduler.layout();
-        self.config.page = self.scheduler.page();
-        self.config.focus = self.scheduler.focus();
+        let layout = self.scheduler.layout();
+        let page = self.scheduler.page();
+        let focus = self.scheduler.focus();
+        let view = self.config.group_mut();
+        view.layout = layout;
+        view.page = page;
+        view.focus = focus;
     }
 
     /// Uploads the pictures decoded since the last repaint.
@@ -2627,7 +2632,7 @@ impl XgViewApp {
                 let label = match tab {
                     SettingsTab::Cameras => monitor_i18n::tr_args(
                         "settings-tab-cameras-count",
-                        &[("count", self.config.cameras.len().into())],
+                        &[("count", self.config.group_camera_count(self.config.active_group).into())],
                     ),
                     other => monitor_i18n::tr(other.label()),
                 };
@@ -3313,10 +3318,70 @@ impl XgViewApp {
         self.cameras_list(ui)
     }
 
+    /// Switches the wall to another camera group.
+    ///
+    /// The view the scheduler holds belongs to the group being left, so it is
+    /// parked there first, and the layout, paging and focus the group being
+    /// entered was left in are loaded into the scheduler: the configuration is
+    /// where a group's view waits while it is not on the wall.
+    fn switch_group(&mut self, index: usize) {
+        if index == self.config.active_group {
+            return;
+        }
+        let (layout, page, focus) =
+            (self.scheduler.layout(), self.scheduler.page(), self.scheduler.focus());
+        let leaving = self.config.group_mut();
+        leaving.layout = layout;
+        leaving.page = page;
+        leaving.focus = focus;
+
+        self.config.active_group = index;
+        let entering = self.config.group().clone();
+        self.scheduler.set_layout(entering.layout);
+        self.scheduler.set_page(entering.page);
+        self.scheduler.set_focus(entering.focus);
+        self.needs_sync = true;
+    }
+
     /// The camera list as configured, with the button that opens the reorder
     /// mode at its foot. Returns `true` when the configuration changed.
     fn cameras_list(&mut self, ui: &mut egui::Ui) -> bool {
         let mut dirty = false;
+
+        // Which group the wall is showing comes first, as a strip of tabs like
+        // the settings tabs above: the buttons under it add to that group, and
+        // the list below it is that group's. Renaming is the uncommon half of
+        // the choice, so its field is at the foot of the page instead.
+        let active = self.config.active_group;
+        let labels: Vec<String> = (0..GROUP_COUNT)
+            .map(|index| {
+                let named = self.config.groups[index].name.trim();
+                let name = if named.is_empty() {
+                    monitor_i18n::tr_args("settings-group-default", &[("n", (index + 1).into())])
+                } else {
+                    named.to_string()
+                };
+                monitor_i18n::tr_args(
+                    "settings-group-label",
+                    &[("name", name.into()), ("count", self.config.group_camera_count(index).into())],
+                )
+            })
+            .collect();
+        let mut switch = None;
+        ui.horizontal_wrapped(|ui| {
+            for (index, label) in labels.into_iter().enumerate() {
+                let tab = ui.selectable_label(active == index, label);
+                self.nav.item(&tab);
+                if tab.clicked() {
+                    switch = Some(index);
+                }
+            }
+        });
+        if let Some(index) = switch {
+            self.switch_group(index);
+            dirty = true;
+        }
+        ui.add_space(theme::space::S);
 
         ui.horizontal(|ui| {
             let devices = ui.button(monitor_i18n::tr("cameras-add-devices"));
@@ -3340,7 +3405,19 @@ impl XgViewApp {
         let mut aspect_change: Option<(usize, TileAspect)> = None;
         let mut infer: Option<usize> = None;
         let mut transport_change: Option<(usize, RtspTransport)> = None;
-        for (slot, camera) in self.config.cameras.iter_mut().enumerate() {
+        // Only the group the selector chose. The slot is a position in the whole
+        // list, which is what the actions below write back through.
+        let active = self.config.active_group;
+        let slots: Vec<usize> = self
+            .config
+            .cameras
+            .iter()
+            .enumerate()
+            .filter(|(_, camera)| usize::from(camera.group) == active)
+            .map(|(slot, _)| slot)
+            .collect();
+        for slot in slots {
+            let camera = &mut self.config.cameras[slot];
             ui.horizontal(|ui| {
                 let mut camera_enabled = camera.enabled;
                 let enable = ui.checkbox(&mut camera_enabled, "");
@@ -3468,7 +3545,7 @@ impl XgViewApp {
         // confirmed. Hidden with fewer than two cameras - there is nothing to
         // arrange. The identifier is fixed, so the button that opens the mode
         // can be given the focus back when the mode closes.
-        if self.config.cameras.len() >= 2 {
+        if self.config.group_camera_count(self.config.active_group) >= 2 {
             ui.add_space(theme::space::M);
             let trigger =
                 ui.push_id("xgview-reorder-trigger", |ui| ui.button(monitor_i18n::tr("cameras-reorder"))).inner;
@@ -3476,12 +3553,41 @@ impl XgViewApp {
             self.name(&trigger, "cameras-reorder");
             self.reorder_trigger_anchor = Some(trigger.id);
             if trigger.clicked() {
-                self.reorder =
-                    Some(self.config.cameras.iter().map(|camera| camera.id.clone()).collect());
+                let active = self.config.active_group;
+                self.reorder = Some(
+                    self.config
+                        .cameras
+                        .iter()
+                        .filter(|camera| usize::from(camera.group) == active)
+                        .map(|camera| camera.id.clone())
+                        .collect(),
+                );
                 self.reorder_focus = true;
                 self.flash(monitor_i18n::tr("toast-reorder"), ToastKind::Info);
             }
         }
+
+        // Renaming a group is the uncommon half of the selector, so it is down
+        // here rather than in the strip: one field, for the group on the wall.
+        ui.add_space(theme::space::M);
+        let active = self.config.active_group;
+        let default_name =
+            monitor_i18n::tr_args("settings-group-default", &[("n", (active + 1).into())]);
+        ui.horizontal(|ui| {
+            ui.label(monitor_i18n::tr("settings-group-name"));
+            let field = dialogs::text_field(
+                ui,
+                &mut self.nav,
+                &mut self.config.groups[active].name,
+                &monitor_i18n::tr("settings-group-name"),
+                false,
+                false,
+                |text| egui::TextEdit::singleline(text).hint_text(default_name).desired_width(200.0),
+            );
+            if field.changed() {
+                dirty = true;
+            }
+        });
 
         dirty
     }
@@ -3985,12 +4091,11 @@ impl XgViewApp {
             // layout, page and focus, so the scheduler is rebuilt the way
             // start-up builds it.
             self.config = imported;
-            self.scheduler = Scheduler::new(
-                self.config.layout,
-                self.config.page,
-                self.config.focus,
-                self.config.enabled_count(),
-            );
+            let (layout, page, focus) = {
+                let view = self.config.group();
+                (view.layout, view.page, view.focus)
+            };
+            self.scheduler = Scheduler::new(layout, page, focus, self.config.enabled_count());
         }
         self.config.normalize();
         self.needs_sync = true;

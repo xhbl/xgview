@@ -1851,6 +1851,7 @@ mod tests {
             aspect: TileAspect::default(),
             main_profile: None,
             sub_profile: None,
+            group: 0,
         }
     }
 

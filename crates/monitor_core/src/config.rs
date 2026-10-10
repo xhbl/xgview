@@ -430,15 +430,41 @@ impl Blackout {
     }
 }
 
+/// How many camera groups the wall holds.
+pub const GROUP_COUNT: usize = 4;
+
+/// One camera group: the name it goes by, and how the wall is gridded while it
+/// is the active one.
+///
+/// The groups are separate camera sets that are *not* deduplicated against one
+/// another - the same camera may be an entry in more than one - and each keeps
+/// its own layout and paging, so switching between a two-camera view and a
+/// nine-camera one does not have to be re-arranged every time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Group {
+    /// The viewer's own name for it. Empty is the default, drawn as "Group N".
+    pub name: String,
+    /// The grid this group is shown in.
+    pub layout: GridLayout,
+    pub page: usize,
+    pub focus: Option<usize>,
+}
+
+impl Default for Group {
+    fn default() -> Self {
+        Self { name: String::new(), layout: GridLayout::default(), page: 0, focus: None }
+    }
+}
+
 /// Persisted application configuration (`config.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub version: u32,
-    /// Grid layout restored at start-up.
-    pub layout: GridLayout,
-    pub page: usize,
-    pub focus: Option<usize>,
+    /// The camera groups, and which of them the wall is showing.
+    pub groups: [Group; GROUP_COUNT],
+    pub active_group: usize,
     /// Mirror of the start-on-boot registration.
     pub autostart: bool,
     /// Open the window in full screen (TV / kiosk deployment).
@@ -491,9 +517,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
-            layout: GridLayout::default(),
-            page: 0,
-            focus: None,
+            groups: std::array::from_fn(|_| Group::default()),
+            active_group: 0,
             autostart: false,
             start_fullscreen: false,
             reserve_navigation_bar: false,
@@ -536,9 +561,35 @@ impl AppConfig {
     /// on the desktop, a document the viewer picked on Android - so the parsing
     /// cannot live inside `load`.
     pub fn from_json(data: &str) -> Result<Self> {
-        let mut config: AppConfig = serde_json::from_str(data)?;
+        let value: serde_json::Value = serde_json::from_str(data)?;
+        let mut config: AppConfig = serde_json::from_value(value.clone())?;
+        config.adopt_flat_view(&value);
         config.normalize();
         Ok(config)
+    }
+
+    /// Folds the `layout` / `page` / `focus` keys a configuration written before
+    /// groups carried at the top level into the first group.
+    ///
+    /// Read from the raw JSON rather than through a field, because those keys
+    /// are no longer part of the shape: the point is that an upgrade keeps the
+    /// grid someone chose, instead of resetting every group to the default.
+    fn adopt_flat_view(&mut self, value: &serde_json::Value) {
+        if value.get("groups").is_some() {
+            return;
+        }
+        let Some(object) = value.as_object() else { return };
+        if let Some(layout) = object.get("layout") {
+            if let Ok(layout) = serde_json::from_value::<GridLayout>(layout.clone()) {
+                self.groups[0].layout = layout;
+            }
+        }
+        if let Some(page) = object.get("page").and_then(serde_json::Value::as_u64) {
+            self.groups[0].page = page as usize;
+        }
+        if let Some(focus) = object.get("focus").and_then(serde_json::Value::as_u64) {
+            self.groups[0].focus = Some(focus as usize);
+        }
     }
 
     /// Loads the configuration from [`AppConfig::default_path`], ignoring read
@@ -607,19 +658,49 @@ impl AppConfig {
         config_dir().join(CONFIG_FILE_NAME)
     }
 
-    /// Cameras that are enabled, in file order.
-    pub fn enabled_cameras(&self) -> Vec<&CameraSource> {
-        self.cameras.iter().filter(|camera| camera.enabled).collect()
+    /// The group the wall is showing.
+    pub fn group(&self) -> &Group {
+        &self.groups[self.active_group.min(GROUP_COUNT - 1)]
     }
 
-    /// Owned clone of the enabled cameras, in file order. The channel index
-    /// used by the scheduler refers to a position inside this list.
+    pub fn group_mut(&mut self) -> &mut Group {
+        let index = self.active_group.min(GROUP_COUNT - 1);
+        &mut self.groups[index]
+    }
+
+    /// Whether an entry belongs to the group the wall is showing.
+    pub fn in_active_group(&self, camera: &CameraSource) -> bool {
+        usize::from(camera.group) == self.active_group
+    }
+
+    /// Cameras of the active group that are enabled, in file order.
+    pub fn enabled_cameras(&self) -> Vec<&CameraSource> {
+        self.cameras
+            .iter()
+            .filter(|camera| camera.enabled && self.in_active_group(camera))
+            .collect()
+    }
+
+    /// Owned clone of those, in file order. The channel index used by the
+    /// scheduler refers to a position inside this list.
     pub fn active_cameras(&self) -> Vec<CameraSource> {
-        self.cameras.iter().filter(|camera| camera.enabled).cloned().collect()
+        self.cameras
+            .iter()
+            .filter(|camera| camera.enabled && self.in_active_group(camera))
+            .cloned()
+            .collect()
     }
 
     pub fn enabled_count(&self) -> usize {
-        self.cameras.iter().filter(|camera| camera.enabled).count()
+        self.cameras
+            .iter()
+            .filter(|camera| camera.enabled && self.in_active_group(camera))
+            .count()
+    }
+
+    /// How many cameras a group holds, enabled or not.
+    pub fn group_camera_count(&self, group: usize) -> usize {
+        self.cameras.iter().filter(|camera| usize::from(camera.group) == group).count()
     }
 
     pub fn find_camera(&self, id: &str) -> Option<&CameraSource> {
@@ -641,12 +722,20 @@ impl AppConfig {
     /// are the same kind of thing, and an import carries neither, so leaving
     /// them to the incoming entry is what silently resets them to their
     /// defaults. Enabled and the origin are kept for the same reason.
-    pub fn upsert_camera(&mut self, camera: CameraSource) -> String {
+    pub fn upsert_camera(&mut self, mut camera: CameraSource) -> String {
+        // The entry belongs to the group the wall is on: the same camera may sit
+        // in another group as well, as an entry of its own, and neither is
+        // touched by the other.
+        let active = self.active_group;
+        camera.group = active as u8;
         let identity = camera.identity();
         if let Some(existing) = self
             .cameras
             .iter_mut()
-            .find(|existing| existing.id == camera.id || existing.identity() == identity)
+            .find(|existing| {
+                usize::from(existing.group) == active
+                    && (existing.id == camera.id || existing.identity() == identity)
+            })
         {
             let id = existing.id.clone();
             let origin = existing.origin;
@@ -669,42 +758,72 @@ impl AppConfig {
         self.cameras.len() != before
     }
 
-    /// Reorders the cameras to match `order`, a list of camera identifiers.
+    /// Reorders the cameras of the active group to match `order`, a list of
+    /// camera identifiers.
     ///
-    /// Identifiers that name no camera are skipped, and a camera the list does
-    /// not mention keeps its place at the end: an order built a moment ago -
-    /// before a removal or an import - therefore cannot drop an entry. The
-    /// order decides the channel index and the place on the wall, so this is
-    /// what a rearranged list is written back as. Returns `true` when the
-    /// resulting order differs from the current one.
+    /// Only the active group moves - the order comes from the list the settings
+    /// page drew, which is that group's - and every other group's entries keep
+    /// their places. Identifiers that name no camera are skipped, and a camera
+    /// the list does not mention keeps its place at the end: an order built a
+    /// moment ago - before a removal or an import - therefore cannot drop an
+    /// entry. The order decides the channel index and the place on the wall, so
+    /// this is what a rearranged list is written back as. Returns `true` when
+    /// the resulting order differs from the current one.
     pub fn apply_order(&mut self, order: &[String]) -> bool {
-        let before: Vec<String> = self.cameras.iter().map(|camera| camera.id.clone()).collect();
-        let mut ordered = Vec::with_capacity(self.cameras.len());
+        let active = self.active_group;
+        let positions: Vec<usize> = self
+            .cameras
+            .iter()
+            .enumerate()
+            .filter(|(_, camera)| usize::from(camera.group) == active)
+            .map(|(position, _)| position)
+            .collect();
+        let before: Vec<String> =
+            positions.iter().map(|position| self.cameras[*position].id.clone()).collect();
+
+        let mut group: Vec<CameraSource> =
+            positions.iter().map(|position| self.cameras[*position].clone()).collect();
+        let mut ordered: Vec<CameraSource> = Vec::with_capacity(group.len());
         for id in order {
-            if let Some(position) = self.cameras.iter().position(|camera| &camera.id == id) {
-                ordered.push(self.cameras.remove(position));
+            if let Some(position) = group.iter().position(|camera| &camera.id == id) {
+                ordered.push(group.remove(position));
             }
         }
-        ordered.append(&mut self.cameras);
-        self.cameras = ordered;
-        self.cameras.iter().map(|camera| camera.id.as_str()).ne(before.iter().map(String::as_str))
+        ordered.append(&mut group);
+
+        let changed = ordered
+            .iter()
+            .map(|camera| camera.id.as_str())
+            .ne(before.iter().map(String::as_str));
+        for (position, camera) in positions.into_iter().zip(ordered) {
+            self.cameras[position] = camera;
+        }
+        changed
     }
 
-    /// Clamps `page` / `focus` once the camera list changed.
+    /// Clamps each group's `page` / `focus` once the camera list changed.
     pub fn normalize(&mut self) {
         if self.version == 0 {
             self.version = CONFIG_VERSION;
         }
-        let count = self.enabled_count();
-        let capacity = self.layout.capacity();
-        let pages = crate::layout::page_count(count, capacity).max(1);
-        if self.page >= pages {
-            self.page = pages - 1;
-        }
-        match self.focus {
-            Some(focus) if focus >= count => self.focus = if count == 0 { None } else { Some(count - 1) },
-            None if count > 0 => self.focus = Some(self.page * capacity),
-            _ => {}
+        self.active_group = self.active_group.min(GROUP_COUNT - 1);
+        for index in 0..GROUP_COUNT {
+            let count = self
+                .cameras
+                .iter()
+                .filter(|camera| usize::from(camera.group) == index && camera.enabled)
+                .count();
+            let group = &mut self.groups[index];
+            let capacity = group.layout.capacity();
+            let pages = crate::layout::page_count(count, capacity).max(1);
+            if group.page >= pages {
+                group.page = pages - 1;
+            }
+            match group.focus {
+                Some(focus) if focus >= count => group.focus = if count == 0 { None } else { Some(count - 1) },
+                None if count > 0 => group.focus = Some(group.page * capacity),
+                _ => {}
+            }
         }
     }
 }
@@ -822,8 +941,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut config = AppConfig {
-            layout: GridLayout::G3x3,
-            page: 1,
+            groups: [
+                Group { layout: GridLayout::G3x3, page: 1, ..Group::default() },
+                Group::default(),
+                Group::default(),
+                Group::default(),
+            ],
             autostart: true,
             ..Default::default()
         };
@@ -836,10 +959,80 @@ mod tests {
         }
         config.save(&path).unwrap();
         let loaded = AppConfig::load(&path).unwrap();
-        assert_eq!(loaded.layout, GridLayout::G3x3);
-        assert_eq!(loaded.page, 1);
+        assert_eq!(loaded.group().layout, GridLayout::G3x3);
+        assert_eq!(loaded.group().page, 1);
         assert!(loaded.autostart);
         assert_eq!(loaded.cameras.len(), 12);
+    }
+
+    /// The wall only ever sees the active group's cameras.
+    #[test]
+    fn the_wall_shows_the_active_group_only() {
+        let mut config = AppConfig::default();
+        config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
+        config.active_group = 2;
+        config.upsert_camera(CameraSource::new("gate", "rtsp://10.0.0.2/live"));
+
+        assert_eq!(config.group_camera_count(0), 1);
+        assert_eq!(config.group_camera_count(2), 1);
+        assert_eq!(config.active_cameras().len(), 1);
+        assert_eq!(config.active_cameras()[0].name, "gate");
+
+        config.active_group = 0;
+        assert_eq!(config.active_cameras()[0].name, "door");
+    }
+
+    /// The same camera may sit in two groups, one entry each: adding it to a
+    /// second group does not rewrite the first, and an import into the group it
+    /// is already in still updates that one.
+    #[test]
+    fn the_same_camera_can_be_in_two_groups() {
+        let mut config = AppConfig::default();
+        let first = config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
+        config.active_group = 1;
+        let second = config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
+
+        assert_ne!(first, second);
+        assert_eq!(config.cameras.len(), 2);
+        assert_eq!(config.group_camera_count(0), 1);
+        assert_eq!(config.group_camera_count(1), 1);
+
+        let again = config.upsert_camera(CameraSource::new("door renamed", "rtsp://10.0.0.1/live"));
+        assert_eq!(again, second);
+        assert_eq!(config.cameras.len(), 2);
+    }
+
+    /// A configuration written before groups kept its layout at the top level.
+    /// Loading one must fold it into the first group rather than reset the grid
+    /// someone chose.
+    #[test]
+    fn a_flat_layout_folds_into_the_first_group() {
+        let config = AppConfig::from_json(r#"{"version":1,"layout":"3x3"}"#).unwrap();
+        assert_eq!(config.active_group, 0);
+        assert_eq!(config.groups[0].layout, GridLayout::G3x3);
+        assert_eq!(config.groups[1].layout, GridLayout::default());
+    }
+
+    /// A group's order is its own: reordering one leaves the other groups' work
+    /// where it was.
+    #[test]
+    fn a_reorder_moves_only_the_active_group() {
+        let mut config = AppConfig::default();
+        let a = config.upsert_camera(CameraSource::new("a", "rtsp://10.0.0.1/live"));
+        let b = config.upsert_camera(CameraSource::new("b", "rtsp://10.0.0.2/live"));
+        config.active_group = 1;
+        let x = config.upsert_camera(CameraSource::new("x", "rtsp://10.0.0.3/live"));
+
+        // The second group's single camera cannot move; the first group's two
+        // are untouched by it.
+        assert!(!config.apply_order(&[b.clone(), a.clone()]));
+        assert_eq!(config.cameras.iter().map(|camera| camera.name.clone()).collect::<Vec<_>>(), vec!["a", "b", "x"]);
+
+        // Swapping the first group's order moves those two and nothing else.
+        config.active_group = 0;
+        assert!(config.apply_order(&[b.clone(), a.clone()]));
+        assert_eq!(config.cameras.iter().map(|camera| camera.name.clone()).collect::<Vec<_>>(), vec!["b", "a", "x"]);
+        assert_eq!(config.find_camera(&x).unwrap().name, "x");
     }
 
     /// An older `config.json` written before the language field existed must
