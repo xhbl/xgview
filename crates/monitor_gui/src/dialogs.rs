@@ -718,20 +718,19 @@ fn onvif_tab(
             // / Down walks the column.
             controls::slider(nav, ui, &mut state.scan.timeout_ms, 200..=8000, 100.0, " ms", &monitor_i18n::tr("dialog-probe-timeout"), 1_500);
             controls::slider(nav, ui, &mut state.scan.concurrency, 1..=512, 1.0, "", &monitor_i18n::tr("dialog-concurrent-probes"), 64);
-            ui.separator();
-            ui.label(RichText::new(monitor_i18n::tr("dialog-onvif-credentials")).small());
-            ui.horizontal(|ui| {
-                ui.label(monitor_i18n::tr("dialog-user"));
-                text_field(ui, nav, &mut state.scan.username, &monitor_i18n::tr("dialog-user"), false, false, |s| {
-                    egui::TextEdit::singleline(s).desired_width(140.0)
-                });
-                ui.label(monitor_i18n::tr("dialog-password"));
-                text_field(ui, nav, &mut state.scan.password, &monitor_i18n::tr("dialog-password"), true, false, |s| {
-                    egui::TextEdit::singleline(s).password(true).desired_width(140.0)
-                });
-            });
         },
     );
+
+    // The ONVIF account is a stream account, so it belongs below the separator
+    // with the list it acts on - and there is nothing to act on until the scan
+    // has answered.
+    ui.add_space(6.0);
+    ui.separator();
+    if !state.devices.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new(monitor_i18n::tr("dialog-onvif-credentials")).small());
+        credentials_row(ui, nav, &mut state.scan.username, &mut state.scan.password);
+    }
 
     ui.add_space(6.0);
     ui.label(RichText::new(monitor_i18n::tr_args("dialog-onvif-devices", &[("count", state.devices.len().into())])).strong());
@@ -850,26 +849,14 @@ pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mu
             }
         });
         ui.end_row();
-
-        // One field per row. The column walk visits them in draw order, so the
-        // two are never confused for one another the way a geometric walk did,
-        // which used to drop the caret into the password from the sub stream box.
-        ui.label(monitor_i18n::tr("dialog-user"));
-        text_field(ui, nav, &mut draft.username, &monitor_i18n::tr("dialog-user"), false, false, |s| {
-            egui::TextEdit::singleline(s).hint_text(theme::hint("user")).desired_width(f32::INFINITY)
-        });
-        ui.end_row();
-
-        ui.label(monitor_i18n::tr("dialog-password"));
-        text_field(ui, nav, &mut draft.password, &monitor_i18n::tr("dialog-password"), true, false, |s| {
-            egui::TextEdit::singleline(s)
-                .password(true)
-                .hint_text(theme::hint("password"))
-                .desired_width(f32::INFINITY)
-        });
-        ui.end_row();
     });
     nav.tracked(ui.checkbox(&mut draft.infer_sub, monitor_i18n::tr("dialog-derive-sub")));
+
+    // The stream account in the layout every other tab gives one: a heading
+    // naming it, then the two fields on one row.
+    ui.separator();
+    ui.label(RichText::new(monitor_i18n::tr("dialog-stream-credentials")).small());
+    credentials_row(ui, nav, &mut draft.username, &mut draft.password);
     CameraFields { first, inferred }
 }
 
@@ -993,37 +980,35 @@ fn synology_tab(
         ui.label(monitor_i18n::tr("dialog-scheme"));
         nav.tracked(ui.checkbox(&mut synology.https, monitor_i18n::tr("dialog-https")));
         ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-account"));
-        text_field(ui, nav, &mut synology.username, &monitor_i18n::tr("dialog-account"), false, false, |s| {
-            egui::TextEdit::singleline(s).desired_width(220.0)
-        });
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-password"));
-        text_field(ui, nav, &mut synology.password, &monitor_i18n::tr("dialog-password"), true, false, |s| {
-            egui::TextEdit::singleline(s).password(true).desired_width(220.0)
-        });
-        ui.end_row();
     });
+
+    // The login is a server parameter like the address above it, so it stays on
+    // the near side of the separator; the list it acts on is beyond it.
+    ui.add_space(6.0);
+    ui.label(RichText::new(monitor_i18n::tr("dialog-synology-credentials")).small());
+    credentials_row(ui, nav, &mut synology.username, &mut synology.password);
     if *synology != before {
         changed = true;
     }
 
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        let ready = config.synology.is_configured() && !state.synology_busy;
+        let ready = synology.is_configured() && !state.synology_busy;
         if nav.tracked(ui.add_enabled(ready, egui::Button::new(monitor_i18n::tr("dialog-fetch-cameras")))).clicked() {
             state.synology_busy = true;
             state.error = None;
             // The list is about to be replaced; a stale one under a running
             // fetch would invite a press on a camera the NAS may not return.
             state.synology_cameras.clear();
-            start_synology(handle, events, config.synology.clone());
+            start_synology(handle, events, synology.clone());
         }
         if state.synology_busy {
             grid_spinner(ui);
             ui.label(RichText::new(monitor_i18n::tr("dialog-contacting-nas")).color(theme::ACCENT));
         }
     });
+
+    ui.separator();
 
     // What the NAS answered, one row per camera: added on the viewer's press,
     // like the ONVIF device list, rather than all at once as they arrive.
@@ -1067,6 +1052,23 @@ fn synology_tab(
 
     status_lines(ui, state);
     changed
+}
+
+/// The user and password fields of one credential set, on one row.
+///
+/// The layout the ONVIF tab gives its own credentials, which the tabs that
+/// followed it keep: a heading naming what the account is for, then this.
+fn credentials_row(ui: &mut egui::Ui, nav: &mut Nav, username: &mut String, password: &mut String) {
+    ui.horizontal(|ui| {
+        ui.label(monitor_i18n::tr("dialog-user"));
+        text_field(ui, nav, username, &monitor_i18n::tr("dialog-user"), false, false, |s| {
+            egui::TextEdit::singleline(s).desired_width(140.0)
+        });
+        ui.label(monitor_i18n::tr("dialog-password"));
+        text_field(ui, nav, password, &monitor_i18n::tr("dialog-password"), true, false, |s| {
+            egui::TextEdit::singleline(s).password(true).desired_width(140.0)
+        });
+    });
 }
 
 /// Draws a list of fetched cameras, one row each, and reports the one whose
@@ -1154,34 +1156,17 @@ fn frigate_tab(
         ui.label(monitor_i18n::tr("dialog-scheme"));
         nav.tracked(ui.checkbox(&mut frigate.https, monitor_i18n::tr("dialog-https")));
         ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-account"));
-        text_field(ui, nav, &mut frigate.username, &monitor_i18n::tr("dialog-account"), false, false, |s| {
-            egui::TextEdit::singleline(s).desired_width(220.0)
-        });
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-password"));
-        text_field(ui, nav, &mut frigate.password, &monitor_i18n::tr("dialog-password"), true, false, |s| {
-            egui::TextEdit::singleline(s).password(true).desired_width(220.0)
-        });
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-rtsp-account"));
-        text_field(ui, nav, &mut frigate.rtsp_username, &monitor_i18n::tr("dialog-rtsp-account"), false, false, |s| {
-            egui::TextEdit::singleline(s).desired_width(220.0)
-        });
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-rtsp-password"));
-        text_field(ui, nav, &mut frigate.rtsp_password, &monitor_i18n::tr("dialog-rtsp-password"), true, false, |s| {
-            egui::TextEdit::singleline(s).password(true).desired_width(220.0)
-        });
-        ui.end_row();
     });
-    if *frigate != before {
-        changed = true;
-    }
+
+    // The login is a server parameter like the address above it, so it stays on
+    // the near side of the separator.
+    ui.add_space(6.0);
+    ui.label(RichText::new(monitor_i18n::tr("dialog-frigate-credentials")).small());
+    credentials_row(ui, nav, &mut frigate.username, &mut frigate.password);
 
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        let ready = config.frigate.is_configured() && !state.frigate_busy;
+        let ready = frigate.is_configured() && !state.frigate_busy;
         if nav.tracked(ui.add_enabled(ready, egui::Button::new(monitor_i18n::tr("dialog-fetch-cameras")))).clicked() {
             state.frigate_busy = true;
             state.error = None;
@@ -1189,13 +1174,33 @@ fn frigate_tab(
             // camera the server may not return.
             state.frigate_cameras.clear();
             state.frigate_leftovers.clear();
-            start_frigate(handle, events, config.frigate.clone());
+            start_frigate(handle, events, frigate.clone());
         }
         if state.frigate_busy {
             grid_spinner(ui);
             ui.label(RichText::new(monitor_i18n::tr("dialog-contacting-server")).color(theme::ACCENT));
         }
     });
+
+    ui.separator();
+
+    // The restream account is a stream account, so it belongs below the
+    // separator with the streams - and it is normally read from Frigate's own
+    // configuration, so it is only worth showing once there is something to
+    // pull.
+    if !state.frigate_cameras.is_empty() || !state.frigate_leftovers.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-credentials")).small());
+        credentials_row(ui, nav, &mut frigate.rtsp_username, &mut frigate.rtsp_password);
+        ui.label(
+            RichText::new(monitor_i18n::tr("dialog-rtsp-override-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+    }
+    if *frigate != before {
+        changed = true;
+    }
 
     ui.add_space(6.0);
     ui.label(
@@ -1271,45 +1276,42 @@ fn go2rtc_tab(
         ui.label(monitor_i18n::tr("dialog-scheme"));
         nav.tracked(ui.checkbox(&mut go2rtc.https, monitor_i18n::tr("dialog-https")));
         ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-account"));
-        text_field(ui, nav, &mut go2rtc.api_username, &monitor_i18n::tr("dialog-account"), false, false, |s| {
-            egui::TextEdit::singleline(s).desired_width(220.0)
-        });
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-password"));
-        text_field(ui, nav, &mut go2rtc.api_password, &monitor_i18n::tr("dialog-password"), true, false, |s| {
-            egui::TextEdit::singleline(s).password(true).desired_width(220.0)
-        });
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-rtsp-account"));
-        text_field(ui, nav, &mut go2rtc.rtsp_username, &monitor_i18n::tr("dialog-rtsp-account"), false, false, |s| {
-            egui::TextEdit::singleline(s).desired_width(220.0)
-        });
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-rtsp-password"));
-        text_field(ui, nav, &mut go2rtc.rtsp_password, &monitor_i18n::tr("dialog-rtsp-password"), true, false, |s| {
-            egui::TextEdit::singleline(s).password(true).desired_width(220.0)
-        });
-        ui.end_row();
     });
-    if *go2rtc != before {
-        changed = true;
-    }
+
+    // The API login is a server parameter, so it stays on the near side of the
+    // separator.
+    ui.add_space(6.0);
+    ui.label(RichText::new(monitor_i18n::tr("dialog-go2rtc-credentials")).small());
+    credentials_row(ui, nav, &mut go2rtc.api_username, &mut go2rtc.api_password);
 
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        let ready = config.go2rtc.is_configured() && !state.go2rtc_busy;
+        let ready = go2rtc.is_configured() && !state.go2rtc_busy;
         if nav.tracked(ui.add_enabled(ready, egui::Button::new(monitor_i18n::tr("dialog-fetch-cameras")))).clicked() {
             state.go2rtc_busy = true;
             state.error = None;
             state.go2rtc_cameras.clear();
-            start_go2rtc(handle, events, config.go2rtc.clone());
+            start_go2rtc(handle, events, go2rtc.clone());
         }
         if state.go2rtc_busy {
             grid_spinner(ui);
             ui.label(RichText::new(monitor_i18n::tr("dialog-contacting-server")).color(theme::ACCENT));
         }
     });
+
+    ui.separator();
+
+    // The RTSP account is a stream account, so it belongs below the separator
+    // with the streams. go2rtc's API does not serve it - it has to be entered
+    // by hand - and it only matters once there are streams to pull.
+    if !state.go2rtc_cameras.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-credentials")).small());
+        credentials_row(ui, nav, &mut go2rtc.rtsp_username, &mut go2rtc.rtsp_password);
+    }
+    if *go2rtc != before {
+        changed = true;
+    }
 
     ui.add_space(6.0);
     ui.label(
