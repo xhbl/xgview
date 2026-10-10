@@ -1506,6 +1506,20 @@ impl XgViewApp {
                         ToastKind::Error,
                     ));
                 }
+                BackgroundEvent::DiscoveryDone(report) => {
+                    // The devices are listed in the dialog for the viewer to
+                    // pick from, not imported on arrival - see `onvif_tab`.
+                    toast = Some((
+                        monitor_i18n::tr_args(
+                            "toast-discovery-found",
+                            &[
+                                ("devices", report.devices.len().into()),
+                                ("ports", report.port_hits.len().into()),
+                            ],
+                        ),
+                        ToastKind::Info,
+                    ));
+                }
                 BackgroundEvent::DiscoveryFailed(error) => {
                     toast = Some((
                         monitor_i18n::tr_args("toast-discovery-failed", &[("error", error.to_string().into())]),

@@ -277,8 +277,12 @@ pub struct DiscoveryUi {
     pub ports: Vec<PortHit>,
     /// Name of the device currently being resolved.
     pub busy: Option<String>,
-    pub error: Option<String>,
-    pub message: Option<String>,
+    /// What the last action reported, tagged with the tab it came from.
+    ///
+    /// One tab's status is not another's: the wording names the tab it belongs
+    /// to ("on the NAS", "in Frigate"), so it is only drawn on that tab.
+    pub error: Option<(Tab, String)>,
+    pub message: Option<(Tab, String)>,
     pub manual: CameraDraft,
     pub synology_busy: bool,
     /// Cameras the last Synology fetch returned, waiting to be picked.
@@ -330,6 +334,26 @@ impl DiscoveryUi {
         self.ports.push(hit.clone());
     }
 
+    /// Records what an action of `tab` reported.
+    fn note(&mut self, tab: Tab, message: impl Into<String>) {
+        self.message = Some((tab, message.into()));
+    }
+
+    /// Records what an action of `tab` got wrong.
+    fn fail(&mut self, tab: Tab, error: impl Into<String>) {
+        self.error = Some((tab, error.into()));
+    }
+
+    /// Drops what `tab` last reported, leaving the other tabs' status alone.
+    fn clear_status(&mut self, tab: Tab) {
+        if self.message.as_ref().is_some_and(|(other, _)| *other == tab) {
+            self.message = None;
+        }
+        if self.error.as_ref().is_some_and(|(other, _)| *other == tab) {
+            self.error = None;
+        }
+    }
+
     /// Applies an event produced by a background job.
     pub fn apply(&mut self, event: BackgroundEvent) {
         match event {
@@ -348,29 +372,29 @@ impl DiscoveryUi {
                 }
                 self.running = false;
                 self.phase.clear();
-                self.message = Some(monitor_i18n::tr_args(
+                self.note(Tab::Onvif, monitor_i18n::tr_args(
                     "dialog-discovery-finished",
                     &[("devices", self.devices.len().into()), ("ports", self.ports.len().into())],
                 ));
             }
             BackgroundEvent::DiscoveryFailed(error) => {
                 self.running = false;
-                self.error = Some(error);
+                self.fail(Tab::Onvif, error);
             }
             BackgroundEvent::Imported(camera) => {
                 self.busy = None;
-                self.message = Some(monitor_i18n::tr_args(
+                self.note(Tab::Onvif, monitor_i18n::tr_args(
                     "dialog-imported",
                     &[("name", camera.name.clone().into()), ("address", camera.display_address().into())],
                 ));
             }
             BackgroundEvent::ImportFailed { name, error } => {
                 self.busy = None;
-                self.error = Some(format!("{name}: {error}"));
+                self.fail(Tab::Onvif, format!("{name}: {error}"));
             }
             BackgroundEvent::SynologyDone(cameras) => {
                 self.synology_busy = false;
-                self.message = Some(monitor_i18n::tr_args(
+                self.note(Tab::Synology, monitor_i18n::tr_args(
                     "dialog-synology-count",
                     &[("count", cameras.len().into())],
                 ));
@@ -378,14 +402,14 @@ impl DiscoveryUi {
             }
             BackgroundEvent::SynologyFailed(error) => {
                 self.synology_busy = false;
-                self.error = Some(monitor_i18n::tr_args(
+                self.fail(Tab::Synology, monitor_i18n::tr_args(
                     "toast-synology-failed",
                     &[("error", error.into())],
                 ));
             }
             BackgroundEvent::FrigateDone(import) => {
                 self.frigate_busy = false;
-                self.message = Some(monitor_i18n::tr_args(
+                self.note(Tab::Frigate, monitor_i18n::tr_args(
                     "dialog-frigate-count",
                     &[
                         ("count", import.cameras.len().into()),
@@ -397,11 +421,11 @@ impl DiscoveryUi {
             }
             BackgroundEvent::FrigateFailed(error) => {
                 self.frigate_busy = false;
-                self.error = Some(monitor_i18n::tr_args("toast-frigate-failed", &[("error", error.into())]));
+                self.fail(Tab::Frigate, monitor_i18n::tr_args("toast-frigate-failed", &[("error", error.into())]));
             }
             BackgroundEvent::Go2rtcDone(cameras) => {
                 self.go2rtc_busy = false;
-                self.message = Some(monitor_i18n::tr_args(
+                self.note(Tab::Go2rtc, monitor_i18n::tr_args(
                     "dialog-go2rtc-count",
                     &[("count", cameras.len().into())],
                 ));
@@ -409,7 +433,7 @@ impl DiscoveryUi {
             }
             BackgroundEvent::Go2rtcFailed(error) => {
                 self.go2rtc_busy = false;
-                self.error = Some(monitor_i18n::tr_args("toast-go2rtc-failed", &[("error", error.into())]));
+                self.fail(Tab::Go2rtc, monitor_i18n::tr_args("toast-go2rtc-failed", &[("error", error.into())]));
             }
         }
     }
@@ -648,8 +672,7 @@ fn onvif_tab(
             scan.subnet_scan = false;
             let discovery = scan.to_config();
             state.running = true;
-            state.error = None;
-            state.message = None;
+            state.clear_status(Tab::Onvif);
             state.devices.clear();
             state.ports.clear();
             state.phase = monitor_i18n::tr("dialog-starting");
@@ -664,8 +687,7 @@ fn onvif_tab(
             scan.tcp_probe = true;
             let discovery = scan.to_config();
             state.running = true;
-            state.error = None;
-            state.message = None;
+            state.clear_status(Tab::Onvif);
             state.devices.clear();
             state.ports.clear();
             state.phase = monitor_i18n::tr("dialog-starting");
@@ -794,7 +816,7 @@ fn onvif_tab(
         state.tab = Tab::Manual;
     }
 
-    status_lines(ui, state);
+    status_lines(ui, state, Tab::Onvif);
     changed
 }
 
@@ -818,7 +840,7 @@ pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mu
         ui.label(monitor_i18n::tr("dialog-name"));
         // The first control of the form, and the one a window opens on.
         let name = text_field(ui, nav, &mut draft.name, &monitor_i18n::tr("dialog-name"), false, false, |s| {
-            egui::TextEdit::singleline(s).hint_text(theme::hint("Front door")).desired_width(f32::INFINITY)
+            egui::TextEdit::singleline(s).hint_text(theme::hint(&monitor_i18n::tr("dialog-name-hint"))).desired_width(f32::INFINITY)
         });
         first = Some(name.id);
         ui.end_row();
@@ -863,7 +885,7 @@ pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mu
 fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {
     let mut changed = false;
     if camera_fields(ui, nav, "manual-camera", &mut state.manual).inferred {
-        state.message = Some(monitor_i18n::tr("dialog-sub-derived-msg"));
+        state.note(Tab::Manual, monitor_i18n::tr("dialog-sub-derived-msg"));
     }
 
     ui.horizontal(|ui| {
@@ -872,11 +894,11 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
                 Ok(source) => {
                     config.upsert_camera(source);
                     state.manual.reset();
-                    state.error = None;
-                    state.message = Some(monitor_i18n::tr("dialog-camera-added"));
+                    state.clear_status(Tab::Manual);
+                    state.note(Tab::Manual, monitor_i18n::tr("dialog-camera-added"));
                     changed = true;
                 }
-                Err(err) => state.error = Some(err),
+                Err(err) => state.fail(Tab::Manual, err),
             }
         }
         if nav.tracked(ui.button(monitor_i18n::tr("dialog-clear"))).clicked() {
@@ -884,7 +906,7 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
         }
     });
 
-    status_lines(ui, state);
+    status_lines(ui, state, Tab::Manual);
     changed
 }
 
@@ -996,7 +1018,7 @@ fn synology_tab(
         let ready = synology.is_configured() && !state.synology_busy;
         if nav.tracked(ui.add_enabled(ready, egui::Button::new(monitor_i18n::tr("dialog-fetch-cameras")))).clicked() {
             state.synology_busy = true;
-            state.error = None;
+            state.clear_status(Tab::Synology);
             // The list is about to be replaced; a stale one under a running
             // fetch would invite a press on a camera the NAS may not return.
             state.synology_cameras.clear();
@@ -1040,17 +1062,11 @@ fn synology_tab(
         });
     }
     if let Some((camera, offer)) = to_add {
-        let name = camera.name.clone();
-        config.upsert_camera(camera);
-        state.message = Some(if offer == AddOffer::Update {
-            monitor_i18n::tr_args("dialog-updated-msg", &[("name", name.into())])
-        } else {
-            monitor_i18n::tr_args("dialog-added-msg", &[("name", name.into())])
-        });
+        apply_add(config, state, Tab::Synology, camera, offer);
         changed = true;
     }
 
-    status_lines(ui, state);
+    status_lines(ui, state, Tab::Synology);
     changed
 }
 
@@ -1107,11 +1123,11 @@ fn camera_rows(
     to_add
 }
 
-/// Puts a picked camera on the wall and says so.
-fn apply_add(config: &mut AppConfig, state: &mut DiscoveryUi, camera: CameraSource, offer: AddOffer) {
+/// Puts a picked camera on the wall and says so, on the tab it came from.
+fn apply_add(config: &mut AppConfig, state: &mut DiscoveryUi, tab: Tab, camera: CameraSource, offer: AddOffer) {
     let name = camera.name.clone();
     config.upsert_camera(camera);
-    state.message = Some(if offer == AddOffer::Update {
+    state.note(tab, if offer == AddOffer::Update {
         monitor_i18n::tr_args("dialog-updated-msg", &[("name", name.into())])
     } else {
         monitor_i18n::tr_args("dialog-added-msg", &[("name", name.into())])
@@ -1135,7 +1151,7 @@ fn frigate_tab(
     egui::Grid::new("frigate").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label(monitor_i18n::tr("dialog-host"));
         text_field(ui, nav, &mut frigate.host, &monitor_i18n::tr("dialog-host"), false, false, |s| {
-            egui::TextEdit::singleline(s).hint_text(theme::hint("192.168.17.88")).desired_width(220.0)
+            egui::TextEdit::singleline(s).hint_text(theme::hint("192.168.1.10")).desired_width(220.0)
         });
         ui.end_row();
         ui.label(monitor_i18n::tr("dialog-port"));
@@ -1169,7 +1185,7 @@ fn frigate_tab(
         let ready = frigate.is_configured() && !state.frigate_busy;
         if nav.tracked(ui.add_enabled(ready, egui::Button::new(monitor_i18n::tr("dialog-fetch-cameras")))).clicked() {
             state.frigate_busy = true;
-            state.error = None;
+            state.clear_status(Tab::Frigate);
             // A stale list under a running fetch would invite a press on a
             // camera the server may not return.
             state.frigate_cameras.clear();
@@ -1214,7 +1230,7 @@ fn frigate_tab(
         ui.label(RichText::new(monitor_i18n::tr("dialog-nothing-fetched")).small().color(theme::TEXT_DIM));
     }
     if let Some((camera, offer)) = camera_rows(ui, nav, config, &state.frigate_cameras) {
-        apply_add(config, state, camera, offer);
+        apply_add(config, state, Tab::Frigate, camera, offer);
         changed = true;
     }
 
@@ -1230,11 +1246,11 @@ fn frigate_tab(
         ui.label(RichText::new(monitor_i18n::tr("dialog-nothing-fetched")).small().color(theme::TEXT_DIM));
     }
     if let Some((camera, offer)) = camera_rows(ui, nav, config, &state.frigate_leftovers) {
-        apply_add(config, state, camera, offer);
+        apply_add(config, state, Tab::Frigate, camera, offer);
         changed = true;
     }
 
-    status_lines(ui, state);
+    status_lines(ui, state, Tab::Frigate);
     changed
 }
 
@@ -1255,7 +1271,7 @@ fn go2rtc_tab(
     egui::Grid::new("go2rtc").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label(monitor_i18n::tr("dialog-host"));
         text_field(ui, nav, &mut go2rtc.host, &monitor_i18n::tr("dialog-host"), false, false, |s| {
-            egui::TextEdit::singleline(s).hint_text(theme::hint("192.168.17.88")).desired_width(220.0)
+            egui::TextEdit::singleline(s).hint_text(theme::hint("192.168.1.10")).desired_width(220.0)
         });
         ui.end_row();
         ui.label(monitor_i18n::tr("dialog-port"));
@@ -1289,7 +1305,7 @@ fn go2rtc_tab(
         let ready = go2rtc.is_configured() && !state.go2rtc_busy;
         if nav.tracked(ui.add_enabled(ready, egui::Button::new(monitor_i18n::tr("dialog-fetch-cameras")))).clicked() {
             state.go2rtc_busy = true;
-            state.error = None;
+            state.clear_status(Tab::Go2rtc);
             state.go2rtc_cameras.clear();
             start_go2rtc(handle, events, go2rtc.clone());
         }
@@ -1325,20 +1341,25 @@ fn go2rtc_tab(
         ui.label(RichText::new(monitor_i18n::tr("dialog-nothing-fetched")).small().color(theme::TEXT_DIM));
     }
     if let Some((camera, offer)) = camera_rows(ui, nav, config, &state.go2rtc_cameras) {
-        apply_add(config, state, camera, offer);
+        apply_add(config, state, Tab::Go2rtc, camera, offer);
         changed = true;
     }
 
-    status_lines(ui, state);
+    status_lines(ui, state, Tab::Go2rtc);
     changed
 }
 
-fn status_lines(ui: &mut egui::Ui, state: &DiscoveryUi) {
+/// Draws what `tab` last reported.
+///
+/// Another tab's status is not this one's: the wording names the tab it belongs
+/// to ("on the NAS", "in Frigate"), so anything tagged with another tab is left
+/// out rather than read where it does not apply.
+fn status_lines(ui: &mut egui::Ui, state: &DiscoveryUi, tab: Tab) {
     ui.add_space(8.0);
-    if let Some(message) = &state.message {
+    if let Some((_, message)) = state.message.as_ref().filter(|(other, _)| *other == tab) {
         ui.label(RichText::new(message).color(theme::LIVE));
     }
-    if let Some(error) = &state.error {
+    if let Some((_, error)) = state.error.as_ref().filter(|(other, _)| *other == tab) {
         ui.label(RichText::new(error).color(theme::ERROR));
     }
 }
