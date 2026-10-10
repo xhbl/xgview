@@ -798,6 +798,30 @@ impl AppConfig {
         true
     }
 
+    /// Makes a group the default one, by swapping it with the built-in slot.
+    ///
+    /// The group moves to the front - the slot that is never removed - and the
+    /// group that held it moves to where the other one was, so nothing is lost
+    /// and the number of groups does not change. The cameras move with their
+    /// groups, and the wall stays on the group being made the default, which is
+    /// now the first one. The built-in slot itself has nothing to swap with.
+    /// Returns whether anything changed.
+    pub fn set_default_group(&mut self, index: usize) -> bool {
+        if index == 0 || index >= self.groups.len() {
+            return false;
+        }
+        self.groups.swap(0, index);
+        for camera in &mut self.cameras {
+            camera.group = match usize::from(camera.group) {
+                0 => index as u8,
+                group if group == index => 0,
+                group => group as u8,
+            };
+        }
+        self.active_group = 0;
+        true
+    }
+
     /// Reorders the cameras of the active group to match `order`, a list of
     /// camera identifiers.
     ///
@@ -1123,6 +1147,33 @@ mod tests {
         assert_eq!(config.groups.len(), 1);
         assert_eq!(config.active_group, 0);
         assert_eq!(config.cameras.len(), 1);
+        assert_eq!(config.active_cameras()[0].name, "door");
+    }
+
+    /// Making a group the default swaps it into the built-in slot: it is the
+    /// first group and stays on the wall, the old first takes its place, and
+    /// the cameras move with their groups.
+    #[test]
+    fn a_group_can_be_made_the_default() {
+        let mut config = AppConfig::default();
+        config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
+        let night = config.add_group("Night".to_string());
+        config.active_group = night;
+        config.upsert_camera(CameraSource::new("gate", "rtsp://10.0.0.2/live"));
+
+        // The built-in slot has nothing to swap with.
+        assert!(!config.set_default_group(0));
+        assert!(config.set_default_group(night));
+
+        assert_eq!(config.groups[0].name, "Night");
+        assert_eq!(config.groups[night].name, "");
+        assert_eq!(config.active_group, 0, "the wall stays on the group made the default");
+        assert_eq!(config.active_cameras()[0].name, "gate");
+
+        // The cameras moved with their groups.
+        assert_eq!(config.group_camera_count(0), 1);
+        assert_eq!(config.group_camera_count(night), 1);
+        config.active_group = night;
         assert_eq!(config.active_cameras()[0].name, "door");
     }
 

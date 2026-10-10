@@ -17,7 +17,8 @@ controls were cleared up.
   of cameras it holds, with the button that adds one at the end. A new group goes
   on the wall at once, named "New Group", with the focus in its name field; the
   built-in first group is always there and cannot be removed, and removing
-  another takes its cameras with it.
+  another takes its cameras with it. Any group can be made the default, which
+  swaps it into the built-in slot and leaves it on the wall.
 - **The groups are not deduplicated against each other.** The same camera may be
   an entry in more than one, added and removed independently - an import into a
   group only ever matches an entry of that group - and reordering likewise moves

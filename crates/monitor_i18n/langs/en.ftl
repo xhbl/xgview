@@ -81,6 +81,7 @@ settings-group-label = { $name } ({ $count })
 settings-group-add = Add Group…
 settings-group-new = New Group
 settings-group-remove = Remove this group
+settings-group-default-set = Set as Default Group
 settings-group-remove-confirm = Remove "{ $name }" and its { $count } camera(s)?
 settings-group-remove-yes = Remove
 settings-group-remove-no = Keep

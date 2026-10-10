@@ -79,6 +79,7 @@ settings-group-label = { $name } ({ $count })
 settings-group-add = 添加组…
 settings-group-new = 新建组
 settings-group-remove = 删除该组
+settings-group-default-set = 设为默认组
 settings-group-remove-confirm = 删除“{ $name }”及其 { $count } 个摄像头？
 settings-group-remove-yes = 删除
 settings-group-remove-no = 保留

@@ -3607,6 +3607,7 @@ impl XgViewApp {
         let default_name = dialogs::group_name(&self.config, active);
         let mut remove = false;
         let mut confirmed = None;
+        let mut make_default = false;
         ui.horizontal(|ui| {
             ui.label(monitor_i18n::tr("settings-group-name"));
             let field = dialogs::text_field(
@@ -3627,15 +3628,31 @@ impl XgViewApp {
                 field.request_focus();
                 field.scroll_to_me(Some(Align::Center));
             }
-            // The built-in group has no removal: there is always one to add to.
-            if active != 0 {
+        });
+        // The group's own actions, on a row of their own: the built-in group has
+        // nothing to set or to remove.
+        if active != 0 {
+            ui.horizontal(|ui| {
+                let set_default = ui.button(monitor_i18n::tr("settings-group-default-set"));
+                self.nav.item(&set_default);
+                if set_default.clicked() {
+                    make_default = true;
+                }
                 let button = ui.button(monitor_i18n::tr("settings-group-remove"));
                 self.nav.item(&button);
                 if button.clicked() {
                     remove = true;
                 }
+            });
+        }
+        if make_default {
+            // The group takes the built-in slot and stays on the wall, so the
+            // view the scheduler holds is still its own; only the names moved.
+            self.group_remove = None;
+            if self.config.set_default_group(active) {
+                dirty = true;
             }
-        });
+        }
         if remove {
             self.group_remove = Some(active);
         }
