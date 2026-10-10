@@ -30,19 +30,12 @@ pub fn restream_url(host: &str, port: u16, stream: &str) -> String {
 pub struct Go2rtcImport {
     /// One camera per stream go2rtc serves.
     pub cameras: Vec<CameraSource>,
-    /// Whether the restream account was needed but go2rtc served no
-    /// configuration file to read it from - so a protected restream has nowhere
-    /// to take it from but the tab's own field.
-    pub restream_account_unread: bool,
-}
-
-/// What `GET /api/config` answered.
-enum ConfigFile {
-    /// The file was served; `Some` carries the `rtsp:` account it names, if any.
-    Served(Option<(String, String)>),
-    /// No file was served - a configuration given on the command line answers
-    /// 410 - so nothing could be read from it.
-    Unavailable,
+    /// Whether the restream account was left empty and none could be read from
+    /// go2rtc either - its `/api/config` serves no file (a configuration given
+    /// on the command line answers 410), or the file it serves names no `rtsp:`
+    /// account. A protected restream then has nowhere to take one from but the
+    /// tab's own field.
+    pub restream_account_missing: bool,
 }
 
 /// Client for a go2rtc HTTP API.
@@ -101,14 +94,14 @@ impl Go2rtcClient {
     /// which to add. The edit form can give one of them a sub stream later.
     pub async fn import_cameras(&self) -> Result<Go2rtcImport> {
         let port = self.restream_port().await;
-        let (credentials, restream_account_unread) = self.restream_credentials().await;
+        let (credentials, restream_account_missing) = self.restream_credentials().await;
         let cameras = self
             .streams()
             .await?
             .iter()
             .map(|name| self.to_source(name, port, &credentials))
             .collect();
-        Ok(Go2rtcImport { cameras, restream_account_unread })
+        Ok(Go2rtcImport { cameras, restream_account_missing })
     }
 
     /// The port the restream is served on: the one entered on the tab, else the
@@ -120,17 +113,16 @@ impl Go2rtcClient {
         }
     }
 
-    /// The restream account, and whether reading one was impossible: the one
+    /// The restream account, and whether one was wanted but not found: the one
     /// entered on the tab, else the one go2rtc's configuration file names.
     async fn restream_credentials(&self) -> (Option<(String, String)>, bool) {
         if !self.config.rtsp_username.trim().is_empty() {
             let entered = (self.config.rtsp_username.clone(), self.config.rtsp_password.clone());
             return (Some(entered), false);
         }
-        match self.config_account().await {
-            ConfigFile::Served(account) => (account, false),
-            ConfigFile::Unavailable => (None, true),
-        }
+        let read = self.config_account().await;
+        let missing = read.is_none();
+        (read, missing)
     }
 
     /// `rtsp.listen` from `GET /api` - go2rtc's Info, which names the port but
@@ -145,22 +137,19 @@ impl Go2rtcClient {
         parse_listen(&response.text().await.ok()?)
     }
 
-    /// Whether `GET /api/config` serves the configuration file, and the `rtsp:`
-    /// account in it. go2rtc hands its own file back, and that file names the
-    /// account `/api` hides - but a configuration given on the command line is
-    /// not served (it answers 410).
-    async fn config_account(&self) -> ConfigFile {
+    /// The `rtsp:` account from `GET /api/config` - go2rtc hands its own
+    /// configuration file back, and that file may name the account `/api`
+    /// hides. `None` when no file is served (a configuration given on the
+    /// command line answers 410), or when the file it serves names no account -
+    /// which a Frigate-managed go2rtc does, its `rtsp:` account living in
+    /// Frigate's own configuration instead.
+    async fn config_account(&self) -> Option<(String, String)> {
         let url = format!("{}/api/config", self.config.api_url());
-        let Ok(response) = self.get(&url).send().await else {
-            return ConfigFile::Unavailable;
-        };
+        let response = self.get(&url).send().await.ok()?;
         if !response.status().is_success() {
-            return ConfigFile::Unavailable;
+            return None;
         }
-        match response.text().await {
-            Ok(body) => ConfigFile::Served(parse_account(&body)),
-            Err(_) => ConfigFile::Unavailable,
-        }
+        parse_account(&response.text().await.ok()?)
     }
 
     fn to_source(&self, name: &str, port: u16, credentials: &Option<(String, String)>) -> CameraSource {
@@ -344,5 +333,10 @@ mod tests {
         assert_eq!(parse_account("rtsp:\n  username: admin\n  password: ${RTSP_PASS:secret}\n"), None);
         assert_eq!(parse_account("rtsp:\n  listen: \":8554\"\n"), None);
         assert_eq!(parse_account("streams:\n  cam: rtsp://x\n"), None);
+        // An `api:` account is not the restream account - only `rtsp:` counts.
+        assert_eq!(
+            parse_account("api:\n  username: admin\n  password: pw\nstreams:\n  cam: rtsp://x\n"),
+            None
+        );
     }
 }

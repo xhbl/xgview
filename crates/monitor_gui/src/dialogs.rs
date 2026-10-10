@@ -316,10 +316,10 @@ pub struct DiscoveryUi {
     /// The go2rtc restream port, as its text box shows it. Empty means the
     /// port `rtsp.listen` names.
     pub go2rtc_rtsp_port: Option<String>,
-    /// Whether the last go2rtc fetch needed the restream account but could not
-    /// read one: go2rtc served no configuration file, so it has to be entered
-    /// by hand.
-    pub go2rtc_account_unread: bool,
+    /// Whether the last go2rtc fetch left the restream account empty and could
+    /// not read one from go2rtc either - so a protected restream needs it
+    /// entered by hand.
+    pub go2rtc_account_missing: bool,
 }
 
 impl DiscoveryUi {
@@ -440,7 +440,7 @@ impl DiscoveryUi {
                     &[("count", import.cameras.len().into())],
                 ));
                 self.go2rtc_cameras = import.cameras;
-                self.go2rtc_account_unread = import.restream_account_unread;
+                self.go2rtc_account_missing = import.restream_account_missing;
             }
             BackgroundEvent::Go2rtcFailed(error) => {
                 self.go2rtc_busy = false;
@@ -1350,7 +1350,7 @@ fn go2rtc_tab(
             state.go2rtc_busy = true;
             state.clear_status(Tab::Go2rtc);
             state.go2rtc_cameras.clear();
-            state.go2rtc_account_unread = false;
+            state.go2rtc_account_missing = false;
             start_go2rtc(handle, events, go2rtc.clone());
         }
         if state.go2rtc_busy {
@@ -1369,10 +1369,10 @@ fn go2rtc_tab(
         ui.add_space(6.0);
         ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-credentials")).small());
         credentials_row(ui, nav, &mut go2rtc.rtsp_username, &mut go2rtc.rtsp_password);
-        // The file could not be read, so there is nothing to fall back to: say
-        // so rather than invite the account to be left empty.
-        if state.go2rtc_account_unread && go2rtc.rtsp_username.trim().is_empty() {
-            ui.label(RichText::new(monitor_i18n::tr("dialog-go2rtc-config-unread")).small().color(theme::WARN));
+        // No account could be read, so there is nothing to fall back to: say so
+        // rather than invite the account to be left empty.
+        if state.go2rtc_account_missing && go2rtc.rtsp_username.trim().is_empty() {
+            ui.label(RichText::new(monitor_i18n::tr("dialog-go2rtc-account-missing")).small().color(theme::WARN));
         } else {
             ui.label(RichText::new(monitor_i18n::tr("dialog-go2rtc-rtsp-hint")).small().color(theme::TEXT_DIM));
         }

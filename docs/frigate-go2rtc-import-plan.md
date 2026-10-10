@@ -203,9 +203,12 @@ Decisions the plan left open, taken while building it:
   `/api/config` carries `go2rtc.rtsp` in clear, and go2rtc's own `/api/config`
   serves its configuration file, whose `rtsp:` block names the account that
   `/api` hides with `json:"-"`. Both tabs fall back to their fields; the go2rtc
-  tab says so - in place of its "leave empty" hint - when the file could not be
-  read and the field is still empty, and a `${VAR}` only the server resolves is
-  not taken as an answer.
+  tab says so - in place of its "leave empty" hint - when no account could be
+  read and the field is still empty. That covers the file being unserved (an
+  inline configuration answers 410) *and* a served file that names no `rtsp:`
+  account, which a Frigate-managed go2rtc is: its account lives in Frigate's own
+  configuration, so the Frigate tab is the one that reads it. A `${VAR}` only
+  the server resolves is not taken as an answer.
 
 Still open:
 
