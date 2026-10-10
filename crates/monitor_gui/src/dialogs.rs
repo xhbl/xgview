@@ -10,9 +10,10 @@ use crossbeam_channel::Sender;
 use egui::{Align, Layout, RichText};
 use tokio::runtime::Handle;
 
-use monitor_core::config::{AppConfig, DiscoveryConfig, SynologyConfig};
+use monitor_core::config::{AppConfig, DiscoveryConfig, FrigateConfig, Go2rtcConfig, SynologyConfig};
 use monitor_core::discovery::{
-    DiscoveryEvent, DiscoveryReport, DiscoveryService, DiscoveredDevice, PortHit, ProgressCallback,
+    DiscoveryEvent, DiscoveryReport, DiscoveryService, DiscoveredDevice, FrigateImport, PortHit,
+    ProgressCallback,
 };
 use monitor_core::model::CameraSource;
 
@@ -92,6 +93,14 @@ pub enum BackgroundEvent {
     SynologyDone(Vec<CameraSource>),
     /// The Synology import failed.
     SynologyFailed(String),
+    /// The Frigate fetch returned its two groups.
+    FrigateDone(FrigateImport),
+    /// The Frigate fetch failed.
+    FrigateFailed(String),
+    /// The go2rtc fetch returned its streams.
+    Go2rtcDone(Vec<CameraSource>),
+    /// The go2rtc fetch failed.
+    Go2rtcFailed(String),
 }
 
 /// Tab of the "Add devices" window.
@@ -101,6 +110,8 @@ pub enum Tab {
     Onvif,
     Manual,
     Synology,
+    Frigate,
+    Go2rtc,
 }
 
 /// Editable mirror of [`DiscoveryConfig`] used by the scan form.
@@ -283,6 +294,18 @@ pub struct DiscoveryUi {
     /// kept; [`SynologyConfig::port`] follows it while the text names a valid
     /// port.
     pub synology_port: Option<String>,
+    pub frigate_busy: bool,
+    /// Cameras the last Frigate fetch returned, waiting to be picked.
+    pub frigate_cameras: Vec<CameraSource>,
+    /// go2rtc streams no Frigate camera references.
+    pub frigate_leftovers: Vec<CameraSource>,
+    /// The Frigate port, as its text box shows it. See [`DiscoveryUi::synology_port`].
+    pub frigate_port: Option<String>,
+    pub go2rtc_busy: bool,
+    /// Streams the last go2rtc fetch returned, waiting to be picked.
+    pub go2rtc_cameras: Vec<CameraSource>,
+    /// The go2rtc API port, as its text box shows it.
+    pub go2rtc_port: Option<String>,
 }
 
 impl DiscoveryUi {
@@ -360,6 +383,34 @@ impl DiscoveryUi {
                     &[("error", error.into())],
                 ));
             }
+            BackgroundEvent::FrigateDone(import) => {
+                self.frigate_busy = false;
+                self.message = Some(monitor_i18n::tr_args(
+                    "dialog-frigate-count",
+                    &[
+                        ("count", import.cameras.len().into()),
+                        ("extra", import.leftovers.len().into()),
+                    ],
+                ));
+                self.frigate_cameras = import.cameras;
+                self.frigate_leftovers = import.leftovers;
+            }
+            BackgroundEvent::FrigateFailed(error) => {
+                self.frigate_busy = false;
+                self.error = Some(monitor_i18n::tr_args("toast-frigate-failed", &[("error", error.into())]));
+            }
+            BackgroundEvent::Go2rtcDone(cameras) => {
+                self.go2rtc_busy = false;
+                self.message = Some(monitor_i18n::tr_args(
+                    "dialog-go2rtc-count",
+                    &[("count", cameras.len().into())],
+                ));
+                self.go2rtc_cameras = cameras;
+            }
+            BackgroundEvent::Go2rtcFailed(error) => {
+                self.go2rtc_busy = false;
+                self.error = Some(monitor_i18n::tr_args("toast-go2rtc-failed", &[("error", error.into())]));
+            }
         }
     }
 }
@@ -422,6 +473,39 @@ pub fn start_synology(handle: &Handle, events: &Sender<BackgroundEvent>, config:
     });
 }
 
+/// Spawns the Frigate camera fetch - login, `/api/config`, grouping and the
+/// resolution probes behind it.
+pub fn start_frigate(handle: &Handle, events: &Sender<BackgroundEvent>, config: FrigateConfig) {
+    let service = DiscoveryService::new(DiscoveryConfig::default());
+    let sender = events.clone();
+    handle.spawn(async move {
+        match service.import_frigate(config).await {
+            Ok(import) => {
+                let _ = sender.send(BackgroundEvent::FrigateDone(import));
+            }
+            Err(err) => {
+                let _ = sender.send(BackgroundEvent::FrigateFailed(err.to_string()));
+            }
+        }
+    });
+}
+
+/// Spawns the standalone go2rtc stream fetch.
+pub fn start_go2rtc(handle: &Handle, events: &Sender<BackgroundEvent>, config: Go2rtcConfig) {
+    let service = DiscoveryService::new(DiscoveryConfig::default());
+    let sender = events.clone();
+    handle.spawn(async move {
+        match service.import_go2rtc(config).await {
+            Ok(cameras) => {
+                let _ = sender.send(BackgroundEvent::Go2rtcDone(cameras));
+            }
+            Err(err) => {
+                let _ = sender.send(BackgroundEvent::Go2rtcFailed(err.to_string()));
+            }
+        }
+    });
+}
+
 /// Draws the "Add devices" dialog. Returns `true` when the configuration changed.
 pub fn add_devices_window(
     ctx: &egui::Context,
@@ -464,6 +548,8 @@ pub fn add_devices_window(
                 Tab::Onvif => changed |= onvif_tab(ui, state, config, handle, events, nav),
                 Tab::Manual => changed |= manual_tab(ui, state, config, nav),
                 Tab::Synology => changed |= synology_tab(ui, state, config, handle, events, nav),
+                Tab::Frigate => changed |= frigate_tab(ui, state, config, handle, events, nav),
+                Tab::Go2rtc => changed |= go2rtc_tab(ui, state, config, handle, events, nav),
             });
         nav.close();
     });
@@ -496,10 +582,12 @@ pub fn add_devices_window(
 /// The dialog's way out - its Close button - ends the same row, so the remote
 /// reaches it with the arrows. Returns `true` when it was pressed.
 fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) -> bool {
-    const TABS: [(Tab, &str); 3] = [
+    const TABS: [(Tab, &str); 5] = [
         (Tab::Onvif, "dialog-tab-onvif"),
         (Tab::Manual, "dialog-tab-manual"),
         (Tab::Synology, "dialog-tab-synology"),
+        (Tab::Frigate, "dialog-tab-frigate"),
+        (Tab::Go2rtc, "dialog-tab-go2rtc"),
     ];
 
     let mut ids = [egui::Id::NULL; TABS.len()];
@@ -974,6 +1062,268 @@ fn synology_tab(
         } else {
             monitor_i18n::tr_args("dialog-added-msg", &[("name", name.into())])
         });
+        changed = true;
+    }
+
+    status_lines(ui, state);
+    changed
+}
+
+/// Draws a list of fetched cameras, one row each, and reports the one whose
+/// button was pressed.
+///
+/// What the Frigate and go2rtc tabs list before any of it is added, like the
+/// Synology list they mirror.
+fn camera_rows(
+    ui: &mut egui::Ui,
+    nav: &mut Nav,
+    config: &AppConfig,
+    cameras: &[CameraSource],
+) -> Option<(CameraSource, AddOffer)> {
+    let mut to_add = None;
+    for camera in cameras {
+        let offer = add_offer(config, camera);
+        ui.horizontal(|ui| {
+            let (label, enabled) = match offer {
+                AddOffer::Add => (monitor_i18n::tr("dialog-add"), true),
+                AddOffer::Update => (monitor_i18n::tr("dialog-update"), true),
+                AddOffer::Added => (monitor_i18n::tr("dialog-added"), false),
+            };
+            if nav.tracked(ui.add_enabled(enabled, egui::Button::new(label))).clicked() {
+                to_add = Some((camera.clone(), offer));
+            }
+            ui.label(RichText::new(camera.short_label(24)).strong());
+            ui.label(RichText::new(&camera.host).monospace().color(theme::TEXT_DIM));
+            if camera.rtsp_sub.is_some() {
+                ui.label(RichText::new(monitor_i18n::tr("dialog-sub-tag")).small().color(theme::ACCENT));
+            }
+            if offer == AddOffer::Update {
+                ui.label(RichText::new(monitor_i18n::tr("dialog-already-added")).small().color(theme::WARN));
+            }
+        });
+    }
+    to_add
+}
+
+/// Puts a picked camera on the wall and says so.
+fn apply_add(config: &mut AppConfig, state: &mut DiscoveryUi, camera: CameraSource, offer: AddOffer) {
+    let name = camera.name.clone();
+    config.upsert_camera(camera);
+    state.message = Some(if offer == AddOffer::Update {
+        monitor_i18n::tr_args("dialog-updated-msg", &[("name", name.into())])
+    } else {
+        monitor_i18n::tr_args("dialog-added-msg", &[("name", name.into())])
+    });
+}
+
+fn frigate_tab(
+    ui: &mut egui::Ui,
+    state: &mut DiscoveryUi,
+    config: &mut AppConfig,
+    handle: &Handle,
+    events: &Sender<BackgroundEvent>,
+    nav: &mut Nav,
+) -> bool {
+    let mut changed = false;
+    ui.label(RichText::new(monitor_i18n::tr("dialog-frigate-hint")).small().color(theme::TEXT_DIM));
+    ui.add_space(4.0);
+
+    let frigate = &mut config.frigate;
+    let before = frigate.clone();
+    egui::Grid::new("frigate").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+        ui.label(monitor_i18n::tr("dialog-host"));
+        text_field(ui, nav, &mut frigate.host, &monitor_i18n::tr("dialog-host"), false, false, |s| {
+            egui::TextEdit::singleline(s).hint_text(theme::hint("192.168.17.88")).desired_width(220.0)
+        });
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-port"));
+        let port_text = state.frigate_port.get_or_insert_with(|| frigate.port.to_string());
+        let port_field = text_field(ui, nav, port_text, &monitor_i18n::tr("dialog-port"), false, false, |s| {
+            egui::TextEdit::singleline(s).desired_width(220.0).char_limit(5)
+        });
+        port_text.retain(|c| c.is_ascii_digit());
+        if let Ok(port) = port_text.parse::<u16>() {
+            if port >= 1 {
+                frigate.port = port;
+            }
+        }
+        if !port_field.has_focus() {
+            *port_text = frigate.port.to_string();
+        }
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-scheme"));
+        nav.tracked(ui.checkbox(&mut frigate.https, monitor_i18n::tr("dialog-https")));
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-account"));
+        text_field(ui, nav, &mut frigate.username, &monitor_i18n::tr("dialog-account"), false, false, |s| {
+            egui::TextEdit::singleline(s).desired_width(220.0)
+        });
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-password"));
+        text_field(ui, nav, &mut frigate.password, &monitor_i18n::tr("dialog-password"), true, false, |s| {
+            egui::TextEdit::singleline(s).password(true).desired_width(220.0)
+        });
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-rtsp-account"));
+        text_field(ui, nav, &mut frigate.rtsp_username, &monitor_i18n::tr("dialog-rtsp-account"), false, false, |s| {
+            egui::TextEdit::singleline(s).desired_width(220.0)
+        });
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-rtsp-password"));
+        text_field(ui, nav, &mut frigate.rtsp_password, &monitor_i18n::tr("dialog-rtsp-password"), true, false, |s| {
+            egui::TextEdit::singleline(s).password(true).desired_width(220.0)
+        });
+        ui.end_row();
+    });
+    if *frigate != before {
+        changed = true;
+    }
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let ready = config.frigate.is_configured() && !state.frigate_busy;
+        if nav.tracked(ui.add_enabled(ready, egui::Button::new(monitor_i18n::tr("dialog-fetch-cameras")))).clicked() {
+            state.frigate_busy = true;
+            state.error = None;
+            // A stale list under a running fetch would invite a press on a
+            // camera the server may not return.
+            state.frigate_cameras.clear();
+            state.frigate_leftovers.clear();
+            start_frigate(handle, events, config.frigate.clone());
+        }
+        if state.frigate_busy {
+            grid_spinner(ui);
+            ui.label(RichText::new(monitor_i18n::tr("dialog-contacting-server")).color(theme::ACCENT));
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(monitor_i18n::tr_args(
+            "dialog-frigate-cameras",
+            &[("count", state.frigate_cameras.len().into())],
+        ))
+        .strong(),
+    );
+    if state.frigate_cameras.is_empty() {
+        ui.label(RichText::new(monitor_i18n::tr("dialog-nothing-fetched")).small().color(theme::TEXT_DIM));
+    }
+    if let Some((camera, offer)) = camera_rows(ui, nav, config, &state.frigate_cameras) {
+        apply_add(config, state, camera, offer);
+        changed = true;
+    }
+
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(monitor_i18n::tr_args(
+            "dialog-frigate-streams",
+            &[("count", state.frigate_leftovers.len().into())],
+        ))
+        .strong(),
+    );
+    if state.frigate_leftovers.is_empty() {
+        ui.label(RichText::new(monitor_i18n::tr("dialog-nothing-fetched")).small().color(theme::TEXT_DIM));
+    }
+    if let Some((camera, offer)) = camera_rows(ui, nav, config, &state.frigate_leftovers) {
+        apply_add(config, state, camera, offer);
+        changed = true;
+    }
+
+    status_lines(ui, state);
+    changed
+}
+
+fn go2rtc_tab(
+    ui: &mut egui::Ui,
+    state: &mut DiscoveryUi,
+    config: &mut AppConfig,
+    handle: &Handle,
+    events: &Sender<BackgroundEvent>,
+    nav: &mut Nav,
+) -> bool {
+    let mut changed = false;
+    ui.label(RichText::new(monitor_i18n::tr("dialog-go2rtc-hint")).small().color(theme::TEXT_DIM));
+    ui.add_space(4.0);
+
+    let go2rtc = &mut config.go2rtc;
+    let before = go2rtc.clone();
+    egui::Grid::new("go2rtc").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+        ui.label(monitor_i18n::tr("dialog-host"));
+        text_field(ui, nav, &mut go2rtc.host, &monitor_i18n::tr("dialog-host"), false, false, |s| {
+            egui::TextEdit::singleline(s).hint_text(theme::hint("192.168.17.88")).desired_width(220.0)
+        });
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-port"));
+        let port_text = state.go2rtc_port.get_or_insert_with(|| go2rtc.port.to_string());
+        let port_field = text_field(ui, nav, port_text, &monitor_i18n::tr("dialog-port"), false, false, |s| {
+            egui::TextEdit::singleline(s).desired_width(220.0).char_limit(5)
+        });
+        port_text.retain(|c| c.is_ascii_digit());
+        if let Ok(port) = port_text.parse::<u16>() {
+            if port >= 1 {
+                go2rtc.port = port;
+            }
+        }
+        if !port_field.has_focus() {
+            *port_text = go2rtc.port.to_string();
+        }
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-scheme"));
+        nav.tracked(ui.checkbox(&mut go2rtc.https, monitor_i18n::tr("dialog-https")));
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-account"));
+        text_field(ui, nav, &mut go2rtc.api_username, &monitor_i18n::tr("dialog-account"), false, false, |s| {
+            egui::TextEdit::singleline(s).desired_width(220.0)
+        });
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-password"));
+        text_field(ui, nav, &mut go2rtc.api_password, &monitor_i18n::tr("dialog-password"), true, false, |s| {
+            egui::TextEdit::singleline(s).password(true).desired_width(220.0)
+        });
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-rtsp-account"));
+        text_field(ui, nav, &mut go2rtc.rtsp_username, &monitor_i18n::tr("dialog-rtsp-account"), false, false, |s| {
+            egui::TextEdit::singleline(s).desired_width(220.0)
+        });
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-rtsp-password"));
+        text_field(ui, nav, &mut go2rtc.rtsp_password, &monitor_i18n::tr("dialog-rtsp-password"), true, false, |s| {
+            egui::TextEdit::singleline(s).password(true).desired_width(220.0)
+        });
+        ui.end_row();
+    });
+    if *go2rtc != before {
+        changed = true;
+    }
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let ready = config.go2rtc.is_configured() && !state.go2rtc_busy;
+        if nav.tracked(ui.add_enabled(ready, egui::Button::new(monitor_i18n::tr("dialog-fetch-cameras")))).clicked() {
+            state.go2rtc_busy = true;
+            state.error = None;
+            state.go2rtc_cameras.clear();
+            start_go2rtc(handle, events, config.go2rtc.clone());
+        }
+        if state.go2rtc_busy {
+            grid_spinner(ui);
+            ui.label(RichText::new(monitor_i18n::tr("dialog-contacting-server")).color(theme::ACCENT));
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(monitor_i18n::tr_args(
+            "dialog-go2rtc-streams",
+            &[("count", state.go2rtc_cameras.len().into())],
+        ))
+        .strong(),
+    );
+    if state.go2rtc_cameras.is_empty() {
+        ui.label(RichText::new(monitor_i18n::tr("dialog-nothing-fetched")).small().color(theme::TEXT_DIM));
+    }
+    if let Some((camera, offer)) = camera_rows(ui, nav, config, &state.go2rtc_cameras) {
+        apply_add(config, state, camera, offer);
         changed = true;
     }
 

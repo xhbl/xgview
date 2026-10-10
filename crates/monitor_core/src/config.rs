@@ -172,6 +172,108 @@ impl SynologyConfig {
     }
 }
 
+/// Frigate NVR connection settings.
+///
+/// Read through Frigate's own API alone: the built-in go2rtc's management port
+/// is normally not published, so a standalone go2rtc is a separate thing - see
+/// [`Go2rtcConfig`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FrigateConfig {
+    /// Frigate host name or IP address.
+    pub host: String,
+    /// 8971 is the authenticated UI / API port; 5000 is the unauthenticated
+    /// internal one.
+    pub port: u16,
+    pub https: bool,
+    /// Login used for `POST /api/login`. Left empty, the unauthenticated
+    /// internal port is used instead, which needs no login.
+    pub username: String,
+    pub password: String,
+    /// Credentials for the `:8554` restream. Left empty, they are read from
+    /// `go2rtc.rtsp` in the configuration Frigate serves.
+    pub rtsp_username: String,
+    pub rtsp_password: String,
+}
+
+impl Default for FrigateConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 8971,
+            https: true,
+            username: String::new(),
+            password: String::new(),
+            rtsp_username: String::new(),
+            rtsp_password: String::new(),
+        }
+    }
+}
+
+impl FrigateConfig {
+    pub fn base_url(&self) -> String {
+        let scheme = if self.https { "https" } else { "http" };
+        format!("{scheme}://{}:{}", self.host, self.port)
+    }
+
+    /// A host is all Frigate needs: with no login, the unauthenticated internal
+    /// API port is used.
+    pub fn is_configured(&self) -> bool {
+        !self.host.trim().is_empty()
+    }
+
+    /// Whether a login has to be performed before the API can be read.
+    pub fn needs_login(&self) -> bool {
+        !self.username.trim().is_empty()
+    }
+}
+
+/// Standalone go2rtc connection settings.
+///
+/// go2rtc has two accounts that are not the same one: the HTTP API's (`api:`
+/// in `go2rtc.yaml`, HTTP Basic) and the `:8554` RTSP restream's (`rtsp:`). The
+/// API does not expose the RTSP account, so both are entered here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Go2rtcConfig {
+    pub host: String,
+    /// The HTTP API port (go2rtc's default is 1984).
+    pub port: u16,
+    pub https: bool,
+    /// Credentials for the API, when go2rtc's `api:` section sets them.
+    pub api_username: String,
+    pub api_password: String,
+    /// Credentials for the `:8554` restream, when go2rtc's `rtsp:` section sets
+    /// them.
+    pub rtsp_username: String,
+    pub rtsp_password: String,
+}
+
+impl Default for Go2rtcConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 1984,
+            https: false,
+            api_username: String::new(),
+            api_password: String::new(),
+            rtsp_username: String::new(),
+            rtsp_password: String::new(),
+        }
+    }
+}
+
+impl Go2rtcConfig {
+    pub fn api_url(&self) -> String {
+        let scheme = if self.https { "https" } else { "http" };
+        format!("{scheme}://{}:{}", self.host, self.port)
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.host.trim().is_empty()
+    }
+}
+
 /// Minutes in a week: the span a blackout window is measured against.
 pub const MINUTES_PER_WEEK: u32 = 7 * 24 * 60;
 
@@ -363,6 +465,8 @@ pub struct AppConfig {
     pub handshake_timeout_ms: u64,
     pub discovery: DiscoveryConfig,
     pub synology: SynologyConfig,
+    pub frigate: FrigateConfig,
+    pub go2rtc: Go2rtcConfig,
     /// Periods during which the wall blanks itself and lets the streams go.
     pub blackout: Blackout,
     /// What each corner of a tile shows. It is a property of the wall rather
@@ -391,6 +495,8 @@ impl Default for AppConfig {
             handshake_timeout_ms: 15_000,
             discovery: DiscoveryConfig::default(),
             synology: SynologyConfig::default(),
+            frigate: FrigateConfig::default(),
+            go2rtc: Go2rtcConfig::default(),
             blackout: Blackout::default(),
             osd: Osd::default(),
             cameras: Vec::new(),

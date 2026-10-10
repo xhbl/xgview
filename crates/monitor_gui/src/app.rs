@@ -1477,6 +1477,35 @@ impl XgViewApp {
                         ToastKind::Error,
                     ));
                 }
+                BackgroundEvent::FrigateDone(import) => {
+                    // Listed in the dialog for the viewer to pick from, not
+                    // imported on arrival - see `frigate_tab`.
+                    toast = Some((
+                        monitor_i18n::tr_args(
+                            "toast-frigate-found",
+                            &[("count", (import.cameras.len() + import.leftovers.len()).into())],
+                        ),
+                        ToastKind::Info,
+                    ));
+                }
+                BackgroundEvent::FrigateFailed(error) => {
+                    toast = Some((
+                        monitor_i18n::tr_args("toast-frigate-failed", &[("error", error.to_string().into())]),
+                        ToastKind::Error,
+                    ));
+                }
+                BackgroundEvent::Go2rtcDone(cameras) => {
+                    toast = Some((
+                        monitor_i18n::tr_args("toast-go2rtc-found", &[("count", cameras.len().into())]),
+                        ToastKind::Info,
+                    ));
+                }
+                BackgroundEvent::Go2rtcFailed(error) => {
+                    toast = Some((
+                        monitor_i18n::tr_args("toast-go2rtc-failed", &[("error", error.to_string().into())]),
+                        ToastKind::Error,
+                    ));
+                }
                 BackgroundEvent::DiscoveryFailed(error) => {
                     toast = Some((
                         monitor_i18n::tr_args("toast-discovery-failed", &[("error", error.to_string().into())]),

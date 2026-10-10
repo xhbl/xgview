@@ -14,8 +14,11 @@
 //! `GetDeviceInformation` / `GetProfiles` / `GetStreamUri` calls to build a
 //! ready to use [`CameraSource`].
 
+pub mod frigate;
+pub mod go2rtc;
 pub mod iprange;
 pub mod onvif;
+pub mod probe;
 pub mod scan;
 pub mod synology;
 pub mod wsdiscovery;
@@ -23,14 +26,17 @@ pub mod wsdiscovery;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::DiscoveryConfig;
+use crate::config::{DiscoveryConfig, FrigateConfig, Go2rtcConfig};
 use crate::error::{CoreError, Result};
 use crate::model::{CameraOrigin, CameraSource};
 
+pub use frigate::{FrigateClient, FrigateImport};
+pub use go2rtc::Go2rtcClient;
 pub use iprange::{parse_targets, parse_targets_multi};
 pub use onvif::{
     DeviceInformation, OnvifClient, OnvifCredentials, OnvifProfile, ResolvedDevice,
 };
+pub use probe::probe_resolution;
 pub use scan::{scan_ports, PortHit};
 pub use synology::{SynologyCamera, SynologyClient};
 pub use wsdiscovery::{
@@ -215,6 +221,17 @@ impl DiscoveryService {
         let sources = client.import_cameras().await;
         client.logout().await;
         sources
+    }
+
+    /// Imports the cameras of a Frigate NVR, in the two groups the tab shows -
+    /// see [`frigate::FrigateImport`].
+    pub async fn import_frigate(&self, config: FrigateConfig) -> Result<FrigateImport> {
+        FrigateClient::new(config)?.import_cameras().await
+    }
+
+    /// Imports the streams of a standalone go2rtc, one camera per stream.
+    pub async fn import_go2rtc(&self, config: Go2rtcConfig) -> Result<Vec<CameraSource>> {
+        Go2rtcClient::new(config)?.import_cameras().await
     }
 }
 

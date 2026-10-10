@@ -93,6 +93,8 @@ pub enum CameraOrigin {
     Manual,
     Onvif,
     Synology,
+    Frigate,
+    Go2rtc,
 }
 
 impl CameraOrigin {
@@ -101,6 +103,8 @@ impl CameraOrigin {
             CameraOrigin::Manual => "origin-manual",
             CameraOrigin::Onvif => "origin-onvif",
             CameraOrigin::Synology => "origin-synology",
+            CameraOrigin::Frigate => "origin-frigate",
+            CameraOrigin::Go2rtc => "origin-go2rtc",
         }
     }
 }
