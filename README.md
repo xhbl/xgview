@@ -40,6 +40,7 @@ the hand.
     - [Touch screen](#touch-screen)
   - [Settings panel](#settings-panel)
   - [Adding cameras](#adding-cameras)
+  - [Camera groups](#camera-groups)
   - [Blackout schedule](#blackout-schedule)
   - [Keep awake](#keep-awake)
   - [Start on boot](#start-on-boot)
@@ -91,6 +92,7 @@ the hand.
 | Discovery | ONVIF WS-Discovery multicast probe, cross-subnet unicast scan, and a TCP 554/80/8000 fallback probe, followed by `GetProfiles` / `GetStreamUri` |
 | Server import | Import every camera in one go from Synology Surveillance Station (`SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera`), Frigate (its API, each camera's main and sub stream paired by measured resolution) or a standalone go2rtc (`/api/streams`) |
 | Cameras | Add, edit, reorder and remove cameras; per-camera display aspect and RTSP transport (UDP when a relay damages the TCP interleaving) |
+| Groups | Named camera groups, each with its own cameras, grid layout and paging, switched from the settings; the same camera may sit in more than one |
 | Start on boot | Windows `HKCU\...\Run` registry entry (or a scheduled task) and an Android `BOOT_COMPLETED` receiver |
 | Configuration | Everything persisted to a cross-platform `config.json`, with export / import |
 
@@ -284,7 +286,7 @@ as a portable monitoring screen:
 | Tab | What it holds |
 | --- | --- |
 | Display | Interface **language**, grid, the four OSD corners, full screen at start-up, the Android navigation bar |
-| Cameras | The camera list: add, edit, reorder, remove; display aspect and RTSP transport per camera (the "Confirm order" step) |
+| Cameras | The group strip, and the group on the wall: its camera list (add, edit, reorder, remove; display aspect and RTSP transport per camera), its name, Set as Default and Remove |
 | Streams | Reconnect timings (first retry, first-frame retry, max delay, handshake timeout, backoff factor / jitter / spread, attempts) and the hardware-decoding preference |
 | Blackout | The blank schedule: on/off, the periods (weekday, start, end), and how long the wall stays back after input |
 | System | Start on boot, **keep awake** (prevent sleep / keep the screen on) with the mechanism in use, the key list, and the Android boot helpers |
@@ -326,7 +328,29 @@ Press `F2` to open the *add devices* window, which has five pages:
 
 Cameras are listed in the **Cameras** tab, where they can be renamed, reordered,
 disabled, and given a display aspect (original, stretch, 16:9, 4:3 or 1:1) and a
-transport per camera.
+transport per camera. A camera is added to the group the wall is on - the
+dialog's title names it; see [Camera groups](#camera-groups).
+
+### Camera groups
+
+The wall can hold more than one set of cameras, so a four-camera view and a
+sixteen-camera one do not have to be re-arranged to move between. The groups are
+a strip of tabs at the top of the **Cameras** settings page, each showing its
+name and the number of cameras it holds.
+
+- **`Add Group…`** puts a new, empty group on the wall at once, named *New
+  Group*, with the focus already in the name field at the foot of the page.
+- **A tab** switches the wall to that group; each group keeps its own grid
+  layout, page and focused tile, restored when it comes back on screen.
+- **The built-in group cannot be removed** - there is always one to add a camera
+  to. Removing another group takes its cameras with it, after a confirmation.
+- **`Set as Default Group`** swaps the group with the built-in slot, so it is the
+  one a new installation starts on; the two change places and nothing is lost.
+- **The groups are independent.** The same camera may be an entry in more than
+  one, and adding, reordering or removing works only on the group being looked
+  at - an import lands in the group the wall is on.
+- With a single group - the built-in one - the group is not named on the wall:
+  the status bar, the empty wall and the dialogs leave the word out.
 
 ### Blackout schedule
 

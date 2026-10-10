@@ -38,8 +38,12 @@ The viewer persists everything to one JSON file, created on first launch:
   deployments).
 - `--config <PATH>` points the viewer at a different file for one run.
 - The About tab can **export** and **import** the configuration; "Only import
-  the cameras" keeps the viewer's own settings and takes the camera list from
-  the file.
+  the cameras" keeps the viewer's own settings, and takes the cameras and the
+  groups they belong to from the file.
+- The wall's **camera groups** are part of the same file: a `groups` array, each
+  entry holding a name, a grid, a page and the focused tile, plus `active_group`,
+  and every camera entry records the group it belongs to. A file written before
+  groups has its layout folded into the first group rather than reset.
 - Adding a field is backwards compatible: `AppConfig` is `#[serde(default)]`, so
   an older `config.json` simply takes the default for anything it lacks. The
   same file is shared by every platform.

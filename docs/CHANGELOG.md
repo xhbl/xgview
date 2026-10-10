@@ -3,7 +3,7 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 1.3.10
+## 1.3.16
 
 Changes since 1.3.7. The wall holds camera groups it switches between, and a few
 controls were cleared up.
@@ -41,9 +41,9 @@ controls were cleared up.
 
 ### Internals
 
-- A camera entry records the group it belongs to, and the configuration holds
-  the four groups' names and views. A `config.json` written before groups has
-  its layout folded into the first group rather than reset.
+- A camera entry records the group it belongs to, and the configuration holds the
+  groups' names and views. A `config.json` written before groups has its layout
+  folded into the first group rather than reset.
 
 ## 1.3.7
 
