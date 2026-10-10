@@ -14,7 +14,7 @@ use tokio::runtime::Handle;
 
 use monitor_core::autostart::{self, AutostartStatus};
 use monitor_core::power::{self, PowerStatus};
-use monitor_core::config::{AppConfig, GROUP_COUNT};
+use monitor_core::config::AppConfig;
 use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{ConnectionState, OsdItem, RtspTransport, StreamKind, TileAspect};
 use monitor_core::pipeline::{ChannelManager, StreamEvent};
@@ -536,6 +536,11 @@ pub struct XgViewApp {
     remove_confirm_anchor: Option<Id>,
     /// Watches the remove window for the frame it appears on.
     remove_confirm_handoff: Handoff,
+    /// Whether the group-name field is to be given the focus as it is drawn:
+    /// set when a group has just been added, so its name is typed over at once.
+    focus_group_name: bool,
+    /// The group whose removal is being confirmed, by index.
+    group_remove: Option<usize>,
     /// The camera order being arranged while the Cameras tab is in its reorder
     /// mode.
     ///
@@ -734,6 +739,8 @@ impl XgViewApp {
             remove_confirm: None,
             remove_confirm_anchor: None,
             remove_confirm_handoff: Handoff::default(),
+            focus_group_name: false,
+            group_remove: None,
             reorder: None,
             reorder_anchor: None,
             reorder_trigger_anchor: None,
@@ -3318,29 +3325,36 @@ impl XgViewApp {
         self.cameras_list(ui)
     }
 
-    /// Switches the wall to another camera group.
-    ///
-    /// The view the scheduler holds belongs to the group being left, so it is
-    /// parked there first, and the layout, paging and focus the group being
-    /// entered was left in are loaded into the scheduler: the configuration is
-    /// where a group's view waits while it is not on the wall.
-    fn switch_group(&mut self, index: usize) {
-        if index == self.config.active_group {
-            return;
-        }
+    /// Parks the view the scheduler holds into the group it belongs to: the
+    /// configuration is where a group's layout, paging and focus wait while it
+    /// is not on the wall.
+    fn park_group_view(&mut self) {
         let (layout, page, focus) =
             (self.scheduler.layout(), self.scheduler.page(), self.scheduler.focus());
-        let leaving = self.config.group_mut();
-        leaving.layout = layout;
-        leaving.page = page;
-        leaving.focus = focus;
+        let group = self.config.group_mut();
+        group.layout = layout;
+        group.page = page;
+        group.focus = focus;
+    }
 
-        self.config.active_group = index;
-        let entering = self.config.group().clone();
-        self.scheduler.set_layout(entering.layout);
-        self.scheduler.set_page(entering.page);
-        self.scheduler.set_focus(entering.focus);
+    /// Loads the active group's view into the scheduler. The cameras follow on
+    /// the next [`Self::sync`].
+    fn load_group_view(&mut self) {
+        let group = self.config.group().clone();
+        self.scheduler.set_layout(group.layout);
+        self.scheduler.set_page(group.page);
+        self.scheduler.set_focus(group.focus);
         self.needs_sync = true;
+    }
+
+    /// Switches the wall to another camera group.
+    fn switch_group(&mut self, index: usize) {
+        if index == self.config.active_index() {
+            return;
+        }
+        self.park_group_view();
+        self.config.active_group = index;
+        self.load_group_view();
     }
 
     /// The camera list as configured, with the button that opens the reorder
@@ -3349,25 +3363,24 @@ impl XgViewApp {
         let mut dirty = false;
 
         // Which group the wall is showing comes first, as a strip of tabs like
-        // the settings tabs above: the buttons under it add to that group, and
-        // the list below it is that group's. Renaming is the uncommon half of
-        // the choice, so its field is at the foot of the page instead.
+        // the settings tabs above, with the button that adds one at its end: the
+        // buttons under it add to that group, and the list below it is that
+        // group's. Renaming and removing are the uncommon half of the choice, so
+        // their controls are at the foot of the page instead.
         let active = self.config.active_group;
-        let labels: Vec<String> = (0..GROUP_COUNT)
+        let labels: Vec<String> = (0..self.config.groups.len())
             .map(|index| {
-                let named = self.config.groups[index].name.trim();
-                let name = if named.is_empty() {
-                    monitor_i18n::tr_args("settings-group-default", &[("n", (index + 1).into())])
-                } else {
-                    named.to_string()
-                };
                 monitor_i18n::tr_args(
                     "settings-group-label",
-                    &[("name", name.into()), ("count", self.config.group_camera_count(index).into())],
+                    &[
+                        ("name", group_name(&self.config, index).into()),
+                        ("count", self.config.group_camera_count(index).into()),
+                    ],
                 )
             })
             .collect();
         let mut switch = None;
+        let mut add = false;
         ui.horizontal_wrapped(|ui| {
             for (index, label) in labels.into_iter().enumerate() {
                 let tab = ui.selectable_label(active == index, label);
@@ -3376,9 +3389,23 @@ impl XgViewApp {
                     switch = Some(index);
                 }
             }
+            let button = ui.button(monitor_i18n::tr("settings-group-add"));
+            self.nav.item(&button);
+            if button.clicked() {
+                add = true;
+            }
         });
         if let Some(index) = switch {
             self.switch_group(index);
+            dirty = true;
+        }
+        if add {
+            // The new group is named for the viewer to type over, and it is the
+            // one on the wall - so the page under the strip is its page, and the
+            // field that names it takes the focus.
+            let index = self.config.add_group(monitor_i18n::tr("settings-group-new"));
+            self.switch_group(index);
+            self.focus_group_name = true;
             dirty = true;
         }
         ui.add_space(theme::space::S);
@@ -3567,12 +3594,14 @@ impl XgViewApp {
             }
         }
 
-        // Renaming a group is the uncommon half of the selector, so it is down
-        // here rather than in the strip: one field, for the group on the wall.
+        // Renaming and removing a group are the uncommon half of the selector,
+        // so they are down here rather than in the strip: one field and one
+        // button, for the group on the wall.
         ui.add_space(theme::space::M);
-        let active = self.config.active_group;
-        let default_name =
-            monitor_i18n::tr_args("settings-group-default", &[("n", (active + 1).into())]);
+        let active = self.config.active_index();
+        let default_name = group_name(&self.config, active);
+        let mut remove = false;
+        let mut confirmed = None;
         ui.horizontal(|ui| {
             ui.label(monitor_i18n::tr("settings-group-name"));
             let field = dialogs::text_field(
@@ -3587,7 +3616,64 @@ impl XgViewApp {
             if field.changed() {
                 dirty = true;
             }
+            if std::mem::take(&mut self.focus_group_name) {
+                // Just added: the focus goes to the field, so the name is typed
+                // over at once rather than hunted for at the foot of the page.
+                field.request_focus();
+                field.scroll_to_me(Some(Align::Center));
+            }
+            // The built-in group has no removal: there is always one to add to.
+            if active != 0 {
+                let button = ui.button(monitor_i18n::tr("settings-group-remove"));
+                self.nav.item(&button);
+                if button.clicked() {
+                    remove = true;
+                }
+            }
         });
+        if remove {
+            self.group_remove = Some(active);
+        }
+        if let Some(index) = self.group_remove.filter(|index| *index == active) {
+            // The question is asked where the button was, rather than in a
+            // window: the group is about to go with its cameras, and a line of
+            // text says so without hiding what is being lost.
+            let name = group_name(&self.config, index);
+            let count = self.config.group_camera_count(index);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(monitor_i18n::tr_args(
+                        "settings-group-remove-confirm",
+                        &[("name", name.into()), ("count", count.into())],
+                    ))
+                    .small()
+                    .color(theme::WARN),
+                );
+                let yes = ui.button(monitor_i18n::tr("settings-group-remove-yes"));
+                self.nav.item(&yes);
+                let no = ui.button(monitor_i18n::tr("settings-group-remove-no"));
+                self.nav.item(&no);
+                if yes.clicked() {
+                    confirmed = Some(index);
+                } else if no.clicked() {
+                    self.group_remove = None;
+                }
+            });
+        } else if self.group_remove.is_some() {
+            // The page moved to another group while the question stood.
+            self.group_remove = None;
+        }
+        if let Some(index) = confirmed {
+            self.group_remove = None;
+            // The view the scheduler holds belongs to the group about to go, so
+            // it is parked before the list moves under it; the group the wall
+            // falls back to then loads its own.
+            self.park_group_view();
+            if self.config.remove_group(index) {
+                self.load_group_view();
+                dirty = true;
+            }
+        }
 
         dirty
     }
@@ -4840,6 +4926,20 @@ impl eframe::App for XgViewApp {
         // egui's to move.
         #[cfg(target_os = "android")]
         ctx.output_mut(|output| output.ime = None);
+    }
+}
+
+/// What a group goes by: its own name, or - when it has none - the word the
+/// built-in first group goes by, and "Group N" for the ones after it.
+fn group_name(config: &AppConfig, index: usize) -> String {
+    let named = config.groups[index].name.trim();
+    if !named.is_empty() {
+        return named.to_string();
+    }
+    if index == 0 {
+        monitor_i18n::tr("settings-group-builtin")
+    } else {
+        monitor_i18n::tr_args("settings-group-default", &[("n", (index + 1).into())])
     }
 }
 

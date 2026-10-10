@@ -430,9 +430,6 @@ impl Blackout {
     }
 }
 
-/// How many camera groups the wall holds.
-pub const GROUP_COUNT: usize = 4;
-
 /// One camera group: the name it goes by, and how the wall is gridded while it
 /// is the active one.
 ///
@@ -440,6 +437,9 @@ pub const GROUP_COUNT: usize = 4;
 /// another - the same camera may be an entry in more than one - and each keeps
 /// its own layout and paging, so switching between a two-camera view and a
 /// nine-camera one does not have to be re-arranged every time.
+///
+/// There is always at least one, and the first is the built-in one: it is never
+/// removed, so there is always a group for a camera to be added to.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Group {
@@ -463,7 +463,7 @@ impl Default for Group {
 pub struct AppConfig {
     pub version: u32,
     /// The camera groups, and which of them the wall is showing.
-    pub groups: [Group; GROUP_COUNT],
+    pub groups: Vec<Group>,
     pub active_group: usize,
     /// Mirror of the start-on-boot registration.
     pub autostart: bool,
@@ -517,7 +517,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
-            groups: std::array::from_fn(|_| Group::default()),
+            groups: vec![Group::default()],
             active_group: 0,
             autostart: false,
             start_fullscreen: false,
@@ -658,19 +658,24 @@ impl AppConfig {
         config_dir().join(CONFIG_FILE_NAME)
     }
 
+    /// The index of the group the wall is showing, held inside the list.
+    pub fn active_index(&self) -> usize {
+        self.active_group.min(self.groups.len().saturating_sub(1))
+    }
+
     /// The group the wall is showing.
     pub fn group(&self) -> &Group {
-        &self.groups[self.active_group.min(GROUP_COUNT - 1)]
+        &self.groups[self.active_index()]
     }
 
     pub fn group_mut(&mut self) -> &mut Group {
-        let index = self.active_group.min(GROUP_COUNT - 1);
+        let index = self.active_index();
         &mut self.groups[index]
     }
 
     /// Whether an entry belongs to the group the wall is showing.
     pub fn in_active_group(&self, camera: &CameraSource) -> bool {
-        usize::from(camera.group) == self.active_group
+        usize::from(camera.group) == self.active_index()
     }
 
     /// Cameras of the active group that are enabled, in file order.
@@ -726,7 +731,7 @@ impl AppConfig {
         // The entry belongs to the group the wall is on: the same camera may sit
         // in another group as well, as an entry of its own, and neither is
         // touched by the other.
-        let active = self.active_group;
+        let active = self.active_index();
         camera.group = active as u8;
         let identity = camera.identity();
         if let Some(existing) = self
@@ -756,6 +761,41 @@ impl AppConfig {
         let before = self.cameras.len();
         self.cameras.retain(|camera| camera.id != id);
         self.cameras.len() != before
+    }
+
+    /// Adds a group at the end, and returns the index it landed on.
+    ///
+    /// `name` is what the settings page pre-fills for it; the viewer renames it.
+    /// The group starts empty, on the default grid.
+    pub fn add_group(&mut self, name: String) -> usize {
+        self.groups.push(Group { name, ..Group::default() });
+        self.groups.len() - 1
+    }
+
+    /// Removes a group and the cameras that belong to it.
+    ///
+    /// The built-in group - the first - is never removed: there is always one to
+    /// add a camera to. The cameras of the group go with it, since a camera
+    /// belongs to exactly one group and there is nowhere else to put it, and the
+    /// cameras of the groups after it are renumbered onto their new index.
+    /// Returns whether anything was removed.
+    pub fn remove_group(&mut self, index: usize) -> bool {
+        if index == 0 || index >= self.groups.len() {
+            return false;
+        }
+        self.groups.remove(index);
+        self.cameras.retain(|camera| usize::from(camera.group) != index);
+        for camera in &mut self.cameras {
+            if usize::from(camera.group) > index {
+                camera.group -= 1;
+            }
+        }
+        if self.active_group == index {
+            self.active_group = 0;
+        } else if self.active_group > index {
+            self.active_group -= 1;
+        }
+        true
     }
 
     /// Reorders the cameras of the active group to match `order`, a list of
@@ -806,8 +846,13 @@ impl AppConfig {
         if self.version == 0 {
             self.version = CONFIG_VERSION;
         }
-        self.active_group = self.active_group.min(GROUP_COUNT - 1);
-        for index in 0..GROUP_COUNT {
+        // There is always a group to add to: the built-in one is never removed,
+        // and a configuration that somehow lost every group gets it back.
+        if self.groups.is_empty() {
+            self.groups.push(Group::default());
+        }
+        self.active_group = self.active_index();
+        for index in 0..self.groups.len() {
             let count = self
                 .cameras
                 .iter()
@@ -941,12 +986,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut config = AppConfig {
-            groups: [
-                Group { layout: GridLayout::G3x3, page: 1, ..Group::default() },
-                Group::default(),
-                Group::default(),
-                Group::default(),
-            ],
+            groups: vec![Group { layout: GridLayout::G3x3, page: 1, ..Group::default() }],
             autostart: true,
             ..Default::default()
         };
@@ -970,11 +1010,12 @@ mod tests {
     fn the_wall_shows_the_active_group_only() {
         let mut config = AppConfig::default();
         config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
-        config.active_group = 2;
+        let second = config.add_group(String::new());
+        config.active_group = second;
         config.upsert_camera(CameraSource::new("gate", "rtsp://10.0.0.2/live"));
 
         assert_eq!(config.group_camera_count(0), 1);
-        assert_eq!(config.group_camera_count(2), 1);
+        assert_eq!(config.group_camera_count(second), 1);
         assert_eq!(config.active_cameras().len(), 1);
         assert_eq!(config.active_cameras()[0].name, "gate");
 
@@ -989,13 +1030,14 @@ mod tests {
     fn the_same_camera_can_be_in_two_groups() {
         let mut config = AppConfig::default();
         let first = config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
-        config.active_group = 1;
+        let group = config.add_group(String::new());
+        config.active_group = group;
         let second = config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
 
         assert_ne!(first, second);
         assert_eq!(config.cameras.len(), 2);
         assert_eq!(config.group_camera_count(0), 1);
-        assert_eq!(config.group_camera_count(1), 1);
+        assert_eq!(config.group_camera_count(group), 1);
 
         let again = config.upsert_camera(CameraSource::new("door renamed", "rtsp://10.0.0.1/live"));
         assert_eq!(again, second);
@@ -1009,8 +1051,8 @@ mod tests {
     fn a_flat_layout_folds_into_the_first_group() {
         let config = AppConfig::from_json(r#"{"version":1,"layout":"3x3"}"#).unwrap();
         assert_eq!(config.active_group, 0);
+        assert_eq!(config.groups.len(), 1, "the built-in group stands");
         assert_eq!(config.groups[0].layout, GridLayout::G3x3);
-        assert_eq!(config.groups[1].layout, GridLayout::default());
     }
 
     /// A group's order is its own: reordering one leaves the other groups' work
@@ -1020,7 +1062,8 @@ mod tests {
         let mut config = AppConfig::default();
         let a = config.upsert_camera(CameraSource::new("a", "rtsp://10.0.0.1/live"));
         let b = config.upsert_camera(CameraSource::new("b", "rtsp://10.0.0.2/live"));
-        config.active_group = 1;
+        let group = config.add_group(String::new());
+        config.active_group = group;
         let x = config.upsert_camera(CameraSource::new("x", "rtsp://10.0.0.3/live"));
 
         // The second group's single camera cannot move; the first group's two
@@ -1033,6 +1076,44 @@ mod tests {
         assert!(config.apply_order(&[b.clone(), a.clone()]));
         assert_eq!(config.cameras.iter().map(|camera| camera.name.clone()).collect::<Vec<_>>(), vec!["b", "a", "x"]);
         assert_eq!(config.find_camera(&x).unwrap().name, "x");
+    }
+
+    /// The built-in group stands; removing another takes its cameras with it and
+    /// renumbers the groups that followed.
+    #[test]
+    fn removing_a_group_takes_its_cameras_and_renumbers_the_rest() {
+        let mut config = AppConfig::default();
+        config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
+        let night = config.add_group("Night".to_string());
+        config.active_group = night;
+        config.upsert_camera(CameraSource::new("gate", "rtsp://10.0.0.2/live"));
+        let yard = config.add_group("Yard".to_string());
+        config.active_group = yard;
+        config.upsert_camera(CameraSource::new("shed", "rtsp://10.0.0.3/live"));
+
+        // The built-in group is never removed.
+        assert!(!config.remove_group(0));
+        assert_eq!(config.groups.len(), 3);
+
+        // Removing a group before the one on the wall pulls the active index
+        // down with it: the wall keeps showing the same group, and its cameras
+        // followed it onto the new index.
+        assert!(config.remove_group(night));
+        assert_eq!(config.groups.len(), 2);
+        assert_eq!(config.groups[1].name, "Yard");
+        assert_eq!(config.active_group, 1);
+        assert_eq!(config.active_cameras()[0].name, "shed");
+
+        // The removed group's camera went with it.
+        assert!(config.cameras.iter().all(|camera| camera.name != "gate"));
+        assert_eq!(config.cameras.len(), 2);
+
+        // Removing the group the wall is on falls back to the built-in one.
+        assert!(config.remove_group(1));
+        assert_eq!(config.groups.len(), 1);
+        assert_eq!(config.active_group, 0);
+        assert_eq!(config.cameras.len(), 1);
+        assert_eq!(config.active_cameras()[0].name, "door");
     }
 
     /// An older `config.json` written before the language field existed must

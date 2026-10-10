@@ -3,19 +3,21 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 1.3.9
+## 1.3.10
 
-Changes since 1.3.7. The wall can hold four camera groups and switch between
-them, and a few controls were cleared up.
+Changes since 1.3.7. The wall holds camera groups it switches between, and a few
+controls were cleared up.
 
 ### Groups
 
-- **Four camera groups, switched from the settings.** Each group is its own set
-  of cameras with its own grid layout and paging, so a two-camera view and a
-  nine-camera one need no re-arranging to move between. The group is a strip of
-  tabs at the top of the *Cameras* settings page, each showing its name and the
-  number of cameras it holds, and the field that names the one on the wall sits
-  at the foot of the page; an unnamed group reads as "Group N".
+- **Camera groups, switched from the settings.** Each group is its own set of
+  cameras with its own grid layout and paging, so a two-camera view and a
+  nine-camera one need no re-arranging to move between. They are a strip of tabs
+  at the top of the *Cameras* settings page, each showing its name and the number
+  of cameras it holds, with the button that adds one at the end. A new group goes
+  on the wall at once, named "New Group", with the focus in its name field; the
+  built-in first group is always there and cannot be removed, and removing
+  another takes its cameras with it.
 - **The groups are not deduplicated against each other.** The same camera may be
   an entry in more than one, added and removed independently - an import into a
   group only ever matches an entry of that group - and reordering likewise moves
