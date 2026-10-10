@@ -851,6 +851,16 @@ impl AppConfig {
         if self.groups.is_empty() {
             self.groups.push(Group::default());
         }
+        // A hand-edited document can name a group that is not there; such an
+        // entry would never be drawn, so it lands on the built-in group rather
+        // than disappearing. Nothing this application writes gets here: the
+        // groups a camera belongs to are renumbered when one is removed.
+        let last = self.groups.len() - 1;
+        for camera in &mut self.cameras {
+            if usize::from(camera.group) > last {
+                camera.group = 0;
+            }
+        }
         self.active_group = self.active_index();
         for index in 0..self.groups.len() {
             let count = self
@@ -1114,6 +1124,20 @@ mod tests {
         assert_eq!(config.active_group, 0);
         assert_eq!(config.cameras.len(), 1);
         assert_eq!(config.active_cameras()[0].name, "door");
+    }
+
+    /// A camera that names a group which is not there lands on the built-in one
+    /// rather than disappearing: nothing draws a group that does not exist.
+    #[test]
+    fn a_camera_in_a_group_that_is_not_there_lands_on_the_built_in_one() {
+        let data = r#"{"cameras":[{"id":"a","name":"a","host":"10.0.0.1",
+            "rtsp_main":"rtsp://10.0.0.1/live","group":5}]}"#;
+        let mut config: AppConfig = serde_json::from_str(data).unwrap();
+        config.normalize();
+
+        assert_eq!(config.groups.len(), 1);
+        assert_eq!(config.cameras[0].group, 0);
+        assert_eq!(config.active_cameras().len(), 1);
     }
 
     /// An older `config.json` written before the language field existed must

@@ -159,7 +159,7 @@ about-export-name = Export configuration
 about-import-name = Import configuration
 about-only-cameras = Only import the cameras
 about-only-cameras-name = Only import the cameras
-about-import-hint = Importing overwrites your current configuration. Check the box to import cameras only while keeping your viewer settings.
+about-import-hint = Importing overwrites your current configuration. Check the box to import the cameras and their groups only, keeping your viewer settings.
 about-import-hint-android = Export saves to Download/xgview/config.json. Import opens the system file picker. { about-import-hint }
 
 ## Toolbar

@@ -4185,7 +4185,17 @@ impl XgViewApp {
         let imported = AppConfig::from_json(data).map_err(|error| error.to_string())?;
         let count = imported.cameras.len();
         if self.import_cameras_only {
+            // The cameras come with the groups they live in. An entry records
+            // the group it belongs to, so bringing the cameras without the
+            // groups they name would leave the ones from the other groups in
+            // groups this installation does not have - and never drawn.
+            // Everything that is not the camera arrangement - the display, the
+            // sleep and blackout settings, the scan ranges - stays this
+            // viewer's own.
             self.config.cameras = imported.cameras;
+            self.config.groups = imported.groups;
+            self.config.active_group = imported.active_group;
+            self.load_group_view();
         } else {
             // Everything is taken from the document, but the path this
             // installation reads and writes stays its own - it is a field of

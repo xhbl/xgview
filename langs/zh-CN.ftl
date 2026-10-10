@@ -157,7 +157,7 @@ about-export-name = 导出配置
 about-import-name = 导入配置
 about-only-cameras = 仅导入摄像头
 about-only-cameras-name = 仅导入摄像头
-about-import-hint = 导入会覆盖当前配置。勾选此框仅导入摄像头，保留本查看器自身的设置。
+about-import-hint = 导入会覆盖当前配置。勾选此框仅导入摄像头及其分组，保留本查看器自身的设置。
 about-import-hint-android = 导出保存到 Download/xgview/config.json。导入会打开系统文件选择器。{ about-import-hint }
 
 ## 工具栏
