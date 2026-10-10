@@ -280,7 +280,7 @@ pub struct DiscoveryUi {
     /// What the last action reported, tagged with the tab it came from.
     ///
     /// One tab's status is not another's: the wording names the tab it belongs
-    /// to ("on the NAS", "in Frigate"), so it is only drawn on that tab.
+    /// to ("on Surveillance Station", "in Frigate"), so it is only drawn on that tab.
     pub error: Option<(Tab, String)>,
     pub message: Option<(Tab, String)>,
     pub manual: CameraDraft,
@@ -1020,7 +1020,8 @@ fn synology_tab(
             state.synology_busy = true;
             state.clear_status(Tab::Synology);
             // The list is about to be replaced; a stale one under a running
-            // fetch would invite a press on a camera the NAS may not return.
+            // fetch would invite a press on a camera Surveillance Station may not
+            // return.
             state.synology_cameras.clear();
             start_synology(handle, events, synology.clone());
         }
@@ -1032,8 +1033,9 @@ fn synology_tab(
 
     ui.separator();
 
-    // What the NAS answered, one row per camera: added on the viewer's press,
-    // like the ONVIF device list, rather than all at once as they arrive.
+    // What Surveillance Station answered, one row per camera: added on the
+    // viewer's press, like the ONVIF device list, rather than all at once as
+    // they arrive.
     ui.add_space(6.0);
     ui.label(RichText::new(monitor_i18n::tr_args("dialog-cameras-on-nas", &[("count", state.synology_cameras.len().into())])).strong());
     if state.synology_cameras.is_empty() {
@@ -1352,7 +1354,7 @@ fn go2rtc_tab(
 /// Draws what `tab` last reported.
 ///
 /// Another tab's status is not this one's: the wording names the tab it belongs
-/// to ("on the NAS", "in Frigate"), so anything tagged with another tab is left
+/// to ("on Surveillance Station", "in Frigate"), so anything tagged with another tab is left
 /// out rather than read where it does not apply.
 fn status_lines(ui: &mut egui::Ui, state: &DiscoveryUi, tab: Tab) {
     ui.add_space(8.0);

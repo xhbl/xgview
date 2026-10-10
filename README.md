@@ -89,7 +89,7 @@ the hand.
 | Language | English, Chinese, or any language added as an external `.ftl` pack; a partial pack falls back to English key by key |
 | Toolbar | An on-screen bar for the layout, paging, full screen, settings and adding cameras; usable with a mouse, touch or a remote |
 | Discovery | ONVIF WS-Discovery multicast probe, cross-subnet unicast scan, and a TCP 554/80/8000 fallback probe, followed by `GetProfiles` / `GetStreamUri` |
-| NVR | Synology Surveillance Station import via `SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera` |
+| Server import | Import every camera in one go from Synology Surveillance Station (`SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera`), Frigate (its API, each camera's main and sub stream paired by measured resolution) or a standalone go2rtc (`/api/streams`) |
 | Cameras | Add, edit, reorder and remove cameras; per-camera display aspect and RTSP transport (UDP when a relay damages the TCP interleaving) |
 | Start on boot | Windows `HKCU\...\Run` registry entry (or a scheduled task) and an Android `BOOT_COMPLETED` receiver |
 | Configuration | Everything persisted to a cross-platform `config.json`, with export / import |
@@ -295,7 +295,7 @@ Every change is written to `config.json` as you make it, so there is no separate
 
 ### Adding cameras
 
-Press `F2` to open the *add devices* window, which has three pages:
+Press `F2` to open the *add devices* window, which has five pages:
 
 1. **ONVIF / network scan** - broadcasts a WS-Discovery probe to
    `239.255.255.250:3702`, optionally scans one or more IP ranges with unicast
@@ -309,8 +309,19 @@ Press `F2` to open the *add devices* window, which has three pages:
    derive the sub stream, or fill both in by hand. The rules know the usual
    Hikvision, Dahua, Foscam, Axis and generic `/stream1` → `/stream2` and
    `/main` → `/sub` conventions; an HTTP or HTTPS MJPEG URL works here too.
-3. **Synology NAS** - sign in to a Surveillance Station host and import every
-   camera bound to the NAS in one go, main stream and sub stream both.
+3. **Synology SS** - sign in to a Surveillance Station host and import every
+   camera bound to it in one go, main stream and sub stream both.
+4. **Frigate** - sign in to Frigate's API (a JWT from `/api/login`; leave the
+   credentials empty for the unauthenticated internal port `5000`). It reads
+   `/api/config`, groups the cameras it defines with the go2rtc streams behind
+   them, pairs each camera's main and sub stream by measured resolution, and
+   lists any go2rtc stream no camera references on its own. A camera is imported
+   as `rtsp://<host>:8554/<stream>`, with the restream account read from
+   Frigate's go2rtc config (overridable in the tab).
+5. **go2rtc** - sign in to a standalone go2rtc's HTTP API (`/api/streams`) and
+   pick from a flat list of the streams it serves; each is added as a camera
+   whose sub stream is left empty. The API does not expose the RTSP account, so
+   it is entered by hand.
 
 Cameras are listed in the **Cameras** tab, where they can be renamed, reordered,
 disabled, and given a display aspect (original, stretch, 16:9, 4:3 or 1:1) and a

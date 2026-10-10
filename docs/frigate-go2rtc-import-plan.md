@@ -1,7 +1,9 @@
 # XGView server import: Frigate and go2rtc
 
-> Status: **plan** — nothing implemented yet. This is the scheme to build after
-> the 1.3 bump.
+> Status: **implemented** — landed in 1.3.2 (commit `8a73df5`); the dialog
+> conventions it follows were settled in `2a03898` and `1ec3fdb`. No release has
+> been built with it yet, and the two tabs have been exercised only by the tests
+> and the probes in §2 — **not clicked through in a running GUI**. See §10.
 > Shape: two **independent** tabs, "Frigate" and "go2rtc", sharing one
 > resolution probe and one `CameraSource` builder. Frigate is read through
 > Frigate's own API only; the go2rtc tab talks to go2rtc's API. Neither depends
@@ -141,7 +143,10 @@ Three independent account pairs in total, none assumed equal to another.
 | `discovery/go2rtc.rs` | new — `/api/streams` |
 | `discovery/mod.rs` | re-exports, `import_frigate`, `import_go2rtc` |
 | `monitor_gui/dialogs.rs` | `Tab::Frigate`, `Tab::Go2rtc` and their tab bodies |
+| `monitor_gui/app.rs` | the four new background events, and their toasts |
 | `langs/zh-CN.ftl`, `monitor_i18n/langs/en.ftl` | the tab/field/status strings |
+
+All of these are in place; `scripts/check-i18n.sh` keeps the packs honest.
 
 ## 8. Tests
 
@@ -164,3 +169,31 @@ Unit tests run on the host with no server:
   restream) is possible but costs an extra camera connection; not the default.
 - Frigate 0.18.0 / go2rtc 1.9.14 is what was measured; older versions may differ
   in the API shapes above.
+
+## 10. What the implementation settled
+
+Decisions the plan left open, taken while building it:
+
+- **Where an account is drawn.** In every tab the separator splits the *server
+  parameters* — address, scheme, and the **login** account, which is always
+  shown — from the *results*. An **ONVIF / RTSP stream** account belongs below
+  it, and only appears once there is a result to act on; before that there is
+  nothing to import with it. `credentials_row` in `dialogs.rs` is the one layout.
+- **No fold for credentials.** An earlier cut hid Frigate's restream override in
+  a collapsed "Advanced" section. Every tab now lays its accounts out the same
+  way, so it is plain.
+- **A status belongs to the tab that reported it.** `DiscoveryUi::message` and
+  `::error` are tagged with a `Tab`, so a result that names one server ("on
+  Surveillance Station") is not read on another, and a tab clears only its own.
+- **Toasts are the error channel.** Every `…Failed` toasts; the four completion
+  events toast an information line as well (`DiscoveryDone` now included, for
+  consistency with the three fetches).
+- **A failed request reports its cause.** `CoreError::Http` gathers the
+  `reqwest` source chain, because "error sending request for url (…)" on its own
+  says nothing actionable.
+
+Still open:
+
+- Click both tabs through in a running GUI; there is no display here.
+- Nothing is released with any of this: 1.3.4 is committed and unbuilt, and four
+  commits (1.3.1 → 1.3.4) are unpushed.

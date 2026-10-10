@@ -578,7 +578,7 @@ mod tests {
         picture
     }
 
-    /// One part, framed the way the NAS frames it.
+    /// One part, framed the way Surveillance Station frames it.
     fn part(boundary: &str, picture: &[u8]) -> Vec<u8> {
         let mut bytes = format!("--{boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", picture.len()).into_bytes();
         bytes.extend_from_slice(picture);

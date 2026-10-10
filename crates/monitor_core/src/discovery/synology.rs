@@ -230,8 +230,8 @@ impl SynologyClient {
         }
     }
 
-    /// Imports the NAS cameras as [`CameraSource`] entries, converting the
-    /// Surveillance Station stream URLs into RTSP URLs.
+    /// Imports the Surveillance Station cameras as [`CameraSource`] entries,
+    /// converting the Surveillance Station stream URLs into RTSP URLs.
     pub async fn import_cameras(&mut self) -> Result<Vec<CameraSource>> {
         let cameras = self.list_cameras().await?;
         let ids: Vec<i64> = cameras.iter().map(|camera| camera.id).collect();
@@ -259,7 +259,8 @@ impl SynologyClient {
                 )
             }
         };
-        // The sub stream is the NAS's MJPEG endpoint rather than an RTSP URL.
+        // The sub stream is Surveillance Station's MJPEG endpoint rather than an
+        // RTSP URL.
         // Synology transcodes it down to a low frame rate, which is what makes
         // it worth having: a tile of a grid only needs enough of a picture to
         // recognise a scene, and the full rate stream stays on the main channel.
@@ -291,7 +292,7 @@ impl SynologyClient {
         }
     }
 
-    /// Makes a stream URL returned by the NAS absolute.
+    /// Makes a stream URL returned by Surveillance Station absolute.
     fn absolute_stream_url(&self, url: &str) -> String {
         if url.starts_with("rtsp://") {
             url.to_string()
@@ -445,8 +446,8 @@ mod tests {
             Some("rtsp://syno:key123@nas.local:554/Sms=13.unicast"),
         );
         // The main stream stays on RTSP, and keeps the credentials the live view
-        // path embedded; the sub stream is the NAS's MJPEG endpoint, authorised
-        // by the stream key that path carried.
+        // path embedded; the sub stream is Surveillance Station's MJPEG endpoint,
+        // authorised by the stream key that path carried.
         assert_eq!(source.rtsp_main, "rtsp://nas.local:554/Sms=13.unicast");
         assert_eq!(source.username.as_deref(), Some("syno"));
         assert_eq!(source.password.as_deref(), Some("key123"));
