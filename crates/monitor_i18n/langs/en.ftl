@@ -133,7 +133,7 @@ cameras-move-down = Move down
 cameras-move-up = Move up
 cameras-move-camera-up = Move camera up
 cameras-move-camera-down = Move camera down
-camera-edit-title = Edit camera
+camera-edit-title = Edit camera ({ $group })
 camera-edit-sub-derived = sub stream url derived from the main url
 
 ## Remove confirmation
@@ -189,7 +189,7 @@ status-focus = focus #{ $index }
 status-no-focus = no focus
 
 ## Wall and exit
-wall-empty-title = No camera configured
+wall-empty-title = No camera configured ({ $group })
 wall-empty-hint = Click "+" or press F2 to scan for network cameras or manually add one
 exit-hint = Press BACK again to quit
 
@@ -305,7 +305,7 @@ grid-holding-last = holding last { $tag } frame
 grid-waiting-video = waiting for video
 
 ## Add devices dialog
-dialog-add-devices = Add devices
+dialog-add-devices = Add devices ({ $group })
 dialog-tab-onvif = ONVIF / network scan
 dialog-tab-manual = Manual entry
 dialog-tab-synology = Synology SS

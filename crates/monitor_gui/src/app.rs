@@ -2518,6 +2518,11 @@ impl XgViewApp {
             // focus the arrows gave it is dropped the moment it is drawn.
             ui.push_id("xgview-status-left", |ui| {
                 let info = self.scheduler.page_info();
+                // The group comes first, with no word in front of it: the name
+                // is the viewer's own, and everything after it - the live count,
+                // the page, the focus - is about that group.
+                ui.label(RichText::new(dialogs::group_name(&self.config, self.config.active_index())));
+                ui.separator();
                 // How many of the configured channels are actually on the wall,
                 // and how many there are to be: the one number that says at a
                 // glance whether anything is missing. It reads better down here
@@ -3373,7 +3378,7 @@ impl XgViewApp {
                 monitor_i18n::tr_args(
                     "settings-group-label",
                     &[
-                        ("name", group_name(&self.config, index).into()),
+                        ("name", dialogs::group_name(&self.config, index).into()),
                         ("count", self.config.group_camera_count(index).into()),
                     ],
                 )
@@ -3599,7 +3604,7 @@ impl XgViewApp {
         // button, for the group on the wall.
         ui.add_space(theme::space::M);
         let active = self.config.active_index();
-        let default_name = group_name(&self.config, active);
+        let default_name = dialogs::group_name(&self.config, active);
         let mut remove = false;
         let mut confirmed = None;
         ui.horizontal(|ui| {
@@ -3638,7 +3643,7 @@ impl XgViewApp {
             // The question is asked where the button was, rather than in a
             // window: the group is about to go with its cameras, and a line of
             // text says so without hiding what is being lost.
-            let name = group_name(&self.config, index);
+            let name = dialogs::group_name(&self.config, index);
             let count = self.config.group_camera_count(index);
             ui.horizontal_wrapped(|ui| {
                 ui.label(
@@ -3842,13 +3847,24 @@ impl XgViewApp {
         };
         let mut save = false;
         let mut cancel = false;
+        // The form edits the camera where it lives, so the heading names the
+        // group it is in - the way the add-devices window names its own.
+        let group = self
+            .config
+            .find_camera(&id)
+            .map(|camera| usize::from(camera.group))
+            .unwrap_or(0);
+        let group = dialogs::group_name(&self.config, group);
 
         // A modal: centred, and its backdrop swallows the presses that would
         // otherwise reach the panel it was opened from. It is left only by its
         // own buttons (or Back) - a press on the backdrop does nothing.
         egui::Modal::new(Id::new("xgview-edit-camera")).show(ctx, |ui| {
             ui.set_width(560.0);
-            ui.label(RichText::new(monitor_i18n::tr("camera-edit-title")).heading());
+            ui.label(
+                RichText::new(monitor_i18n::tr_args("camera-edit-title", &[("group", group.into())]))
+                    .heading(),
+            );
             ui.add_space(theme::space::S);
             self.nav.open("edit-body");
             let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft);
@@ -4313,7 +4329,10 @@ impl XgViewApp {
             grid::empty_state(
                 ui,
                 area,
-                &monitor_i18n::tr("wall-empty-title"),
+                &monitor_i18n::tr_args(
+                    "wall-empty-title",
+                    &[("group", dialogs::group_name(&self.config, self.config.active_index()).into())],
+                ),
                 &monitor_i18n::tr("wall-empty-hint"),
             );
             return;
@@ -4926,20 +4945,6 @@ impl eframe::App for XgViewApp {
         // egui's to move.
         #[cfg(target_os = "android")]
         ctx.output_mut(|output| output.ime = None);
-    }
-}
-
-/// What a group goes by: its own name, or - when it has none - the word the
-/// built-in first group goes by, and "Group N" for the ones after it.
-fn group_name(config: &AppConfig, index: usize) -> String {
-    let named = config.groups[index].name.trim();
-    if !named.is_empty() {
-        return named.to_string();
-    }
-    if index == 0 {
-        monitor_i18n::tr("settings-group-builtin")
-    } else {
-        monitor_i18n::tr_args("settings-group-default", &[("n", (index + 1).into())])
     }
 }
 

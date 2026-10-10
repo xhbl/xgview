@@ -560,7 +560,13 @@ pub fn add_devices_window(
     // dialog shut and the settings panel could be rearranged from under it.
     egui::Modal::new(egui::Id::new("xgview-add-devices")).show(ctx, |ui| {
         ui.set_width(620.0);
-        ui.label(RichText::new(monitor_i18n::tr("dialog-add-devices")).heading());
+        ui.label(
+            RichText::new(monitor_i18n::tr_args(
+                "dialog-add-devices",
+                &[("group", group_name(config, config.active_index()).into())],
+            ))
+            .heading(),
+        );
         ui.add_space(theme::space::S);
 
         if tab_strip(ui, state, nav) {
@@ -939,6 +945,26 @@ enum AddOffer {
     Update,
     /// The same camera, the same settings: nothing to add.
     Added,
+}
+
+/// What a group goes by: its own name, or - when it has none - the word the
+/// built-in first group goes by, and "Group N" for the ones after it.
+///
+/// The settings page, the add-devices dialog, the empty wall and the status bar
+/// all name the same group, so they name it the same way.
+pub fn group_name(config: &AppConfig, index: usize) -> String {
+    let Some(group) = config.groups.get(index) else {
+        return String::new();
+    };
+    let named = group.name.trim();
+    if !named.is_empty() {
+        return named.to_string();
+    }
+    if index == 0 {
+        monitor_i18n::tr("settings-group-builtin")
+    } else {
+        monitor_i18n::tr_args("settings-group-default", &[("n", (index + 1).into())])
+    }
 }
 
 /// Whether a listed camera is already on the wall, and whether importing it
