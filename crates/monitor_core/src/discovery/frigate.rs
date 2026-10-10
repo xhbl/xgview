@@ -27,7 +27,7 @@ use crate::error::{CoreError, Result};
 use crate::model::{CameraOrigin, CameraSource};
 use crate::rtsp::RtspUrl;
 
-use super::go2rtc::restream_url;
+use super::go2rtc::{port_of_listen, restream_url, RESTREAM_PORT};
 use super::probe::probe_resolution;
 
 /// How long one stream's resolution may take to read.
@@ -56,6 +56,9 @@ struct FrigateParts {
     leftovers: Vec<String>,
     /// The `:8554` account from `go2rtc.rtsp`, when Frigate sets one.
     rtsp: Option<(String, String)>,
+    /// The port the restream is served on, resolved from the tab, the input
+    /// paths and `go2rtc.rtsp.listen` - see [`parse_config`].
+    restream_port: u16,
 }
 
 /// What one Frigate import produced, as ready-to-add cameras.
@@ -151,14 +154,14 @@ impl FrigateClient {
     /// Fetches, groups, measures and builds the two groups of cameras.
     pub async fn import_cameras(&mut self) -> Result<FrigateImport> {
         let config = self.config_json().await?;
-        let parts = parse_config(&config, &self.config.host);
+        let parts = parse_config(&config, &self.config.host, self.config.rtsp_port);
         Ok(build_sources(&self.config, parts).await)
     }
 }
 
-/// Splits a `/api/config` body into the cameras, the leftover streams and the
-/// restream account.
-fn parse_config(config: &Value, host: &str) -> FrigateParts {
+/// Splits a `/api/config` body into the cameras, the leftover streams, the
+/// restream account and the port the restream is served on.
+fn parse_config(config: &Value, host: &str, override_port: Option<u16>) -> FrigateParts {
     let go2rtc = config.get("go2rtc");
     let streams = go2rtc
         .and_then(|go2rtc| go2rtc.get("streams"))
@@ -170,21 +173,27 @@ fn parse_config(config: &Value, host: &str) -> FrigateParts {
         let password = rtsp.get("password").and_then(Value::as_str).unwrap_or_default();
         (!user.is_empty()).then(|| (user.to_string(), password.to_string()))
     });
+    let table = config.get("cameras").and_then(Value::as_object);
+
+    // The restream port: the one entered on the tab, else the one a loopback
+    // input names (inside Frigate's container the restream is always loopback),
+    // else `go2rtc.rtsp.listen`, else 8554.
+    let path_port = table.and_then(|table| {
+        table.values().flat_map(input_paths).find_map(|path| loopback_port(&path))
+    });
+    let listen_port = go2rtc
+        .and_then(|go2rtc| go2rtc.get("rtsp"))
+        .and_then(|rtsp| rtsp.get("listen"))
+        .and_then(port_of_listen);
+    let restream_port = override_port.or(path_port).or(listen_port).unwrap_or(RESTREAM_PORT);
 
     let mut used: HashSet<String> = HashSet::new();
     let mut cameras = Vec::new();
-    if let Some(table) = config.get("cameras").and_then(Value::as_object) {
+    if let Some(table) = table {
         for (name, camera) in table {
-            let inputs = camera
-                .get("ffmpeg")
-                .and_then(|ffmpeg| ffmpeg.get("inputs"))
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
             let mut streams_of_camera: Vec<String> = Vec::new();
-            for input in &inputs {
-                let Some(path) = input.get("path").and_then(Value::as_str) else { continue };
-                if let Some(stream) = stream_for_path(path, host, &streams) {
+            for path in input_paths(camera) {
+                if let Some(stream) = stream_for_path(&path, host, restream_port, &streams) {
                     if !streams_of_camera.contains(&stream) {
                         streams_of_camera.push(stream);
                     }
@@ -203,19 +212,34 @@ fn parse_config(config: &Value, host: &str) -> FrigateParts {
         .cloned()
         .collect();
 
-    FrigateParts { cameras, leftovers, rtsp }
+    FrigateParts { cameras, leftovers, rtsp, restream_port }
+}
+
+/// The `ffmpeg.inputs[].path` of one camera, in order.
+fn input_paths(camera: &Value) -> Vec<String> {
+    camera
+        .get("ffmpeg")
+        .and_then(|ffmpeg| ffmpeg.get("inputs"))
+        .and_then(Value::as_array)
+        .map(|inputs| {
+            inputs
+                .iter()
+                .filter_map(|input| input.get("path").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The go2rtc stream an `ffmpeg` input path names, if any.
-fn stream_for_path(path: &str, host: &str, streams: &Map<String, Value>) -> Option<String> {
-    // Frigate's own restream, written either as the loopback the container uses
-    // or as the host itself.
+fn stream_for_path(path: &str, host: &str, port: u16, streams: &Map<String, Value>) -> Option<String> {
+    // Frigate's own restream: the loopback the container uses - any port, since
+    // a camera is never at the loopback - or the restream port on an address
+    // Frigate itself is reached at.
     if let Ok(uri) = RtspUrl::parse(path) {
         let path_host = uri.host().unwrap_or_default();
-        let is_frigate_go2rtc = uri.port() == Some(8554)
-            && (path_host.eq_ignore_ascii_case("127.0.0.1")
-                || path_host.eq_ignore_ascii_case("localhost")
-                || path_host.eq_ignore_ascii_case(host));
+        let is_frigate_go2rtc = is_loopback(path_host)
+            || (path_host.eq_ignore_ascii_case(host) && uri.port() == Some(port));
         if is_frigate_go2rtc {
             let name = uri.path().trim_matches('/');
             if !name.is_empty() {
@@ -235,6 +259,18 @@ fn stream_for_path(path: &str, host: &str, streams: &Map<String, Value>) -> Opti
             .any(|source| credentialless(source) == wanted)
             .then(|| name.clone())
     })
+}
+
+/// `127.0.0.1` / `localhost`, where a camera is never addressed but Frigate's
+/// own go2rtc always is.
+fn is_loopback(host: &str) -> bool {
+    host.eq_ignore_ascii_case("127.0.0.1") || host.eq_ignore_ascii_case("localhost")
+}
+
+/// The restream port a loopback input path names, if it is one.
+fn loopback_port(path: &str) -> Option<u16> {
+    let uri = RtspUrl::parse(path).ok()?;
+    is_loopback(uri.host().unwrap_or_default()).then(|| uri.port()).flatten()
 }
 
 /// A URL with its scheme and its credentials removed, for comparing a stream's
@@ -304,11 +340,12 @@ async fn probe_all(
 
 fn source_for(
     config: &FrigateConfig,
+    port: u16,
     name: &str,
     stream: &str,
     credentials: &Option<(String, String)>,
 ) -> CameraSource {
-    let mut source = CameraSource::new(name, restream_url(&config.host, stream));
+    let mut source = CameraSource::new(name, restream_url(&config.host, port, stream));
     source.host = config.host.clone();
     source.origin = CameraOrigin::Frigate;
     source.tags = vec!["frigate".to_string()];
@@ -321,11 +358,12 @@ fn source_for(
 
 async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateImport {
     let credentials = rtsp_credentials(config, parts.rtsp.clone());
+    let port = parts.restream_port;
 
     let urls: Vec<String> = parts
         .cameras
         .iter()
-        .flat_map(|camera| camera.streams.iter().map(|name| restream_url(&config.host, name)))
+        .flat_map(|camera| camera.streams.iter().map(|name| restream_url(&config.host, port, name)))
         .collect();
     let sizes = probe_all(&urls, credentials.clone()).await;
 
@@ -335,9 +373,9 @@ async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateIm
         let count = camera.streams.len();
         let (main, sub) = select_pair(&sizes[cursor..cursor + count]);
         cursor += count;
-        let mut source = source_for(config, &camera.name, &camera.streams[main], &credentials);
+        let mut source = source_for(config, port, &camera.name, &camera.streams[main], &credentials);
         if let Some(sub) = sub {
-            source.rtsp_sub = Some(restream_url(&config.host, &camera.streams[sub]));
+            source.rtsp_sub = Some(restream_url(&config.host, port, &camera.streams[sub]));
         }
         cameras.push(source);
     }
@@ -345,7 +383,7 @@ async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateIm
     let leftovers = parts
         .leftovers
         .iter()
-        .map(|name| source_for(config, name, name, &credentials))
+        .map(|name| source_for(config, port, name, name, &credentials))
         .collect();
 
     FrigateImport { cameras, leftovers }
@@ -393,7 +431,7 @@ mod tests {
         )
         .unwrap();
 
-        let parts = parse_config(&config, "192.168.17.88");
+        let parts = parse_config(&config, "192.168.17.88", None);
 
         assert_eq!(parts.cameras.len(), 2);
         let door = parts.cameras.iter().find(|camera| camera.name == "cam_front_door").unwrap();
@@ -405,6 +443,64 @@ mod tests {
         assert!(parts.leftovers.contains(&"cam_direct_1".to_string()));
         assert!(parts.leftovers.contains(&"cam_garage_1".to_string()));
         assert_eq!(parts.rtsp, Some(("admin".to_string(), "_sxtmmadmin1".to_string())));
+        // The loopback input names the restream port.
+        assert_eq!(parts.restream_port, 8554);
+    }
+
+    /// The restream port is not assumed to be 8554: a loopback input names it,
+    /// `go2rtc.rtsp.listen` names it, and only then does it default.
+    #[test]
+    fn the_restream_port_is_read_then_defaulted() {
+        let loopback: Value = serde_json::from_str(
+            r#"{
+              "cameras": { "cam_a": { "ffmpeg": { "inputs": [
+                { "path": "rtsp://127.0.0.1:9000/cam_a_1" }
+              ] } } },
+              "go2rtc": { "streams": { "cam_a_1": ["rtsp://*:*@192.168.27.40:88/videoMain"] } }
+            }"#,
+        )
+        .unwrap();
+        let parts = parse_config(&loopback, "192.168.17.88", None);
+        assert_eq!(parts.restream_port, 9000);
+        assert_eq!(parts.cameras[0].streams, vec!["cam_a_1"]);
+
+        // No loopback path: `rtsp.listen` is where the port comes from, and it
+        // is what lets a host-form input path be recognised at all.
+        let listen: Value = serde_json::from_str(
+            r#"{
+              "cameras": { "cam_a": { "ffmpeg": { "inputs": [
+                { "path": "rtsp://192.168.17.88:9000/cam_a_1" }
+              ] } } },
+              "go2rtc": {
+                "rtsp": { "listen": ":9000" },
+                "streams": { "cam_a_1": ["rtsp://*:*@192.168.27.40:88/videoMain"] }
+              }
+            }"#,
+        )
+        .unwrap();
+        let parts = parse_config(&listen, "192.168.17.88", None);
+        assert_eq!(parts.restream_port, 9000);
+        assert_eq!(parts.cameras[0].streams, vec!["cam_a_1"]);
+
+        // Nothing names a port: 8554.
+        let bare: Value = serde_json::from_str(r#"{"cameras":{},"go2rtc":{"streams":{}}}"#).unwrap();
+        assert_eq!(parse_config(&bare, "192.168.17.88", None).restream_port, 8554);
+    }
+
+    #[test]
+    fn the_entered_port_overrides_the_one_read() {
+        let config: Value = serde_json::from_str(
+            r#"{
+              "cameras": { "cam_a": { "ffmpeg": { "inputs": [
+                { "path": "rtsp://127.0.0.1:9000/cam_a_1" }
+              ] } } },
+              "go2rtc": { "streams": { "cam_a_1": ["rtsp://*:*@192.168.27.40:88/videoMain"] } }
+            }"#,
+        )
+        .unwrap();
+
+        let parts = parse_config(&config, "192.168.17.88", Some(8554));
+        assert_eq!(parts.restream_port, 8554);
     }
 
     #[test]

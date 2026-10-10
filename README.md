@@ -316,12 +316,13 @@ Press `F2` to open the *add devices* window, which has five pages:
    `/api/config`, groups the cameras it defines with the go2rtc streams behind
    them, pairs each camera's main and sub stream by measured resolution, and
    lists any go2rtc stream no camera references on its own. A camera is imported
-   as `rtsp://<host>:8554/<stream>`, with the restream account read from
-   Frigate's go2rtc config (overridable in the tab).
+   as `rtsp://<host>:<port>/<stream>`, with the restream port and account read
+   from Frigate's own configuration (both overridable in the tab).
 5. **go2rtc** - sign in to a standalone go2rtc's HTTP API (`/api/streams`) and
    pick from a flat list of the streams it serves; each is added as a camera
-   whose sub stream is left empty. The API does not expose the RTSP account, so
-   it is entered by hand.
+   whose sub stream is left empty. The restream port is read from go2rtc's
+   `rtsp.listen`, and the restream account from the configuration file it serves
+   at `/api/config` (entered by hand when that file is not available).
 
 Cameras are listed in the **Cameras** tab, where they can be renamed, reordered,
 disabled, and given a display aspect (original, stretch, 16:9, 4:3 or 1:1) and a

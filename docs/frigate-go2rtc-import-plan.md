@@ -119,8 +119,11 @@ For a standalone go2rtc. Fully independent of the Frigate tab.
   what to import. Each selected stream becomes a camera whose **main is that
   stream** and whose sub is left empty (the edit form can add one later; the
   resolution probe runs only to show the size in the list).
-- The RTSP account is not exposed by the API, so it is a pair of fields on the
-  tab; leave empty when go2rtc has no `rtsp:` account.
+- The RTSP account is not in `GET /api` (the rtsp module tags it `json:"-"`),
+  but `GET /api/config` serves the configuration file, which names it - so it is
+  a pair of fields on the tab that fall back to the file, and are left empty
+  when go2rtc has no `rtsp:` account. The restream port is read from
+  `rtsp.listen` (`GET /api`); a port entered on the tab overrides it.
 - `origin = Go2rtc`.
 
 ## 6. Credentials, summarised
@@ -128,7 +131,7 @@ For a standalone go2rtc. Fully independent of the Frigate tab.
 | Server | API | Streams (`:8554`) |
 |---|---|---|
 | Frigate | login user/password (JWT) on `:8971` | read from `go2rtc.rtsp`; field to override |
-| go2rtc | Basic `api:` user/password on `:1984` | `rtsp:` user/password, entered by the user |
+| go2rtc | Basic `api:` user/password on `:1984` | read from `/api/config`; field to override |
 
 Three independent account pairs in total, none assumed equal to another.
 
@@ -191,6 +194,18 @@ Decisions the plan left open, taken while building it:
 - **A failed request reports its cause.** `CoreError::Http` gathers the
   `reqwest` source chain, because "error sending request for url (…)" on its own
   says nothing actionable.
+- **The restream port is read, not assumed.** Both tabs started on a hard-coded
+  8554. The Frigate tab now takes the port from a go2rtc input path
+  (`127.0.0.1:<port>`, which a camera never is) or from `go2rtc.rtsp.listen`,
+  and the go2rtc tab from `rtsp.listen` on `/api`. A port entered on either tab
+  overrides what the server says, and 8554 is only the last resort.
+- **The restream account is read where the server exposes it.** Frigate's
+  `/api/config` carries `go2rtc.rtsp` in clear, and go2rtc's own `/api/config`
+  serves its configuration file, whose `rtsp:` block names the account that
+  `/api` hides with `json:"-"`. Both tabs fall back to their fields; the go2rtc
+  tab says so - in place of its "leave empty" hint - when the file could not be
+  read and the field is still empty, and a `${VAR}` only the server resolves is
+  not taken as an answer.
 
 Still open:
 

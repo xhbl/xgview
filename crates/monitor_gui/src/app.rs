@@ -1494,9 +1494,9 @@ impl XgViewApp {
                         ToastKind::Error,
                     ));
                 }
-                BackgroundEvent::Go2rtcDone(cameras) => {
+                BackgroundEvent::Go2rtcDone(import) => {
                     toast = Some((
-                        monitor_i18n::tr_args("toast-go2rtc-found", &[("count", cameras.len().into())]),
+                        monitor_i18n::tr_args("toast-go2rtc-found", &[("count", import.cameras.len().into())]),
                         ToastKind::Info,
                     ));
                 }

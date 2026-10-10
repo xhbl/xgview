@@ -12,8 +12,8 @@ use tokio::runtime::Handle;
 
 use monitor_core::config::{AppConfig, DiscoveryConfig, FrigateConfig, Go2rtcConfig, SynologyConfig};
 use monitor_core::discovery::{
-    DiscoveryEvent, DiscoveryReport, DiscoveryService, DiscoveredDevice, FrigateImport, PortHit,
-    ProgressCallback,
+    DiscoveryEvent, DiscoveryReport, DiscoveryService, DiscoveredDevice, FrigateImport, Go2rtcImport,
+    PortHit, ProgressCallback,
 };
 use monitor_core::model::CameraSource;
 
@@ -98,7 +98,7 @@ pub enum BackgroundEvent {
     /// The Frigate fetch failed.
     FrigateFailed(String),
     /// The go2rtc fetch returned its streams.
-    Go2rtcDone(Vec<CameraSource>),
+    Go2rtcDone(Go2rtcImport),
     /// The go2rtc fetch failed.
     Go2rtcFailed(String),
 }
@@ -305,11 +305,21 @@ pub struct DiscoveryUi {
     pub frigate_leftovers: Vec<CameraSource>,
     /// The Frigate port, as its text box shows it. See [`DiscoveryUi::synology_port`].
     pub frigate_port: Option<String>,
+    /// The Frigate restream port, as its text box shows it. Empty means the
+    /// port Frigate's own configuration names.
+    pub frigate_rtsp_port: Option<String>,
     pub go2rtc_busy: bool,
     /// Streams the last go2rtc fetch returned, waiting to be picked.
     pub go2rtc_cameras: Vec<CameraSource>,
     /// The go2rtc API port, as its text box shows it.
     pub go2rtc_port: Option<String>,
+    /// The go2rtc restream port, as its text box shows it. Empty means the
+    /// port `rtsp.listen` names.
+    pub go2rtc_rtsp_port: Option<String>,
+    /// Whether the last go2rtc fetch needed the restream account but could not
+    /// read one: go2rtc served no configuration file, so it has to be entered
+    /// by hand.
+    pub go2rtc_account_unread: bool,
 }
 
 impl DiscoveryUi {
@@ -423,13 +433,14 @@ impl DiscoveryUi {
                 self.frigate_busy = false;
                 self.fail(Tab::Frigate, monitor_i18n::tr_args("toast-frigate-failed", &[("error", error.into())]));
             }
-            BackgroundEvent::Go2rtcDone(cameras) => {
+            BackgroundEvent::Go2rtcDone(import) => {
                 self.go2rtc_busy = false;
                 self.note(Tab::Go2rtc, monitor_i18n::tr_args(
                     "dialog-go2rtc-count",
-                    &[("count", cameras.len().into())],
+                    &[("count", import.cameras.len().into())],
                 ));
-                self.go2rtc_cameras = cameras;
+                self.go2rtc_cameras = import.cameras;
+                self.go2rtc_account_unread = import.restream_account_unread;
             }
             BackgroundEvent::Go2rtcFailed(error) => {
                 self.go2rtc_busy = false;
@@ -520,8 +531,8 @@ pub fn start_go2rtc(handle: &Handle, events: &Sender<BackgroundEvent>, config: G
     let sender = events.clone();
     handle.spawn(async move {
         match service.import_go2rtc(config).await {
-            Ok(cameras) => {
-                let _ = sender.send(BackgroundEvent::Go2rtcDone(cameras));
+            Ok(import) => {
+                let _ = sender.send(BackgroundEvent::Go2rtcDone(import));
             }
             Err(err) => {
                 let _ = sender.send(BackgroundEvent::Go2rtcFailed(err.to_string()));
@@ -1089,6 +1100,30 @@ fn credentials_row(ui: &mut egui::Ui, nav: &mut Nav, username: &mut String, pass
     });
 }
 
+/// Draws the restream-port field: empty reads the port from the server.
+///
+/// The box keeps only digits; the port follows it while the text names a valid
+/// one, and is cleared - so the server decides - when the box is emptied.
+fn restream_port_row(ui: &mut egui::Ui, nav: &mut Nav, text: &mut String, port: &mut Option<u16>) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-port")).small());
+        let field = text_field(ui, nav, text, &monitor_i18n::tr("dialog-rtsp-port"), false, false, |s| {
+            egui::TextEdit::singleline(s).desired_width(70.0).char_limit(5)
+        });
+        text.retain(|c| c.is_ascii_digit());
+        *port = text.parse::<u16>().ok().filter(|port| *port >= 1);
+        if !field.has_focus() {
+            *text = port_text(*port);
+        }
+    });
+    ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-port-hint")).small().color(theme::TEXT_DIM));
+}
+
+/// A port as its text box shows it - empty when unset.
+fn port_text(port: Option<u16>) -> String {
+    port.map(|port| port.to_string()).unwrap_or_default()
+}
+
 /// Draws a list of fetched cameras, one row each, and reports the one whose
 /// button was pressed.
 ///
@@ -1215,6 +1250,12 @@ fn frigate_tab(
                 .small()
                 .color(theme::TEXT_DIM),
         );
+        restream_port_row(
+            ui,
+            nav,
+            state.frigate_rtsp_port.get_or_insert_with(|| port_text(frigate.rtsp_port)),
+            &mut frigate.rtsp_port,
+        );
     }
     if *frigate != before {
         changed = true;
@@ -1309,6 +1350,7 @@ fn go2rtc_tab(
             state.go2rtc_busy = true;
             state.clear_status(Tab::Go2rtc);
             state.go2rtc_cameras.clear();
+            state.go2rtc_account_unread = false;
             start_go2rtc(handle, events, go2rtc.clone());
         }
         if state.go2rtc_busy {
@@ -1320,12 +1362,26 @@ fn go2rtc_tab(
     ui.separator();
 
     // The RTSP account is a stream account, so it belongs below the separator
-    // with the streams. go2rtc's API does not serve it - it has to be entered
-    // by hand - and it only matters once there are streams to pull.
+    // with the streams. go2rtc's `/api` does not serve it, but `/api/config`
+    // serves the file it is set in, so it is only worth showing once there are
+    // streams to pull.
     if !state.go2rtc_cameras.is_empty() {
         ui.add_space(6.0);
         ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-credentials")).small());
         credentials_row(ui, nav, &mut go2rtc.rtsp_username, &mut go2rtc.rtsp_password);
+        // The file could not be read, so there is nothing to fall back to: say
+        // so rather than invite the account to be left empty.
+        if state.go2rtc_account_unread && go2rtc.rtsp_username.trim().is_empty() {
+            ui.label(RichText::new(monitor_i18n::tr("dialog-go2rtc-config-unread")).small().color(theme::WARN));
+        } else {
+            ui.label(RichText::new(monitor_i18n::tr("dialog-go2rtc-rtsp-hint")).small().color(theme::TEXT_DIM));
+        }
+        restream_port_row(
+            ui,
+            nav,
+            state.go2rtc_rtsp_port.get_or_insert_with(|| port_text(go2rtc.rtsp_port)),
+            &mut go2rtc.rtsp_port,
+        );
     }
     if *go2rtc != before {
         changed = true;

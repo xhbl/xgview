@@ -194,6 +194,10 @@ pub struct FrigateConfig {
     /// `go2rtc.rtsp` in the configuration Frigate serves.
     pub rtsp_username: String,
     pub rtsp_password: String,
+    /// The restream port. Left unset, it is read from Frigate's own
+    /// configuration - the port a go2rtc input path names, or
+    /// `go2rtc.rtsp.listen` - and only then falls back to 8554.
+    pub rtsp_port: Option<u16>,
 }
 
 impl Default for FrigateConfig {
@@ -206,6 +210,7 @@ impl Default for FrigateConfig {
             password: String::new(),
             rtsp_username: String::new(),
             rtsp_password: String::new(),
+            rtsp_port: None,
         }
     }
 }
@@ -231,8 +236,9 @@ impl FrigateConfig {
 /// Standalone go2rtc connection settings.
 ///
 /// go2rtc has two accounts that are not the same one: the HTTP API's (`api:`
-/// in `go2rtc.yaml`, HTTP Basic) and the `:8554` RTSP restream's (`rtsp:`). The
-/// API does not expose the RTSP account, so both are entered here.
+/// in `go2rtc.yaml`, HTTP Basic) and the `:8554` RTSP restream's (`rtsp:`). Its
+/// `/api` hides the latter, but `/api/config` serves the configuration file, so
+/// the restream account can be read from there when one is left empty here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Go2rtcConfig {
@@ -244,9 +250,12 @@ pub struct Go2rtcConfig {
     pub api_username: String,
     pub api_password: String,
     /// Credentials for the `:8554` restream, when go2rtc's `rtsp:` section sets
-    /// them.
+    /// them. Left empty, they are read from `/api/config`.
     pub rtsp_username: String,
     pub rtsp_password: String,
+    /// The restream port. Left unset, `rtsp.listen` is read from go2rtc's
+    /// `/api`, and only then does it fall back to 8554.
+    pub rtsp_port: Option<u16>,
 }
 
 impl Default for Go2rtcConfig {
@@ -259,6 +268,7 @@ impl Default for Go2rtcConfig {
             api_password: String::new(),
             rtsp_username: String::new(),
             rtsp_password: String::new(),
+            rtsp_port: None,
         }
     }
 }

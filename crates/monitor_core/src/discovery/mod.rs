@@ -31,7 +31,7 @@ use crate::error::{CoreError, Result};
 use crate::model::{CameraOrigin, CameraSource};
 
 pub use frigate::{FrigateClient, FrigateImport};
-pub use go2rtc::Go2rtcClient;
+pub use go2rtc::{Go2rtcClient, Go2rtcImport};
 pub use iprange::{parse_targets, parse_targets_multi};
 pub use onvif::{
     DeviceInformation, OnvifClient, OnvifCredentials, OnvifProfile, ResolvedDevice,
@@ -230,7 +230,7 @@ impl DiscoveryService {
     }
 
     /// Imports the streams of a standalone go2rtc, one camera per stream.
-    pub async fn import_go2rtc(&self, config: Go2rtcConfig) -> Result<Vec<CameraSource>> {
+    pub async fn import_go2rtc(&self, config: Go2rtcConfig) -> Result<Go2rtcImport> {
         Go2rtcClient::new(config)?.import_cameras().await
     }
 }
