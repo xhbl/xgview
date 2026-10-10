@@ -132,7 +132,8 @@ cameras-move-down = 下移
 cameras-move-up = 上移
 cameras-move-camera-up = 上移摄像头
 cameras-move-camera-down = 下移摄像头
-camera-edit-title = 编辑摄像头 ({ $group })
+camera-edit-title = 编辑摄像头
+camera-edit-title-group = { camera-edit-title } ({ $group })
 camera-edit-sub-derived = 辅码流地址由主码流推断
 
 ## 移除确认
@@ -188,7 +189,8 @@ status-focus = 焦点 #{ $index }
 status-no-focus = 无焦点
 
 ## 大屏与退出
-wall-empty-title = 未配置摄像头 ({ $group })
+wall-empty-title = 未配置摄像头
+wall-empty-title-group = { wall-empty-title } ({ $group })
 wall-empty-hint = 点击 "+" 或按 F2 扫描网络摄像头或手动添加
 exit-hint = 再按一次返回退出
 
@@ -293,7 +295,8 @@ grid-holding-last = 保留上一 { $tag } 帧
 grid-waiting-video = 等待画面
 
 ## 添加设备对话框
-dialog-add-devices = 添加设备 ({ $group })
+dialog-add-devices = 添加设备
+dialog-add-devices-group = { dialog-add-devices } ({ $group })
 dialog-tab-onvif = ONVIF / 网络扫描
 dialog-tab-manual = 手动输入
 dialog-tab-synology = Synology SS

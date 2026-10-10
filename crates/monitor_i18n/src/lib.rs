@@ -417,6 +417,21 @@ mod tests {
         assert_eq!(current_language(), DEFAULT_LANGUAGE);
     }
 
+    /// The heading that names a group is written as the plain one by reference,
+    /// so the words live in one place and the reference resolves.
+    #[test]
+    fn a_heading_with_a_group_is_built_from_the_plain_one() {
+        init(DEFAULT_LANGUAGE, &[]);
+        assert_eq!(
+            tr_args("dialog-add-devices-group", &[("group", "Night".into())]),
+            "Add devices (Night)"
+        );
+        assert_eq!(
+            tr_args("camera-edit-title-group", &[("group", "Night".into())]),
+            "Edit camera (Night)"
+        );
+    }
+
     #[test]
     fn zh_cn_pack_parses_and_has_keys() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");

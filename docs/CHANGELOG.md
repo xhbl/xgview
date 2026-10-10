@@ -23,6 +23,9 @@ controls were cleared up.
   an entry in more than one, added and removed independently - an import into a
   group only ever matches an entry of that group - and reordering likewise moves
   only the group being looked at.
+- Which group is on the wall is named in the status bar, on an empty wall and in
+  the dialogs that add and edit cameras - and left out of all of them when the
+  built-in group is the only one there is.
 - **Each group keeps its view.** The layout, the page and the focused tile are
   held per group and restored when it is switched to.
 - `--print-schedule` prints every group in turn, each with its name, camera

@@ -561,9 +561,11 @@ pub fn add_devices_window(
     egui::Modal::new(egui::Id::new("xgview-add-devices")).show(ctx, |ui| {
         ui.set_width(620.0);
         ui.label(
-            RichText::new(monitor_i18n::tr_args(
+            RichText::new(group_heading(
+                config,
+                config.active_index(),
                 "dialog-add-devices",
-                &[("group", group_name(config, config.active_index()).into())],
+                "dialog-add-devices-group",
             ))
             .heading(),
         );
@@ -964,6 +966,18 @@ pub fn group_name(config: &AppConfig, index: usize) -> String {
         monitor_i18n::tr("settings-group-builtin")
     } else {
         monitor_i18n::tr_args("settings-group-default", &[("n", (index + 1).into())])
+    }
+}
+
+/// The heading of something that belongs to one group: `named` with the group
+/// in it when there is more than one group to tell apart, and `plain` when the
+/// built-in one is all there is - with a single group the word would be on every
+/// heading and tell the viewer nothing.
+pub fn group_heading(config: &AppConfig, index: usize, plain: &str, named: &str) -> String {
+    if config.groups.len() > 1 {
+        monitor_i18n::tr_args(named, &[("group", group_name(config, index).into())])
+    } else {
+        monitor_i18n::tr(plain)
     }
 }
 
