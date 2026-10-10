@@ -334,7 +334,7 @@ dialog-fetch-cameras = 获取摄像头
 dialog-contacting-nas = 正在联系 Surveillance Station…
 dialog-cameras-on-nas = Surveillance Station 上的摄像头（{ $count }）
 dialog-nothing-fetched = 尚未获取
-dialog-sub-tag = 辅流
+dialog-sub-tag = 含辅流
 dialog-already-added = 已添加，设置不同
 dialog-updated-msg = 已更新 { $name }
 dialog-added-msg = 已添加 { $name }
@@ -362,12 +362,6 @@ dialog-go2rtc-count = { $count } 条流——选择要添加的
 dialog-starting = 启动中…
 dialog-an-rtsp-url-required = 需要 RTSP 地址
 dialog-url-must-start = 地址必须以 rtsp:// 开头
-
-## 发现摘要（设置面板）
-summary-multicast = 多播
-summary-unicast = 单播（{ $count } 个网段）
-summary-tcp = tcp { $ports }
-summary-disabled = 已禁用
 
 ## 浮层输入框（Android 软键盘）
 input-select-all = 全选

@@ -347,7 +347,7 @@ dialog-fetch-cameras = Fetch cameras
 dialog-contacting-nas = contacting Surveillance Station…
 dialog-cameras-on-nas = Cameras on Surveillance Station ({ $count })
 dialog-nothing-fetched = nothing fetched yet
-dialog-sub-tag = sub
+dialog-sub-tag = w/sub
 dialog-already-added = already added, settings differ
 dialog-updated-msg = updated { $name }
 dialog-added-msg = added { $name }
@@ -375,12 +375,6 @@ dialog-go2rtc-count = { $count } stream(s) - pick the ones to add
 dialog-starting = starting…
 dialog-an-rtsp-url-required = an RTSP url is required
 dialog-url-must-start = the url must start with rtsp://
-
-## Discovery summary (settings panel)
-summary-multicast = multicast
-summary-unicast = unicast ({ $count } ranges)
-summary-tcp = tcp { $ports }
-summary-disabled = disabled
 
 ## Floating input box (Android soft keyboard)
 input-select-all = Select all

@@ -2894,10 +2894,10 @@ impl XgViewApp {
 
         // The switch comes first because everything below it is inert while it
         // is off, and the rows are greyed rather than hidden so that what is
-        // being switched off can still be read. Named above itself, the way the
-        // other tabs name a block and put its controls under it.
-        ui.label(RichText::new(monitor_i18n::tr("settings-blackout-on")).strong());
-        let switch = ui.checkbox(&mut blackout.enabled, "");
+        // being switched off can still be read. It carries its own label, as
+        // every other standalone setting does - a bare box under a heading left
+        // it unclear what it switched.
+        let switch = ui.checkbox(&mut blackout.enabled, monitor_i18n::tr("settings-blackout-on"));
         nav.item(&switch);
         dirty |= switch.changed();
 
@@ -3332,7 +3332,6 @@ impl XgViewApp {
                 self.discovery.tab = Tab::Manual;
             }
         });
-        ui.label(RichText::new(dialogs::discovery_summary(&self.config.discovery)).small().color(theme::TEXT_DIM));
         ui.add_space(theme::space::S);
 
         let mut toggle: Option<(usize, bool)> = None;

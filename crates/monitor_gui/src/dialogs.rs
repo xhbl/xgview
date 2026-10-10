@@ -18,6 +18,7 @@ use monitor_core::discovery::{
 use monitor_core::model::CameraSource;
 
 use crate::controls;
+use crate::icons::{self, Icon};
 use crate::nav::{Kind, Nav};
 use crate::theme;
 
@@ -652,9 +653,12 @@ fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) -> bool 
         let slot = TABS.iter().position(|(value, _)| *value == state.tab).unwrap_or(0);
         state.focus_anchor = Some(ids[slot]);
         nav.set_entry("dialog-tabs", ids[slot]);
-        // The way out, at the far end of the strip.
+        // The way out, at the far end of the strip: a cross rather than the
+        // word, which stays as its tooltip - the only place it can still be
+        // read.
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if nav.tracked(ui.button(monitor_i18n::tr("dialog-close"))).clicked() {
+            let close_button = icons::button(ui, Icon::Close, false, &monitor_i18n::tr("dialog-close"));
+            if nav.tracked(close_button).clicked() {
                 close = true;
             }
         });
@@ -1424,24 +1428,4 @@ fn status_lines(ui: &mut egui::Ui, state: &DiscoveryUi, tab: Tab) {
 
 fn grid_spinner(ui: &mut egui::Ui) {
     ui.add(egui::Spinner::new().size(16.0));
-}
-
-/// Small helper used by the settings panel to describe a discovery configuration.
-pub fn discovery_summary(config: &DiscoveryConfig) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if config.broadcast {
-        parts.push(monitor_i18n::tr("summary-multicast"));
-    }
-    if config.subnet_scan {
-        parts.push(monitor_i18n::tr_args("summary-unicast", &[("count", config.ip_ranges.len().into())]));
-    }
-    if config.tcp_probe {
-        let ports = config.tcp_ports.iter().map(u16::to_string).collect::<Vec<_>>().join("/");
-        parts.push(monitor_i18n::tr_args("summary-tcp", &[("ports", ports.into())]));
-    }
-    if parts.is_empty() {
-        monitor_i18n::tr("summary-disabled")
-    } else {
-        parts.join(" + ")
-    }
 }

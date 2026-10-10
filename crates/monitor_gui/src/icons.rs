@@ -35,6 +35,8 @@ pub enum Icon {
     Up,
     /// Move something down a list: a chevron pointing down.
     Down,
+    /// Close something: two strokes crossed.
+    Close,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -198,6 +200,10 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke) {
         }
         Icon::Down => {
             painter.add(line(&[at(0.22, 0.38), at(0.50, 0.66), at(0.78, 0.38)]));
+        }
+        Icon::Close => {
+            painter.add(line(&[at(0.16, 0.16), at(0.84, 0.84)]));
+            painter.add(line(&[at(0.84, 0.16), at(0.16, 0.84)]));
         }
     }
 }
