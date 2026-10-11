@@ -85,7 +85,7 @@ the hand.
 | Codecs | H.264 and MJPEG are decoded and displayed. HEVC is recognised in the stream description but has no decoder yet, so an HEVC-only camera shows no picture |
 | Transports | RTSP over TCP (interleaved, the default) or UDP, chosen per camera; HTTP / HTTPS MJPEG (`multipart/x-mixed-replace`) cameras are supported too |
 | On-screen display | Each tile corner independently shows one of: none, name, number + name, stream, transport + rate, frame rate + decoder, size + shape, or all statistics |
-| Power management | Keeps the machine awake and/or the screen on while the wall is up (`SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` on Linux, `WakeLock` + `FLAG_KEEP_SCREEN_ON` on Android); both switches default on |
+| Power management | Keeps the machine awake and/or the screen on while the wall is up (`SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` + the desktop's D-Bus inhibit on Linux, `WakeLock` + `FLAG_KEEP_SCREEN_ON` on Android); both switches default on |
 | Blackout | Scheduled periods, per weekday, in which the wall blanks itself and parks every channel - sockets closed, decoders dropped; input brings it back for a chosen number of minutes |
 | Language | English, Chinese, or any language added as an external `.ftl` pack; a partial pack falls back to English key by key |
 | Toolbar | An on-screen bar for the layout, paging, full screen, settings and adding cameras; usable with a mouse, touch or a remote |
@@ -370,8 +370,8 @@ The **System** tab can hold the machine awake and keep the screen on while the
 wall is up, so a display that would blank or a system that would sleep does not
 cut the streams. Both switches are on by default; keeping the screen on also
 keeps the system awake. The mechanism per platform is `SetThreadExecutionState`
-(Windows), `caffeinate` (macOS), `systemd-inhibit` (Linux) and `WakeLock` +
-`FLAG_KEEP_SCREEN_ON` (Android), and is shown in the panel. The request is
+(Windows), `caffeinate` (macOS), `systemd-inhibit` + D-Bus (Linux) and `WakeLock`
++ `FLAG_KEEP_SCREEN_ON` (Android), and is shown in the panel. The request is
 released when the viewer exits; see
 [docs/power-management-plan.md](docs/power-management-plan.md).
 

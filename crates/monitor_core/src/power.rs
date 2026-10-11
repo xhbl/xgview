@@ -4,7 +4,7 @@
 //! |----------|-----------|--------------|
 //! | Windows  | `SetThreadExecutionState(ES_CONTINUOUS \| ES_SYSTEM_REQUIRED \| ES_DISPLAY_REQUIRED)` | `ES_SYSTEM_REQUIRED` alone |
 //! | macOS    | `caffeinate -i -d` child process | `-i` alone |
-//! | Linux    | `systemd-inhibit --what=sleep:idle` child process | `--what=sleep` alone |
+//! | Linux    | `systemd-inhibit --what=sleep:idle` child process, and the desktop's own display inhibit over D-Bus | `--what=sleep` alone |
 //! | Android  | `FLAG_KEEP_SCREEN_ON` + `PARTIAL_WAKE_LOCK` | the same |
 //!
 //! A monitoring wall is meant to stay on: a machine that sleeps, or blanks its
@@ -26,6 +26,15 @@
 //! settings panel is drawn, and until it does [`is_supported`] answers `false`
 //! there, so the panel greys the switches out instead of offering two that do
 //! nothing.
+//!
+//! On Linux the display half has a second authority, and it is the one that
+//! matters on a desktop. `systemd-inhibit`'s `idle` is *logind's* idea of idle;
+//! the blanking `xset q` reports as DPMS is a timer inside the X server, set by
+//! the desktop's power manager, and it never asks logind. Such a desktop - XFCE
+//! is the one this was found on - blanks the screen whatever logind was told.
+//! Those desktops answer for it themselves over the session bus, so the
+//! services that own the screen are asked as well ([`session`]), and both are
+//! held together.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -115,7 +124,7 @@ pub fn mechanism() -> &'static str {
     }
     #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
     {
-        "power-mechanism-systemd"
+        "power-mechanism-linux"
     }
     #[cfg(target_os = "android")]
     {
@@ -249,6 +258,187 @@ mod holder {
     }
 }
 
+/// The desktop's own display inhibitor, held over the session bus.
+///
+/// See the module note for why this stands beside the logind child: they are
+/// two different authorities, and on a desktop the one that really blanks the
+/// screen is this one. Nothing here is fatal when it fails - a session with no
+/// bus, or with no service that owns the screen, is not a broken machine - so
+/// each failure is logged and the logind half stands on its own.
+///
+/// **The inhibit lives exactly as long as the connection that asked for it.**
+/// That is why it is a live connection and not a one-shot `dbus-send`: a tool
+/// that has already exited has, by the bus's own rule, given the inhibit back.
+/// It is also why a crash needs no cleanup - the bus releases it.
+#[cfg(target_os = "linux")]
+mod session {
+    use std::time::Duration;
+
+    use zbus::blocking::connection::Builder;
+    use zbus::blocking::Connection;
+
+    use super::*;
+
+    /// How long a bus call may take before it is given up on.
+    ///
+    /// Reached from the settings panel, which draws every frame. A toggle makes
+    /// a handful of calls - an ownership probe and an inhibit per service - so
+    /// the worst case is a few seconds, where zbus's default would let a bus
+    /// that has stopped answering hold the interface indefinitely.
+    const CALL_TIMEOUT: Duration = Duration::from_secs(1);
+
+    /// One service that can be asked to leave the screen alone.
+    struct Inhibitor {
+        /// The well known name the service owns on the session bus.
+        service: &'static str,
+        /// The object its `Inhibit` is on.
+        path: &'static str,
+        /// The interface its `Inhibit` is on. Not always the service's own name:
+        /// the power management one puts it on a sub-interface.
+        interface: &'static str,
+    }
+
+    /// The services asked - all of them, not the first that answers.
+    ///
+    /// They are the two halves a desktop can have: the screensaver daemon and
+    /// the power manager. A session may have one, the other, or both, and they
+    /// do not overlap - on XFCE with no screensaver daemon it is the power
+    /// manager that blanks the screen, and only its `Inhibit` reaches that.
+    const INHIBITORS: &[Inhibitor] = &[
+        Inhibitor {
+            service: "org.freedesktop.ScreenSaver",
+            path: "/org/freedesktop/ScreenSaver",
+            interface: "org.freedesktop.ScreenSaver",
+        },
+        Inhibitor {
+            service: "org.freedesktop.PowerManagement",
+            path: "/org/freedesktop/PowerManagement/Inhibit",
+            interface: "org.freedesktop.PowerManagement.Inhibit",
+        },
+    ];
+
+    /// The connection the inhibitors are held on, and the cookies to give back.
+    struct Held {
+        connection: Connection,
+        cookies: Vec<(&'static Inhibitor, u32)>,
+    }
+
+    /// `None` while nothing is held.
+    static HELD: Mutex<Option<Held>> = Mutex::new(None);
+
+    /// Asks every service that is there, and returns the ones that took it.
+    pub(super) fn hold(application: &str, reason: &str) -> Vec<&'static str> {
+        release();
+        let connection = match Builder::session()
+            .and_then(|builder| builder.method_timeout(CALL_TIMEOUT).build())
+        {
+            Ok(connection) => connection,
+            Err(err) => {
+                tracing::debug!(
+                    target: "xgview::power",
+                    %err,
+                    "no session bus, so no desktop display inhibitor"
+                );
+                return Vec::new();
+            }
+        };
+
+        let mut cookies = Vec::new();
+        let mut taken = Vec::new();
+        for inhibitor in INHIBITORS {
+            // Asked before the call, so that a service which is not running is
+            // left that way: the bus would otherwise start it, and starting a
+            // screensaver daemon in order to stop the screen blanking is the
+            // wrong way round.
+            match owns(&connection, inhibitor.service) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(err) => {
+                    tracing::debug!(
+                        target: "xgview::power",
+                        service = inhibitor.service,
+                        %err,
+                        "cannot ask the bus who owns a name"
+                    );
+                    continue;
+                }
+            }
+            match inhibit(&connection, inhibitor, application, reason) {
+                Ok(cookie) => {
+                    // A cookie is only how a caller names the inhibit again
+                    // sooner; an implementation that returns none has still
+                    // taken it, and dropping the connection releases it either
+                    // way.
+                    if let Some(cookie) = cookie {
+                        cookies.push((inhibitor, cookie));
+                    }
+                    taken.push(inhibitor.service);
+                }
+                Err(err) => tracing::debug!(
+                    target: "xgview::power",
+                    service = inhibitor.service,
+                    %err,
+                    "the display inhibitor was refused"
+                ),
+            }
+        }
+
+        if taken.is_empty() {
+            // Nothing was taken, so the connection has no reason to live.
+            return Vec::new();
+        }
+        *lock(&HELD) = Some(Held { connection, cookies });
+        taken
+    }
+
+    /// Gives the inhibitors back.
+    pub(super) fn release() {
+        let Some(Held { connection, cookies }) = lock(&HELD).take() else {
+            return;
+        };
+        for (inhibitor, cookie) in cookies {
+            let _ = connection.call_method(
+                Some(inhibitor.service),
+                inhibitor.path,
+                Some(inhibitor.interface),
+                "UnInhibit",
+                &(cookie,),
+            );
+        }
+        // Whatever the calls above did not take back, dropping the connection
+        // does.
+    }
+
+    /// Whether a name is owned on the bus right now.
+    fn owns(connection: &Connection, service: &str) -> zbus::Result<bool> {
+        let reply = connection.call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "NameHasOwner",
+            &(service,),
+        )?;
+        Ok(reply.body().deserialize().unwrap_or(false))
+    }
+
+    /// Asks one service for a display inhibit, and its cookie when it gives one.
+    fn inhibit(
+        connection: &Connection,
+        inhibitor: &Inhibitor,
+        application: &str,
+        reason: &str,
+    ) -> zbus::Result<Option<u32>> {
+        let reply = connection.call_method(
+            Some(inhibitor.service),
+            inhibitor.path,
+            Some(inhibitor.interface),
+            "Inhibit",
+            &(application, reason),
+        )?;
+        Ok(reply.body().deserialize().ok())
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use super::*;
@@ -378,6 +568,14 @@ mod imp {
 
     use super::*;
 
+    /// What the machine is told the request is for. It is the same sentence to
+    /// `systemd-inhibit`'s `--why` and to the buses' `Inhibit` arguments.
+    const WHY: &str = "XGView is showing a surveillance wall";
+
+    /// The name the desktop's services report as the requester.
+    #[cfg(target_os = "linux")]
+    const APPLICATION: &str = "XGView";
+
     /// The lock holder, `None` while nothing is held.
     static CHILD: Mutex<Option<Child>> = Mutex::new(None);
 
@@ -419,6 +617,10 @@ mod imp {
 
     pub(super) fn apply(wanted: Applied) -> Result<()> {
         stop();
+        // Whatever a previous state held on the bus is given back before the new
+        // one is asked for, so the two are never both in place.
+        #[cfg(target_os = "linux")]
+        session::release();
         let what = match (wanted.system, wanted.display) {
             (true, true) => "sleep:idle",
             (true, false) => "sleep",
@@ -433,7 +635,7 @@ mod imp {
             .arg("--mode")
             .arg("block")
             .arg("--why")
-            .arg("XGView is showing a surveillance wall")
+            .arg(WHY)
             // The lock lives exactly as long as this command does, so the
             // command has to be one that does not finish. `cat` is the
             // conventional choice and it is wrong: it reads standard input, and
@@ -444,12 +646,24 @@ mod imp {
             .arg("infinity");
         let child = holder::watch(&mut command, "systemd-inhibit")?;
         *lock(&CHILD) = Some(child);
+        // The child is the whole of the system half, and of the display half
+        // only where logind's idle is what blanks the screen. On a desktop the
+        // blanking is the desktop's own, so its services are asked as well - and
+        // one that declines is only a service this session does not have (see
+        // `session`).
+        #[cfg(target_os = "linux")]
+        if wanted.display {
+            let asked = session::hold(APPLICATION, WHY);
+            tracing::info!(target: "xgview::power", services = ?asked, "desktop display inhibitors");
+        }
         tracing::info!(target: "xgview::power", what, "inhibitor started");
         Ok(())
     }
 
     pub(super) fn release() -> Result<()> {
         stop();
+        #[cfg(target_os = "linux")]
+        session::release();
         Ok(())
     }
 

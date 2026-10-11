@@ -17,7 +17,7 @@ platform, and the settings panel offers it.
 |---|---|---|
 | Windows | `SetThreadExecutionState(ES_CONTINUOUS \| ES_SYSTEM_REQUIRED)` | `+ ES_DISPLAY_REQUIRED` |
 | macOS | `caffeinate -i` | `+ -d`, with `-w <pid>` |
-| Linux | `systemd-inhibit --what=sleep … sleep infinity` | `+ :idle` |
+| Linux | `systemd-inhibit --what=sleep … sleep infinity` | `+ :idle`, and a session-bus inhibit held on the desktop's own services (§5.3) |
 | Android | `PARTIAL_WAKE_LOCK` | `FLAG_KEEP_SCREEN_ON` |
 
 Two facts shape the whole design:
@@ -54,7 +54,9 @@ only** and does not stop the system suspending:
 
 - Windows: `ES_DISPLAY_REQUIRED` only resets the display idle timer.
 - macOS: `caffeinate -d` is display-only.
-- Linux: `systemd-inhibit --what=idle` blocks idle (blank/screensaver) only.
+- Linux: `systemd-inhibit --what=idle` blocks *logind's* idle only. It does not
+  reach the desktop's own blanking - X11 DPMS is a timer inside the X server -
+  which is what the session-bus inhibit is for (§5.3).
 
 So "screen on, sleep allowed" is a strange state: the screen is lit, but the
 system may still suspend underneath it - and a suspension takes the screen with
@@ -117,6 +119,7 @@ power.rs
 ├── #[cfg(windows)]                    mod imp — SetThreadExecutionState FFI
 ├── #[cfg(target_os = "macos")]        mod imp — caffeinate child process
 ├── #[cfg(all(unix, not(any(macos, android))))] mod imp — systemd-inhibit child process
+├── #[cfg(target_os = "linux")]        mod session — the desktop's own display inhibit, over the session bus
 ├── #[cfg(all(unix, not(android)))]    mod holder — spawn a child and check it did not exit at once
 ├── #[cfg(target_os = "android")]      mod imp — forward to the AndroidRequest the GUI installed
 └── #[cfg(not(any(windows, unix)))]    mod imp — CoreError::unsupported
@@ -257,8 +260,11 @@ use of external commands (the `xdg-open` in `monitor_gui`):
 
 ### 5.3 Linux
 
-`systemd-inhibit` holds the lock: **the inhibition lasts as long as the child
-lives and is released the moment it exits.**
+Two mechanisms, because the two halves answer to different authorities.
+`systemd-inhibit` holds the logind lock - **the inhibition lasts as long as the
+child lives and is released the moment it exits** - which is the whole of the
+system half, and of the display half only where logind's idle is what blanks the
+screen. The desktop's own blanking is reached over the session bus instead.
 
 - `prevent_sleep` → `--what=sleep`; `keep_screen_on` → add `:idle`.
 - Full command:
@@ -275,9 +281,25 @@ systemd-inhibit --what=sleep:idle --mode=block --why="XGView is showing a survei
 - **Crash residue**: `systemd-inhibit` has no macOS `-w` equivalent, so if the
   main process is killed the holder survives and holds the lock until log out.
   This is a known residue, documented rather than fixed.
+- **The display half is asked of the desktop, over the session bus.** The `idle`
+  above is *logind's* idle. The blanking `xset q` reports as DPMS is a timer
+  inside the X server, set by the desktop's power manager, and it never asks
+  logind: on XFCE the screen blanked with the inhibitor held. So
+  `org.freedesktop.ScreenSaver` and `org.freedesktop.PowerManagement` are both
+  asked - the power manager's `Inhibit` (at
+  `/org/freedesktop/PowerManagement/Inhibit`, on the sub-interface of the same
+  name) being the one XFCE answers. All of them, not the first that answers: a
+  session may have one, the other or both, and they do not overlap. None of it is
+  fatal when absent - a session with no bus, or with neither service, is not a
+  broken machine - so each failure is logged and the logind half stands alone.
+- **That inhibit is a live connection, and nothing shorter will do.** The bus
+  releases an inhibit when the connection that asked for it goes away, which is
+  also what makes a crash clean up after itself. A one-shot `dbus-send` has
+  already exited by the time the lock could be used, so it would hold nothing -
+  the same reason `cat` is wrong for the child above, one layer out.
 - **No `xdg-screensaver` fallback**: it is an X11 tool that does nothing in a
-  Wayland session, and a switch that silently does nothing is worse than one the
-  panel greys out.
+  Wayland session, and it would only repeat what the session-bus inhibit already
+  reaches on the desktops that implement it.
 - **`is_supported()` must actually ask, not just look on `PATH`.** Where there
   is no seat, logind refuses outright: `systemd-inhibit` exits 1 with `Failed to
   inhibit: Access denied` (containers and WSL sessions do this). So support is

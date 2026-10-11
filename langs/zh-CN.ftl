@@ -282,7 +282,7 @@ autostart-mechanism-android = Android BootReceiver（RECEIVE_BOOT_COMPLETED）
 autostart-mechanism-unsupported = 不支持
 power-mechanism-windows = SetThreadExecutionState
 power-mechanism-caffeinate = caffeinate
-power-mechanism-systemd = systemd-inhibit
+power-mechanism-linux = systemd-inhibit + D-Bus
 power-mechanism-android = WakeLock + FLAG_KEEP_SCREEN_ON
 power-mechanism-unsupported = 不支持
 

@@ -38,5 +38,12 @@ winreg = "0.52"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The desktop's own way of being asked to leave the screen alone: X11 DPMS is
+# not driven by logind, so `systemd-inhibit --what=idle` cannot reach it (see
+# `power`). Held as a live session-bus connection, so a pure Rust client rather
+# than a C library the package would have to carry.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+
 [dev-dependencies]
 tempfile = "3"
