@@ -202,6 +202,10 @@ fn cjk_faces(language: &str) -> Vec<Candidate> {
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase();
+    // Only the Windows, Linux and Android arms below tell the two Chinese
+    // scripts apart; macOS keeps one face for both (PingFang covers them), so
+    // the flag would have no reader there. Computed only where an arm asks.
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
     let traditional = {
         let lower = language.to_ascii_lowercase();
         lower.contains("hant") || lower.starts_with("zh-tw") || lower.starts_with("zh-hk") || lower.starts_with("zh-mo")
