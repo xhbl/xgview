@@ -163,10 +163,18 @@ third party dependency - and stages it with the executable, which finds the
 seven shared libraries beside it through an `$ORIGIN` rpath:
 `target/xgview-<version>-linux-x86_64.tar.gz` unpacks and runs. The FFmpeg
 release is pinned by `FFMPEG_VERSION` (8.0.3, so `avcodec-62`; Windows' vcpkg
-builds `avcodec-63` - the crate carries a branch for each). The trim costs two
-things, both visible in the script: the x86 SIMD paths need `nasm` on the build
-machine, and hardware decoding needs `--enable-vaapi` and its `libva` headers -
-without either, the package decodes on the CPU alone.
+builds `avcodec-63` - the crate carries a branch for each). The trim costs one
+thing, visible in the script: the x86 SIMD paths need `nasm` on the build
+machine. Hardware decoding is compiled in - `--enable-vaapi --enable-ffnvcodec
+--enable-nvdec`, the VAAPI and NVDEC hwaccels for H.264 - and it adds two build
+inputs of its own. `nv-codec-headers` is headers only: FFmpeg reaches CUDA
+through its dynlink shims, so libcuda and libnvcuvid are opened at run time and
+nothing NVIDIA-specific travels in the package. `libva` is the other way round:
+VAAPI is *linked*, so libva 2.22.0 is built from source and staged beside the
+executable with `libva-drm`, or the program would not start on a machine that
+never installed it. The bundled libva has the VA driver directories compiled in
+(`XGVIEW_VA_DRIVER_DIRS`), because the driver is the machine's own and this
+libva has to be told where that machine keeps it.
 
 The glibc floor is the build machine's, which is what `--docker` is for: a
 release is built by running the same script inside a `rockylinux:8` container,
@@ -335,7 +343,7 @@ What WSL2 does have is `/dev/dxg`, and the NVIDIA driver for it brings
 `libnvcuvid.so`, `libnvidia-encode.so` and `libcuda.so`. With those on the linker
 path and a libavutil built with the CUDA hwcontext, `cuda` opens and decodes for
 real. Two checks before believing it: `nvidia-smi -L` answering, and
-`strings libavutil.so | grep nvcuda` finding the loader.
+`strings libavutil.so | grep libcuda.so.1` finding the loader.
 
 `h264_cuvid` living in libavcodec is not the same fact. That is a decoder in its
 own right; `cuda` is the hwaccel, and a build can carry either without the other.

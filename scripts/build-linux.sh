@@ -37,11 +37,12 @@
 #
 # Prerequisites
 # -------------
-#   Host build: rustc / cargo, gcc, make, pkg-config and libclang (bindgen) on
-#   the build machine. `curl` and `tar` fetch and unpack the FFmpeg source on
-#   the first run. `nasm` (or `yasm`) is optional: without it FFmpeg is
-#   configured with `--disable-x86asm` and software decoding loses its hand
-#   written SIMD paths.
+#   Host build: rustc / cargo, gcc, make, pkg-config, libclang (bindgen), and
+#   meson, ninja and the libdrm development files on the build machine - the
+#   last three build the bundled libva. `curl` and `tar` fetch and unpack the
+#   FFmpeg, libva and nv-codec-headers sources on the first run. `nasm` (or
+#   `yasm`) is optional: without it FFmpeg is configured with `--disable-x86asm`
+#   and software decoding loses its hand written SIMD paths.
 #
 #   Container build: a working docker. Under WSL the linux distribution's socket
 #   can be unreachable while the Windows client (`docker.exe`) still is; point
@@ -64,6 +65,11 @@ Usage: scripts/build-linux.sh [--docker] [--docker-image IMAGE]
 
 Environment:
   FFMPEG_VERSION           FFmpeg source to build   (default 8.0.3)
+  LIBVA_VERSION            libva source to build    (default 2.22.0)
+  NVCODEC_VERSION          nv-codec-headers tag     (default n13.1.15.0)
+  XGVIEW_VA_DRIVER_DIRS    VA driver directories compiled into the bundled
+                           libva, colon separated (default: the usual
+                           multiarch, lib64 and lib locations)
   XGVIEW_OUT_ROOT          output root              (default <repo>/target)
   XGVIEW_DOCKER            docker client            (default docker)
   XGVIEW_DOCKER_IMAGE_TAG  container image tag      (default derived)
@@ -95,6 +101,21 @@ done
 # itself is versioned for.
 FFMPEG_VERSION="${FFMPEG_VERSION:-8.0.3}"
 
+# The two inputs hardware decoding needs at build time, both built here rather
+# than taken from the distribution. libva is what VAAPI (Intel/AMD) asks for;
+# nv-codec-headers is the header-only release FFmpeg's CUDA/NVDEC support is
+# written against.
+LIBVA_VERSION="${LIBVA_VERSION:-2.22.0}"
+NVCODEC_VERSION="${NVCODEC_VERSION:-n13.1.15.0}"
+
+# Where the VA-API drivers live on the machines the package is meant for, as
+# the default search path of the bundled libva. The package carries its own
+# libva (see `build_hwcodecs`), and that copy has to name the directories the
+# *running* machine keeps its drivers in: the distribution's libva was compiled
+# for its own layout, this one cannot know it. libva splits the path on ':',
+# and `LIBVA_DRIVERS_PATH` in the environment still overrides it.
+VA_DRIVER_DIRS="${XGVIEW_VA_DRIVER_DIRS:-/usr/lib/x86_64-linux-gnu/dri:/usr/lib64/dri:/usr/lib/dri:/usr/lib/aarch64-linux-gnu/dri}"
+
 # Everything the build writes goes under here: the FFmpeg working tree, cargo's
 # target directory, the staging folder and the tarball. On the host that is
 # `target/`, unchanged. The container run points it at the mounted volume,
@@ -107,6 +128,10 @@ WORK_DIR="$OUT_ROOT/ffmpeg-linux-$ARCH"
 SRC_DIR="$WORK_DIR/build"
 PREFIX="$WORK_DIR/prefix"
 DL_DIR="$WORK_DIR/downloads"
+# libva and the nv-codec-headers each get their own prefix: both are inputs to
+# the FFmpeg configure step, and neither belongs in the FFmpeg tree itself.
+LIBVA_PREFIX="$WORK_DIR/libva"
+NVCODEC_PREFIX="$WORK_DIR/nvcodec"
 
 # Cargo would otherwise default to `target/`; routing it through OUT_ROOT lets
 # the container keep its objects in the volume (`/work/out`) while the host
@@ -148,6 +173,82 @@ PACKAGE_NAME="xgview-$VERSION-linux-$ARCH"
 PACKAGE_DIR="$OUT_ROOT/$PACKAGE_NAME"
 TARBALL="$OUT_ROOT/$PACKAGE_NAME.tar.gz"
 
+# ---------------------------------------------------------------- hwcodecs
+#
+# What hardware decoding needs at build time, beyond the decoders themselves.
+# Two inputs, and the two could hardly behave more differently at run time:
+#
+#   nv-codec-headers - the header-only release FFmpeg's CUDA and NVDEC support
+#     is written against. Nothing here is linked: libcuda and libnvcuvid are
+#     opened at run time through FFmpeg's dynlink shims, so an NVIDIA-less
+#     machine does not fail to start - the CUDA device simply does not open and
+#     the next device on the list, or the CPU, takes the stream. The CUDA
+#     toolkit is not needed to build this.
+#
+#   libva - the opposite case. VAAPI is not opened at run time: libavutil and
+#     libavcodec link it, so a machine without it cannot start the program at
+#     all. A distribution's libva is therefore not reused - one is built here
+#     and travels in the package (see `stage_package`). Its driver search path
+#     is compiled in as `VA_DRIVER_DIRS`, because the driver is the target's
+#     and this libva has to be told where that machine keeps it.
+build_hwcodecs() {
+    local marker="$WORK_DIR/.xgview-hwcodecs-version" build_id
+    build_id="$NVCODEC_VERSION $LIBVA_VERSION"
+    if [[ -f "$NVCODEC_PREFIX/lib/pkgconfig/ffnvcodec.pc" \
+          && -f "$LIBVA_PREFIX/lib/libva.so" \
+          && -f "$marker" && "$(cat "$marker")" == "$build_id" ]]; then
+        echo "==> hardware codec inputs already built ($build_id, skipping)"
+        return 0
+    fi
+
+    local tool
+    for tool in meson ninja curl tar; do
+        command -v "$tool" >/dev/null 2>&1 \
+            || { echo "error: '$tool' is required to build libva" >&2; exit 1; }
+    done
+    pkg-config --exists libdrm \
+        || { echo "error: the libdrm development files are required to build libva" >&2; exit 1; }
+    mkdir -p "$DL_DIR" "$SRC_DIR" "$NVCODEC_PREFIX" "$LIBVA_PREFIX"
+
+    # The headers are the whole install, so unpacking to the source tree and
+    # running `make install` with a prefix is the entire build.
+    local nv_tar="$DL_DIR/nv-codec-headers-$NVCODEC_VERSION.tar.gz"
+    if [[ ! -f "$nv_tar" ]]; then
+        echo "    downloading nv-codec-headers $NVCODEC_VERSION"
+        curl -fL --retry 3 -o "$nv_tar" \
+            "https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/$NVCODEC_VERSION.tar.gz"
+    fi
+    local nv_src="$SRC_DIR/nv-codec-headers-$NVCODEC_VERSION"
+    [[ -d "$nv_src" ]] || tar -xzf "$nv_tar" -C "$SRC_DIR"
+    echo "==> nv-codec-headers $NVCODEC_VERSION into $NVCODEC_PREFIX"
+    make -C "$nv_src" install PREFIX="$NVCODEC_PREFIX" >/dev/null
+
+    # libva, DRM only. The X11, GLX and Wayland displays are not wanted: the
+    # decoder reaches the device through a DRM render node, which is the path
+    # that works headless as well as on a desktop, and each of the other three
+    # would add a library to carry and a display protocol to depend on.
+    local va_tar="$DL_DIR/libva-$LIBVA_VERSION.tar.gz"
+    if [[ ! -f "$va_tar" ]]; then
+        echo "    downloading libva $LIBVA_VERSION"
+        curl -fL --retry 3 -o "$va_tar" \
+            "https://github.com/intel/libva/archive/refs/tags/$LIBVA_VERSION.tar.gz"
+    fi
+    local va_src="$SRC_DIR/libva-$LIBVA_VERSION"
+    [[ -d "$va_src" ]] || tar -xzf "$va_tar" -C "$SRC_DIR"
+    echo "==> libva $LIBVA_VERSION into $LIBVA_PREFIX"
+    rm -rf "$va_src/build"
+    (
+        cd "$va_src"
+        meson setup build --prefix="$LIBVA_PREFIX" --libdir=lib --buildtype=release \
+            -Dwith_x11=no -Dwith_glx=no -Dwith_wayland=no -Dwith_win32=no \
+            -Ddriverdir="$VA_DRIVER_DIRS" >/dev/null
+        ninja -C build >/dev/null
+        ninja -C build install >/dev/null
+    )
+
+    printf '%s\n' "$build_id" > "$marker"
+}
+
 # ---------------------------------------------------------------- ffmpeg
 #
 # Only the decoders the pipeline can ask for are compiled in. `monitor_codec`
@@ -167,6 +268,11 @@ TARBALL="$OUT_ROOT/$PACKAGE_NAME.tar.gz"
 # something actually reaches, but all seven travel in the package - they are
 # ours, they are tiny next to the decoding library, and keeping the set whole
 # means a future feature that does reach one of them still finds it.
+#
+# Hardware decoding is compiled in as well: the VAAPI and CUDA hwaccels for
+# H.264, the only codec the pipeline ever asks a device for (`prefer_hardware`
+# is H.264 alone, crates/monitor_core/src/pipeline.rs). The headers and the
+# libva both need come from `build_hwcodecs`; the CUDA side links nothing.
 build_ffmpeg() {
     # nasm/yasm assemble the hand written x86 SIMD. Without one of them
     # `--disable-x86asm` is required and software decoding loses those paths;
@@ -179,7 +285,7 @@ build_ffmpeg() {
         asm_flags+=(--disable-x86asm)
         asm_state="noasm"
     fi
-    build_id="$FFMPEG_VERSION $asm_state"
+    build_id="$FFMPEG_VERSION $asm_state libva-$LIBVA_VERSION $NVCODEC_VERSION"
 
     if [[ -f "$PREFIX/lib/libavcodec.so" && -f "$PREFIX/include/libavcodec/avcodec.h" \
           && -f "$PREFIX/.xgview-ffmpeg-version" \
@@ -210,6 +316,10 @@ build_ffmpeg() {
     # A source tree left half configured by an interrupted run would otherwise
     # keep stale decisions.
     make distclean >/dev/null 2>&1 || true
+    # The configure step finds libva and the codec headers through pkg-config,
+    # so both prefixes go on the search path (build_cargo inherits it and
+    # appends the FFmpeg tree's own).
+    export PKG_CONFIG_PATH="$NVCODEC_PREFIX/lib/pkgconfig:$LIBVA_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
     ./configure \
         --prefix="$PREFIX" \
         --enable-shared \
@@ -224,6 +334,11 @@ build_ffmpeg() {
         --enable-decoder=hevc \
         --enable-decoder=mjpeg \
         --enable-decoder=mpeg4 \
+        --enable-vaapi \
+        --enable-ffnvcodec \
+        --enable-nvdec \
+        --enable-hwaccel=h264_vaapi \
+        --enable-hwaccel=h264_nvdec \
         "${asm_flags[@]}"
     make -j"$(nproc 2>/dev/null || echo 4)"
     make install
@@ -248,6 +363,12 @@ build_cargo() {
     # RPATH is inherited by the dependencies, which is what lets libavformat find
     # libavcodec find libavutil, all side by side, without an LD_LIBRARY_PATH.
     RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN -C link-arg=-Wl,--disable-new-dtags'
+    # libavutil and libavcodec are linked against libva, so the linker has to
+    # reach that copy while resolving their undefined symbols. It sits in its own
+    # prefix, which is not on the default search path - without this the link
+    # would succeed only where a distribution libva happens to be installed, and
+    # fail in the container, which has none.
+    RUSTFLAGS="$RUSTFLAGS -C link-arg=-L$LIBVA_PREFIX/lib"
     export RUSTFLAGS
     cargo build --release --locked -p xgview
 }
@@ -268,6 +389,18 @@ stage_package() {
     for library in libavcodec libavdevice libavfilter libavformat libavutil \
                    libswresample libswscale; do
         for file in "$PREFIX/lib/$library".so*; do
+            [[ -e "$file" ]] || continue
+            cp -a "$file" "$PACKAGE_DIR/"
+            echo "    $(basename "$file")"
+        done
+    done
+
+    # libva travels for the same reason the FFmpeg libraries do, only more so:
+    # VAAPI is linked rather than opened at run time, so a package without it
+    # would not start at all on a machine that never installed libva. This is
+    # the copy `build_hwcodecs` built, not the distribution's.
+    for library in libva libva-drm; do
+        for file in "$LIBVA_PREFIX/lib/$library".so*; do
             [[ -e "$file" ]] || continue
             cp -a "$file" "$PACKAGE_DIR/"
             echo "    $(basename "$file")"
@@ -340,22 +473,28 @@ verify_package() {
     printf '%s\n' "$ldd_output"
 
     local status=0
-    # Every FFmpeg library the executable loads has to come from the copy beside
-    # it and not from anything installed. Which of the seven actually appear is up
-    # to the linker: the ones nothing reaches (libavfilter, libswresample on this
-    # build) are dropped, and that is fine - they exist for the link, not for the
-    # program. libavcodec is the one that must be there, or nothing decodes.
+    # Every library of ours the executable loads has to come from the copy
+    # beside it and not from anything installed. Which of the seven FFmpeg
+    # libraries actually appear is up to the linker: the ones nothing reaches
+    # (libavfilter, libswresample on this build) are dropped, and that is fine -
+    # they exist for the link, not for the program. libavcodec is the one that
+    # must be there, or nothing decodes; libva is what VAAPI needs and is linked
+    # rather than opened, so it has to resolve locally too.
     local foreign
     foreign="$(printf '%s\n' "$ldd_output" \
-        | awk '$1 ~ /^lib(av|sw)[a-z]+\.so/ { print }' \
+        | awk '$1 ~ /^lib(av[a-z]*|sw[a-z]*|va|va-drm)\.so/ { print }' \
         | grep -F -v "$unpacked/" || true)"
     if [[ -n "$foreign" ]]; then
-        echo "FAIL: FFmpeg libraries that do not resolve into the unpacked folder:" >&2
+        echo "FAIL: libraries that do not resolve into the unpacked folder:" >&2
         printf '%s\n' "$foreign" >&2
         status=1
     fi
     if ! printf '%s\n' "$ldd_output" | grep -q "^[[:space:]]*libavcodec\.so"; then
         echo "FAIL: libavcodec is not linked at all" >&2
+        status=1
+    fi
+    if ! printf '%s\n' "$ldd_output" | grep -q "^[[:space:]]*libva\.so"; then
+        echo "FAIL: libva is not linked: VAAPI hardware decoding would be absent" >&2
         status=1
     fi
 
@@ -490,6 +629,9 @@ run_container_build() {
         -e XGVIEW_OUT_ROOT=/work/out \
         -e CARGO_HOME=/work/cargo \
         -e FFMPEG_VERSION="$FFMPEG_VERSION" \
+        -e LIBVA_VERSION="$LIBVA_VERSION" \
+        -e NVCODEC_VERSION="$NVCODEC_VERSION" \
+        -e XGVIEW_VA_DRIVER_DIRS="$VA_DRIVER_DIRS" \
         "$image" \
         bash /repo/scripts/build-linux.sh
 
@@ -508,6 +650,7 @@ echo "==> XGView $VERSION, linux-$ARCH"
 if [[ -n "${XGVIEW_BUILD_IN_CONTAINER:-}" ]]; then
     echo "    (container build, output root $OUT_ROOT)"
     mkdir -p "$OUT_ROOT"
+    build_hwcodecs
     build_ffmpeg
     build_cargo
     stage_package
@@ -519,6 +662,7 @@ if [[ "$DOCKER_MODE" -eq 1 ]]; then
     run_container_build
 else
     mkdir -p "$OUT_ROOT"
+    build_hwcodecs
     build_ffmpeg
     build_cargo
     stage_package
