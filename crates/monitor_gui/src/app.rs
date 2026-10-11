@@ -468,6 +468,10 @@ pub struct XgViewApp {
     /// What the window's place among the others is doing, apart from the
     /// setting; see [`crate::window`].
     on_top: OnTop,
+    /// A second launch asked this window to come forward, and the focus still
+    /// has to be sent: it goes a frame after the restore that precedes it. See
+    /// [`crate::instance`].
+    come_forward: bool,
     /// Whether the top and bottom bars are on screen right now.
     chrome: Chrome,
     /// The controls of the top bar with the rectangle each was drawn in, left to
@@ -707,6 +711,7 @@ impl XgViewApp {
             fullscreen_pending: fullscreen,
             windowed_size_pending: fullscreen && crate::FULLSCREEN_ON_THE_BUILDER,
             on_top: OnTop::default(),
+            come_forward: false,
             chrome: Chrome {
                 visible: true,
                 last_input: Instant::now(),
@@ -3161,6 +3166,21 @@ impl XgViewApp {
                 .color(theme::TEXT_DIM),
             );
             ui.label(RichText::new(&self.autostart.detail).small().color(theme::TEXT_DIM));
+
+            ui.add_space(theme::space::S);
+            // One window per configuration: a second launch of this
+            // configuration asks the one that is up to come forward instead of
+            // opening another wall over it. It takes effect on the next launch,
+            // like the start-up full screen above, and the lock follows the
+            // configuration file rather than the installation - see
+            // `crate::instance`.
+            let mut one_instance = self.config.single_instance;
+            let only = ui.checkbox(&mut one_instance, monitor_i18n::tr("settings-single-instance"));
+            self.nav.item(&only);
+            if only.changed() {
+                self.config.single_instance = one_instance;
+                dirty = true;
+            }
         }
         #[cfg(target_os = "android")]
         self.android_boot_section(ui);
@@ -4624,6 +4644,18 @@ impl eframe::App for XgViewApp {
         // `native_options` in `lib.rs`.
         if std::mem::take(&mut self.fullscreen_pending) {
             self.set_fullscreen(ctx, true);
+        }
+
+        // Another launch asked this window to come forward. The restore is a
+        // command of its own, a frame before the focus: winit only raises a
+        // window it does not consider minimised, and it looks at the state it
+        // had before this frame, so sending the two together would drop the
+        // focus. See `crate::instance`.
+        if crate::instance::asked_to_come_forward() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            self.come_forward = true;
+        } else if std::mem::take(&mut self.come_forward) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
         // A suspension with a clock on it ends by itself, on the first frame

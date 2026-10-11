@@ -289,7 +289,7 @@ as a portable monitoring screen:
 | Cameras | The group strip, and the group on the wall: its camera list (add, edit, reorder, remove; display aspect and RTSP transport per camera), its name, Set as Default and Remove |
 | Streams | Reconnect timings (first retry, first-frame retry, max delay, handshake timeout, backoff factor / jitter / spread, attempts) and the hardware-decoding preference |
 | Blackout | The blank schedule: on/off, the periods (weekday, start, end), and how long the wall stays back after input |
-| System | Start on boot, **keep awake** (prevent sleep / keep the screen on) with the mechanism in use, the key list, and the Android boot helpers |
+| System | Start on boot, one instance per configuration, **keep awake** (prevent sleep / keep the screen on) with the mechanism in use, the key list, and the Android boot helpers |
 | About | Version, author, decoder in use, config path, export / import |
 
 Every change is written to `config.json` as you make it, so there is no separate
@@ -385,6 +385,17 @@ can, a Wayland session cannot - winit has no way to ask for it there - and
 Android has nothing to stay above, so the switch is greyed out. It is also set
 aside by itself while the viewer opens something that has to come up in front of
 the wall: a file dialog for export or import, or a page in the browser.
+
+### One instance per configuration
+
+A second launch of the same configuration does not open a second wall: it finds
+the window that is up, asks it to come forward, and ends. The lock follows the
+configuration file rather than the installation, so a viewer who deliberately
+runs another wall from `--config` still can - and the switches that print and
+exit (`--help`, `--print-schedule`, `--install-autostart`) are not a window and
+are never held back. On a Wayland session the second launch still ends without a
+window, but nothing there can bring the first one forward, so what it did is not
+visible. Android has one instance by construction and the switch is not offered.
 
 ### Start on boot
 

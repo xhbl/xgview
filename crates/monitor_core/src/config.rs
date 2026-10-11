@@ -474,6 +474,11 @@ pub struct AppConfig {
     /// wall. A preference the desktop may ignore, and one only the platforms
     /// that can do it for us offer; see `monitor_gui::window`.
     pub always_on_top_fullscreen: bool,
+    /// One window per configuration: a second launch of the same configuration
+    /// asks the window already up to come forward and ends, rather than opening
+    /// a second wall over the first. The lock follows the configuration file, so
+    /// another `--config` is another wall. See `monitor_gui::instance`.
+    pub single_instance: bool,
     /// Android: leave the navigation bar in place and keep its strip free of the
     /// wall, instead of hiding it and drawing under it. Ignored on the other
     /// platforms, which have no such bar.
@@ -527,6 +532,7 @@ impl Default for AppConfig {
             autostart: false,
             start_fullscreen: false,
             always_on_top_fullscreen: false,
+            single_instance: true,
             reserve_navigation_bar: false,
             prevent_sleep: true,
             keep_screen_on: true,

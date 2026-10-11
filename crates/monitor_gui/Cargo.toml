@@ -39,6 +39,12 @@ eframe = { version = "0.32", features = ["accesskit", "glow", "wayland", "x11"] 
 # The default features are the desktop portal on Linux, so no GTK is pulled in.
 rfd = "0.17"
 
+# The single-instance claim's kernel objects on Windows - a named mutex that says
+# whether another instance holds this configuration, and a named event it is
+# asked to come forward on. See `src/instance.rs`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
 # The soft keyboard's text arrives through JNI from MainActivity; see

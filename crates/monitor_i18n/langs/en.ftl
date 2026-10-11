@@ -45,6 +45,7 @@ corner-bottom-right = Bottom right
 ## Settings / System
 settings-startup = Start-up
 settings-autostart = Start with the system boot
+settings-single-instance = Run one instance per configuration
 settings-autostart-unsupported = start-on-boot is not supported on this platform
 settings-mechanism = mechanism: { $name }
 settings-power = Keep awake

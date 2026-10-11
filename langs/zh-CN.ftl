@@ -43,6 +43,7 @@ corner-bottom-right = 右下
 ## 设置 / 系统
 settings-startup = 启动
 settings-autostart = 随系统开机启动
+settings-single-instance = 同一配置只运行一个实例
 settings-autostart-unsupported = 此平台不支持开机自启
 settings-mechanism = 机制：{ $name }
 settings-power = 保持唤醒

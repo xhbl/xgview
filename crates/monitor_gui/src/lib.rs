@@ -6,6 +6,7 @@
 //! * [`fonts`]   – system font fallback for the characters egui does not ship.
 //! * [`grid`]    – grid geometry and tile painting.
 //! * [`icons`]   – the shapes the controls carry.
+//! * [`instance`] – one window per configuration.
 //! * [`keyboard`] – the soft keyboard on Android (Android only).
 //! * [`nav`]     – explicit directional navigation for a remote control.
 //! * [`theme`]   – colour palette and typography.
@@ -26,6 +27,7 @@ pub mod dialogs;
 pub mod fonts;
 pub mod grid;
 pub mod icons;
+pub mod instance;
 #[cfg(target_os = "android")]
 pub mod android;
 #[cfg(target_os = "android")]
@@ -167,6 +169,25 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
     let runtime = build_runtime()?;
     let handle = runtime.handle().clone();
     let config_path = options.config_path();
+
+    // One window per configuration, when the configuration asks for it: a second
+    // launch finds the first, asks it to come forward, and ends here - before a
+    // window of its own exists. Android takes no lock: the activity is
+    // `singleTask`, so a second launch never becomes a second process. See
+    // `instance`.
+    #[cfg(not(target_os = "android"))]
+    if options.config.single_instance {
+        match instance::claim(&config_path) {
+            instance::Claim::First => {}
+            instance::Claim::Running => {
+                tracing::info!(target: "xgview", "another instance is up; asked it to come forward");
+                return Ok(());
+            }
+            instance::Claim::Unusable(reason) => {
+                tracing::warn!(target: "xgview", %reason, "cannot take the single-instance lock; starting anyway");
+            }
+        }
+    }
 
     eframe::run_native(
         monitor_core::APP_DISPLAY_NAME,
