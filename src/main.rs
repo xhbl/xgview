@@ -12,12 +12,15 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Instant;
 
 use anyhow::Result;
 use monitor_core::autostart;
 use monitor_core::config::AppConfig;
 use monitor_core::layout::GridLayout;
 use monitor_core::scheduler::Scheduler;
+use monitor_core::supervise;
 use monitor_core::APP_DISPLAY_NAME;
 use monitor_gui::RunOptions;
 
@@ -34,6 +37,7 @@ Options:
   --install-autostart  Register XGView for start-on-boot and exit
   --remove-autostart   Remove the start-on-boot registration and exit
   --print-schedule     Print the resolved grid / channel schedule and exit
+  --supervise          Keep the viewer running: start it again if it dies
   --console            Open a console window for log output (Windows only)
   -h, --help           Print this help
   -V, --version        Print the version
@@ -85,6 +89,14 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // A supervisor opens nothing itself: it starts the viewer - this same program
+    // without this switch - and watches it. Placed after the switches that print
+    // and exit, so that a help or a schedule asked for on a supervised line is
+    // still just that.
+    if args.iter().any(|arg| arg == supervise::SWITCH) {
+        supervise_viewer(&args);
+    }
+
     let fullscreen = if args.iter().any(|arg| arg == "--windowed") {
         false
     } else {
@@ -101,7 +113,7 @@ fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
-    monitor_gui::run(RunOptions {
+    match monitor_gui::run(RunOptions {
         config,
         config_path: Some(config_path),
         fullscreen,
@@ -110,7 +122,60 @@ fn main() -> Result<()> {
         // Language packs live under the configuration directory here; only
         // Android names a second place a file transfer can reach.
         extra_lang_dir: None,
-    })
+    }) {
+        Ok(()) => Ok(()),
+        // No renderer to be had on this machine, which is one answer a restart
+        // cannot change. Saying so in the exit code is what lets a supervisor
+        // stop asking; see `monitor_core::supervise` and `monitor_gui::CannotDraw`.
+        Err(err) if err.downcast_ref::<monitor_gui::CannotDraw>().is_some() => {
+            tracing::error!(target: "xgview", %err, "cannot draw here, and starting again would not change that");
+            std::process::exit(supervise::CANNOT_RUN);
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Keeps the viewer running: starts it, waits, and starts it again when it dies
+/// without having been asked to stop.
+///
+/// The viewer is this program without `--supervise`, so that switch is the whole
+/// difference between the two roles - and it is not handed down, or the child
+/// would be a supervisor of itself, one process deeper, for ever.
+///
+/// Windows note: this process is the GUI subsystem one, so it has no console and
+/// ctrl-c never reaches it. A viewer watched from a command line is watched by
+/// `xgview.com` instead, which does have one; see the `xgview-cli` binary.
+fn supervise_viewer(args: &[String]) -> ! {
+    let viewer = match std::env::current_exe() {
+        Ok(viewer) => viewer,
+        Err(err) => {
+            tracing::error!(target: "xgview", %err, "cannot find the viewer to supervise");
+            std::process::exit(1);
+        }
+    };
+    let passed: Vec<&String> = args
+        .iter()
+        .filter(|arg| arg.as_str() != supervise::SWITCH)
+        .collect();
+
+    let mut record = supervise::Record::new();
+    loop {
+        let status = match Command::new(&viewer).args(&passed).status() {
+            Ok(status) => status,
+            // The viewer is not there to be started at all, which is not
+            // something waiting would fix.
+            Err(err) => {
+                tracing::error!(target: "xgview", %err, "cannot start the viewer");
+                std::process::exit(1);
+            }
+        };
+        match record.watch(status, Instant::now()) {
+            // The viewer's own code, so that whoever started the supervisor -
+            // a start-on-boot entry, a shell, systemd - sees what happened.
+            supervise::Next::LeaveItDown => std::process::exit(status.code().unwrap_or(1)),
+            supervise::Next::Again(delay) => std::thread::sleep(delay),
+        }
+    }
 }
 
 /// Prints the decoding plan of every page of every group, which is handy to

@@ -85,6 +85,12 @@ powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -NoBuild -N
 `scripts\build-windows.ps1` produces the same layout as a zip under `target/`
 without installing it.
 
+The Run key entry starts the viewer *supervised*, so that a wall on a machine
+nobody watches comes back by itself if it dies. The scheduled task above is left
+without that: it has a failure restart of its own, and two policies layered over
+one viewer would only disagree. See the README's
+[Keep it running](../README.md#keep-it-running).
+
 ## 5. Linux build and deployment
 
 ```bash

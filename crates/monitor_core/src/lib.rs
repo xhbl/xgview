@@ -21,6 +21,8 @@
 //!   is meant to stay visible.
 //! * [`blackout`]   – the local clock and the evaluation behind the scheduled
 //!   blank that saves the display at night.
+//! * [`supervise`]  – the policy over the viewer's restarts, and the exit codes
+//!   that say which restarts are worth making.
 
 pub mod autostart;
 pub mod blackout;
@@ -37,6 +39,7 @@ pub mod power;
 pub mod rtcp;
 pub mod rtsp;
 pub mod scheduler;
+pub mod supervise;
 
 pub use error::{CoreError, Result};
 pub use h264::{AccessUnit, H264Depacketizer};

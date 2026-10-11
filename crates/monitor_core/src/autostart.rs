@@ -38,9 +38,21 @@ pub fn current_exe() -> Result<PathBuf> {
 }
 
 /// Command line registered for auto start (quoted for the Windows registry).
+///
+/// Supervised, because that is the whole of what start-on-boot is asked for on a
+/// machine nobody watches: a viewer that comes up at boot and dies an hour later
+/// has not been started at all, as far as the wall is concerned. The one
+/// mechanism this is not used for is the Windows scheduled task, which has a
+/// failure restart of its own and takes its arguments from the installer; putting
+/// the two together would give two restart policies that do not agree. See
+/// [`crate::supervise`].
 pub fn command_line() -> Result<String> {
     let exe = current_exe()?;
-    Ok(format!("\"{}\" --autostart", exe.display()))
+    Ok(format!(
+        "\"{}\" --autostart {}",
+        exe.display(),
+        crate::supervise::SWITCH
+    ))
 }
 
 /// `true` when this platform supports programmatic registration.

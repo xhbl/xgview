@@ -196,7 +196,61 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
             Ok(Box::new(XgViewApp::new(cc, options, config_path, handle)) as Box<dyn eframe::App>)
         }),
     )
-    .map_err(|err| anyhow::anyhow!("cannot start the viewer: {err}"))
+    .map_err(|err| {
+        if draws_nowhere(&err) {
+            anyhow::Error::new(CannotDraw(err.to_string()))
+        } else {
+            anyhow::anyhow!("cannot start the viewer: {err}")
+        }
+    })
+}
+
+/// The viewer has no renderer to be had on this machine.
+///
+/// Carried out of [`run`] as a type of its own so that the process can say so in
+/// its exit code, where a supervisor reads it and stops asking: this machine will
+/// not answer any other way. A failure that is *not* one of these - a desktop
+/// that is not up yet, say - is worth starting again for, and in a kiosk that is
+/// the ordinary case. See `monitor_core::supervise`.
+#[derive(Debug)]
+pub struct CannotDraw(String);
+
+impl std::fmt::Display for CannotDraw {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cannot start the viewer: {}", self.0)
+    }
+}
+
+impl std::error::Error for CannotDraw {}
+
+/// Whether an eframe failure is one this machine will never serve, as against a
+/// desktop that is not there yet.
+#[cfg(not(target_os = "android"))]
+fn draws_nowhere(err: &eframe::Error) -> bool {
+    match err {
+        // The window system. A session that has not come up yet - the start-on-
+        // boot entry runs long before a display is ready - and the next launch
+        // may well find it.
+        eframe::Error::Winit(_) | eframe::Error::WinitEventLoop(_) => false,
+        // Building the app, which is before any renderer is asked for.
+        eframe::Error::AppCreation(_) => false,
+        // The renderer itself: no adapter, no context, no config for one, or a
+        // driver missing what the GL backend asks for. Nothing here is a matter
+        // of waiting.
+        eframe::Error::Glutin(_)
+        | eframe::Error::NoGlutinConfigs(..)
+        | eframe::Error::OpenGL(_)
+        | eframe::Error::Wgpu(_) => true,
+    }
+}
+
+/// The same question where there is nothing to ask it of: Android builds eframe
+/// without the renderer features, so most of the variants above do not exist
+/// there - and nothing here would read the answer anyway, the android entry point
+/// being `run_android` with the activity's own restarts behind it.
+#[cfg(target_os = "android")]
+fn draws_nowhere(_err: &eframe::Error) -> bool {
+    false
 }
 
 #[cfg(target_os = "android")]

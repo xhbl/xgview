@@ -30,6 +30,7 @@ the hand.
 - [Features](#features)
 - [Supported platforms](#supported-platforms)
   - [Android: what the device needs](#android-what-the-device-needs)
+  - [Linux: a minimal kiosk machine](#linux-a-minimal-kiosk-machine)
 - [Getting started](#getting-started)
 - [Usage](#usage)
   - [The wall at a glance](#the-wall-at-a-glance)
@@ -43,7 +44,10 @@ the hand.
   - [Camera groups](#camera-groups)
   - [Blackout schedule](#blackout-schedule)
   - [Keep awake](#keep-awake)
+  - [Stay on top in full screen](#stay-on-top-in-full-screen)
+  - [One instance per configuration](#one-instance-per-configuration)
   - [Start on boot](#start-on-boot)
+  - [Keep it running](#keep-it-running)
   - [Language](#language)
   - [Command line](#command-line)
   - [Troubleshooting](#troubleshooting)
@@ -141,6 +145,41 @@ ten minutes, and a device that can draw on neither backend is left closed instea
 of restarted in a loop. On Android 10 and newer the restart can be refused as a
 background start unless XGView may *display over other apps* - the same permission
 [start on boot](#start-on-boot) uses.
+
+### Linux: a minimal kiosk machine
+
+A box that boots straight into the wall needs no desktop environment, but it does
+need a display server and a session: the viewer draws through a window and has no
+mode that paints the display directly. On Debian, what that comes to:
+
+* **A display server** - Xorg or Wayland - and a *window manager*. Full screen,
+  staying on top, and a second launch coming forward are all requests made to a
+  window manager, and none of them happens without one. `matchbox-window-manager`,
+  `openbox` or `i3` are a few megabytes; a kiosk compositor such as `cage` fills
+  both roles at once.
+* **An automatic logon.** Xorg takes the display through logind and needs an
+  active session, so the arrangement is a logon on a virtual console that asks for
+  no password. Running Xorg as root is a path its drivers no longer support.
+* **The viewer started from `~/.xinitrc`**, because nothing on such a box reads
+  the XDG autostart entry:
+
+  ```sh
+  xset -dpms s off &                      # see the last point below
+  exec xgview --fullscreen --supervise    # and it comes back if it dies
+  ```
+
+* **Packages**, on top of the window manager itself. The window system:
+  `libx11-6 libxcb1 libxcursor1 libxrandr2 libxi6 libxkbcommon-x11-0` - `ldd
+  xgview` will not name those, they are loaded as they are needed. Text:
+  `fontconfig` and at least one face, `fonts-dejavu-core`. Renderer:
+  `libvulkan1 mesa-vulkan-drivers`, or the GL fallback `libegl1 libgl1-mesa-dri`.
+  Sessions: `libdrm2` and `systemd` for logind. The decoders need nothing extra -
+  FFmpeg and libva travel in the package.
+* **The screen.** [Keep awake](#keep-awake) cannot help here: there is no screen
+  saver and no power service to inhibit over the session bus, and a bare Xorg may
+  not have one at all. The blanking is the X server's own DPMS, so it is turned off
+  at the X level - the `xset -dpms s off` above, or `Option "DPMS" "false"` in
+  `xorg.conf`. Sleep itself is still inhibited the usual way, through logind.
 
 ---
 
@@ -410,6 +449,19 @@ which writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Remove it wit
 interactive logon, install a scheduled task instead (see
 [docs/CONFIG.md](docs/CONFIG.md)) or register the binary as a Windows service.
 
+The entry runs the viewer supervised - [see below](#keep-it-running) - and an
+entry registered by an older version is not rewritten on its own: toggle the
+setting off and on again, or run `--install-autostart` once.
+
+**Linux.** Toggle "Start with the system" in the settings panel (`F1`), or run
+`xgview --install-autostart`, which writes `~/.config/autostart/xgview.desktop`
+(under `XDG_CONFIG_HOME` when that is set); `--remove-autostart` takes it away.
+Supervised, like the Windows entry. A `.desktop` file there is read by a *session
+manager*: a desktop environment has one, while a bare Xorg started from
+`~/.xinitrc` does not read it at all - on such a machine the viewer is started
+from that file instead, as
+[Linux: a minimal kiosk machine](#linux-a-minimal-kiosk-machine) describes.
+
 **Android.** The manifest registers a `BootReceiver` for `BOOT_COMPLETED`, which
 relaunches the activity after the box booted. Android 10+ refuses to start an
 activity from the background, and that broadcast is one, so the relaunch is
@@ -429,6 +481,40 @@ From a computer, the first is one command:
 ```bash
 adb shell appops set com.xhbl.xgview SYSTEM_ALERT_WINDOW allow
 ```
+
+### Keep it running
+
+`--supervise` makes the process a supervisor rather than a viewer: it starts the
+viewer - itself, without that switch - waits, and starts it again when it dies
+without having been asked to stop. The start-on-boot entry is registered this way,
+because a viewer that comes up at boot and dies an hour later has not really been
+started, on a machine nobody is watching.
+
+| the viewer exited with | then |
+| --- | --- |
+| `0` - asked to stop: the window was closed, or another instance holds the configuration | nothing; the supervisor ends too |
+| `2` - no renderer to be had on this machine | nothing; no restart would change that answer |
+| anything else - a crash, a panic, a kill | started again after 700 ms |
+
+Three restarts are allowed within ten minutes, after which the viewer is left down
+with the reason in the log. Those are Android's numbers, where the activity has
+restarted the viewer by itself for longer than this switch has existed, and the
+window is what keeps them livable: a viewer that dies once a quarter of an hour is
+started again every time. The delay is short rather than a back-off because
+getting the wall back matters more than sparing the cpu.
+
+From a command line, `xgview --supervise` keeps the log in the console, and
+ctrl-c there stops the viewer along with the supervisor. On Windows that one is
+`xgview.com --supervise`: the viewer is a GUI process and is not attached to the
+console, so ctrl-c never reaches it and the command line entry point is the side
+that can act on it.
+
+It is not a substitute for watching the supervisor. End that - the task manager,
+`kill` - and the viewer keeps running with nobody looking after it, which is the
+same arrangement as having no supervisor at all, and the right way round where the
+wall being up matters more than who is watching it. A Windows scheduled task or a
+systemd unit can be layered over the top where a second restart policy is wanted;
+`scripts/install-windows.ps1` registers one.
 
 ### Language
 
@@ -451,6 +537,7 @@ xgview [OPTIONS]
   --install-autostart  Register XGView for start-on-boot and exit
   --remove-autostart   Remove the start-on-boot registration and exit
   --print-schedule     Print the resolved grid / channel schedule and exit
+  --supervise          Keep the viewer running: start it again if it dies
   --console            Open a console window for log output (Windows only)
   -h, --help           Print this help
   -V, --version        Print the version
@@ -459,6 +546,9 @@ xgview [OPTIONS]
 `--print-schedule` is useful to validate a configuration on a headless box: it
 lists every page of every layout and shows which camera is decoded on which
 stream.
+
+`--supervise` keeps the viewer up rather than watching it once; see
+[Keep it running](#keep-it-running).
 
 On Windows the viewer is a GUI application, so starting it opens no console
 window. Its command line is served by `xgview.com`, installed beside it: a shell
