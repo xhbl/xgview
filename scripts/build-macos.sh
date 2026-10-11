@@ -19,6 +19,9 @@
 #
 # Both architectures are built and joined into one universal binary by default,
 # so the same download runs on Intel and on Apple silicon. `--arch` narrows it.
+# That holds only if the FFmpeg libraries are universal too - a thin library
+# beside a fat executable starts on one machine only - so they are checked
+# before the build rather than after it.
 #
 # Must be run on macOS: `install_name_tool`, `lipo`, `codesign` and `ditto` are
 # Apple's own tools.
@@ -132,6 +135,28 @@ if [[ -z "$FFMPEG_LIBDIR" || ! -d "$FFMPEG_LIBDIR" ]]; then
     echo "error: pkg-config cannot find libavcodec's library directory." >&2
     echo "       Install FFmpeg (Homebrew), or build it and point PKG_CONFIG_PATH at it." >&2
     exit 1
+fi
+
+# A universal executable joined to thin libraries is a bundle that starts on one
+# machine only, and the join happens at the end of the build - so the libraries
+# are asked now, when the answer still costs nothing. Both architectures of
+# FFmpeg have to have been built into the one prefix for this to hold.
+if [[ "$ARCH" == universal ]]; then
+    for lib in "$FFMPEG_LIBDIR"/*.dylib; do
+        [[ -f "$lib" && ! -L "$lib" ]] || continue
+        archs="$(lipo -archs "$lib")"
+        for wanted in x86_64 arm64; do
+            case " $archs " in
+                *" $wanted "*) ;;
+                *)
+                    echo "error: $(basename "$lib") in $FFMPEG_LIBDIR is '$archs', not universal." >&2
+                    echo "       Build FFmpeg for both architectures into this prefix (see the" >&2
+                    echo "       macOS setup notes), or pass --arch x86_64 for a one-machine bundle." >&2
+                    exit 1
+                    ;;
+            esac
+        done
+    done
 fi
 
 # ---------------------------------------------------------------- cargo
