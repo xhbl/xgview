@@ -29,10 +29,19 @@ use crate::controls;
 use crate::nav::{Axis, Dir, Exit, Kind, Nav, ScopeDef};
 use crate::theme;
 use crate::video::{VideoRenderer, VideoSurface};
+use crate::window::{self, OnTop};
 use crate::RunOptions;
 
 /// Debounce applied before writing `config.json`.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(700);
+
+/// How long the wall stays off the top after a link is opened, so that the
+/// window the browser or the mail client opens comes up in front of it.
+///
+/// A clock rather than an event: nothing tells us when another program's window
+/// appears, and while the viewer is reading that page they are not looking at
+/// the wall anyway.
+const LINK_TAKEOVER: Duration = Duration::from_secs(5);
 
 /// Repaint interval while at least one channel is showing video.
 const LIVE_REPAINT: Duration = Duration::from_millis(33);
@@ -456,6 +465,9 @@ pub struct XgViewApp {
     /// Whether the window still has to be given a windowed size, having been
     /// created full screen with none asked for; see `set_fullscreen`.
     windowed_size_pending: bool,
+    /// What the window's place among the others is doing, apart from the
+    /// setting; see [`crate::window`].
+    on_top: OnTop,
     /// Whether the top and bottom bars are on screen right now.
     chrome: Chrome,
     /// The controls of the top bar with the rectangle each was drawn in, left to
@@ -694,6 +706,7 @@ impl XgViewApp {
             fullscreen,
             fullscreen_pending: fullscreen,
             windowed_size_pending: fullscreen && crate::FULLSCREEN_ON_THE_BUILDER,
+            on_top: OnTop::default(),
             chrome: Chrome {
                 visible: true,
                 last_input: Instant::now(),
@@ -1120,6 +1133,45 @@ impl XgViewApp {
         self.chrome.visible = !enabled;
         self.chrome.hide_now = enabled;
         self.chrome.last_input = Instant::now();
+        // The option to stay on top is about the wall that has the screen to
+        // itself, so entering and leaving full screen is when it moves.
+        self.apply_window_level(ctx);
+    }
+
+    /// Asks the window manager for the window level the current state wants.
+    ///
+    /// Sent when something the answer is decided from moves - the option, full
+    /// screen, a suspension - rather than every frame: it is a request to the
+    /// window manager, and one per frame would be a repaint's worth of noise for
+    /// an answer that has not changed.
+    fn apply_window_level(&mut self, ctx: &egui::Context) {
+        let level = window::level(
+            window::supported(),
+            self.config.always_on_top_fullscreen,
+            self.fullscreen,
+            self.on_top,
+            Instant::now(),
+        );
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+    }
+
+    /// Says what the window's place among the others is doing from now on.
+    ///
+    /// Used around anything the viewer opened that has to come up in front of
+    /// the wall; [`crate::window`] describes the two shapes its end can take.
+    /// Nothing is remembered where the platform cannot hold a window above the
+    /// others, since nothing can be asked of it.
+    fn set_on_top(&mut self, ctx: &egui::Context, on_top: OnTop) {
+        if !window::supported() {
+            return;
+        }
+        self.on_top = on_top;
+        if let OnTop::SuspendedUntil(until) = on_top {
+            // Nothing else would wake the app to put the wall back when the
+            // clock runs out.
+            ctx.request_repaint_after(until.saturating_duration_since(Instant::now()));
+        }
+        self.apply_window_level(ctx);
     }
 
     /// Whether what the viewer did this frame is a request for the bars.
@@ -1772,7 +1824,14 @@ impl XgViewApp {
     /// the shell that resolves a protocol to its handler. The shell is asked
     /// here instead: `ShellExecuteW` on Windows, and the desktop's opener
     /// elsewhere.
-    fn open_link(_ctx: &egui::Context, url: &str) {
+    ///
+    /// Whatever answers opens a window of its own - a browser, the mail client -
+    /// and a wall held on top would be sitting in front of it, so the wall is
+    /// taken off the top while it happens and put back on a clock. The clock is
+    /// what says when: nothing reports that another program's window has
+    /// appeared.
+    fn open_link(&mut self, ctx: &egui::Context, url: &str) {
+        self.set_on_top(ctx, OnTop::SuspendedUntil(Instant::now() + LINK_TAKEOVER));
         #[cfg(windows)]
         {
             #[link(name = "shell32")]
@@ -2782,6 +2841,23 @@ impl XgViewApp {
         if start.changed() {
             self.config.start_fullscreen = start_fullscreen;
             dirty = true;
+        }
+        // Windows, macOS and X11 can hold a window above the others; a Wayland
+        // session and Android cannot. There it is greyed out rather than left to
+        // be a switch that does nothing, the way `monitor_core::power` treats the
+        // switches it cannot honour. See `crate::window`.
+        let on_top_supported = window::supported();
+        let mut on_top = self.config.always_on_top_fullscreen;
+        ui.add_enabled_ui(on_top_supported, |ui| {
+            let on_top_check = self.nav.tracked(ui.checkbox(&mut on_top, monitor_i18n::tr("settings-on-top")));
+            if on_top_check.changed() {
+                self.config.always_on_top_fullscreen = on_top;
+                self.apply_window_level(ui.ctx());
+                dirty = true;
+            }
+        });
+        if !on_top_supported {
+            ui.label(RichText::new(monitor_i18n::tr("settings-on-top-unsupported")).small().color(theme::TEXT_DIM));
         }
 
         // Android only: whether the navigation bar keeps its strip (the wall is
@@ -4043,7 +4119,7 @@ impl XgViewApp {
                 self.nav.item(&link);
                 self.name(&link, "about-author-name");
                 if link.clicked() {
-                    Self::open_link(ui.ctx(), &monitor_core::author_mailto());
+                    self.open_link(ui.ctx(), &monitor_core::author_mailto());
                 }
             }
             ui.label(monitor_i18n::tr_args("about-copyright", &[("years", monitor_core::copyright_years().into())]));
@@ -4060,7 +4136,7 @@ impl XgViewApp {
         let repository = self.nav.tracked(repository);
         self.name(&repository, "about-repository");
         if repository.clicked() {
-            Self::open_link(ui.ctx(), REPOSITORY_URL);
+            self.open_link(ui.ctx(), REPOSITORY_URL);
         }
         let decoder_mode = monitor_i18n::tr(if self.hardware_decoder {
             "about-decoder-hardware"
@@ -4084,14 +4160,22 @@ impl XgViewApp {
         self.nav.item(&export);
         self.name(&export, "about-export-name");
         if export.clicked() {
+            // The desktop's file dialog is a window of its own and has to come
+            // up in front of the wall, which one held on top would cover. Its end
+            // is known here rather than by a clock: the call returns when the
+            // dialog closes.
+            self.set_on_top(ui.ctx(), OnTop::Suspended);
             self.export_config();
+            self.set_on_top(ui.ctx(), OnTop::Configured);
         }
         ui.horizontal(|ui| {
             let import = ui.button(monitor_i18n::tr("about-import"));
             self.nav.item(&import);
             self.name(&import, "about-import-name");
             if import.clicked() {
+                self.set_on_top(ui.ctx(), OnTop::Suspended);
                 self.import_config();
+                self.set_on_top(ui.ctx(), OnTop::Configured);
             }
             let only = ui.checkbox(&mut self.import_cameras_only, monitor_i18n::tr("about-only-cameras"));
             self.nav.item(&only);
@@ -4540,6 +4624,15 @@ impl eframe::App for XgViewApp {
         // `native_options` in `lib.rs`.
         if std::mem::take(&mut self.fullscreen_pending) {
             self.set_fullscreen(ctx, true);
+        }
+
+        // A suspension with a clock on it ends by itself, on the first frame
+        // after the moment it named. The other kind is ended by the code that
+        // began it, which knows when the thing it opened is over.
+        if let OnTop::SuspendedUntil(until) = self.on_top {
+            if Instant::now() >= until {
+                self.set_on_top(ctx, OnTop::Configured);
+            }
         }
 
         // Anything the soft keyboard typed has to be in the input queue before

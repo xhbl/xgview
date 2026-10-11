@@ -469,6 +469,11 @@ pub struct AppConfig {
     pub autostart: bool,
     /// Open the window in full screen (TV / kiosk deployment).
     pub start_fullscreen: bool,
+    /// Keep the window above the others while it is full screen, so nothing the
+    /// machine puts up - a panel, a notification, another window - covers the
+    /// wall. A preference the desktop may ignore, and one only the platforms
+    /// that can do it for us offer; see `monitor_gui::window`.
+    pub always_on_top_fullscreen: bool,
     /// Android: leave the navigation bar in place and keep its strip free of the
     /// wall, instead of hiding it and drawing under it. Ignored on the other
     /// platforms, which have no such bar.
@@ -521,6 +526,7 @@ impl Default for AppConfig {
             active_group: 0,
             autostart: false,
             start_fullscreen: false,
+            always_on_top_fullscreen: false,
             reserve_navigation_bar: false,
             prevent_sleep: true,
             keep_screen_on: true,

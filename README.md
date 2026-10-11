@@ -285,7 +285,7 @@ as a portable monitoring screen:
 
 | Tab | What it holds |
 | --- | --- |
-| Display | Interface **language**, grid, the four OSD corners, full screen at start-up, the Android navigation bar |
+| Display | Interface **language**, grid, the four OSD corners, full screen at start-up, staying on top in full screen, the Android navigation bar |
 | Cameras | The group strip, and the group on the wall: its camera list (add, edit, reorder, remove; display aspect and RTSP transport per camera), its name, Set as Default and Remove |
 | Streams | Reconnect timings (first retry, first-frame retry, max delay, handshake timeout, backoff factor / jitter / spread, attempts) and the hardware-decoding preference |
 | Blackout | The blank schedule: on/off, the periods (weekday, start, end), and how long the wall stays back after input |
@@ -374,6 +374,17 @@ keeps the system awake. The mechanism per platform is `SetThreadExecutionState`
 + `FLAG_KEEP_SCREEN_ON` (Android), and is shown in the panel. The request is
 released when the viewer exits; see
 [docs/power-management-plan.md](docs/power-management-plan.md).
+
+### Stay on top in full screen
+
+The **Display** tab can keep the wall above the machine's other windows while it
+is in full screen, so a panel, a notification or another window cannot cover the
+cameras. It is off by default, it applies only in full screen, and it is offered
+only where the platform can honour it: Windows, macOS and X11 (XFCE and the like)
+can, a Wayland session cannot - winit has no way to ask for it there - and
+Android has nothing to stay above, so the switch is greyed out. It is also set
+aside by itself while the viewer opens something that has to come up in front of
+the wall: a file dialog for export or import, or a page in the browser.
 
 ### Start on boot
 

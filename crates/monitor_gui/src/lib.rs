@@ -10,6 +10,7 @@
 //! * [`nav`]     – explicit directional navigation for a remote control.
 //! * [`theme`]   – colour palette and typography.
 //! * [`video`]   – uploads the decoded planes and turns them into pictures.
+//! * [`window`]  – the window's place among the others.
 //!
 //! The renderer is driven by the [`monitor_core::scheduler::Scheduler`], which
 //! decides which channel is decoded with which stream, and by the
@@ -32,6 +33,7 @@ pub mod keyboard;
 pub mod nav;
 pub mod theme;
 pub mod video;
+pub mod window;
 
 pub use app::XgViewApp;
 
