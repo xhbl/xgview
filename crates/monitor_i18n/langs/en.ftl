@@ -293,6 +293,7 @@ discovery-source-multicast = WS-Discovery (multicast)
 discovery-source-unicast = WS-Discovery (unicast)
 discovery-source-portscan = TCP port scan
 autostart-mechanism-windows = Registry (HKCU Run)
+autostart-mechanism-launchagent = LaunchAgent (~/Library/LaunchAgents)
 autostart-mechanism-xdg = XDG autostart (.desktop)
 autostart-mechanism-android = Android BootReceiver (RECEIVE_BOOT_COMPLETED)
 autostart-mechanism-unsupported = unsupported

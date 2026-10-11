@@ -3,7 +3,8 @@
 //! | Platform      | Mechanism                                              |
 //! |---------------|--------------------------------------------------------|
 //! | Windows       | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`   |
-//! | Linux / macOS | `~/.config/autostart/xgview.desktop` (XDG autostart)   |
+//! | macOS         | `~/Library/LaunchAgents/com.xhbl.xgview.plist`         |
+//! | Linux         | `~/.config/autostart/xgview.desktop` (XDG autostart)   |
 //! | Android       | `RECEIVE_BOOT_COMPLETED` + `BootReceiver` (manifest)   |
 //!
 //! On Windows the per-user `Run` key is used because it does not require
@@ -14,8 +15,8 @@ use std::path::PathBuf;
 
 use crate::error::{CoreError, Result};
 // Only the Windows registry and the XDG desktop entry below use the display
-// name; on Android there is neither, and the import would be unused.
-#[cfg(any(windows, all(unix, not(target_os = "android"))))]
+// name; on Android and macOS there is neither, and the import would be unused.
+#[cfg(any(windows, all(unix, not(any(target_os = "macos", target_os = "android")))))]
 use crate::APP_DISPLAY_NAME;
 
 /// Result of a start-on-boot query.
@@ -49,10 +50,21 @@ pub fn current_exe() -> Result<PathBuf> {
 pub fn command_line() -> Result<String> {
     let exe = current_exe()?;
     Ok(format!(
-        "\"{}\" --autostart {}",
+        "\"{}\" {}",
         exe.display(),
-        crate::supervise::SWITCH
+        autostart_arguments().join(" ")
     ))
+}
+
+/// The arguments a start-on-boot entry passes, after the executable.
+///
+/// `--autostart` marks the launch so the window does not take the focus, and
+/// `--supervise` keeps the wall up on a machine nobody watches (see
+/// [`crate::supervise`]). Kept in one place because two entries carry them - the
+/// Windows `Run` value and the XDG desktop entry as one command line, macOS's
+/// LaunchAgent as a list - and they have to agree.
+fn autostart_arguments() -> [&'static str; 2] {
+    ["--autostart", crate::supervise::SWITCH]
 }
 
 /// `true` when this platform supports programmatic registration.
@@ -66,7 +78,11 @@ pub fn mechanism() -> &'static str {
     {
         "autostart-mechanism-windows"
     }
-    #[cfg(all(unix, not(target_os = "android")))]
+    #[cfg(target_os = "macos")]
+    {
+        "autostart-mechanism-launchagent"
+    }
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
     {
         "autostart-mechanism-xdg"
     }
@@ -148,7 +164,103 @@ mod imp {
     }
 }
 
-#[cfg(all(unix, not(target_os = "android")))]
+/// macOS: a per-user LaunchAgent, which `launchd` reads at login.
+///
+/// The plist *is* the registration - it takes effect the next time the user logs
+/// in, and nothing is loaded here, the way the Windows entry is only a value
+/// under `Run` until the next logon. `RunAtLoad` starts the viewer and nothing
+/// restarts it: `--supervise` is the restart policy (see [`crate::supervise`]),
+/// and `launchd`'s own `KeepAlive` beside it would be a second one that does not
+/// agree - the same reason the Windows scheduled task carries no supervisor.
+/// `LimitLoadToSessionType` keeps it to a GUI session, which is where a wall
+/// belongs.
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    /// The label the agent is filed under. Reverse-DNS, the way the Android
+    /// package names the same application.
+    const LABEL: &str = "com.xhbl.xgview";
+
+    /// Where the agent lives: the per-user directory, since none of this runs as
+    /// root and the system-wide one would need elevation.
+    fn agent_file() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(|home| {
+            PathBuf::from(home)
+                .join("Library/LaunchAgents")
+                .join(format!("{LABEL}.plist"))
+        })
+    }
+
+    /// The plist itself.
+    ///
+    /// `ProgramArguments` is a list rather than one command line, so each
+    /// argument is a `<string>` of its own and a path with a space in it needs no
+    /// quoting.
+    fn agent_plist() -> Result<String> {
+        let exe = current_exe()?;
+        let mut plist = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        plist.push_str(
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+        );
+        plist.push_str("<plist version=\"1.0\">\n<dict>\n");
+        plist.push_str("    <key>Label</key>\n");
+        plist.push_str(&format!("    <string>{LABEL}</string>\n"));
+        plist.push_str("    <key>ProgramArguments</key>\n    <array>\n");
+        for argument in std::iter::once(exe.display().to_string())
+            .chain(autostart_arguments().iter().map(|arg| (*arg).to_string()))
+        {
+            plist.push_str(&format!("        <string>{}</string>\n", xml_escape(&argument)));
+        }
+        plist.push_str("    </array>\n");
+        plist.push_str("    <key>RunAtLoad</key>\n    <true/>\n");
+        plist.push_str("    <key>LimitLoadToSessionType</key>\n    <string>Aqua</string>\n");
+        plist.push_str("</dict>\n</plist>\n");
+        Ok(plist)
+    }
+
+    /// The five characters XML reserves, traded for their entities: a path can
+    /// hold at least `&`, and the plist would be refused as malformed.
+    fn xml_escape(value: &str) -> String {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
+    }
+
+    pub(super) fn is_enabled() -> Result<bool> {
+        Ok(agent_file().map(|path| path.exists()).unwrap_or(false))
+    }
+
+    pub(super) fn set_enabled(enable: bool) -> Result<()> {
+        let path = agent_file().ok_or_else(|| CoreError::unsupported("no HOME available"))?;
+        if enable {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&path, agent_plist()?)?;
+            tracing::info!(target: "xgview::autostart", path = %path.display(), "LaunchAgent written");
+        } else if path.exists() {
+            fs::remove_file(&path)?;
+            tracing::info!(target: "xgview::autostart", path = %path.display(), "LaunchAgent removed");
+        }
+        Ok(())
+    }
+
+    pub(super) fn detail() -> String {
+        agent_file()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "~/Library/LaunchAgents".to_string())
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
 mod imp {
     use std::fs;
 

@@ -462,6 +462,13 @@ manager*: a desktop environment has one, while a bare Xorg started from
 from that file instead, as
 [Linux: a minimal kiosk machine](#linux-a-minimal-kiosk-machine) describes.
 
+**macOS.** Toggle "Start with the system" in the settings panel (`F1`), or run
+`xgview --install-autostart`, which writes
+`~/Library/LaunchAgents/com.xhbl.xgview.plist`; `--remove-autostart` takes it
+away. Supervised, like the others. `launchd` reads the agent at the next logon
+rather than loading it on the spot, and it is kept to the GUI session, which is
+where a wall belongs.
+
 **Android.** The manifest registers a `BootReceiver` for `BOOT_COMPLETED`, which
 relaunches the activity after the box booted. Android 10+ refuses to start an
 activity from the background, and that broadcast is one, so the relaunch is

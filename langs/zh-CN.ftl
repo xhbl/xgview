@@ -280,6 +280,7 @@ discovery-source-multicast = WS-Discovery（多播）
 discovery-source-unicast = WS-Discovery（单播）
 discovery-source-portscan = TCP 端口扫描
 autostart-mechanism-windows = 注册表（HKCU Run）
+autostart-mechanism-launchagent = LaunchAgent（~/Library/LaunchAgents）
 autostart-mechanism-xdg = XDG 自启（.desktop）
 autostart-mechanism-android = Android BootReceiver（RECEIVE_BOOT_COMPLETED）
 autostart-mechanism-unsupported = 不支持
