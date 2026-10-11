@@ -243,13 +243,19 @@ pub enum OsdItem {
     NumberName,
     /// Whether the picture is moving, and which stream it comes from.
     Stream,
-    /// Transport and the rate the stream arrives at.
-    Link,
+    /// The codec, and the rate the stream arrives at.
+    ///
+    /// The `alias` is what this was called while it showed the transport: the
+    /// enum is stored in `config.json` by variant name, and a corner saved as
+    /// `Link` has to keep working - an unknown variant would take the whole
+    /// file, cameras included, down with it.
+    #[serde(alias = "Link")]
+    Codec,
     /// Frame rate, and which decoder is doing the work.
     Fps,
     /// Picture size, the shape it is drawn in, and the decoder.
     Format,
-    /// [`OsdItem::Link`], [`OsdItem::Fps`] and [`OsdItem::Format`], one per line.
+    /// [`OsdItem::Codec`], [`OsdItem::Fps`] and [`OsdItem::Format`], one per line.
     Detail,
 }
 
@@ -260,7 +266,7 @@ impl OsdItem {
         OsdItem::Name,
         OsdItem::NumberName,
         OsdItem::Stream,
-        OsdItem::Link,
+        OsdItem::Codec,
         OsdItem::Fps,
         OsdItem::Format,
         OsdItem::Detail,
@@ -279,7 +285,7 @@ impl OsdItem {
             OsdItem::Name => "osd-name",
             OsdItem::NumberName => "osd-number-name",
             OsdItem::Stream => "osd-stream",
-            OsdItem::Link => "osd-link",
+            OsdItem::Codec => "osd-codec",
             OsdItem::Fps => "osd-fps",
             OsdItem::Format => "osd-format",
             OsdItem::Detail => "osd-detail",
@@ -674,6 +680,18 @@ mod tests {
         assert_eq!(TileAspect::Original.ratio(), None, "the stream's own shape");
         assert_eq!(TileAspect::Ratio16x9.ratio(), Some(16.0 / 9.0));
         assert_eq!(TileAspect::Ratio1x1.ratio(), Some(1.0));
+    }
+
+    /// The OSD enum is stored in `config.json` by variant name, so a corner
+    /// saved before `Link` became `Codec` has to keep reading - an unknown
+    /// variant fails the whole file, cameras and all. The write side is the new
+    /// name, which is what makes the alias a one-way door rather than a second
+    /// spelling to maintain.
+    #[test]
+    fn a_corner_saved_as_link_still_reads() {
+        let item: OsdItem = serde_json::from_str("\"Link\"").expect("a corner saved earlier");
+        assert_eq!(item, OsdItem::Codec);
+        assert_eq!(serde_json::to_string(&OsdItem::Codec).expect("written"), "\"Codec\"");
     }
 
     /// An edit form writes back only the fields it shows.

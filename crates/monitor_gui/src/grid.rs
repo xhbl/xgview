@@ -293,11 +293,11 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
     } else {
         monitor_i18n::tr("decode-sw")
     };
-    let link = || OsdLine {
+    let codec = || OsdLine {
         dot: None,
         text: format!(
             "{} {:.0}kbps",
-            camera.transport.as_str(),
+            codec_name(channel),
             channel.map(|channel| channel.bitrate_kbps).unwrap_or(0.0)
         ),
     };
@@ -335,11 +335,25 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
                 .map(|stream| monitor_i18n::tr(stream.tag()).to_string())
                 .unwrap_or_else(|| "—".to_string()),
         }],
-        OsdItem::Link => vec![link()],
+        OsdItem::Codec => vec![codec()],
         OsdItem::Fps => vec![fps()],
         OsdItem::Format => vec![format()],
-        OsdItem::Detail => vec![link(), fps(), format()],
+        OsdItem::Detail => vec![codec(), fps(), format()],
     }
+}
+
+/// The codec a tile names, uppercased.
+///
+/// The name is the camera's - it arrives in the stream's own description - and
+/// so is its case, which is why it is normalised here: `h264` in one corner and
+/// `H265` in the next would read as two conventions rather than one. Until the
+/// stream has described itself there is nothing to name, and a dash says so,
+/// the way the stream item does.
+fn codec_name(channel: Option<&ChannelUi>) -> String {
+    channel
+        .and_then(|channel| channel.codec.as_deref())
+        .map(str::to_ascii_uppercase)
+        .unwrap_or_else(|| "—".to_string())
 }
 
 /// Draws one corner's lines, growing away from the corner they belong to.

@@ -84,7 +84,7 @@ the hand.
 | Decoding | H.264 on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, `AMediaCodec` on Android) and on the CPU elsewhere; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW` |
 | Codecs | H.264 and MJPEG are decoded and displayed. HEVC is recognised in the stream description but has no decoder yet, so an HEVC-only camera shows no picture |
 | Transports | RTSP over TCP (interleaved, the default) or UDP, chosen per camera; HTTP / HTTPS MJPEG (`multipart/x-mixed-replace`) cameras are supported too |
-| On-screen display | Each tile corner independently shows one of: none, name, number + name, stream, transport + rate, frame rate + decoder, size + shape, or all statistics |
+| On-screen display | Each tile corner independently shows one of: none, name, number + name, stream, codec + rate, frame rate + decoder, size + shape, or all statistics |
 | Power management | Keeps the machine awake and/or the screen on while the wall is up (`SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` + the desktop's D-Bus inhibit on Linux, `WakeLock` + `FLAG_KEEP_SCREEN_ON` on Android); both switches default on |
 | Blackout | Scheduled periods, per weekday, in which the wall blanks itself and parks every channel - sockets closed, decoders dropped; input brings it back for a chosen number of minutes |
 | Language | English, Chinese, or any language added as an external `.ftl` pack; a partial pack falls back to English key by key |
