@@ -227,52 +227,68 @@ PLIST
 
 # ---------------------------------------------------------------- frameworks
 #
-# Every FFmpeg library the executable needs is copied in, and everything that
-# refers to one of them is rewritten to load it from beside itself rather than
-# from the prefix it was built in. The references are read out of the Mach-O
-# headers with `otool -L` rather than hard-coded, so the set follows whatever the
-# build actually linked - and a reference to a system library (`libz`,
-# `libiconv`, ...) is left alone, those being on every Mac.
+# Every FFmpeg library the executable needs is copied in, and every reference to
+# one of them is rewritten to load it from beside itself rather than from the
+# prefix it was built in.
+#
+# Both the copy and the rewrite are driven by the references read out of the
+# Mach-O headers with `otool -L`, rather than by a listing of the prefix, so that
+# a library lands under exactly the name the loader will ask for. That name is
+# not necessarily the name of the file behind it - a tree that keeps a versioned
+# image answers to `libavutil.60.dylib` through a symlink - so the copy follows
+# the link (`cp -L`) and keeps the name that was asked for. The walk is
+# transitive, the libraries referring to one another; a reference to a system
+# library (`libz`, `libiconv`, ...) is left alone, those being on every Mac.
 copy_and_rewrite_frameworks() {
     local frameworks="$APP/Contents/Frameworks"
+    local binary="$APP/Contents/MacOS/xgview"
     echo "==> Bundling FFmpeg from $FFMPEG_LIBDIR"
 
-    local file
-    for file in "$FFMPEG_LIBDIR"/*.dylib; do
-        # The real images, not the `libavcodec.dylib` symlinks beside them: a
-        # Mach-O records the versioned name, which is the one to copy.
-        [[ -f "$file" && ! -L "$file" ]] || continue
-        cp "$file" "$frameworks/"
+    # `queue` is what still has to be walked - the executable first, then each
+    # library copied for it - and `copied` is the names, which the rewrite pass
+    # below then goes over.
+    local queue=("$binary") file dep name index=0
+    local copied=()
+    while [[ "$index" -lt "${#queue[@]}" ]]; do
+        file="${queue[$index]}"
+        index=$((index + 1))
+        while read -r dep; do
+            [[ "$dep" == "$FFMPEG_LIBDIR"/* ]] || continue
+            name="$(basename "$dep")"
+            [[ " ${copied[*]-} " == *" $name "* ]] && continue
+            copied+=("$name")
+            cp -L "$dep" "$frameworks/$name"
+            queue+=("$frameworks/$name")
+        done < <(otool -L "$file" | tail -n +2 | awk '{print $1}')
     done
+
+    if [[ "${#copied[@]}" -eq 0 ]]; then
+        echo "error: the executable references nothing under $FFMPEG_LIBDIR." >&2
+        echo "       Is the FFmpeg it was linked against the one pkg-config names?" >&2
+        exit 1
+    fi
 
     # Each library: its own id first, so a reference to it can be `@rpath/<name>`,
     # then `@loader_path` on the search path so that `@rpath` means "the folder I
     # am in", then its references to the others.
-    local lib name dep
-    for lib in "$frameworks"/*.dylib; do
-        name="$(basename "$lib")"
+    local lib
+    for name in "${copied[@]}"; do
+        lib="$frameworks/$name"
         install_name_tool -id "@rpath/$name" "$lib"
         # Already present on a second run, which is not an error.
         install_name_tool -add_rpath @loader_path "$lib" 2>/dev/null || true
         while read -r dep; do
-            case "$dep" in
-                "$FFMPEG_LIBDIR"/*)
-                    install_name_tool -change "$dep" "@rpath/$(basename "$dep")" "$lib"
-                    ;;
-            esac
+            [[ "$dep" == "$FFMPEG_LIBDIR"/* ]] || continue
+            install_name_tool -change "$dep" "@rpath/$(basename "$dep")" "$lib"
         done < <(otool -L "$lib" | tail -n +2 | awk '{print $1}')
     done
 
-    # The executable looks in the Frameworks folder, which is one up from it and
-    # across - `Contents/MacOS` beside `Contents/Frameworks`.
-    local binary="$APP/Contents/MacOS/xgview"
+    # The executable looks in the Frameworks folder, one up from it and across -
+    # `Contents/MacOS` beside `Contents/Frameworks`.
     install_name_tool -add_rpath @executable_path/../Frameworks "$binary" 2>/dev/null || true
     while read -r dep; do
-        case "$dep" in
-            "$FFMPEG_LIBDIR"/*)
-                install_name_tool -change "$dep" "@rpath/$(basename "$dep")" "$binary"
-                ;;
-        esac
+        [[ "$dep" == "$FFMPEG_LIBDIR"/* ]] || continue
+        install_name_tool -change "$dep" "@rpath/$(basename "$dep")" "$binary"
     done < <(otool -L "$binary" | tail -n +2 | awk '{print $1}')
 }
 
@@ -326,16 +342,20 @@ verify_package() {
     lipo -info "$binary"
 
     echo "--- FFmpeg libraries ---"
-    otool -L "$binary" | awk '/libav|libsw/ {print "    " $1}'
-
-    local outside
-    outside="$(otool -L "$binary" | awk '/libav|libsw/ && $1 !~ /^@rpath\// {print $1}')"
-    local failed=0
-    if [[ -n "$outside" ]]; then
-        echo "error: these FFmpeg libraries are still referenced outside the bundle:" >&2
-        printf '    %s\n' "$outside" >&2
-        failed=1
-    fi
+    # Every one has to be an `@rpath` reference *and* the file it names has to be
+    # there. A bundle that asks for `@rpath/libavutil.60.dylib` while carrying
+    # `libavutil.60.8.103.dylib` reads as rewritten and crashes at launch, which
+    # is the failure this is here to catch.
+    local failed=0 dep name
+    while read -r dep; do
+        name="$(basename "$dep")"
+        if [[ "$dep" == @rpath/* && -f "$APP/Contents/Frameworks/$name" ]]; then
+            echo "    $dep"
+        else
+            echo "error: $dep is not inside the bundle, or the file it names is missing" >&2
+            failed=1
+        fi
+    done < <(otool -L "$binary" | awk '/libav|libsw/ {print $1}')
 
     echo "--- signature ---"
     if codesign --verify --deep --strict "$APP" 2>/dev/null; then
