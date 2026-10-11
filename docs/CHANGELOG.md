@@ -3,6 +3,28 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.3.18
+
+Changes since 1.3.16. The Linux package decodes on the GPU.
+
+### Hardware decoding
+
+- **The Linux package carries a hardware decoder now.** The FFmpeg it builds had
+  been left with software decoding alone, so every tile showed `SW` on every
+  machine - an NVIDIA card under WSL, an Intel iGPU on a desktop - however
+  capable the hardware was. The VAAPI and NVDEC hwaccels for H.264 (the one codec
+  the pipeline asks a device for) are now compiled in, and `vaapi` on Intel and
+  AMD and `cuda` on NVIDIA both open where the machine offers them.
+- **VAAPI's libva travels in the package.** It is linked rather than opened at
+  run time, so libva is built from source at package time and staged beside the
+  executable with `libva-drm`: a machine that never installed libva can still
+  decode on the GPU. The bundled copy has the VA driver directories compiled in,
+  because the driver itself is the machine's own and it has to be told where that
+  machine keeps it.
+- **The CUDA side ships no library.** `nv-codec-headers` is headers only and the
+  driver is opened at run time, so nothing NVIDIA-specific is in the package; a
+  machine without the driver simply falls through to the next device, or the CPU.
+
 ## 1.3.16
 
 Changes since 1.3.7. The wall holds camera groups it switches between, and a few
