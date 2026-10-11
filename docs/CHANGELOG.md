@@ -3,6 +3,55 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.3.24
+
+Changes since 1.3.18. The wall keeps itself up, can be held above the other
+windows, and can be limited to one window per configuration.
+
+### Keeping the wall up
+
+- **`--supervise` starts the viewer again when it dies.** A kiosk machine has
+  nobody watching it, so a viewer that comes up at boot and dies an hour later
+  has not been started at all. The switch makes the process a supervisor: it
+  starts the viewer, waits, and starts it again when it dies without having been
+  asked to stop - three times within ten minutes, and then it leaves it down. A
+  viewer that was asked to stop, or that cannot draw on the machine at all,
+  exits with a code that says so and is not started again.
+- **The start-on-boot entry now asks to be supervised**, so a machine that boots
+  into the wall stays that way on its own. Windows' scheduled task is the one
+  mechanism left out, having a failure restart of its own.
+- **The desktop is asked to leave the screen alone.** Keeping the machine awake
+  was already there, but a desktop like XFCE blanks the screen on a timer of its
+  own - X11's DPMS - which logind's inhibitor never reaches, so the screen went
+  dark with the switch on. The services that own the screen, the screensaver
+  daemon and the power manager, are now asked over the session bus as well, and
+  the two are held together.
+
+### One window per configuration
+
+- **A second launch brings the wall forward instead of opening a second one.**
+  The lock is the configuration file's, named after it and kept beside it, so a
+  wall deliberately run from another `--config` still opens. It is a bound
+  socket on Unix and a pair of named kernel objects on Windows; a Wayland
+  session cannot bring the window forward, so a second launch there ends
+  quietly. Android takes no lock - its activity is `singleTask`.
+
+### The wall above the others
+
+- **A full-screen wall can be held on top**, so a panel, a notification or
+  another window cannot cover the cameras. A Display tab option, off unless
+  asked for, and only in full screen. Windows, macOS and X11 can honour it; a
+  Wayland session cannot and the switch is greyed out there.
+- The wall is taken off the top around what the viewer opens that has to come up
+  in front of it: a file dialog for export or import, and the browser a link
+  opens.
+
+### Display
+
+- **A tile's corner names the codec instead of the transport**: `H264 200kbps`
+  where it read `TCP 200kbps`. The codec is what the stream announces in its own
+  description, and the corner item's settings button now says "Codec + rate".
+
 ## 1.3.18
 
 Changes since 1.3.16. The Linux package decodes on the GPU.
