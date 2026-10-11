@@ -12,6 +12,11 @@ readme = "README.md"
 edition.workspace = true
 rust-version.workspace = true
 
+# Two binaries live in this package, so `cargo run` has to be told which one is
+# meant. The viewer is the program; the console entry point beside it is reached
+# by name (`cargo run --bin xgview-cli`), and is what a shell starts on Windows.
+default-run = "xgview"
+
 [[bin]]
 name = "xgview"
 path = "src/main.rs"
@@ -55,7 +60,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.3.26"
+version = "1.3.27"
 authors = ["XHBL <newxhbl@hotmail.com>"]
 description = "A grid viewer for surveillance cameras"
 license = "MIT"
