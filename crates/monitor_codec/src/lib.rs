@@ -304,10 +304,11 @@ pub struct DecoderCapabilities {
     /// a given stream ends up on it is only known once decoding starts, and
     /// [`VideoStreamInfo::hardware`] is where that answer is reported.
     pub hardware: bool,
-    /// Hardware and software decoding can be chosen between. True where the
-    /// build carries a software decoder to choose: the desktop always, and
-    /// Android for H.264. A codec with none - H.265 there - stays on the
-    /// platform's decoder whatever the setting says.
+    /// Hardware and software decoding can be chosen between. False where the
+    /// build offers no choice: Android decodes on the platform's decoder and
+    /// falls back to OpenH264 for H.264 by itself - a stream it will not take,
+    /// and not a setting - so there is nothing to prefer and a switch would say
+    /// more than it does.
     pub selectable: bool,
     /// Backend that will be used by [`create_decoder`].
     pub backend: &'static str,
@@ -315,12 +316,12 @@ pub struct DecoderCapabilities {
 
 /// Reports the capabilities of the current platform.
 pub fn capabilities() -> DecoderCapabilities {
-    #[cfg(all(target_os = "android", feature = "h264"))]
+    #[cfg(target_os = "android")]
     {
-        DecoderCapabilities { hardware: true, selectable: true, backend: "AMediaCodec" }
-    }
-    #[cfg(all(target_os = "android", not(feature = "h264")))]
-    {
+        // Not selectable however the H.264 fallback is built: the software
+        // decoder there answers a stream the platform refuses, never a setting,
+        // and the codecs beside H.264 - H.265 above all - have no software path
+        // at all, so a switch would promise what the build cannot keep.
         DecoderCapabilities { hardware: true, selectable: false, backend: "AMediaCodec" }
     }
     #[cfg(all(not(target_os = "android"), feature = "ffmpeg", any(windows, target_os = "linux")))]

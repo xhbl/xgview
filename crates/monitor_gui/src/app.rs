@@ -3388,12 +3388,15 @@ impl XgViewApp {
                 );
             }
         });
-        let summary = if !self.decoder_selectable {
-            monitor_i18n::tr("streams-summary-fixed")
-        } else if self.hardware_decoder {
-            monitor_i18n::tr("streams-summary-available")
-        } else {
+        // A build with no hardware decoder at all is told apart first: the
+        // "nothing to switch" wording describes a platform that decodes in
+        // hardware and sees to its own fallbacks, which such a build is not.
+        let summary = if !self.hardware_decoder {
             monitor_i18n::tr("streams-summary-software")
+        } else if !self.decoder_selectable {
+            monitor_i18n::tr("streams-summary-fixed")
+        } else {
+            monitor_i18n::tr("streams-summary-available")
         };
         ui.label(RichText::new(summary).small().color(theme::TEXT_DIM));
 

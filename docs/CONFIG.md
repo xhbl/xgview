@@ -381,8 +381,7 @@ xgview/
   decoder (`Direct3D 11` / `CUDA`, `VAAPI` / `CUDA`) and fall back to software
   for a device or a stream the hardware will not take; Android decodes through
   `AMediaCodec` and falls back to OpenH264 for an H.264 stream the platform will
-  not take (or when hardware decoding is switched off there); macOS through
-  VideoToolbox. Each tile shows which one it got
+  not take; macOS through VideoToolbox. Each tile shows which one it got
   (`HW` / `SW`).
 * **Text is keyed, not hard-coded** – `monitor_core` returns i18n keys and
   `monitor_gui` translates them through `monitor_i18n`; English is embedded and
