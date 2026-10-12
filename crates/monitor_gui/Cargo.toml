@@ -35,9 +35,13 @@ monitor_i18n = { path = "../monitor_i18n" }
 # glow backend it would otherwise turn on itself.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { version = "0.32", features = ["accesskit", "glow", "wayland", "x11"] }
-# Native file dialogs for the configuration export / import of the About tab.
-# The default features are the desktop portal on Linux, so no GTK is pulled in.
-rfd = "0.17"
+# The file dialog the configuration export / import opens, drawn by egui inside
+# this window rather than by the desktop. A native one goes through
+# `xdg-desktop-portal` on Linux and can be left waiting on a `zenity` fallback,
+# which is a wall frozen behind a dialog that never came up; this one comes up
+# the same way everywhere, needs no session of its own, and cannot end up behind
+# a full screen wall held on top. The version tracks egui's.
+egui-file-dialog = "0.11"
 
 # The single-instance claim's kernel objects on Windows - a named mutex that says
 # whether another instance holds this configuration, and a named event it is

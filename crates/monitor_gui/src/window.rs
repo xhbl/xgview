@@ -3,7 +3,7 @@
 //! A monitoring wall is often the only thing on a screen, and a full screen one
 //! that something can cover - a notification, a panel, the browser the viewer
 //! just asked for - is not doing its job. So the window is asked to stay on top:
-//! [`level`] is the whole decision, and [`OnTop`] is the two moments where the
+//! [`level`] is the whole decision, and [`OnTop`] is the moment where the
 //! app gives that up on purpose.
 //!
 //! What can be asked for is not the same everywhere. Windows, macOS and most X11
@@ -28,10 +28,6 @@ pub enum OnTop {
     /// Nothing to say: the setting decides.
     #[default]
     Configured,
-    /// Taken off the top until the code that did it puts it back. A native file
-    /// dialog is the case - the call that opens it returns when the dialog
-    /// closes, so its end is known here rather than by a clock.
-    Suspended,
     /// Taken off the top until a moment. A browser window is the case: nothing
     /// tells us when it appears, so a clock is the only end that can be named.
     SuspendedUntil(Instant),
@@ -120,7 +116,6 @@ pub fn level(
 ) -> WindowLevel {
     let held_off = match on_top {
         OnTop::Configured => false,
-        OnTop::Suspended => true,
         OnTop::SuspendedUntil(until) => now < until,
     };
     if supported && configured && fullscreen && !held_off {
@@ -166,7 +161,6 @@ mod tests {
     #[test]
     fn a_suspension_lets_what_was_opened_come_up_in_front() {
         let until = Instant::now() + Duration::from_secs(60);
-        assert_eq!(asked_for(true, true, true, OnTop::Suspended), WindowLevel::Normal);
         assert_eq!(asked_for(true, true, true, OnTop::SuspendedUntil(until)), WindowLevel::Normal);
     }
 
