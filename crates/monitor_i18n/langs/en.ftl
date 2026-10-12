@@ -225,6 +225,7 @@ toast-config-save-failed = cannot save { $path }: { $error }
 toast-config-exported = configuration exported to { $path }
 toast-export-failed = cannot export: { $error }
 toast-export-needs-storage = export needs the storage permission - grant it, then export again
+toast-no-file-dialog = no file dialog in this session — start the viewer from a desktop session
 toast-imported =
     imported { $count ->
         [one] { $count } camera

@@ -223,6 +223,7 @@ toast-config-save-failed = 无法保存 { $path }：{ $error }
 toast-config-exported = 配置已导出到 { $path }
 toast-export-failed = 无法导出：{ $error }
 toast-export-needs-storage = 导出需要存储权限——授权后再导出一次
+toast-no-file-dialog = 此会话没有可用的文件对话框——请从桌面会话启动查看器
 toast-imported = 已从 { $path } 导入 { $count } 个摄像头
 toast-imported-document = 已从所选文件导入 { $count } 个摄像头
 toast-import-failed = 无法导入：{ $error }

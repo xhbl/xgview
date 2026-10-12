@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(not(target_os = "android"))]
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -454,16 +456,38 @@ impl Passphrase {
 /// The wall is taken off the top around anything the viewer opened that has to
 /// come up in front of it, and the command that does it is acted on when the
 /// frame that sent it ends. A dialog opened in that same frame would therefore
-/// still come up behind a wall held on top - and the app is inside the dialog's
-/// own message loop while it is up, with no frame left in which the level could
-/// reach the window manager, so the wall looks frozen over it. What was asked
-/// for is kept here for one frame instead; see [`XgViewApp::ask_for_file`].
+/// still come up behind a wall held on top, because no frame has run in which
+/// the level could reach the window manager. What was asked for is kept here
+/// for one frame instead; see [`XgViewApp::ask_for_file`].
 #[derive(Debug)]
 enum FileJob {
     /// Sealing the configuration for another machine, under this passphrase.
     Export(String),
     /// Reading a configuration in - sealed, or in clear from an older export.
     Import,
+}
+
+/// Whether a native file dialog can be reached from this process at all.
+///
+/// On Linux the dialog is `rfd`'s, which asks `xdg-desktop-portal` over the
+/// session bus and, when that fails, falls back to a `zenity` it waits on - a
+/// fallback a process started by systemd, with no session bus, is left with,
+/// and one that never comes back. Nothing here can tell a slow dialog from that
+/// one, so the session bus it would need is asked for by name and the press is
+/// answered with a toast when it is not there. Windows and macOS open the
+/// system's own dialog, which needs no bus of ours.
+#[cfg(not(target_os = "android"))]
+fn file_dialog_reachable() -> bool {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok_and(|address| !address.is_empty())
+            || std::env::var("XDG_RUNTIME_DIR")
+                .is_ok_and(|dir| Path::new(&dir).join("bus").exists())
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        true
+    }
 }
 
 /// Translation key of what the status line calls a grid layout.
@@ -513,6 +537,12 @@ pub struct XgViewApp {
     video: VideoRenderer,
     events_tx: Sender<BackgroundEvent>,
     events_rx: Receiver<BackgroundEvent>,
+    /// Where a native file dialog's answer comes back from: the thread it runs
+    /// on, and what it was opened for. See [`Self::ask_for_file`].
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    file_tx: Sender<(FileJob, Option<PathBuf>)>,
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    file_rx: Receiver<(FileJob, Option<PathBuf>)>,
     /// Start-on-boot state as the desktop start-up section reports it; the
     /// Android section shows the system's own state instead and never reads it.
     #[cfg_attr(target_os = "android", allow(dead_code))]
@@ -777,6 +807,7 @@ impl XgViewApp {
             config.prefer_hardware_decode,
         );
         let (events_tx, events_rx) = unbounded();
+        let (file_tx, file_rx) = unbounded();
         let capabilities = monitor_codec::capabilities();
 
         // eframe is built with the wgpu backend, so it always offers the render
@@ -797,6 +828,8 @@ impl XgViewApp {
             video,
             events_tx,
             events_rx,
+            file_tx,
+            file_rx,
             autostart,
             power,
             decoder: capabilities.backend,
@@ -1302,10 +1335,8 @@ impl XgViewApp {
     /// The dialog itself is opened on the next frame, by
     /// [`Self::open_asked_file`]: the command that lowers the window level is
     /// acted on when *this* frame ends, so a dialog opened here would come up
-    /// behind a wall still held on top, and the app would be inside the
-    /// dialog's own message loop with no frame left in which the level could
-    /// reach the window manager. That is the wall that looks frozen, with the
-    /// file picker somewhere behind it.
+    /// behind a wall still held on top. What it answers comes back through
+    /// [`Self::poll_file_answer`], which also puts the wall back.
     fn ask_for_file(&mut self, ctx: &egui::Context, job: FileJob) {
         self.set_on_top(ctx, OnTop::Suspended);
         self.file_job = Some(job);
@@ -1316,15 +1347,54 @@ impl XgViewApp {
     }
 
     /// Opens the file dialog the previous frame asked for, now that the wall is
-    /// off the top, and puts the wall back on top when the dialog closes.
+    /// off the top.
     ///
-    /// The call that opens a native dialog returns when it closes, so its end
-    /// is known here rather than by a clock.
+    /// The dialog runs on the runtime's threads, not this one: `rfd` reaches
+    /// the dialog through `xdg-desktop-portal` over the session bus and, when
+    /// that fails, through a `zenity` it waits on - and either of those can hang
+    /// with no way for this program to tell. On this thread that was a frozen
+    /// wall, with the picker nowhere to be seen; there it is only a thread that
+    /// never comes back.
+    #[cfg(not(target_os = "android"))]
     fn open_asked_file(&mut self, ctx: &egui::Context) {
-        // A desktop file dialog is the case; on Android the export writes
-        // straight into the public folder and the import hands the picker to
-        // another activity, and this is the one frame of latency between the
-        // press and either.
+        let Some(job) = self.file_job.take() else {
+            return;
+        };
+        // Without a session bus the portal cannot be asked at all and what is
+        // left is the `zenity` fallback - the state a viewer started by systemd
+        // is in. Say so rather than leave one hanging behind the wall.
+        if !file_dialog_reachable() {
+            self.set_on_top(ctx, OnTop::Configured);
+            self.flash(monitor_i18n::tr("toast-no-file-dialog"), ToastKind::Error);
+            return;
+        }
+        let dialog = match &job {
+            FileJob::Export(_) => rfd::AsyncFileDialog::new()
+                .set_file_name(monitor_core::EXPORT_FILE_NAME)
+                .add_filter("age", &["age"]),
+            FileJob::Import => {
+                rfd::AsyncFileDialog::new().add_filter("configuration", &["age", "json"])
+            }
+        };
+        let answers = self.file_tx.clone();
+        let ctx = ctx.clone();
+        self.handle.spawn(async move {
+            let chosen = match &job {
+                FileJob::Export(_) => dialog.save_file().await,
+                FileJob::Import => dialog.pick_file().await,
+            };
+            let _ = answers.send((job, chosen.map(|handle| handle.path().to_path_buf())));
+            // The wall may have no live channel and be repainting on nothing,
+            // and the answer would sit in the channel until something woke it.
+            ctx.request_repaint();
+        });
+    }
+
+    /// Opens what Android has instead of a file dialog: the export is written
+    /// straight into the public folder, and the import hands the picker to
+    /// another activity, whose answer [`Self::poll_picked_config`] takes.
+    #[cfg(target_os = "android")]
+    fn open_asked_file(&mut self, ctx: &egui::Context) {
         let Some(job) = self.file_job.take() else {
             return;
         };
@@ -1333,6 +1403,23 @@ impl XgViewApp {
             FileJob::Import => self.import_config(),
         }
         self.set_on_top(ctx, OnTop::Configured);
+    }
+
+    /// Takes the file dialog's answer, if one has arrived, and puts the wall
+    /// back on top: the dialog it was held off for is over.
+    #[cfg(not(target_os = "android"))]
+    fn poll_file_answer(&mut self, ctx: &egui::Context) {
+        while let Ok((job, chosen)) = self.file_rx.try_recv() {
+            self.set_on_top(ctx, OnTop::Configured);
+            // A dialog the viewer dismissed asks for nothing and says nothing.
+            let Some(path) = chosen else {
+                continue;
+            };
+            match job {
+                FileJob::Export(passphrase) => self.export_to(&path, &passphrase),
+                FileJob::Import => self.import_from(path),
+            }
+        }
     }
 
     /// Whether what the viewer did this frame is a request for the bars.
@@ -4492,7 +4579,7 @@ impl XgViewApp {
 
     /// What the export / import pair does. The desktop picks files with the
     /// system's dialogs; Android has the fixed export folder and the system's
-    /// document picker, and says so. See [`Self::export_sealed`].
+    /// document picker, and says so. See [`Self::ask_for_file`].
     #[cfg(not(target_os = "android"))]
     fn import_hint(&self) -> String {
         monitor_i18n::tr("about-import-hint")
@@ -4505,22 +4592,13 @@ impl XgViewApp {
         monitor_i18n::tr("about-import-hint-android")
     }
 
-    /// Writes the configuration out sealed with `passphrase`, to the file the
-    /// viewer picks.
+    /// Writes the configuration out sealed with `passphrase`, to a file the
+    /// viewer has already chosen.
     ///
-    /// The passphrase has already been typed twice, so the write is the last
-    /// step: the file dialog this opens is a window of its own and has to come
-    /// up in front of the wall, which the caller arranges with
-    /// [`Self::set_on_top`].
+    /// Choosing it is the dialog [`Self::ask_for_file`] opens on another thread;
+    /// this is what happens once its answer is in.
     #[cfg(not(target_os = "android"))]
-    fn export_sealed(&mut self, passphrase: &str) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name(monitor_core::EXPORT_FILE_NAME)
-            .add_filter("age", &["age"])
-            .save_file()
-        else {
-            return;
-        };
+    fn export_to(&mut self, path: &Path, passphrase: &str) {
         let sealed = match monitor_core::sealed::seal(&self.config, passphrase) {
             Ok(sealed) => sealed,
             Err(error) => {
@@ -4528,7 +4606,7 @@ impl XgViewApp {
                 return;
             }
         };
-        match std::fs::write(&path, sealed.as_bytes()) {
+        match std::fs::write(path, sealed.as_bytes()) {
             Ok(()) => self.flash(
                 monitor_i18n::tr_args(
                     "toast-config-exported",
@@ -4570,16 +4648,14 @@ impl XgViewApp {
         }
     }
 
-    /// Reads a configuration file into the running one.
+    /// Reads a configuration file the viewer has chosen into the running one.
     ///
     /// A sealed document asks for its passphrase before anything is touched, and
     /// the prompt takes it from there; an older export - JSON, in clear - is
-    /// imported on the spot, the way it always was.
+    /// imported on the spot, the way it always was. The file was chosen by the
+    /// dialog [`Self::ask_for_file`] opens on another thread.
     #[cfg(not(target_os = "android"))]
-    fn import_config(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("configuration", &["age", "json"]).pick_file() else {
-            return;
-        };
+    fn import_from(&mut self, path: PathBuf) {
         let data = match std::fs::read_to_string(&path) {
             Ok(data) => data,
             Err(error) => {
@@ -5040,6 +5116,11 @@ impl eframe::App for XgViewApp {
         // ended with - the wall off the top - has already reached the window
         // manager. See `ask_for_file`.
         self.open_asked_file(ctx);
+
+        // The file dialog's answer, if the thread it ran on has given one since
+        // the last frame.
+        #[cfg(not(target_os = "android"))]
+        self.poll_file_answer(ctx);
 
         // Anything the soft keyboard typed has to be in the input queue before
         // a widget is drawn: a text field reads the events of the frame it is
