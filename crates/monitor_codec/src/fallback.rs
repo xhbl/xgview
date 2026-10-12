@@ -93,6 +93,20 @@ impl VideoDecoder for Fallback {
 
     fn configure(&mut self, config: &DecoderConfig) -> Result<()> {
         self.config = Some(config.clone());
+        // Asked not to decode in hardware, the software decoder is taken
+        // straight away and the platform's is never opened. The pair is a policy
+        // over the two decoders, and this is the other side of it: the fallback
+        // the setting asks for rather than the one a refusal forces.
+        if !config.hardware {
+            tracing::info!(
+                target: "xgview::codec",
+                decoder = self.software.name(),
+                "hardware decoding is switched off, decoding on the cpu"
+            );
+            self.software.configure(config)?;
+            self.switched = true;
+            return Ok(());
+        }
         match self.preferred.configure(config) {
             Ok(()) => Ok(()),
             // A refusal here is one about the codec rather than the stream -
@@ -253,6 +267,17 @@ mod tests {
         decoder.configure(&config()).unwrap();
         assert_eq!(decoder.name(), "second");
         assert_eq!(decoder.decode(&[0; 8], 0, true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_software_decoder_is_taken_when_hardware_is_not_asked_for() {
+        let mut decoder = Fallback::new(stub("first", Answer::Picture), stub("second", Answer::Picture));
+        let mut asked_for_software = config();
+        asked_for_software.hardware = false;
+        decoder.configure(&asked_for_software).unwrap();
+        assert_eq!(decoder.name(), "second");
+        assert_eq!(decoder.decode(&[0; 8], 0, true).unwrap().len(), 1);
+        assert_eq!(decoder.name(), "second", "and it stays there");
     }
 
     #[test]

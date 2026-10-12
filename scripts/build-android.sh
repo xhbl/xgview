@@ -50,12 +50,6 @@ echo "==> building monitor_android (${PROFILE}) for ${ABIS} at API ${API}"
 # name mentions only the ABIs of this run. Empty the tree so what is packaged is
 # what was built.
 rm -rf "${OUT_DIR}"
-# OpenH264 is C++, and `cc` links the C++ runtime of the target it builds for.
-# Android's default is the shared `libc++_shared`, which would then have to
-# travel in the APK; this project is one shared library - the Android project
-# packages a single `libmonitor_android.so` - so the static runtime is both
-# correct and one file fewer. Google's own guidance names this the case for it.
-export CXXSTDLIB=c++_static
 # `-P` is cargo-ndk's own platform flag. The lowercase `-p` is passed through to
 # cargo as `--package`, so it takes a crate name and not an API level.
 # shellcheck disable=SC2086
@@ -64,6 +58,38 @@ cargo ndk \
     -P "${API}" \
     -o "${OUT_DIR}" \
     build ${PROFILE_FLAG} -p monitor_android
+
+# OpenH264 is C++, and `cc` links Android's C++ runtime for it. The platform
+# hands a program its system libraries but not a C++ runtime to a library of
+# ours, so `libc++_shared.so` has to travel in the APK beside the one the
+# Android project packages. It comes from the NDK, matched to the ABI.
+#
+# The static runtime is the other way to do this and the one that looks tidier -
+# a single `.so`, nothing to copy - but Android keeps it in two archives, and
+# linking `c++_static` without `c++abi` beside it leaves the library loading with
+# its RTTI undefined: "cannot locate symbol
+# _ZTVN10__cxxabiv117__class_type_infoE", on the device, at launch.
+ndk_root="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+if [ -n "$ndk_root" ]; then
+    ndk_lib_dir=""
+    for dir in "$ndk_root"/toolchains/llvm/prebuilt/*/sysroot/usr/lib; do
+        ndk_lib_dir="$dir"
+        break
+    done
+    for abi in ${ABIS}; do
+        case "$abi" in
+            arm64-v8a)   triple=aarch64-linux-android ;;
+            armeabi-v7a) triple=arm-linux-androideabi ;;
+            x86)         triple=i686-linux-android ;;
+            x86_64)      triple=x86_64-linux-android ;;
+            *)           echo "error: unknown ABI: $abi" >&2; exit 2 ;;
+        esac
+        cp "${ndk_lib_dir}/${triple}/libc++_shared.so" "${OUT_DIR}/${abi}/libc++_shared.so"
+        echo "    libc++_shared.so (${abi})"
+    done
+else
+    echo "warning: no ANDROID_NDK_HOME, so libc++_shared.so was not packaged" >&2
+fi
 
 echo
 echo "==> native libraries:"

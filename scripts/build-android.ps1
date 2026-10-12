@@ -120,14 +120,34 @@ try {
     # a package called `-arm64-v8a` that way, carrying code from before every
     # fix since. Empty the tree so what is packaged is what was built.
     Remove-Item -Recurse -Force 'android-build/jniLibs' -ErrorAction SilentlyContinue
-    # OpenH264 is C++, and `cc` links the C++ runtime of the target it builds
-    # for. Android's default is the shared `libc++_shared`, which would then have
-    # to travel in the APK; this project is one shared library - Gradle packages
-    # a single `libmonitor_android.so` - so the static runtime is both correct
-    # and one file fewer. Google's own guidance names this the case for it.
-    $env:CXXSTDLIB = 'c++_static'
     & cargo ndk -t $Abis -P $Api -o android-build/jniLibs build --release -p monitor_android
     if ($LASTEXITCODE -ne 0) { throw "cargo ndk failed (exit $LASTEXITCODE)" }
+
+    # OpenH264 is C++, and `cc` links Android's C++ runtime for it. The platform
+    # hands a program its system libraries but not a C++ runtime to a library of
+    # ours, so `libc++_shared.so` has to travel in the APK beside the one Gradle
+    # packages. It comes from the NDK, matched to the ABI.
+    #
+    # The static runtime is the other way to do this and the one that looks
+    # tidier - a single `.so`, nothing to copy - but Android keeps it in two
+    # archives, and linking `c++_static` without `c++abi` beside it leaves the
+    # library loading with its RTTI undefined: "cannot locate symbol
+    # _ZTVN10__cxxabiv117__class_type_infoE", on the device, at launch.
+    $sysrootLib = (Get-ChildItem (Join-Path $ndk 'toolchains\llvm\prebuilt\*\sysroot\usr\lib') -Directory |
+        Select-Object -First 1).FullName
+    foreach ($abi in ($Abis -split '\s+')) {
+        $triple = @{
+            'arm64-v8a'   = 'aarch64-linux-android'
+            'armeabi-v7a' = 'arm-linux-androideabi'
+            'x86'         = 'i686-linux-android'
+            'x86_64'      = 'x86_64-linux-android'
+        }[$abi]
+        if (-not $triple) { throw "unknown ABI: $abi" }
+        $shared = Join-Path $sysrootLib "$triple\libc++_shared.so"
+        if (-not (Test-Path $shared)) { throw "libc++_shared.so missing for $abi ($shared)" }
+        Copy-Item $shared (Join-Path (Join-Path 'android-build/jniLibs' $abi) 'libc++_shared.so') -Force
+        Write-Host "    libc++_shared.so ($abi)"
+    }
 
     Write-Host "==> APK (gradle $task)" -ForegroundColor Cyan
     & $gradle -p android $task --console=plain

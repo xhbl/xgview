@@ -199,9 +199,12 @@ features pulls none of it into the Android dependency graph. OpenH264 *is* built
 as the fallback for an H.264 stream `AMediaCodec` will not take: the platform
 decoder is tried first, and a refusal at open time hands the access unit that was
 refused to the software one (`monitor_codec::fallback`). It is C++, so `cc` links
-a C++ runtime - the Android build scripts ask for the static one
-(`CXXSTDLIB=c++_static`), there being a single shared library in the APK that the
-shared `libc++_shared` would otherwise have to travel beside.
+a C++ runtime - Android's shared one, `libc++_shared`, which the build scripts
+take from the NDK and put in the APK beside the library that needs it. The static
+runtime is the tidier-looking alternative and a trap: Android keeps it in two
+archives, and `CXXSTDLIB=c++_static` alone leaves the library loading with its
+RTTI undefined ("cannot locate symbol `_ZTVN10__cxxabiv117__class_type_infoE`",
+on the device, at launch).
 
 **libavcodec logs to `stderr` on its own.** It writes there directly unless it is
 given a callback, with no timestamp, no target and no filter that can reach it,

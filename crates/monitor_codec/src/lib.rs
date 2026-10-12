@@ -304,10 +304,10 @@ pub struct DecoderCapabilities {
     /// a given stream ends up on it is only known once decoding starts, and
     /// [`VideoStreamInfo::hardware`] is where that answer is reported.
     pub hardware: bool,
-    /// Hardware and software decoding can be chosen between. False where the
-    /// build offers no choice: Android decodes on the platform's decoder and
-    /// falls back to OpenH264 only for a stream that one will not take, so
-    /// there is nothing to prefer and a switch would be a lie.
+    /// Hardware and software decoding can be chosen between. True where the
+    /// build carries a software decoder to choose: the desktop always, and
+    /// Android for H.264. A codec with none - H.265 there - stays on the
+    /// platform's decoder whatever the setting says.
     pub selectable: bool,
     /// Backend that will be used by [`create_decoder`].
     pub backend: &'static str,
@@ -315,7 +315,11 @@ pub struct DecoderCapabilities {
 
 /// Reports the capabilities of the current platform.
 pub fn capabilities() -> DecoderCapabilities {
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", feature = "h264"))]
+    {
+        DecoderCapabilities { hardware: true, selectable: true, backend: "AMediaCodec" }
+    }
+    #[cfg(all(target_os = "android", not(feature = "h264")))]
     {
         DecoderCapabilities { hardware: true, selectable: false, backend: "AMediaCodec" }
     }
