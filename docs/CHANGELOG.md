@@ -3,6 +3,42 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.3.37
+
+Changes since 1.3.24. **macOS becomes a supported platform** - it builds, decodes
+on the GPU, starts on boot, and ships as a signed app that runs on Intel and on
+Apple silicon alike.
+
+### macOS
+
+- **The viewer builds and runs on macOS.** Most of the work was what an ABI
+  decides rather than what the viewer does: `va_list` is a plain pointer on
+  Apple's AArch64 and a tag structure on the System V one, and a build for an
+  architecture other than the one it is running on has to be allowed to ask
+  pkg-config about it.
+- **It decodes on the GPU through VideoToolbox.** That is the platform's own
+  decoder, so there is nothing to install; a stream it will not take falls back
+  to the software path, the way the other platforms' devices do.
+- **Start on boot writes a LaunchAgent** at
+  `~/Library/LaunchAgents/com.xhbl.xgview.plist`, which `launchd` reads at the
+  next logon, and it is supervised like every other platform's entry. The switch
+  used to write an XDG `.desktop` file, which nothing on macOS reads.
+- **`scripts/build-macos.sh` produces a `.app`.** The FFmpeg libraries it links
+  are copied into `Contents/Frameworks` and every reference to them rewritten to
+  `@rpath`, so the bundle carries its own decoder; the language packs travel in
+  `Contents/Resources`; and the bundle is signed ad-hoc, inside out. Both
+  architectures are built and joined with `lipo`, so one download runs on either
+  Mac. Handing it to anyone over the network still needs a Developer ID
+  certificate and notarisation, which the script does not do.
+
+### Internals
+
+- The package carries two binaries, which had made `cargo run` ambiguous: the
+  viewer is now the manifest's `default-run`, and the console entry point beside
+  it is reached by name.
+- The test for Simplified against Traditional Chinese was computed on every
+  platform while only Windows, Linux and Android read it, which warned on macOS.
+
 ## 1.3.24
 
 Changes since 1.3.18. The wall keeps itself up, can be held above the other
