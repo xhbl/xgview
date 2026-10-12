@@ -3,6 +3,37 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.3.41
+
+Changes since 1.3.37. **Android decodes H.264 on the CPU when the platform's own
+decoder will not take the stream**, so a camera it would have refused is watched
+rather than left dark.
+
+### Android
+
+- **H.264 falls back to OpenH264.** `AMediaCodec` was the only decoder the
+  Android build carried, and it does not take every stream a camera offers - a
+  profile its decoders do not implement, or a device already holding as many
+  hardware sessions as it allows - which left the tile dark with nothing else to
+  try. The platform's decoder is still tried first; one that refuses hands the
+  access unit it refused, which is the one carrying the parameter sets, to the
+  software decoder, and that tile then reads `SW`. Confirmed on a SHIELD: nine
+  channels, every one decoding, no errors either way.
+- **The decoding setting stays greyed out there.** The software path covers H.264
+  alone, so preferring the CPU would leave H.265 on the platform's decoder
+  whatever the setting said. What the setting was for - a stream the platform
+  will not take - the fallback answers on its own.
+- **The APK carries its C++ runtime.** OpenH264 is C++, and Android keeps the C++
+  runtime in the platform rather than handing one to a library of ours, so
+  `libc++_shared.so` travels beside it. The package grows by about half a
+  megabyte.
+
+### Internals
+
+- The line beside the decoding setting describes what a platform with a fallback
+  of its own does; a build with no hardware decoder at all takes the CPU-only
+  wording instead.
+
 ## 1.3.37
 
 Changes since 1.3.24. **macOS becomes a supported platform** - it builds, decodes
