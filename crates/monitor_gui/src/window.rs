@@ -6,13 +6,16 @@
 //! [`level`] is the whole decision, and [`OnTop`] is the two moments where the
 //! app gives that up on purpose.
 //!
-//! What can be asked for is not the same everywhere. Windows, macOS and X11 keep
-//! a window above the others; a Wayland session cannot - winit documents the
-//! window level as unsupported there - and Android has nothing to keep it above.
-//! [`supported`] answers that from the session's own variables, and the settings
-//! panel greys the switch out where it answers `false`, the treatment
-//! `monitor_core::power` gives its own switches: one that silently does nothing
-//! is worse than one the panel will not offer.
+//! What can be asked for is not the same everywhere. Windows, macOS and most X11
+//! window managers keep a window above the others; a Wayland session cannot -
+//! winit documents the window level as unsupported there - Android has nothing to
+//! keep it above, and an XFCE session cannot have it at all, because xfwm4 refuses
+//! `_NET_WM_STATE_ABOVE` on a full screen window and clears the state when one
+//! goes full screen: exactly the state this is for. [`supported`] answers that
+//! from the session's own variables, and the settings panel greys the switch out
+//! where it answers `false`, the treatment `monitor_core::power` gives its own
+//! switches: one that silently does nothing is worse than one the panel will not
+//! offer.
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -54,10 +57,11 @@ fn detect() -> bool {
         false
     }
     // Everywhere else that is unix - in practice Linux, where the answer is
-    // whether the session is X11.
+    // whether the session is X11 and runs a window manager that will hold a full
+    // screen window above the others.
     #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
     {
-        !wayland_session()
+        !wayland_session() && !xfce_session()
     }
     #[cfg(not(any(windows, unix)))]
     {
@@ -77,6 +81,28 @@ fn wayland_session() -> bool {
     ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
         .iter()
         .any(|name| std::env::var(name).is_ok_and(|value| !value.is_empty()))
+}
+
+/// Whether this is an XFCE session, whose window manager will not keep a full
+/// screen window above the others.
+///
+/// xfwm4 refuses `_NET_WM_STATE_ABOVE` for a full screen window, and clears the
+/// state when one goes full screen - which is the one moment the switch is about.
+/// Verified against xfwm4 4.18: the same request is honoured while the window is
+/// windowed and refused while it is full screen, for winit and for an outside
+/// `wmctrl` alike, while Openbox honours it in both. There is nothing the viewer
+/// can do about it from here, so the switch is not offered rather than offered
+/// and ignored.
+///
+/// Asked of the session's variables, because the window manager itself cannot be
+/// asked without an X connection this crate does not open: XFCE is what runs
+/// xfwm4, and a session that names none of these is taken at its word.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+fn xfce_session() -> bool {
+    ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .any(|value| value.to_ascii_lowercase().contains("xfce"))
 }
 
 /// The window level the current state asks for.

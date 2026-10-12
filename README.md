@@ -443,11 +443,13 @@ released when the viewer exits; see
 The **Display** tab can keep the wall above the machine's other windows while it
 is in full screen, so a panel, a notification or another window cannot cover the
 cameras. It is off by default, it applies only in full screen, and it is offered
-only where the platform can honour it: Windows, macOS and X11 (XFCE and the like)
-can, a Wayland session cannot - winit has no way to ask for it there - and
-Android has nothing to stay above, so the switch is greyed out. It is also set
-aside by itself while the viewer opens something that has to come up in front of
-the wall: a file dialog for export or import, or a page in the browser.
+only where the platform can honour it: Windows, macOS and most X11 window
+managers can; a Wayland session cannot - winit has no way to ask for it there -
+and neither can an XFCE session, where xfwm4 refuses to hold a full screen window
+above the others, nor Android, which has nothing to stay above. Where it cannot
+be honoured the switch is greyed out rather than offered and ignored. It is also
+set aside by itself while the viewer opens something that has to come up in front
+of the wall: a file dialog for export or import, or a page in the browser.
 
 ### One instance per configuration
 
