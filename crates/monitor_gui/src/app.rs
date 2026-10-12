@@ -588,6 +588,15 @@ pub struct XgViewApp {
     file_dialog: FileDialog,
     #[cfg(not(target_os = "android"))]
     file_job: Option<FileJob>,
+    /// Whether the file dialog had the keyboard when this frame's keys were
+    /// handed out.
+    ///
+    /// Not the same question as [`Self::file_dialog_open`]: the dialog closes
+    /// itself inside [`Self::poll_file_dialog`], which runs before the keys are
+    /// routed, so a Back that has just closed it is still in the queue when the
+    /// wall reads it - and would take the settings panel down behind it as
+    /// well.
+    file_dialog_keys: bool,
     /// Start-on-boot state as the desktop start-up section reports it; the
     /// Android section shows the system's own state instead and never reads it.
     #[cfg_attr(target_os = "android", allow(dead_code))]
@@ -873,6 +882,7 @@ impl XgViewApp {
             file_dialog: new_file_dialog(),
             #[cfg(not(target_os = "android"))]
             file_job: None,
+            file_dialog_keys: false,
             autostart,
             power,
             decoder: capabilities.backend,
@@ -1394,6 +1404,7 @@ impl XgViewApp {
     /// Draws the file dialog while it is up, and acts on what it answers.
     #[cfg(not(target_os = "android"))]
     fn poll_file_dialog(&mut self, ctx: &egui::Context) {
+        self.file_dialog_keys = self.file_job.is_some();
         if self.file_job.is_none() {
             return;
         }
@@ -2188,7 +2199,12 @@ impl XgViewApp {
         // and egui's focus walk are how a viewer moves around it, and the arrows
         // and Back taken out of the queue below would reach neither; it is left
         // to close itself, by its Cancel button or the Esc it reads.
-        if self.file_dialog_open() {
+        //
+        // Read as the frame began rather than now: a Back that has just closed
+        // the dialog is the dialog's to answer, and it is the same press that a
+        // `file_dialog_open` read here would find still in the queue and hand to
+        // the wall - closing the panel the dialog was opened from.
+        if self.file_dialog_keys {
             return;
         }
 
