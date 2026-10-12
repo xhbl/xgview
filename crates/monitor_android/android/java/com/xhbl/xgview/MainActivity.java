@@ -924,6 +924,12 @@ public class MainActivity extends NativeActivity {
     /** Folder the export is written to, under the public Downloads directory. */
     private static final String EXPORT_FOLDER = "Download/xgview";
 
+    // The sealed configuration's own type. It cannot be `text/plain`: the
+    // Downloads provider appends the extension a MIME type maps to, so a
+    // `config.age` written as text/plain lands on the device as
+    // `config.age.txt`. This one maps to nothing and the name is left alone.
+    private static final String SEALED_MIME_TYPE = "application/vnd.xgview.age";
+
     /** Request code for the storage permission Android 9 needs to write there. */
     private static final int REQUEST_WRITE_STORAGE = 0x5847;
 
@@ -982,7 +988,7 @@ public class MainActivity extends NativeActivity {
         final ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, name);
         values.put(MediaStore.Downloads.RELATIVE_PATH, folder);
-        values.put(MediaStore.Downloads.MIME_TYPE, "text/plain");
+        values.put(MediaStore.Downloads.MIME_TYPE, SEALED_MIME_TYPE);
         // Pending until the bytes are all there, so a reader never sees half a
         // configuration.
         values.put(MediaStore.Downloads.IS_PENDING, 1);
@@ -1109,7 +1115,8 @@ public class MainActivity extends NativeActivity {
                     // A picker honouring the filter shows only these, which keeps
                     // a wall of unrelated files out of the way.
                     .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
-                            "application/json", "text/plain", "application/octet-stream"
+                            SEALED_MIME_TYPE, "application/json", "text/plain",
+                            "application/octet-stream"
                     });
             try {
                 self.startActivityForResult(intent, REQUEST_IMPORT_DOCUMENT);
