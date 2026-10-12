@@ -1416,10 +1416,11 @@ impl XgViewApp {
         if self.file_job.is_some() && !self.file_dialog_keys {
             let held = ctx.memory(|memory| memory.focused());
             // The control the export or import was asked from is the one to go
-            // back to. Both buttons remember themselves when pressed, which is
-            // what makes an export work: it goes through the passphrase prompt
-            // on the way here, and the prompt's own anchor points into itself.
-            self.file_dialog_anchor = self.file_dialog_anchor.or(held).or(self.passphrase_anchor);
+            // back to. Both buttons remember themselves when pressed - but only
+            // for a keyboard or a remote, so this is `None` when the dialog came
+            // from a pointer and the focus it took is the one it hands back:
+            // nothing visibly moves either way.
+            self.file_dialog_anchor = self.file_dialog_anchor.or(held);
             if let Some(focused) = held {
                 ctx.memory_mut(|memory| memory.surrender_focus(focused));
             }
@@ -4630,7 +4631,13 @@ impl XgViewApp {
             // twice, and the file dialog that follows is opened from the prompt.
             // The button is remembered here, because by the time that dialog is
             // up the focus has been through the prompt on the way.
-            self.file_dialog_anchor = Some(export.id);
+            //
+            // Only for a press that came from the keyboard or a remote: a
+            // pointer does not move the focus anywhere else in this program, so
+            // it must not appear to move it here either.
+            if !export.clicked_by(egui::PointerButton::Primary) {
+                self.file_dialog_anchor = Some(export.id);
+            }
             self.passphrase = Some(Passphrase::for_export());
         }
         ui.horizontal(|ui| {
@@ -4640,7 +4647,12 @@ impl XgViewApp {
             if import.clicked() {
                 // A sealed document opens the passphrase prompt instead, which
                 // is drawn on the wall. See `ask_for_file`.
-                self.file_dialog_anchor = Some(import.id);
+                //
+                // Remembered for a keyboard or remote press only, as the export
+                // is: a pointer leaves the focus where it found it.
+                if !import.clicked_by(egui::PointerButton::Primary) {
+                    self.file_dialog_anchor = Some(import.id);
+                }
                 self.ask_for_file(FileJob::Import);
             }
             let only = ui.checkbox(&mut self.import_cameras_only, monitor_i18n::tr("about-only-cameras"));
