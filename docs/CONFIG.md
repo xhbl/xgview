@@ -46,6 +46,10 @@ The viewer persists everything to one JSON file, created on first launch:
   the copy is the one that travels between machines. The passphrase is asked for
   twice and kept nowhere. **Import reads either form**: a sealed file asks for
   its passphrase, and an older `config.json` in clear is read as it always was.
+- An **import keeps what it replaces**: the configuration it supersedes is left
+  beside it as `config.json.bak` before the new one is adopted, and a JSON
+  document that is not an XGView configuration is refused rather than read as an
+  empty one.
 - On Unix the file this machine keeps for itself is written readable by its owner
   alone (`0600`); it stays in clear because the viewer reads it at boot, with
   nobody there to type anything.

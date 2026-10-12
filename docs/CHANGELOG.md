@@ -3,6 +3,81 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.3.57
+
+Changes since 1.3.42. **A configuration is worth carrying now.** An export is
+sealed with a passphrase instead of travelling in clear, the chooser that
+writes and reads it is the viewer's own rather than the desktop's, and the file
+a machine keeps for itself is readable by its owner alone.
+
+### Carrying a configuration
+
+- **An export is sealed with a passphrase.** The whole document is encrypted -
+  an [`age`](https://age-encryption.org) file, ASCII-armored, written as
+  `config.age` - because the copy is what leaves the machine, and the copy is
+  what someone else can find. The passphrase is asked for twice, kept nowhere,
+  and importing asks for it again; a wrong one is retried where it was typed,
+  with the letters visible on request. **Import still reads an older
+  `config.json` in clear**, which is how a wall set up before this release moves
+  over. A sealed file is not JSON, so a viewer too old to know about it refuses
+  the file rather than reading it as an empty configuration.
+- **The file a machine keeps for itself is readable by its owner alone**
+  (`0600` on Unix, re-applied on every write). It stays in clear: the viewer
+  starts at boot with nobody there to type a passphrase.
+- **An import keeps what it replaces.** The previous configuration is left
+  beside it as `config.json.bak` before the new one is adopted, and a JSON
+  document that is not an XGView configuration is refused instead of replacing
+  a wall with nothing. A checkbox still imports only the cameras, keeping the
+  viewer's own settings.
+
+### Export and import where there is no desktop
+
+- **The chooser is the viewer's own**, drawn by egui inside the window instead
+  of borrowed from the desktop. It looks and behaves the same on every desktop,
+  it is driven from a remote or a keyboard as well as a mouse, and it needs no
+  session to talk to: a viewer started by systemd, on a bare kiosk install with
+  no `zenity` or `xdg-desktop-portal` package, used to leave a dialog that could
+  not appear and a wall that could not be reached. Android keeps the system's
+  document picker.
+- **Back closes the chooser and nothing else.** The settings panel it was opened
+  from used to close behind it on the same press; now one Back closes the
+  chooser, and the panel stays. One press is also enough: the focus is handed
+  over as the chooser goes up, so the viewer does not have to click or press a
+  direction first.
+- **The focus comes back to the button that opened it.** An import or export
+  walked with a keyboard or a remote leaves the ring on the button again, the
+  way editing a camera already did. A chooser opened with the mouse leaves the
+  focus where it found it.
+- The chooser's own labels - titles, places, buttons, its errors - are
+  translated with the rest of the interface.
+
+### The wall above the other windows
+
+- **"Staying on top in full screen" is greyed out on XFCE**, with the note that
+  the platform cannot hold a window there. `xfwm4` refuses to keep a full screen
+  window above the others (`_NET_WM_STATE_ABOVE` is never applied, measured in a
+  nested session and on a Debian/XFCE box), so the switch could never have done
+  anything; the README said an X11 desktop like XFCE would work, which was
+  wrong. Windows, macOS and other X11 window managers are unaffected.
+
+### Android
+
+- **An export keeps its name.** `config.age` was landing in
+  `Download/xgview` as `config.age.txt`: the Downloads provider appends the
+  extension the record's MIME type maps to, and `text/plain` maps to `txt`. The
+  export is written with a type of its own, which maps to nothing, and the
+  import picker is told about it so the viewer's own exports stay selectable.
+
+### Internals
+
+- The export and import choosers no longer go through `rfd`, and neither do the
+  thread, the session bus check and the window-level suspension that were there
+  to stop a dialog from holding up the wall. The chooser is an egui library
+  pinned to the egui version it was built against (`0.11` against `0.32`), so
+  egui moves first when either is upgraded.
+- The README's get started and get the build sections name macOS, which the
+  1.3.37 notes had left out.
+
 ## 1.3.42
 
 Changes since 1.3.37. **Android decodes H.264 on the CPU when the platform's own

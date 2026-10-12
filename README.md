@@ -240,8 +240,10 @@ desktop session behind it. An export is **sealed with a passphrase** - an
 the copy you carry between machines is of no use to anyone who finds it - and the
 passphrase is asked for twice and stored nowhere. Importing reads either form: a
 sealed file asks for its passphrase, an older clear `config.json` is read as
-before. Importing replaces the whole configuration; a checkbox imports only the
-cameras and keeps your viewer settings.
+before. Importing replaces the whole configuration - the one it replaces is kept
+beside it as `config.json.bak`, and a file that is not an XGView configuration is
+refused rather than adopted. A checkbox imports only the cameras and keeps your
+viewer settings.
 
 ---
 
