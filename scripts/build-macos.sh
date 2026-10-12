@@ -316,6 +316,16 @@ bundle_app() {
     place_executable
     cp "$ICON" "$APP/Contents/Resources/xgview.icns"
     write_info_plist
+
+    # Language packs are read from a `langs` directory beside the running
+    # executable - `monitor_i18n::init` looks in the program's own folder before
+    # anywhere else - and inside a bundle that folder is `Contents/MacOS`, the
+    # same "next to the binary" the Windows and Linux packages use. English is
+    # embedded in the executable; every other language travels here.
+    if [[ -d "$REPO_ROOT/langs" ]]; then
+        cp -R "$REPO_ROOT/langs" "$APP/Contents/MacOS/langs"
+    fi
+
     copy_and_rewrite_frameworks
     sign_app
 }
@@ -356,6 +366,13 @@ verify_package() {
             failed=1
         fi
     done < <(otool -L "$binary" | awk '/libav|libsw/ {print $1}')
+
+    echo "--- language packs ---"
+    if [[ -d "$APP/Contents/MacOS/langs" ]]; then
+        ls "$APP/Contents/MacOS/langs" | sed 's/^/    /'
+    else
+        echo "    (none; only the embedded English is available)"
+    fi
 
     echo "--- signature ---"
     if codesign --verify --deep --strict "$APP" 2>/dev/null; then
