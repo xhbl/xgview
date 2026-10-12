@@ -597,6 +597,9 @@ pub struct XgViewApp {
     /// wall reads it - and would take the settings panel down behind it as
     /// well.
     file_dialog_keys: bool,
+    /// The control the file dialog was opened from, to be given the focus back
+    /// when it closes - the way a window's `from` does for the others.
+    file_dialog_anchor: Option<Id>,
     /// Start-on-boot state as the desktop start-up section reports it; the
     /// Android section shows the system's own state instead and never reads it.
     #[cfg_attr(target_os = "android", allow(dead_code))]
@@ -883,6 +886,7 @@ impl XgViewApp {
             #[cfg(not(target_os = "android"))]
             file_job: None,
             file_dialog_keys: false,
+            file_dialog_anchor: None,
             autostart,
             power,
             decoder: capabilities.backend,
@@ -1410,7 +1414,12 @@ impl XgViewApp {
         // belonging to that button would be read by nobody, and the first press
         // would be spent doing nothing.
         if self.file_job.is_some() && !self.file_dialog_keys {
-            if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+            let held = ctx.memory(|memory| memory.focused());
+            // An export is asked for twice - the passphrase comes first - so the
+            // focus may already be gone by the time the dialog goes up; the
+            // prompt's own anchor is the control behind it when it is.
+            self.file_dialog_anchor = held.or(self.passphrase_anchor);
+            if let Some(focused) = held {
                 ctx.memory_mut(|memory| memory.surrender_focus(focused));
             }
         }
@@ -1432,6 +1441,14 @@ impl XgViewApp {
             // The viewer backed out of it: nothing is imported or exported, and
             // there is nothing to say about it.
             self.file_job = None;
+        }
+        // It is down now, so the control behind it takes the focus back - the
+        // way it would have had the dialog not been opened at all. An import
+        // that turned out to want the passphrase anchors itself instead.
+        if self.file_job.is_none() && self.passphrase.is_none() {
+            if let Some(anchor) = self.file_dialog_anchor.take() {
+                self.restore_focus = Some(anchor);
+            }
         }
     }
 
