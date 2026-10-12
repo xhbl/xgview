@@ -1,12 +1,13 @@
 //! Platform video decoding abstraction for XGView.
 //!
-//! | Target        | Backend                                                    |
-//! |---------------|------------------------------------------------------------|
-//! | Android       | `AMediaCodec` (NDK media), decoding into byte buffers whose |
-//! |               | planes the renderer uploads                                 |
-//! | Windows/Linux | FFmpeg (`ffmpeg` feature) or Cisco OpenH264 (`h264`        |
-//! |               | feature, on by default), falling back to the null decoder   |
-//! |               | used by the UI skeleton when neither is enabled             |
+//! | Target  | Backend                                                       |
+//! |---------|---------------------------------------------------------------|
+//! | Android | `AMediaCodec` (NDK media), falling back to Cisco OpenH264      |
+//! |         | (`h264` feature) for a stream the platform will not take;       |
+//! |         | decodes into byte buffers whose planes the renderer uploads    |
+//! | Desktop | FFmpeg (`ffmpeg` feature) or Cisco OpenH264 (`h264` feature,   |
+//! |         | on by default), falling back to the null decoder used by the   |
+//! |         | UI skeleton when neither is enabled                            |
 //!
 //! MJPEG is the exception that every target shares: it is decoded by the pure
 //! Rust backend of [`jpeg`], because JPEG gains nothing from a C library and
@@ -20,9 +21,10 @@ use std::fmt;
 
 use thiserror::Error;
 
+pub mod fallback;
 #[cfg(all(not(target_os = "android"), feature = "ffmpeg"))]
 pub mod ffmpeg;
-#[cfg(all(not(target_os = "android"), feature = "h264"))]
+#[cfg(feature = "h264")]
 pub mod h264;
 pub mod jpeg;
 pub mod null;
@@ -303,9 +305,9 @@ pub struct DecoderCapabilities {
     /// [`VideoStreamInfo::hardware`] is where that answer is reported.
     pub hardware: bool,
     /// Hardware and software decoding can be chosen between. False where the
-    /// only decoder in the build is a hardware one, which is the case on
-    /// Android: preferring hardware there is not a setting, it is the only way
-    /// the platform decodes, and offering the choice would be a lie.
+    /// build offers no choice: Android decodes on the platform's decoder and
+    /// falls back to OpenH264 only for a stream that one will not take, so
+    /// there is nothing to prefer and a switch would be a lie.
     pub selectable: bool,
     /// Backend that will be used by [`create_decoder`].
     pub backend: &'static str,
@@ -355,6 +357,17 @@ pub fn create_decoder(codec: Codec) -> Box<dyn VideoDecoder> {
     }
     #[cfg(target_os = "android")]
     {
+        // H.264 is the one codec the build carries a second decoder for: a
+        // stream the platform will not take - a profile its decoders do not
+        // implement, a device already holding as many hardware sessions as it
+        // allows - is decoded on the CPU rather than leaving the tile dark.
+        #[cfg(feature = "h264")]
+        if codec == Codec::H264 {
+            return Box::new(fallback::Fallback::new(
+                Box::new(amediacodec::AMediaCodecDecoder::new()),
+                Box::new(h264::H264Decoder::new()),
+            ));
+        }
         Box::new(amediacodec::AMediaCodecDecoder::new())
     }
     #[cfg(all(not(target_os = "android"), feature = "ffmpeg"))]

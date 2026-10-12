@@ -104,7 +104,7 @@ the hand.
 
 | Platform | Typical device | Decoding |
 | --- | --- | --- |
-| **Android** (arm64-v8a) | TV box, phone, tablet | `AMediaCodec` - hardware |
+| **Android** (arm64-v8a) | TV box, phone, tablet | `AMediaCodec` - hardware, falling back to OpenH264 for H.264 |
 | **Windows** x64 | mini PC, kiosk, desktop | Direct3D 11 Video or CUDA - hardware, with a CPU fallback |
 | **Linux** x64 | desktop, mini PC | VAAPI or CUDA - hardware, with a CPU fallback |
 | **macOS** (universal) | desktop, laptop | VideoToolbox - hardware, with a CPU fallback |
@@ -114,8 +114,10 @@ GPU that offers VAAPI or CUDA, which a desktop with an NVIDIA, Intel or AMD
 graphics does; a machine that offers neither decodes on the CPU, where the wall
 still runs - comfortable for a grid of sub streams, and heavier once it starts
 pulling main streams. macOS decodes through VideoToolbox, which is part of the
-system. A tile whose corner is set to the frame-rate item shows `HW` or `SW`, so
-you can see at a glance which path a camera is on.
+system, and Android through `AMediaCodec` - with H.264 falling back to OpenH264
+on the CPU when the platform's decoders will not take the stream. A tile whose
+corner is set to the frame-rate item shows `HW` or `SW`, so you can see at a
+glance which path a camera is on.
 
 ### Android: what the device needs
 

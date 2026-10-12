@@ -50,6 +50,12 @@ echo "==> building monitor_android (${PROFILE}) for ${ABIS} at API ${API}"
 # name mentions only the ABIs of this run. Empty the tree so what is packaged is
 # what was built.
 rm -rf "${OUT_DIR}"
+# OpenH264 is C++, and `cc` links the C++ runtime of the target it builds for.
+# Android's default is the shared `libc++_shared`, which would then have to
+# travel in the APK; this project is one shared library - the Android project
+# packages a single `libmonitor_android.so` - so the static runtime is both
+# correct and one file fewer. Google's own guidance names this the case for it.
+export CXXSTDLIB=c++_static
 # `-P` is cargo-ndk's own platform flag. The lowercase `-p` is passed through to
 # cargo as `--package`, so it takes a crate name and not an API level.
 # shellcheck disable=SC2086

@@ -14,6 +14,13 @@ bytes = "1"
 # The MJPEG decoder. Pure Rust, so it needs no toolchain of its own and is the
 # one backend every target can carry - see `src/jpeg.rs`.
 jpeg-decoder = "0.3"
+# The H.264 software decoder: the desktop targets' second backend, and Android's
+# fallback when `AMediaCodec` will not take a stream. Compiled from source by its
+# sys crate, so it needs a C++ compiler and nothing else installed.
+openh264 = { version = "0.9", optional = true }
+# The decoder's own options are not exposed by the wrapper crate, which the
+# error concealment mode is set through.
+openh264-sys2 = { version = "0.9", optional = true, default-features = false }
 thiserror = "2"
 tracing = "0.1"
 
@@ -21,7 +28,8 @@ tracing = "0.1"
 # FFmpeg is the decoder the desktop builds use. OpenH264 stays enabled beside it
 # so the software path is still there to compare against and to fall back on.
 default = ["h264", "ffmpeg"]
-# Enables the in process H.264 software decoder used on Windows and Linux.
+# Enables the in process H.264 software decoder: the alternative to FFmpeg on
+# the desktop, and the only fallback there is on Android.
 h264 = ["dep:openh264", "dep:openh264-sys2"]
 # Enables the FFmpeg decoder. It needs the FFmpeg development libraries while
 # building, and the matching runtime libraries next to the executable at run
@@ -33,10 +41,6 @@ jni = "0.21"
 ndk = "0.9"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
-openh264 = { version = "0.9", optional = true }
-# The decoder's own options are not exposed by the wrapper crate, which the
-# error concealment mode is set through.
-openh264-sys2 = { version = "0.9", optional = true, default-features = false }
 # The desktop decoder. Its major version tracks the FFmpeg release it binds to,
 # so it has to match the libraries found through `VCPKG_ROOT` / `FFMPEG_DIR`.
 ffmpeg-next = { version = "9", optional = true }

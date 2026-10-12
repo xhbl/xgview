@@ -120,6 +120,12 @@ try {
     # a package called `-arm64-v8a` that way, carrying code from before every
     # fix since. Empty the tree so what is packaged is what was built.
     Remove-Item -Recurse -Force 'android-build/jniLibs' -ErrorAction SilentlyContinue
+    # OpenH264 is C++, and `cc` links the C++ runtime of the target it builds
+    # for. Android's default is the shared `libc++_shared`, which would then have
+    # to travel in the APK; this project is one shared library - Gradle packages
+    # a single `libmonitor_android.so` - so the static runtime is both correct
+    # and one file fewer. Google's own guidance names this the case for it.
+    $env:CXXSTDLIB = 'c++_static'
     & cargo ndk -t $Abis -P $Api -o android-build/jniLibs build --release -p monitor_android
     if ($LASTEXITCODE -ne 0) { throw "cargo ndk failed (exit $LASTEXITCODE)" }
 

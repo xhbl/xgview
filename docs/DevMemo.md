@@ -193,10 +193,15 @@ alone. The folder stays whole because the `$ORIGIN` rpath is what finds the
 libraries - there is no `bin/` and `lib/` split to install into, which is why
 `/opt` is the shape it fits.
 
-**Building on Android.** Neither FFmpeg nor OpenH264 is needed there, and the
-manifests say so: both are declared for targets other than Android, so enabling
-the crate's default features pulls neither into the Android dependency graph.
-Android decodes through `AMediaCodec`.
+**Building on Android.** FFmpeg is not built there and the manifest says so: it
+is declared for targets other than Android, so enabling the crate's default
+features pulls none of it into the Android dependency graph. OpenH264 *is* built,
+as the fallback for an H.264 stream `AMediaCodec` will not take: the platform
+decoder is tried first, and a refusal at open time hands the access unit that was
+refused to the software one (`monitor_codec::fallback`). It is C++, so `cc` links
+a C++ runtime - the Android build scripts ask for the static one
+(`CXXSTDLIB=c++_static`), there being a single shared library in the APK that the
+shared `libc++_shared` would otherwise have to travel beside.
 
 **libavcodec logs to `stderr` on its own.** It writes there directly unless it is
 given a callback, with no timestamp, no target and no filter that can reach it,
