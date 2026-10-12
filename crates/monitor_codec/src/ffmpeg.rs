@@ -231,12 +231,19 @@ impl FfmpegDecoder {
     }
 }
 
-/// The argument list of a `printf` style call, which the platforms spell
-/// differently: a plain pointer on Windows, and a pointer to the tag structure
-/// of the System V calling convention on Linux.
-#[cfg(windows)]
+/// The argument list of a `printf` style call.
+///
+/// The spelling is the C library's business and differs by ABI - and it is the
+/// spelling our own function has to use, since it is handed to libavcodec as a
+/// callback and `av_log_format_line2` takes the same type:
+///
+/// * a plain `char *` on Windows, and on Apple's AArch64 ABI, where there is no
+///   tag structure for bindgen to name;
+/// * a pointer to the System V AMD64 tag structure on Linux and Intel macOS,
+///   which is what `ffmpeg-sys-next`'s bindings call `__va_list_tag`.
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64")))]
 type VaList = *mut c_char;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
 type VaList = *mut ffmpeg::ffi::__va_list_tag;
 
 /// Longest libavcodec message kept, in bytes.
