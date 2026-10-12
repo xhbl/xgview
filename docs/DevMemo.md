@@ -308,6 +308,7 @@ used; a machine with none of them falls through to the CPU.
 | --- | --- | --- |
 | Linux | `cuda`, `vaapi` | The NVIDIA driver does not implement VAAPI. Reaching it takes a bridging package, so on an NVIDIA machine VAAPI is the second hand path. |
 | Windows | `d3d11va`, `cuda` | Direct3D 11 serves every vendor including NVIDIA, drives the same decoding hardware, and asks for nothing beyond the graphics driver. CUDA has nothing to win in front of it. |
+| macOS | `videotoolbox` | One entry, and nothing to order: it is part of the system, so there is no driver to look for and no second path behind it. |
 
 A device that turns us down is logged at `debug` and the next is tried; only the
 whole table failing is a `warn`. A machine with one device out of two is not a

@@ -436,6 +436,13 @@ const VAAPI: Device = Device {
     pixel: Pixel::VAAPI,
     name: "ffmpeg + vaapi",
 };
+#[cfg(target_os = "macos")]
+const VIDEOTOOLBOX: Device = Device {
+    kind: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+    picture: ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX,
+    pixel: Pixel::VIDEOTOOLBOX,
+    name: "ffmpeg + videotoolbox",
+};
 
 /// The devices to try, best first.
 ///
@@ -448,12 +455,16 @@ const VAAPI: Device = Device {
 /// driver does not implement it, and reaching it takes a bridging package. On
 /// Windows Direct3D 11 leads instead. It serves every vendor including NVIDIA,
 /// drives the same decoding hardware and asks for nothing beyond the graphics
-/// driver, so CUDA has nothing to win by standing in front of it.
+/// driver, so CUDA has nothing to win by standing in front of it. macOS has one
+/// entry and there is nothing to order: VideoToolbox is part of the system, so
+/// there is no driver to look for and nothing to choose between.
 #[cfg(windows)]
 const DEVICES: &[Device] = &[D3D11VA, CUDA];
 #[cfg(target_os = "linux")]
 const DEVICES: &[Device] = &[CUDA, VAAPI];
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+const DEVICES: &[Device] = &[VIDEOTOOLBOX];
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 const DEVICES: &[Device] = &[];
 
 /// Opens the first device of [`DEVICES`] that will have us.
@@ -545,8 +556,9 @@ unsafe extern "C" fn prefer_hardware(
 /// Copies a picture the decoder left on the GPU back into system memory.
 ///
 /// The destination is an empty frame: the transfer fills in its size and its
-/// pixel format from the source, and both Direct3D 11 and VAAPI hand it over as
-/// NV12.
+/// pixel format from the source, and every device in the table hands it over as
+/// NV12 - the very layout the renderer takes - which is why nothing here says
+/// which one it was.
 fn copy_back(destination: &mut Picture, source: &Picture) -> Result<()> {
     // Safety: both are live frames owned by this call, and this is the
     // documented way to bring a hardware picture back to the CPU.

@@ -380,8 +380,8 @@ xgview/
 * **Hardware decoding where it is available** – Windows and Linux prefer a GPU
   decoder (`Direct3D 11` / `CUDA`, `VAAPI` / `CUDA`) and fall back to software
   for a device or a stream the hardware will not take; Android decodes through
-  `AMediaCodec`; macOS has no hardware path yet and decodes on the CPU. Each tile
-  shows which one it got (`HW` / `SW`).
+  `AMediaCodec`; macOS through VideoToolbox. Each tile shows which one it got
+  (`HW` / `SW`).
 * **Text is keyed, not hard-coded** – `monitor_core` returns i18n keys and
   `monitor_gui` translates them through `monitor_i18n`; English is embedded and
   every other language is a `.ftl` file.
