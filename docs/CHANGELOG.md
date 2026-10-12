@@ -3,7 +3,7 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 1.3.41
+## 1.3.42
 
 Changes since 1.3.37. **Android decodes H.264 on the CPU when the platform's own
 decoder will not take the stream**, so a camera it would have refused is watched
@@ -25,8 +25,7 @@ rather than left dark.
   will not take - the fallback answers on its own.
 - **The APK carries its C++ runtime.** OpenH264 is C++, and Android keeps the C++
   runtime in the platform rather than handing one to a library of ours, so
-  `libc++_shared.so` travels beside it. The package grows by about half a
-  megabyte.
+  `libc++_shared.so` travels beside it. The APK goes from 13.1 MB to 15.2 MB.
 
 ### Internals
 
