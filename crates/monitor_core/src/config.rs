@@ -574,6 +574,9 @@ impl AppConfig {
     /// cannot live inside `load`.
     pub fn from_json(data: &str) -> Result<Self> {
         let value: serde_json::Value = serde_json::from_str(data)?;
+        if !looks_like_a_configuration(&value) {
+            return Err(CoreError::config("this is not an XGView configuration"));
+        }
         let mut config: AppConfig = serde_json::from_value(value.clone())?;
         config.adopt_flat_view(&value);
         config.normalize();
@@ -643,6 +646,11 @@ impl AppConfig {
     }
 
     /// Writes the configuration atomically (temporary file + rename).
+    ///
+    /// The file is created readable by its owner alone: it holds the cameras'
+    /// credentials in clear, and the mode a plain write would take - the process
+    /// umask, 0644 on a stock system - leaves them open to every account on the
+    /// machine.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -652,7 +660,7 @@ impl AppConfig {
         }
         let json = self.to_json()?;
         let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, json)?;
+        write_private(&temporary, json.as_bytes())?;
         std::fs::rename(&temporary, path).map_err(|err| {
             CoreError::config(format!("cannot replace {}: {err}", path.display()))
         })?;
@@ -983,6 +991,50 @@ fn platform_config_dir() -> Option<PathBuf> {
     None
 }
 
+/// Whether a parsed document is one of ours at all.
+///
+/// Every configuration ever written carries `cameras`, and one written since the
+/// groups do also carries `groups`. A JSON document with none of them is some
+/// other tool's - a file the user picked by mistake - and reading it would
+/// quietly produce a configuration with no cameras in it, taking the wall down
+/// with it. Text that is not JSON at all has already failed by the time this is
+/// asked.
+fn looks_like_a_configuration(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    ["cameras", "groups", "active_group"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+}
+
+/// Writes a file only its owner can read.
+///
+/// Windows has no such mode, and needs none: the configuration lives under
+/// `%APPDATA%`, whose access control already keeps the other accounts out. The
+/// permissions are set on the handle rather than at creation, so a leftover
+/// temporary file from a run that died cannot hand its own mode on to the file
+/// that replaces it.
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        options.mode(0o600);
+        let mut file = options.open(path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(data)?;
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    {
+        options.open(path)?.write_all(data)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1025,6 +1077,33 @@ mod tests {
             "{ not json",
             "the file is the user's, not the defaults' to replace"
         );
+    }
+
+    /// The configuration carries the cameras' credentials in clear, so it is
+    /// written where only the account that wrote it can read it - not the 0644 a
+    /// plain write takes from the umask.
+    #[cfg(unix)]
+    #[test]
+    fn the_configuration_is_readable_by_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        AppConfig::default().save(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    /// A JSON document that is not a configuration - the user picked the wrong
+    /// file, or picked an export this build cannot read - is refused, rather
+    /// than read as a configuration with no cameras in it and take the wall
+    /// down with it.
+    #[test]
+    fn a_json_document_that_is_not_a_configuration_is_refused() {
+        assert!(AppConfig::from_json(r#"{"name":"thing","version":3}"#).is_err());
+        assert!(AppConfig::from_json(r#"[1, 2, 3]"#).is_err());
+        assert!(AppConfig::from_json(r#""config.json""#).is_err());
     }
 
     #[test]
@@ -1095,7 +1174,7 @@ mod tests {
     /// someone chose.
     #[test]
     fn a_flat_layout_folds_into_the_first_group() {
-        let config = AppConfig::from_json(r#"{"version":1,"layout":"3x3"}"#).unwrap();
+        let config = AppConfig::from_json(r#"{"version":1,"layout":"3x3","cameras":[]}"#).unwrap();
         assert_eq!(config.active_group, 0);
         assert_eq!(config.groups.len(), 1, "the built-in group stands");
         assert_eq!(config.groups[0].layout, GridLayout::G3x3);

@@ -4315,6 +4315,7 @@ impl XgViewApp {
     fn apply_import(&mut self, data: &str) -> Result<usize, String> {
         let imported = AppConfig::from_json(data).map_err(|error| error.to_string())?;
         let count = imported.cameras.len();
+        self.back_up_configuration();
         if self.import_cameras_only {
             // The cameras come with the groups they live in. An entry records
             // the group it belongs to, so bringing the cameras without the
@@ -4344,6 +4345,31 @@ impl XgViewApp {
         self.needs_sync = true;
         self.mark_dirty();
         Ok(count)
+    }
+
+    /// Keeps the configuration an import is about to replace, beside it.
+    ///
+    /// Importing is the one thing here that can throw work away - everything
+    /// else edits the configuration already loaded - so the file it was read
+    /// from is copied aside first. A copy that cannot be written is reported and
+    /// the import goes ahead anyway: not being able to keep the old file is no
+    /// reason to refuse the new one, but it is something to hear about.
+    fn back_up_configuration(&mut self) {
+        let path = self.config_path.with_extension("json.bak");
+        match self.config.save(&path) {
+            Ok(()) => tracing::info!(
+                target: "xgview::config",
+                path = %path.display(),
+                "kept the configuration this import replaces"
+            ),
+            Err(error) => self.flash(
+                monitor_i18n::tr_args(
+                    "toast-backup-failed",
+                    &[("error", error.to_string().into())],
+                ),
+                ToastKind::Error,
+            ),
+        }
     }
 
     /// Takes the document the system picker returned, if one has arrived.

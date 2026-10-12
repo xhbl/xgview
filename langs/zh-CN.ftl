@@ -212,6 +212,7 @@ toast-export-needs-storage = 导出需要存储权限——授权后再导出一
 toast-imported = 已从 { $path } 导入 { $count } 个摄像头
 toast-imported-document = 已从所选文件导入 { $count } 个摄像头
 toast-import-failed = 无法导入：{ $error }
+toast-backup-failed = 未能保留被替换配置的副本：{ $error }
 toast-started-autostart = XGView v{ $version } 已自动启动（{ $decoder } 解码器）
 toast-started = XGView v{ $version } — { $decoder } 解码器
 toast-camera-added = 已添加 { $name }

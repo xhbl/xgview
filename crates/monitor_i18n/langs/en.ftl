@@ -222,6 +222,7 @@ toast-imported-document =
        *[other] { $count } cameras
     } from the picked file
 toast-import-failed = cannot import: { $error }
+toast-backup-failed = could not keep a copy of the configuration being replaced: { $error }
 toast-started-autostart = XGView v{ $version } started automatically ({ $decoder } decoder)
 toast-started = XGView v{ $version } — { $decoder } decoder
 toast-camera-added = added { $name }
