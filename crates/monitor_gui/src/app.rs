@@ -1404,6 +1404,16 @@ impl XgViewApp {
     /// Draws the file dialog while it is up, and acts on what it answers.
     #[cfg(not(target_os = "android"))]
     fn poll_file_dialog(&mut self, ctx: &egui::Context) {
+        // The frame it goes up, whatever held the focus hands it over. The
+        // button that opened the dialog is behind it now, and the dialog reads
+        // its own keys only while no widget has the focus - so an Esc still
+        // belonging to that button would be read by nobody, and the first press
+        // would be spent doing nothing.
+        if self.file_job.is_some() && !self.file_dialog_keys {
+            if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+                ctx.memory_mut(|memory| memory.surrender_focus(focused));
+            }
+        }
         self.file_dialog_keys = self.file_job.is_some();
         if self.file_job.is_none() {
             return;
