@@ -29,6 +29,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 monitor_codec = { path = "../monitor_codec" }
+age = { version = "0.12.1", default-features = false, features = ["armor"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

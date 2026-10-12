@@ -23,6 +23,8 @@
 //!   blank that saves the display at night.
 //! * [`supervise`]  – the policy over the viewer's restarts, and the exit codes
 //!   that say which restarts are worth making.
+//! * [`sealed`]     – the configuration sealed with a passphrase for the trip to
+//!   another machine, against it in clear for the machine that owns it.
 
 pub mod autostart;
 pub mod blackout;
@@ -39,6 +41,7 @@ pub mod power;
 pub mod rtcp;
 pub mod rtsp;
 pub mod scheduler;
+pub mod sealed;
 pub mod supervise;
 
 pub use error::{CoreError, Result};
