@@ -325,13 +325,14 @@ bundle_app() {
     cp "$ICON" "$APP/Contents/Resources/xgview.icns"
     write_info_plist
 
-    # Language packs are read from a `langs` directory beside the running
-    # executable - `monitor_i18n::init` looks in the program's own folder before
-    # anywhere else - and inside a bundle that folder is `Contents/MacOS`, the
-    # same "next to the binary" the Windows and Linux packages use. English is
-    # embedded in the executable; every other language travels here.
+    # Language packs go in `Contents/Resources/langs`, not beside the executable:
+    # `Contents/MacOS` is where a bundle keeps code, and `codesign` refuses a
+    # `.ftl` there - "code object is not signed at all". `monitor_i18n::init`
+    # looks in the executable's own folder and then in `Resources/langs` beside
+    # it, so a bundle is found either way. English is embedded in the binary;
+    # every other language travels here.
     if [[ -d "$REPO_ROOT/langs" ]]; then
-        cp -R "$REPO_ROOT/langs" "$APP/Contents/MacOS/langs"
+        cp -R "$REPO_ROOT/langs" "$APP/Contents/Resources/langs"
     fi
 
     copy_and_rewrite_frameworks
@@ -376,8 +377,8 @@ verify_package() {
     done < <(otool -L "$binary" | awk '/libav|libsw/ {print $1}')
 
     echo "--- language packs ---"
-    if [[ -d "$APP/Contents/MacOS/langs" ]]; then
-        ls "$APP/Contents/MacOS/langs" | sed 's/^/    /'
+    if [[ -d "$APP/Contents/Resources/langs" ]]; then
+        ls "$APP/Contents/Resources/langs" | sed 's/^/    /'
     else
         echo "    (none; only the embedded English is available)"
     fi

@@ -110,6 +110,12 @@ pub fn init(wanted: &str, extra_dirs: &[PathBuf]) {
     if let Ok(executable) = std::env::current_exe() {
         if let Some(parent) = executable.parent() {
             dirs.push(parent.join("langs"));
+            // Inside a macOS app bundle the executable lives in `Contents/MacOS`,
+            // where a bundle keeps nothing but code - a `.ftl` put there is
+            // refused by `codesign` - so the packs travel beside it in
+            // `Contents/Resources/langs`. The fold is harmless elsewhere: the
+            // path simply is not there.
+            dirs.push(parent.join("../Resources/langs"));
         }
     }
     dirs.extend(extra_dirs.iter().cloned());
