@@ -10,9 +10,9 @@ It targets:
 
 - **TV boxes and living-room displays** (Android TV, e.g. an Amlogic S905X5M or
   an Nvidia Shield TV), driven with the remote;
-- **mini PCs**, on Windows or Linux, running as kiosk / control-room machines;
 - **Android phones and tablets** used as a desk or pocket monitoring screen;
-- **desktop Windows and Linux**, for setup and everyday use.
+- **mini PCs and desktops**, on Windows, Linux or macOS - a kiosk / control-room
+  wall, or a desk for setup and everyday use.
 
 The same build answers to a keyboard and mouse, a living-room remote and a touch
 screen alike, so one binary fits a wall-mounted box, a desktop and a tablet in
@@ -31,6 +31,7 @@ the hand.
 - [Supported platforms](#supported-platforms)
   - [Android: what the device needs](#android-what-the-device-needs)
   - [Linux: a minimal kiosk machine](#linux-a-minimal-kiosk-machine)
+  - [macOS: what the device needs](#macos-what-the-device-needs)
 - [Getting started](#getting-started)
 - [Usage](#usage)
   - [The wall at a glance](#the-wall-at-a-glance)
@@ -85,7 +86,7 @@ the hand.
 | Seamless transition | The last sub-stream frame is held until the main stream delivers its first keyframe - no black or green frames |
 | Suspend | Channels on a non-visible page are suspended to save bandwidth, CPU and decoder handles |
 | Reconnection | Exponential-backoff self-healing with a non-blocking "reconnecting…" overlay; the backoff shape and the handshake timeout are configurable and reach channels already running |
-| Decoding | H.264 on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, `AMediaCodec` on Android) and on the CPU elsewhere; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW` |
+| Decoding | H.264 on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, VideoToolbox on macOS, `AMediaCodec` on Android) and on the CPU elsewhere - Android falling back to OpenH264 by itself for a stream its own decoder will not take; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW` |
 | Codecs | H.264 and MJPEG are decoded and displayed. HEVC is recognised in the stream description but has no decoder yet, so an HEVC-only camera shows no picture |
 | Transports | RTSP over TCP (interleaved, the default) or UDP, chosen per camera; HTTP / HTTPS MJPEG (`multipart/x-mixed-replace`) cameras are supported too |
 | On-screen display | Each tile corner independently shows one of: none, name, number + name, stream, codec + rate, frame rate + decoder, size + shape, or all statistics |
@@ -97,7 +98,7 @@ the hand.
 | Server import | Import every camera in one go from Synology Surveillance Station (`SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera`), Frigate (its API, each camera's main and sub stream paired by measured resolution) or a standalone go2rtc (`/api/streams`) |
 | Cameras | Add, edit, reorder and remove cameras; per-camera display aspect and RTSP transport (UDP when a relay damages the TCP interleaving) |
 | Groups | Named camera groups, each with its own cameras, grid layout and paging, switched from the settings; the same camera may sit in more than one |
-| Start on boot | Windows `HKCU\...\Run` registry entry (or a scheduled task) and an Android `BOOT_COMPLETED` receiver |
+| Start on boot | A Windows `HKCU\...\Run` registry entry (or a scheduled task), an XDG autostart entry on Linux, a LaunchAgent on macOS, and an Android `BOOT_COMPLETED` receiver |
 | Configuration | Everything persisted to a cross-platform `config.json`, with export / import |
 
 ## Supported platforms
@@ -185,6 +186,18 @@ mode that paints the display directly. On Debian, what that comes to:
   at the X level - the `xset -dpms s off` above, or `Option "DPMS" "false"` in
   `xorg.conf`. Sleep itself is still inhibited the usual way, through logind.
 
+### macOS: what the device needs
+
+- **macOS 11 (Big Sur) or newer**, on Intel or Apple silicon: the download is one
+  universal `.app`, so the same file runs natively on either.
+- **Nothing to install.** Drag it to *Applications*, or run it from wherever it
+  was unpacked; delete it to uninstall. The configuration in `~/.config/xgview`
+  is left alone either way.
+- **It is signed ad-hoc, not notarised.** A copy built here or moved by hand
+  opens straight away. One that came over the network is quarantined by
+  Gatekeeper and refuses until it is allowed in *System Settings → Privacy &
+  Security*, the app not carrying a Developer ID.
+
 ---
 
 ## Getting started
@@ -193,15 +206,17 @@ XGView is a GUI: start `xgview` (or double-click `xgview.exe`) and the wall come
 up with whatever cameras are already in its configuration.
 
 1. **Get the build.** Windows ships as a zip you unpack anywhere; Linux as a
-   self-contained `tar.gz` that comes with its own `install.sh`; Android as a
-   signed APK; or build from source. See [docs/CONFIG.md](docs/CONFIG.md).
+   self-contained `tar.gz` that comes with its own `install.sh`; macOS as a
+   signed universal `.app` inside a zip; Android as a signed APK; or build from
+   source. See [docs/CONFIG.md](docs/CONFIG.md).
 2. **Add cameras.** On the first run the grid is empty - press `F2` to discover
    cameras on the network, or add one by hand.
 3. **Make it yours.** Press `F1` for the settings panel: layout, OSD, language,
    reconnect timings, the blackout schedule and start on boot.
 
 Nothing is installed and nothing is registered behind your back; the Windows
-package is a directory you can delete to uninstall, and on Linux the installer
+package is a directory you can delete to uninstall, the macOS `.app` is dragged
+to *Applications* and thrown away again to be rid of, and on Linux the installer
 says exactly what it puts where - `./install.sh --uninstall` takes it all back
 out again.
 
@@ -577,6 +592,13 @@ xgview                       # the viewer in the foreground, log in this console
 entry run. It is the GUI application, though, and prints nothing of its own: the
 command line is `xgview`, which is `xgview.com` installed beside it.
 
+On macOS a double-clicked `.app` takes no arguments, so the switches go to the
+executable inside the bundle:
+
+```bash
+XGView.app/Contents/MacOS/xgview --print-schedule
+```
+
 ### Troubleshooting
 
 - **A tile shows `Stream failed` with a reason.** The camera could not be
@@ -605,6 +627,12 @@ command line is `xgview`, which is `xgview.com` installed beside it.
   OpenGL ES before the renderer is built, so a `Parent device is lost` panic
   should not appear at all; if one does, the app logs it and brings itself back
   on OpenGL ES a few seconds later.
+- **macOS will not open the app, or says the developer cannot be verified.** The
+  bundle is signed ad-hoc rather than notarised, so a copy that travelled over
+  the network is quarantined. Allow it in *System Settings → Privacy & Security*,
+  or drop the flag with `xattr -d com.apple.quarantine XGView.app`.
+- **A macOS build started from a terminal has no Dock icon and does not come to
+  the front.** A bare binary is not a bundle; run `XGView.app` instead.
 - **Where are the logs?** On Android, `adb logcat -s xgview`. On the desktop, set
   the `RUST_LOG` environment variable (for example `RUST_LOG=xgview=debug`); on
   Windows, `xgview` with no switches runs the viewer in the foreground and its
