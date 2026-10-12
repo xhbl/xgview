@@ -448,6 +448,24 @@ impl Passphrase {
     }
 }
 
+/// A native file dialog the viewer asked for, waiting for the frame that can
+/// open it.
+///
+/// The wall is taken off the top around anything the viewer opened that has to
+/// come up in front of it, and the command that does it is acted on when the
+/// frame that sent it ends. A dialog opened in that same frame would therefore
+/// still come up behind a wall held on top - and the app is inside the dialog's
+/// own message loop while it is up, with no frame left in which the level could
+/// reach the window manager, so the wall looks frozen over it. What was asked
+/// for is kept here for one frame instead; see [`XgViewApp::ask_for_file`].
+#[derive(Debug)]
+enum FileJob {
+    /// Sealing the configuration for another machine, under this passphrase.
+    Export(String),
+    /// Reading a configuration in - sealed, or in clear from an older export.
+    Import,
+}
+
 /// Translation key of what the status line calls a grid layout.
 ///
 /// [`GridLayout::label`] is the button's own text: right on the bar, where the
@@ -607,6 +625,9 @@ pub struct XgViewApp {
     passphrase_anchor: Option<Id>,
     /// Watches the prompt for the frame it appears on.
     passphrase_handoff: Handoff,
+    /// A native file dialog asked for on the previous frame, to open now that
+    /// the wall has actually come off the top. See [`FileJob`].
+    file_job: Option<FileJob>,
     /// The Android start-on-boot state - whether the app may draw over other
     /// apps, and whether it is the home app - and when it was last read. Read
     /// through `crate::android`, throttled: it only changes while the viewer is
@@ -838,6 +859,7 @@ impl XgViewApp {
             passphrase: None,
             passphrase_anchor: None,
             passphrase_handoff: Handoff::default(),
+            file_job: None,
             #[cfg(target_os = "android")]
             android_boot: (false, false),
             #[cfg(target_os = "android")]
@@ -1272,6 +1294,45 @@ impl XgViewApp {
             ctx.request_repaint_after(until.saturating_duration_since(Instant::now()));
         }
         self.apply_window_level(ctx);
+    }
+
+    /// Asks for a native file dialog, and takes the wall off the top so that it
+    /// comes up in front of it.
+    ///
+    /// The dialog itself is opened on the next frame, by
+    /// [`Self::open_asked_file`]: the command that lowers the window level is
+    /// acted on when *this* frame ends, so a dialog opened here would come up
+    /// behind a wall still held on top, and the app would be inside the
+    /// dialog's own message loop with no frame left in which the level could
+    /// reach the window manager. That is the wall that looks frozen, with the
+    /// file picker somewhere behind it.
+    fn ask_for_file(&mut self, ctx: &egui::Context, job: FileJob) {
+        self.set_on_top(ctx, OnTop::Suspended);
+        self.file_job = Some(job);
+        // The frame that carries the level is not otherwise repainting - a wall
+        // with no live channel is idle - and the dialog would wait for input
+        // that is not coming.
+        ctx.request_repaint();
+    }
+
+    /// Opens the file dialog the previous frame asked for, now that the wall is
+    /// off the top, and puts the wall back on top when the dialog closes.
+    ///
+    /// The call that opens a native dialog returns when it closes, so its end
+    /// is known here rather than by a clock.
+    fn open_asked_file(&mut self, ctx: &egui::Context) {
+        // A desktop file dialog is the case; on Android the export writes
+        // straight into the public folder and the import hands the picker to
+        // another activity, and this is the one frame of latency between the
+        // press and either.
+        let Some(job) = self.file_job.take() else {
+            return;
+        };
+        match job {
+            FileJob::Export(passphrase) => self.export_sealed(&passphrase),
+            FileJob::Import => self.import_config(),
+        }
+        self.set_on_top(ctx, OnTop::Configured);
     }
 
     /// Whether what the viewer did this frame is a request for the bars.
@@ -4299,11 +4360,9 @@ impl XgViewApp {
                     } else if prompt.first != prompt.again {
                         prompt.error = Some(monitor_i18n::tr("prompt-passphrase-mismatch"));
                     } else {
-                        // The file dialog this opens is a window of its own and
-                        // has to come up in front of the wall.
-                        self.set_on_top(ctx, OnTop::Suspended);
-                        self.export_sealed(&prompt.first);
-                        self.set_on_top(ctx, OnTop::Configured);
+                        // The file dialog this opens comes up on the next
+                        // frame, with the wall off the top; see `ask_for_file`.
+                        self.ask_for_file(ctx, FileJob::Export(prompt.first.clone()));
                         leave = true;
                     }
                 }
@@ -4418,14 +4477,11 @@ impl XgViewApp {
             self.nav.item(&import);
             self.name(&import, "about-import-name");
             if import.clicked() {
-                // The desktop's file dialog is a window of its own and has to
-                // come up in front of the wall, which one held on top would
-                // cover. Its end is known here rather than by a clock: the call
-                // returns when the dialog closes. A sealed document opens the
-                // passphrase prompt instead, which is drawn on the wall.
-                self.set_on_top(ui.ctx(), OnTop::Suspended);
-                self.import_config();
-                self.set_on_top(ui.ctx(), OnTop::Configured);
+                // The native picker is a window of its own: it is asked for here
+                // and opened on the next frame, once the wall is off the top -
+                // and a sealed document opens the passphrase prompt instead,
+                // which is drawn on the wall. See `ask_for_file`.
+                self.ask_for_file(ui.ctx(), FileJob::Import);
             }
             let only = ui.checkbox(&mut self.import_cameras_only, monitor_i18n::tr("about-only-cameras"));
             self.nav.item(&only);
@@ -4978,6 +5034,12 @@ impl eframe::App for XgViewApp {
                 self.set_on_top(ctx, OnTop::Configured);
             }
         }
+
+        // The file dialog asked for on the previous frame, if one was. Opened
+        // here, at the top of the frame, so that the command the asking frame
+        // ended with - the wall off the top - has already reached the window
+        // manager. See `ask_for_file`.
+        self.open_asked_file(ctx);
 
         // Anything the soft keyboard typed has to be in the input queue before
         // a widget is drawn: a text field reads the events of the frame it is
