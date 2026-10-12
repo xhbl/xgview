@@ -1415,10 +1415,11 @@ impl XgViewApp {
         // would be spent doing nothing.
         if self.file_job.is_some() && !self.file_dialog_keys {
             let held = ctx.memory(|memory| memory.focused());
-            // An export is asked for twice - the passphrase comes first - so the
-            // focus may already be gone by the time the dialog goes up; the
-            // prompt's own anchor is the control behind it when it is.
-            self.file_dialog_anchor = held.or(self.passphrase_anchor);
+            // The control the export or import was asked from is the one to go
+            // back to. Both buttons remember themselves when pressed, which is
+            // what makes an export work: it goes through the passphrase prompt
+            // on the way here, and the prompt's own anchor points into itself.
+            self.file_dialog_anchor = self.file_dialog_anchor.or(held).or(self.passphrase_anchor);
             if let Some(focused) = held {
                 ctx.memory_mut(|memory| memory.surrender_focus(focused));
             }
@@ -2271,6 +2272,9 @@ impl XgViewApp {
         {
             if self.passphrase.take().is_some() {
                 self.passphrase_anchor = None;
+                // Backing out of it leaves the export or import unasked for, and
+                // the button behind the prompt takes the focus again.
+                self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
             } else if let Some(confirm) = self.remove_confirm.take() {
                 self.remove_confirm_anchor = None;
                 self.restore_focus = Some(confirm.from);
@@ -4624,6 +4628,9 @@ impl XgViewApp {
         if export.clicked() {
             // The passphrase first: nothing is written until it has been typed
             // twice, and the file dialog that follows is opened from the prompt.
+            // The button is remembered here, because by the time that dialog is
+            // up the focus has been through the prompt on the way.
+            self.file_dialog_anchor = Some(export.id);
             self.passphrase = Some(Passphrase::for_export());
         }
         ui.horizontal(|ui| {
@@ -4633,6 +4640,7 @@ impl XgViewApp {
             if import.clicked() {
                 // A sealed document opens the passphrase prompt instead, which
                 // is drawn on the wall. See `ask_for_file`.
+                self.file_dialog_anchor = Some(import.id);
                 self.ask_for_file(FileJob::Import);
             }
             let only = ui.checkbox(&mut self.import_cameras_only, monitor_i18n::tr("about-only-cameras"));
