@@ -161,6 +161,14 @@ fi
 
 # ---------------------------------------------------------------- cargo
 build_cargo() {
+    # pkg-config refuses to answer for a target that is not the host - "has not
+    # been configured to support cross-compilation" - and building the second
+    # architecture of a universal binary is exactly that. Letting it answer is
+    # safe here: the same prefix responds, its libraries carry both
+    # architectures, and the linker takes the slice it is building for. The
+    # headers do not differ by architecture, so there is nothing for a sysroot to
+    # correct.
+    export PKG_CONFIG_ALLOW_CROSS=1
     local target
     for target in "${TARGETS[@]}"; do
         echo "==> Building xgview (release, $target)"
