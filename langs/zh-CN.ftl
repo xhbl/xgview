@@ -162,8 +162,22 @@ about-export-name = 导出配置
 about-import-name = 导入配置
 about-only-cameras = 仅导入摄像头
 about-only-cameras-name = 仅导入摄像头
-about-import-hint = 导入会覆盖当前配置。勾选此框仅导入摄像头及其分组，保留本查看器自身的设置。
-about-import-hint-android = 导出保存到 Download/xgview/config.json。导入会打开系统文件选择器。{ about-import-hint }
+about-import-hint = 导入会覆盖当前配置。勾选此框仅导入摄像头及其分组，保留本查看器自身的设置。导出会用口令加密后写入。
+about-import-hint-android = 导出会将加密后的 config.age 保存到 Download/xgview。导入会打开系统文件选择器。{ about-import-hint }
+
+## 口令
+prompt-seal-title = 加密配置
+prompt-seal-hint = 导出会用口令加密后写入，捡到文件的人无法使用。口令需要输入两遍，且不会保存在任何地方：没有它，此文件无法再次打开。
+prompt-open-title = 此配置已加密
+prompt-open-hint = 请输入加密它时所用的口令。
+prompt-passphrase = 口令
+prompt-passphrase-again = 再输一遍口令
+prompt-reveal = 显示口令
+prompt-passphrase-empty = 请输入口令
+prompt-passphrase-mismatch = 两次输入的口令不一致
+prompt-passphrase-wrong = 口令无法打开此文件——请重试
+prompt-seal-action = 导出
+prompt-open-action = 打开
 
 ## 工具栏
 toolbar-layout-1x1 = 宫格 1×1

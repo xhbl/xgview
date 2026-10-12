@@ -366,6 +366,88 @@ struct RemoveConfirm {
     from: Id,
 }
 
+/// What a passphrase prompt is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SealJob {
+    /// Sealing the configuration for the trip: the passphrase is asked for
+    /// twice, so a mistyped one cannot put the configuration out of reach.
+    Export,
+    /// Opening a sealed configuration: asked once, and a wrong one is tried
+    /// again in place rather than closing the prompt.
+    Import,
+}
+
+/// The passphrase prompt, while it is up.
+///
+/// One window for both directions: what an export and an import need is the
+/// same entry, and the differences - a second field, a different action - are
+/// small enough to read off `job` here rather than to keep two windows in step.
+#[derive(Debug)]
+struct Passphrase {
+    job: SealJob,
+    /// The passphrase, and - on an export - its confirmation.
+    first: String,
+    again: String,
+    /// Whether the entry is shown rather than dotted, for checking a long one.
+    reveal: bool,
+    /// Why the last attempt did not go through, drawn in place.
+    error: Option<String>,
+    /// The sealed document an import is opening, and where it came from.
+    sealed: Option<String>,
+    /// The file the document came from, where the platform names one - the
+    /// desktop's dialogs do, Android's picker hands over the text alone.
+    origin: Option<PathBuf>,
+}
+
+impl Passphrase {
+    /// The prompt an export opens on.
+    fn for_export() -> Self {
+        Self {
+            job: SealJob::Export,
+            first: String::new(),
+            again: String::new(),
+            reveal: false,
+            error: None,
+            sealed: None,
+            origin: None,
+        }
+    }
+
+    /// The prompt a sealed document opens on.
+    fn for_import(sealed: String, origin: Option<PathBuf>) -> Self {
+        Self {
+            job: SealJob::Import,
+            first: String::new(),
+            again: String::new(),
+            reveal: false,
+            error: None,
+            sealed: Some(sealed),
+            origin,
+        }
+    }
+
+    fn title(&self) -> String {
+        monitor_i18n::tr(match self.job {
+            SealJob::Export => "prompt-seal-title",
+            SealJob::Import => "prompt-open-title",
+        })
+    }
+
+    fn hint(&self) -> String {
+        monitor_i18n::tr(match self.job {
+            SealJob::Export => "prompt-seal-hint",
+            SealJob::Import => "prompt-open-hint",
+        })
+    }
+
+    fn action(&self) -> String {
+        monitor_i18n::tr(match self.job {
+            SealJob::Export => "prompt-seal-action",
+            SealJob::Import => "prompt-open-action",
+        })
+    }
+}
+
 /// Translation key of what the status line calls a grid layout.
 ///
 /// [`GridLayout::label`] is the button's own text: right on the bar, where the
@@ -518,6 +600,13 @@ pub struct XgViewApp {
     /// default: taking the cameras alone is the import that cannot surprise a
     /// machine that is already installed.
     import_cameras_only: bool,
+    /// The passphrase prompt, while it is up: what seals an export, and what
+    /// opens a sealed one. See [`Passphrase`].
+    passphrase: Option<Passphrase>,
+    /// First control of the prompt, to hand it the focus as it opens.
+    passphrase_anchor: Option<Id>,
+    /// Watches the prompt for the frame it appears on.
+    passphrase_handoff: Handoff,
     /// The Android start-on-boot state - whether the app may draw over other
     /// apps, and whether it is the home app - and when it was last read. Read
     /// through `crate::android`, throttled: it only changes while the viewer is
@@ -739,12 +828,16 @@ impl XgViewApp {
                 ("status", ScopeDef::new(Axis::Row)),
                 ("edit-body", ScopeDef::new(Axis::Column)),
                 ("confirm-body", ScopeDef::new(Axis::Column)),
+                ("passphrase-body", ScopeDef::new(Axis::Column)),
 
             ]),
             reveal_next: None,
             swallow_enter: 0,
             restore_focus: None,
             import_cameras_only: true,
+            passphrase: None,
+            passphrase_anchor: None,
+            passphrase_handoff: Handoff::default(),
             #[cfg(target_os = "android")]
             android_boot: (false, false),
             #[cfg(target_os = "android")]
@@ -799,7 +892,9 @@ impl XgViewApp {
     /// being left without a focus, and at the start of one to give the focus
     /// back the moment a key says the viewer is on the keyboard again.
     fn panel_anchor(&self) -> Option<Id> {
-        if self.remove_confirm.is_some() {
+        if self.passphrase.is_some() {
+            self.passphrase_anchor
+        } else if self.remove_confirm.is_some() {
             self.remove_confirm_anchor
         } else if self.camera_edit.is_some() {
             self.camera_edit_anchor
@@ -1956,8 +2051,12 @@ impl XgViewApp {
         // it, whatever inside it has the focus. A field's caret must not hold it
         // open - Back on the first field would otherwise hand the focus back to
         // that same field, and the window could never be left.
-        if (self.camera_edit.is_some() || self.remove_confirm.is_some()) && self.dialog_back_pressed(ctx) {
-            if let Some(confirm) = self.remove_confirm.take() {
+        if (self.passphrase.is_some() || self.camera_edit.is_some() || self.remove_confirm.is_some())
+            && self.dialog_back_pressed(ctx)
+        {
+            if self.passphrase.take().is_some() {
+                self.passphrase_anchor = None;
+            } else if let Some(confirm) = self.remove_confirm.take() {
                 self.remove_confirm_anchor = None;
                 self.restore_focus = Some(confirm.from);
             } else if let Some(edit) = self.camera_edit.take() {
@@ -2171,7 +2270,10 @@ impl XgViewApp {
         // A dialog owns the screen while it is up: nothing behind it answers the
         // pointer, and the keys that open a panel are spent the same way, so one
         // dialog can never be stacked on another.
-        let dialog_open = self.discovery.open || self.camera_edit.is_some() || self.remove_confirm.is_some();
+        let dialog_open = self.discovery.open
+            || self.camera_edit.is_some()
+            || self.remove_confirm.is_some()
+            || self.passphrase.is_some();
         if keys.settings && !dialog_open {
             self.show_settings = !self.show_settings;
         }
@@ -4110,6 +4212,128 @@ impl XgViewApp {
         false
     }
 
+    /// The passphrase prompt: what seals a configuration for the trip, and what
+    /// opens one that was sealed. Returns `true` when the configuration changed.
+    ///
+    /// Sealing asks twice, so a mistyped passphrase cannot put the configuration
+    /// out of reach before it has even left. Opening asks once and, when the
+    /// passphrase does not take, leaves the prompt up with that said - the
+    /// document is kept here, so a second try costs nothing but the typing.
+    fn passphrase_window(&mut self, ctx: &egui::Context) -> bool {
+        // Taken for the frame, like the edit and remove windows, so the fields
+        // and the navigation layer can be borrowed apart.
+        let Some(mut prompt) = self.passphrase.take() else {
+            return false;
+        };
+        let mut changed = false;
+        let mut confirm = false;
+        let mut leave = false;
+
+        // A modal, like the other two: centred, and nothing behind it answers.
+        // Its own buttons (or Back) are the only way out.
+        egui::Modal::new(Id::new("xgview-passphrase")).show(ctx, |ui| {
+            self.nav.open("passphrase-body");
+            ui.set_width(440.0);
+            ui.label(RichText::new(prompt.title()).heading());
+            ui.label(RichText::new(prompt.hint()).small().color(theme::TEXT_DIM));
+            ui.add_space(theme::space::S);
+
+            // Read off once: the field is drawn with the entry hidden unless the
+            // viewer asked to see it.
+            let reveal = prompt.reveal;
+            ui.label(monitor_i18n::tr("prompt-passphrase"));
+            let first = dialogs::text_field(
+                ui,
+                &mut self.nav,
+                &mut prompt.first,
+                &monitor_i18n::tr("prompt-passphrase"),
+                !reveal,
+                false,
+                |s| egui::TextEdit::singleline(s).password(!reveal).desired_width(f32::INFINITY),
+            );
+            // The prompt opens on this field.
+            self.passphrase_anchor = Some(first.id);
+
+            if prompt.job == SealJob::Export {
+                ui.add_space(theme::space::XS);
+                ui.label(monitor_i18n::tr("prompt-passphrase-again"));
+                dialogs::text_field(
+                    ui,
+                    &mut self.nav,
+                    &mut prompt.again,
+                    &monitor_i18n::tr("prompt-passphrase-again"),
+                    !reveal,
+                    false,
+                    |s| egui::TextEdit::singleline(s).password(!reveal).desired_width(f32::INFINITY),
+                );
+            }
+
+            ui.add_space(theme::space::XS);
+            self.nav.tracked(ui.checkbox(&mut prompt.reveal, monitor_i18n::tr("prompt-reveal")));
+
+            if let Some(error) = &prompt.error {
+                ui.add_space(theme::space::XS);
+                ui.label(RichText::new(error).color(theme::ERROR));
+            }
+
+            ui.add_space(theme::space::M);
+            let action = prompt.action();
+            let cancel_label = monitor_i18n::tr("cancel");
+            ui.horizontal(|ui| {
+                ui.add_space(Self::center_offset(ui, &[&action, &cancel_label]));
+                if self.nav.tracked(ui.button(action)).clicked() {
+                    confirm = true;
+                }
+                if self.nav.tracked(ui.button(cancel_label)).clicked() {
+                    leave = true;
+                }
+            });
+            self.nav.close();
+        });
+
+        if confirm {
+            match prompt.job {
+                SealJob::Export => {
+                    if prompt.first.is_empty() {
+                        prompt.error = Some(monitor_i18n::tr("prompt-passphrase-empty"));
+                    } else if prompt.first != prompt.again {
+                        prompt.error = Some(monitor_i18n::tr("prompt-passphrase-mismatch"));
+                    } else {
+                        // The file dialog this opens is a window of its own and
+                        // has to come up in front of the wall.
+                        self.set_on_top(ctx, OnTop::Suspended);
+                        self.export_sealed(&prompt.first);
+                        self.set_on_top(ctx, OnTop::Configured);
+                        leave = true;
+                    }
+                }
+                SealJob::Import => {
+                    let data = prompt.sealed.clone().unwrap_or_default();
+                    match monitor_core::sealed::open(&data, &prompt.first) {
+                        Ok(imported) => {
+                            let count = self.apply_import_config(imported);
+                            self.say_imported(count, prompt.origin.clone());
+                            changed = true;
+                            leave = true;
+                        }
+                        // A wrong passphrase and a damaged file read the same
+                        // way, and it is the passphrase that is worth another
+                        // try: the entry stays, the window stays, and one more
+                        // attempt is one more field's worth of typing.
+                        Err(_) => prompt.error = Some(monitor_i18n::tr("prompt-passphrase-wrong")),
+                    }
+                }
+            }
+        }
+
+        if leave {
+            self.passphrase_anchor = None;
+        } else {
+            self.passphrase = Some(prompt);
+        }
+        changed
+    }
+
     /// What the program is, where its configuration lives, and the export /
     /// import of that configuration.
     fn settings_about(&mut self, ui: &mut egui::Ui) {
@@ -4175,27 +4399,30 @@ impl XgViewApp {
             &[("path", self.config_path.display().to_string().into())],
         ));
 
-        // The export / import pair. The desktop opens file dialogs for both; on
-        // Android the export goes to the public Download/xgview folder and the
-        // import opens the system's document picker, and the hint says so.
+        // The export / import pair. The export is sealed with a passphrase, which
+        // the prompt asks for before the file is written; the desktop opens a
+        // file dialog for each, while Android writes into the public
+        // Download/xgview folder and opens the system's document picker, and the
+        // hint says so.
         ui.add_space(theme::space::M);
         let export = ui.button(monitor_i18n::tr("about-export"));
         self.nav.item(&export);
         self.name(&export, "about-export-name");
         if export.clicked() {
-            // The desktop's file dialog is a window of its own and has to come
-            // up in front of the wall, which one held on top would cover. Its end
-            // is known here rather than by a clock: the call returns when the
-            // dialog closes.
-            self.set_on_top(ui.ctx(), OnTop::Suspended);
-            self.export_config();
-            self.set_on_top(ui.ctx(), OnTop::Configured);
+            // The passphrase first: nothing is written until it has been typed
+            // twice, and the file dialog that follows is opened from the prompt.
+            self.passphrase = Some(Passphrase::for_export());
         }
         ui.horizontal(|ui| {
             let import = ui.button(monitor_i18n::tr("about-import"));
             self.nav.item(&import);
             self.name(&import, "about-import-name");
             if import.clicked() {
+                // The desktop's file dialog is a window of its own and has to
+                // come up in front of the wall, which one held on top would
+                // cover. Its end is known here rather than by a clock: the call
+                // returns when the dialog closes. A sealed document opens the
+                // passphrase prompt instead, which is drawn on the wall.
                 self.set_on_top(ui.ctx(), OnTop::Suspended);
                 self.import_config();
                 self.set_on_top(ui.ctx(), OnTop::Configured);
@@ -4209,7 +4436,7 @@ impl XgViewApp {
 
     /// What the export / import pair does. The desktop picks files with the
     /// system's dialogs; Android has the fixed export folder and the system's
-    /// document picker, and says so. See [`Self::export_config`].
+    /// document picker, and says so. See [`Self::export_sealed`].
     #[cfg(not(target_os = "android"))]
     fn import_hint(&self) -> String {
         monitor_i18n::tr("about-import-hint")
@@ -4222,17 +4449,30 @@ impl XgViewApp {
         monitor_i18n::tr("about-import-hint-android")
     }
 
-    /// Writes the current configuration to the file the viewer picks.
+    /// Writes the configuration out sealed with `passphrase`, to the file the
+    /// viewer picks.
+    ///
+    /// The passphrase has already been typed twice, so the write is the last
+    /// step: the file dialog this opens is a window of its own and has to come
+    /// up in front of the wall, which the caller arranges with
+    /// [`Self::set_on_top`].
     #[cfg(not(target_os = "android"))]
-    fn export_config(&mut self) {
+    fn export_sealed(&mut self, passphrase: &str) {
         let Some(path) = rfd::FileDialog::new()
-            .set_file_name(monitor_core::CONFIG_FILE_NAME)
-            .add_filter("JSON", &["json"])
+            .set_file_name(monitor_core::EXPORT_FILE_NAME)
+            .add_filter("age", &["age"])
             .save_file()
         else {
             return;
         };
-        match self.config.save(&path) {
+        let sealed = match monitor_core::sealed::seal(&self.config, passphrase) {
+            Ok(sealed) => sealed,
+            Err(error) => {
+                self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]), ToastKind::Error);
+                return;
+            }
+        };
+        match std::fs::write(&path, sealed.as_bytes()) {
             Ok(()) => self.flash(
                 monitor_i18n::tr_args(
                     "toast-config-exported",
@@ -4244,23 +4484,23 @@ impl XgViewApp {
         }
     }
 
-    /// Writes the current configuration into the public `Download/xgview`
-    /// folder.
+    /// Writes the configuration out sealed with `passphrase`, into the public
+    /// `Download/xgview` folder.
     ///
     /// The write is the activity's - `MediaStore` from Android 10 on, a plain
     /// file into the public Downloads folder before that - because a
     /// `NativeActivity` has no storage of its own the viewer can reach. See
     /// `MainActivity.writeDownloadFile`.
     #[cfg(target_os = "android")]
-    fn export_config(&mut self) {
-        let json = match self.config.to_json() {
-            Ok(json) => json,
+    fn export_sealed(&mut self, passphrase: &str) {
+        let sealed = match monitor_core::sealed::seal(&self.config, passphrase) {
+            Ok(sealed) => sealed,
             Err(error) => {
                 self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]), ToastKind::Error);
                 return;
             }
         };
-        match crate::android::write_download(monitor_core::CONFIG_FILE_NAME, &json) {
+        match crate::android::write_download(monitor_core::EXPORT_FILE_NAME, &sealed) {
             Ok(crate::android::ExportOutcome::Written(path)) => self.flash(
                 monitor_i18n::tr_args("toast-config-exported", &[("path", path.into())]),
                 ToastKind::Info,
@@ -4275,23 +4515,29 @@ impl XgViewApp {
     }
 
     /// Reads a configuration file into the running one.
+    ///
+    /// A sealed document asks for its passphrase before anything is touched, and
+    /// the prompt takes it from there; an older export - JSON, in clear - is
+    /// imported on the spot, the way it always was.
     #[cfg(not(target_os = "android"))]
     fn import_config(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() else {
+        let Some(path) = rfd::FileDialog::new().add_filter("configuration", &["age", "json"]).pick_file() else {
             return;
         };
-        match std::fs::read_to_string(&path) {
-            Ok(data) => match self.apply_import(&data) {
-                Ok(count) => self.flash(
-                    monitor_i18n::tr_args(
-                        "toast-imported",
-                        &[("count", count.into()), ("path", path.display().to_string().into())],
-                    ),
-                    ToastKind::Info,
-                ),
-                Err(error) => self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error),
-            },
-            Err(error) => self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.to_string().into())]), ToastKind::Error),
+        let data = match std::fs::read_to_string(&path) {
+            Ok(data) => data,
+            Err(error) => {
+                self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.to_string().into())]), ToastKind::Error);
+                return;
+            }
+        };
+        if monitor_core::sealed::is_sealed(&data) {
+            self.passphrase = Some(Passphrase::for_import(data, Some(path)));
+            return;
+        }
+        match self.apply_import(&data) {
+            Ok(count) => self.say_imported(count, Some(path)),
+            Err(error) => self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error),
         }
     }
 
@@ -4306,14 +4552,21 @@ impl XgViewApp {
     }
 
     /// Applies a configuration that was read from somewhere - a file the
-    /// desktop picked, a document the Android picker returned - and reports how
-    /// many cameras came with it, for the toast the caller puts up.
+    /// desktop picked, a document the Android picker returned, a sealed one the
+    /// prompt has just opened - and reports how many cameras came with it, for
+    /// the toast the caller puts up.
+    fn apply_import(&mut self, data: &str) -> Result<usize, String> {
+        let imported = AppConfig::from_json(data).map_err(|error| error.to_string())?;
+        Ok(self.apply_import_config(imported))
+    }
+
+    /// Applies a configuration already read, and reports how many cameras came
+    /// with it.
     ///
     /// The cameras replace this viewer's, and the result is written back over
     /// this installation's configuration on the next save. With the "only the
     /// cameras" box ticked nothing else is taken from it.
-    fn apply_import(&mut self, data: &str) -> Result<usize, String> {
-        let imported = AppConfig::from_json(data).map_err(|error| error.to_string())?;
+    fn apply_import_config(&mut self, imported: AppConfig) -> usize {
         let count = imported.cameras.len();
         self.back_up_configuration();
         if self.import_cameras_only {
@@ -4344,7 +4597,7 @@ impl XgViewApp {
         self.config.normalize();
         self.needs_sync = true;
         self.mark_dirty();
-        Ok(count)
+        count
     }
 
     /// Keeps the configuration an import is about to replace, beside it.
@@ -4373,22 +4626,52 @@ impl XgViewApp {
     }
 
     /// Takes the document the system picker returned, if one has arrived.
+    ///
+    /// A sealed document asks for its passphrase before anything is touched; an
+    /// older export, JSON in clear, is imported on the spot.
     #[cfg(target_os = "android")]
     fn poll_picked_config(&mut self) {
         match crate::android::take_picked_config() {
             None => {}
             Some(crate::android::Picked::Cancelled) => {}
-            Some(crate::android::Picked::Config(text)) => match self.apply_import(&text) {
-                Ok(count) => self.flash(
-                    monitor_i18n::tr_args("toast-imported-document", &[("count", count.into())]),
-                    ToastKind::Info,
-                ),
-                Err(error) => self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error),
-            },
+            Some(crate::android::Picked::Config(text)) => {
+                if monitor_core::sealed::is_sealed(&text) {
+                    self.passphrase = Some(Passphrase::for_import(text, None));
+                    return;
+                }
+                match self.apply_import(&text) {
+                    Ok(count) => self.say_imported(count, None),
+                    Err(error) => self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error),
+                }
+            }
             Some(crate::android::Picked::Failed(error)) => {
                 self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error)
             }
         }
+    }
+
+    /// Says what an import of `count` cameras did, naming the file it came from
+    /// where the platform names one.
+    ///
+    /// The desktop's dialogs hand over a path, so the toast points at the file;
+    /// Android's picker hands over the text alone, and the wording says so.
+    #[cfg(not(target_os = "android"))]
+    fn say_imported(&mut self, count: usize, origin: Option<PathBuf>) {
+        let path = origin.map(|path| path.display().to_string()).unwrap_or_default();
+        self.flash(
+            monitor_i18n::tr_args("toast-imported", &[("count", count.into()), ("path", path.into())]),
+            ToastKind::Info,
+        );
+    }
+
+    /// Says what an import of `count` cameras did, the picked document having no
+    /// path to name.
+    #[cfg(target_os = "android")]
+    fn say_imported(&mut self, count: usize, _origin: Option<PathBuf>) {
+        self.flash(
+            monitor_i18n::tr_args("toast-imported-document", &[("count", count.into())]),
+            ToastKind::Info,
+        );
     }
 
     fn current_view(&self, total: usize) -> PageView {
@@ -4946,6 +5229,9 @@ impl eframe::App for XgViewApp {
         if self.remove_confirm_window(ctx) {
             self.mark_dirty();
         }
+        if self.passphrase_window(ctx) {
+            self.mark_dirty();
+        }
 
         self.draw_toast(ctx);
         self.draw_exit_hint(ctx);
@@ -4986,6 +5272,16 @@ impl eframe::App for XgViewApp {
         if self.remove_confirm_handoff.entering(self.remove_confirm.is_some()) {
             self.swallow_enter = 10;
             if let Some(id) = self.remove_confirm_anchor {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
+        if self.passphrase_handoff.entering(self.passphrase.is_some()) {
+            self.swallow_enter = 10;
+            if let Some(id) = self.passphrase_anchor {
+                // The caret starts after the last character, and the field's id
+                // is the same on every visit: dropping the persisted state hands
+                // the choice back to egui. See the edit window for the same.
+                egui::TextEdit::store_state(ctx, id, Default::default());
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }

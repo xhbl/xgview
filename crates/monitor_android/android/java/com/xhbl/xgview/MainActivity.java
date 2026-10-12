@@ -915,7 +915,7 @@ public class MainActivity extends NativeActivity {
     //
     // The About tab's export and import. Android has no file dialog of the
     // desktop kind, so the export goes to a fixed place any file manager can
-    // reach - Download/xgview/config.json - while the import is handed to the
+    // reach - Download/xgview/config.age - while the import is handed to the
     // system's own document picker. The picker is not a preference: from
     // Android 11 a plain path into shared storage is closed to an app for any
     // file it did not create itself, which is exactly the case for a
@@ -966,7 +966,7 @@ public class MainActivity extends NativeActivity {
         final byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
 
         // Exporting twice must replace the file rather than leave a
-        // "config (1).json" beside it, which is what an insert would do. The
+        // "config (1).age" beside it, which is what an insert would do. The
         // row may carry that suffix already; see `findDownload`.
         final Uri existing = findDownload(resolver, folder, name);
         if (existing != null) {
@@ -982,7 +982,7 @@ public class MainActivity extends NativeActivity {
         final ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, name);
         values.put(MediaStore.Downloads.RELATIVE_PATH, folder);
-        values.put(MediaStore.Downloads.MIME_TYPE, "application/json");
+        values.put(MediaStore.Downloads.MIME_TYPE, "text/plain");
         // Pending until the bytes are all there, so a reader never sees half a
         // configuration.
         values.put(MediaStore.Downloads.IS_PENDING, 1);
@@ -1012,7 +1012,7 @@ public class MainActivity extends NativeActivity {
         // `MediaStore` keeps the name it was given unless a file of that name
         // already sits in the folder without being in its index - a
         // configuration dropped there by hand, say - and then it makes the name
-        // unique: "config (1).json". That is the name the viewer is told about,
+        // unique: "config (1).age". That is the name the viewer is told about,
         // and the one the next export has to look for; see `findDownload`.
         return EXPORT_FOLDER + "/" + downloadName(resolver, target, name);
     }
@@ -1040,7 +1040,7 @@ public class MainActivity extends NativeActivity {
         // The wanted name, or the one `MediaStore` made unique out of it. The
         // rows in this folder are only ever the app's own - an install holds no
         // storage permission, so it sees nothing else - which is what makes the
-        // "config (…).json" pattern safe to match: it can only be a previous
+        // "config (…).age" pattern safe to match: it can only be a previous
         // export of this same file.
         final int dot = name.lastIndexOf('.');
         final String base = dot > 0 ? name.substring(0, dot) : name;

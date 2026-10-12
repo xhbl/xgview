@@ -232,9 +232,14 @@ Everything is stored in one `config.json`:
 | Any | set `XGVIEW_CONFIG_DIR` to override the folder, or pass `--config <PATH>` |
 
 The **About** tab exports and imports the file (on Android, export writes to
-`Download/xgview/config.json` and import opens the system file picker). Importing
-replaces the whole configuration; a checkbox imports only the cameras and keeps
-your viewer settings.
+`Download/xgview/config.age` and import opens the system file picker). An export
+is **sealed with a passphrase** - an [`age`](https://age-encryption.org) document
+holding the whole configuration, so the copy you carry between machines is of no
+use to anyone who finds it - and the passphrase is asked for twice and stored
+nowhere. Importing reads either form: a sealed file asks for its passphrase, an
+older clear `config.json` is read as before. Importing replaces the whole
+configuration; a checkbox imports only the cameras and keeps your viewer
+settings.
 
 ---
 

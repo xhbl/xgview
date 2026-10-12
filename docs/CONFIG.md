@@ -41,6 +41,14 @@ The viewer persists everything to one JSON file, created on first launch:
 - The About tab can **export** and **import** the configuration; "Only import
   the cameras" keeps the viewer's own settings, and takes the cameras and the
   groups they belong to from the file.
+- An **export is sealed** with a passphrase before it is written - an `age`
+  document, `config.age`, whole-file rather than only the credentials - because
+  the copy is the one that travels between machines. The passphrase is asked for
+  twice and kept nowhere. **Import reads either form**: a sealed file asks for
+  its passphrase, and an older `config.json` in clear is read as it always was.
+- On Unix the file this machine keeps for itself is written readable by its owner
+  alone (`0600`); it stays in clear because the viewer reads it at boot, with
+  nobody there to type anything.
 - The wall's **camera groups** are part of the same file: a `groups` array, each
   entry holding a name, a grid, a page and the focused tile, plus `active_group`,
   and every camera entry records the group it belongs to. A file written before

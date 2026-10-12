@@ -164,8 +164,22 @@ about-export-name = Export configuration
 about-import-name = Import configuration
 about-only-cameras = Only import the cameras
 about-only-cameras-name = Only import the cameras
-about-import-hint = Importing overwrites your current configuration. Check the box to import the cameras and their groups only, keeping your viewer settings.
-about-import-hint-android = Export saves to Download/xgview/config.json. Import opens the system file picker. { about-import-hint }
+about-import-hint = Importing overwrites your current configuration. Check the box to import the cameras and their groups only, keeping your viewer settings. The export is sealed with a passphrase before it is written.
+about-import-hint-android = Export saves a sealed config.age to Download/xgview. Import opens the system file picker. { about-import-hint }
+
+## Passphrase prompt
+prompt-seal-title = Seal the configuration
+prompt-seal-hint = The export is written sealed with a passphrase, so the file is of no use to anyone who finds it. The passphrase is asked for twice and kept nowhere: without it, the file cannot be opened again.
+prompt-open-title = This configuration is sealed
+prompt-open-hint = Enter the passphrase it was sealed with.
+prompt-passphrase = Passphrase
+prompt-passphrase-again = Passphrase again
+prompt-reveal = Show the passphrase
+prompt-passphrase-empty = Enter a passphrase
+prompt-passphrase-mismatch = The two entries are not the same
+prompt-passphrase-wrong = That passphrase did not open it — try again
+prompt-seal-action = Export
+prompt-open-action = Open
 
 ## Toolbar
 toolbar-layout-1x1 = Grid 1×1

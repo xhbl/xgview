@@ -107,3 +107,10 @@ pub fn copyright_years() -> String {
 
 /// Name of the JSON configuration file.
 pub const CONFIG_FILE_NAME: &str = "config.json";
+
+/// Name an exported configuration goes by.
+///
+/// Different from [`CONFIG_FILE_NAME`] on purpose: the file this machine reads
+/// back is JSON in clear, while an export is sealed with a passphrase - see
+/// [`sealed`] - and the two are not interchangeable.
+pub const EXPORT_FILE_NAME: &str = "config.age";
