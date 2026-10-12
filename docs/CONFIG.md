@@ -16,7 +16,8 @@ behind the decoder and the cameras, see [DevMemo.md](DevMemo.md).
 |---|---|
 | Windows / Linux desktop (default build) | Rust 1.80+ (Edition 2021, via [rustup](https://rustup.rs)); the FFmpeg **development** libraries, found through `VCPKG_ROOT` (`vcpkg install ffmpeg:x64-windows`); **libclang** for `bindgen` (`winget install LLVM.LLVM`, then set `LIBCLANG_PATH`) |
 | Linux package (`scripts/build-linux.sh`) | gcc / make, `pkg-config`, `nasm` (the x86 SIMD paths) and **libclang**; the FFmpeg source is fetched and built by the script itself, or by the container image with `--docker` |
-| Windows / Linux desktop (runtime) | the matching FFmpeg libraries beside the executable or on `PATH`; the Linux package carries its own |
+| macOS package (`scripts/build-macos.sh`) | the Xcode Command Line Tools (for `clang`, and for `install_name_tool`, `lipo`, `codesign`, `otool` and `ditto`), a Rust toolchain with the targets being built, and FFmpeg found through `pkg-config` - Homebrew's, or one built from source |
+| Windows / Linux / macOS desktop (runtime) | the matching FFmpeg libraries beside the executable or on `PATH`; the Linux package and the macOS bundle carry their own |
 | Android | the Android NDK (r25+), the `aarch64-linux-android` target and `cargo-ndk`; a JDK, Gradle and the Android SDK for the APK |
 
 Neither FFmpeg nor OpenH264 is used on Android - decoding is `AMediaCodec`.
@@ -48,7 +49,7 @@ The viewer persists everything to one JSON file, created on first launch:
   an older `config.json` simply takes the default for anything it lacks. The
   same file is shared by every platform.
 
-## 3. Build and run (Windows / Linux)
+## 3. Build and run (Windows / Linux / macOS)
 
 ```bash
 cargo run                     # windowed
@@ -130,7 +131,67 @@ links the executable onto `PATH`. It leaves `~/.config/xgview` alone, on install
 and on uninstall alike, and running it again over an existing install replaces
 that install rather than adding to it.
 
-## 6. Android build and deployment
+## 6. macOS build and packaging
+
+```bash
+scripts/build-macos.sh                 # one universal .app (x86_64 and arm64)
+scripts/build-macos.sh --arch x86_64   # a single architecture, quicker
+# -> target/XGView.app and target/xgview-<version>-macos-<arch>.zip
+```
+
+The desktop build links FFmpeg dynamically, and a Mach-O records the path of
+every library it loads - so a build made against an FFmpeg in `~/opt/ffmpeg` runs
+on that machine and nowhere else. The script copies the libraries pkg-config
+names into `Contents/Frameworks` and rewrites every reference to them to
+`@rpath`: the executable looks under `@executable_path/../Frameworks`, and each
+library finds its neighbours through `@loader_path`. What is copied and what is
+rewritten are one list, read out of the Mach-O headers with `otool -L`, taking
+each name as the loader will ask for it and leaving a system library (`libz`,
+`libiconv`, …) where it is.
+
+The bundle is the shape macOS expects of an application: `Info.plist`, the `.icns`
+and the language packs under `Contents/Resources` (where a bundle keeps what is
+not code - `codesign` refuses a `.ftl` in `Contents/MacOS`), and the executable
+under `Contents/MacOS`. That shape is what gives it a Dock icon and a window that
+can come to the front. It is signed ad-hoc, inside out.
+
+Both architectures are built and joined with `lipo`, so one download runs on
+Intel and on Apple silicon. That holds only if the FFmpeg libraries are universal
+too - a thin library beside a fat executable starts on one machine only - so the
+script checks them before the build rather than after it. Both architectures of
+FFmpeg therefore have to be built into the one prefix (the two are swapped on an
+Apple silicon machine):
+
+```bash
+cd ffmpeg-8.0.3
+./configure --prefix="$HOME/opt/ffmpeg" --disable-doc --disable-programs \
+    --enable-shared --disable-static
+make -j"$(sysctl -n hw.ncpu)" && make install
+mv "$HOME/opt/ffmpeg/lib" "$HOME/opt/ffmpeg/lib.x86_64"    # aside for the other
+make distclean
+./configure --prefix="$HOME/opt/ffmpeg" --disable-doc --disable-programs \
+    --enable-shared --disable-static \
+    --arch=arm64 --target-os=darwin --enable-cross-compile \
+    --cc='clang -arch arm64' --cxx='clang++ -arch arm64'
+make -j"$(sysctl -n hw.ncpu)" && make install
+cd "$HOME/opt/ffmpeg/lib"                                 # join the two
+for f in *.dylib; do
+    [ -L "$f" ] && continue
+    lipo -create -output "$f.new" "../lib.x86_64/$f" "$f" && mv "$f.new" "$f"
+done
+```
+
+The prerequisites are the Command Line Tools, a Rust toolchain with the targets
+being built, and FFmpeg found through `pkg-config` - Homebrew's, or one built as
+above. A macOS too old for Homebrew is the case that build is for: on Intel it
+also wants `nasm`, without which FFmpeg refuses to configure unless
+`--disable-x86asm` is passed, and the software paths then lose their SIMD.
+
+Ad-hoc signing runs the bundle where it was built and where it is copied. Handing
+it to anyone over the network needs a Developer ID certificate and notarisation,
+which this does not do.
+
+## 7. Android build and deployment
 
 ### Windows: one script, library and APK
 
@@ -208,7 +269,7 @@ permissions granted (`adb install -r -g`) so the unattended box never shows a
 dialog, grants the special `SYSTEM_ALERT_WINDOW` permission the boot start
 needs, launches the app and follows its logcat output.
 
-## 7. Android release signing: what to carry to a new clone
+## 8. Android release signing: what to carry to a new clone
 
 The release APK is signed with a private key that is deliberately **not** in the
 repository (see `.gitignore`). Cloning elsewhere therefore needs two files
@@ -256,10 +317,10 @@ They are generated, and are ignored by `.gitignore`:
 | `android/local.properties` | not used: `build-android.ps1` finds the SDK/JDK/NDK through environment variables |
 | `config.json` (at the repository root) | a local configuration, if one was put there |
 
-The Android toolchain itself is an installation, not a file to copy: see §8 for
+The Android toolchain itself is an installation, not a file to copy: see §9 for
 where its paths are read from.
 
-## 8. Environment variables
+## 9. Environment variables
 
 | Variable | Used by | Purpose |
 |---|---|---|
@@ -267,13 +328,14 @@ where its paths are read from.
 | `FFMPEG_DIR` | Windows packaging | alternative root for the FFmpeg runtime DLLs, beside `VCPKG_ROOT` |
 | `LIBCLANG_PATH` | desktop build | `libclang.dll` / `libclang.so` for `bindgen` |
 | `FFMPEG_VERSION` | `build-linux.sh` | which FFmpeg release the package's own copy is built from (`8.0.3` by default) |
-| `XGVIEW_OUT_ROOT`, `XGVIEW_DOCKER`, `XGVIEW_DOCKER_VOLUME` | `build-linux.sh` | where the package is written, and which docker client and volume the `--docker` build uses; the script's usage block lists the rest |
+| `XGVIEW_OUT_ROOT` | `build-linux.sh`, `build-macos.sh` | where the package is written; the Linux script also reads `XGVIEW_DOCKER` and `XGVIEW_DOCKER_VOLUME` for its `--docker` build, and its usage block lists the rest |
+| `PKG_CONFIG_PATH` | macOS build | where FFmpeg's `.pc` files are found when it was built from source rather than installed with Homebrew |
 | `XGVIEW_ANDROID_ROOT` | `build-android.ps1` | toolchain root (NDK, JDK, Gradle, SDK); `C:\Android` by default |
 | `ANDROID_NDK_HOME`, `ANDROID_HOME`, `JAVA_HOME` | cargo-ndk / Gradle | set by the build script from `XGVIEW_ANDROID_ROOT`; set them yourself when building with the `.sh` scripts |
 | `XGVIEW_CONFIG_DIR` | the viewer | overrides the configuration directory (portable deployments) |
 | `RUST_LOG` | the viewer | log filter, e.g. `RUST_LOG=xgview=debug` |
 
-## 9. Repository layout
+## 10. Repository layout
 
 ```
 xgview/
@@ -300,10 +362,11 @@ xgview/
 ├── docs/                       # this file, design notes, and `DevMemo.md`
 ├── android/                    # the Gradle project that turns the library into an APK
 └── scripts/                    # packaging and deployment helpers: Windows install, Android
-                                #   cargo-ndk / adb, the Linux package and its installer
+                                #   cargo-ndk / adb, the Linux and macOS packages, and the
+                                #   Linux installer
 ```
 
-## 10. Architecture principles
+## 11. Architecture principles
 
 * **Non blocking UI** – the egui thread never touches a socket or a decoder. All
   network I/O and decoding run on a tokio runtime; results reach the UI through
@@ -317,11 +380,13 @@ xgview/
 * **Hardware decoding where it is available** – Windows and Linux prefer a GPU
   decoder (`Direct3D 11` / `CUDA`, `VAAPI` / `CUDA`) and fall back to software
   for a device or a stream the hardware will not take; Android decodes through
-  `AMediaCodec`. Each tile shows which one it got (`HW` / `SW`).
+  `AMediaCodec`; macOS has no hardware path yet and decodes on the CPU. Each tile
+  shows which one it got (`HW` / `SW`).
 * **Text is keyed, not hard-coded** – `monitor_core` returns i18n keys and
   `monitor_gui` translates them through `monitor_i18n`; English is embedded and
   every other language is a `.ftl` file.
-* **Conditional compilation** – `#[cfg(target_os = "android")]` /
-  `#[cfg(target_os = "windows")]` select the decoder, the power mechanism and
-  the start on boot mechanism. With the prerequisites of §1 in place, a plain
-  `cargo run` on Windows is enough to get going.
+* **Conditional compilation** – `#[cfg(target_os = "…")]` selects the decoder,
+  the power mechanism and the start on boot mechanism: a registry `Run` value on
+  Windows, XDG autostart on Linux, a LaunchAgent on macOS, a manifest receiver on
+  Android. With the prerequisites of §1 in place, a plain `cargo run` on any
+  desktop target is enough to get going.

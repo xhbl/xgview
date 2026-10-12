@@ -107,13 +107,15 @@ the hand.
 | **Android** (arm64-v8a) | TV box, phone, tablet | `AMediaCodec` - hardware |
 | **Windows** x64 | mini PC, kiosk, desktop | Direct3D 11 Video or CUDA - hardware, with a CPU fallback |
 | **Linux** x64 | desktop, mini PC | VAAPI or CUDA - hardware, with a CPU fallback |
+| **macOS** (universal) | desktop, laptop | the CPU - software |
 
 Hardware decoding covers H.264; MJPEG is always decoded on the CPU. It needs a
 GPU that offers VAAPI or CUDA, which a desktop with an NVIDIA, Intel or AMD
 graphics does; a machine that offers neither decodes on the CPU, where the wall
 still runs - comfortable for a grid of sub streams, and heavier once it starts
-pulling main streams. A tile whose corner is set to the frame-rate item shows
-`HW` or `SW`, so you can see at a glance which path a camera is on.
+pulling main streams. macOS is the one desktop target with no hardware path yet,
+so it always decodes on the CPU. A tile whose corner is set to the frame-rate
+item shows `HW` or `SW`, so you can see at a glance which path a camera is on.
 
 ### Android: what the device needs
 
