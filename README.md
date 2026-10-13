@@ -401,8 +401,9 @@ Press `F2` to open the *add devices* window, which has five pages:
    *Stream protocol* chooses what the imported cameras prefer - **auto** (RTSP
    first, MSE when RTSP cannot be reached), **rtsp**, or the WebSocket one - and
    each camera can be switched afterwards from the Cameras tab. The main/sub
-   pairing (measured by resolution) follows that choice too - **auto** asks both
-   addresses at once - so a closed RTSP port costs no camera its sub stream.
+   pairing is measured over both addresses at once, so a closed RTSP port costs
+   no camera its sub stream; where nothing can be measured, a camera with more
+   than one stream still gets a sub by input order.
 5. **go2rtc** - sign in to a standalone go2rtc's HTTP API (`/api/streams`) and
    pick from a flat list of the streams it serves; each is added as a camera
    whose sub stream is left empty. As with Frigate, **both of its addresses are

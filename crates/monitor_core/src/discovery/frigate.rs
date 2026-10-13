@@ -14,7 +14,10 @@
 //! Nothing reads a camera's own address: the restream URL is rebuilt from the
 //! stream name, and which of a camera's streams is the main one is decided by a
 //! measured resolution, never by Frigate's `detect` / `record` roles - those
-//! name a purpose, and a viewer may record the sub feed to save space.
+//! name a purpose, and a viewer may record the sub feed to save space. The
+//! resolution is measured over RTSP and over the MSE endpoint at once, and only
+//! where neither answers does a camera with more than one stream fall back to
+//! input order to name its sub (see [`select_pair`]).
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -22,7 +25,7 @@ use std::time::Duration;
 use futures::stream::{self, StreamExt};
 use serde_json::{Map, Value};
 
-use crate::config::{FrigateConfig, StreamProtocol};
+use crate::config::FrigateConfig;
 use crate::error::{CoreError, Result};
 use crate::model::{CameraOrigin, CameraSource};
 use crate::rtsp::RtspUrl;
@@ -284,9 +287,13 @@ fn credentialless(url: &str) -> String {
 /// Main and sub indices into one camera's streams, from their measured sizes.
 ///
 /// The main stream is the largest one whose size could be read, and the sub the
-/// smallest one that is *smaller* than it. Nothing is guessed: a device with
-/// several equally sized feeds has no sub, and one whose sizes could not be read
-/// has none either - an empty sub falls back to the main stream.
+/// smallest one that is *smaller* than it. When that leaves no sub - the sizes
+/// came back equal, or none could be read at all - a camera with more than one
+/// stream still gets one, by input order: Frigate lists the main feed first, so
+/// the first stream that is not the main becomes the sub. That last part is the
+/// one guess here, kept as the fallback for when the reliable fact (the
+/// picture size) is missing - a closed port, say - rather than leaving the
+/// camera without a sub stream.
 fn select_pair(sizes: &[Option<(u32, u32)>]) -> (usize, Option<usize>) {
     let pixels = |size: Option<(u32, u32)>| size.map(|(w, h)| u64::from(w) * u64::from(h));
     // The largest size wins; among equal sizes the earlier input is the main,
@@ -299,7 +306,7 @@ fn select_pair(sizes: &[Option<(u32, u32)>]) -> (usize, Option<usize>) {
         .max_by_key(|(pixels, index)| (*pixels, std::cmp::Reverse(*index)))
         .map(|(_, index)| index)
         .unwrap_or(0);
-    let sub = pixels(sizes.get(main).copied().flatten()).and_then(|main_pixels| {
+    let measured = pixels(sizes.get(main).copied().flatten()).and_then(|main_pixels| {
         sizes
             .iter()
             .enumerate()
@@ -311,6 +318,11 @@ fn select_pair(sizes: &[Option<(u32, u32)>]) -> (usize, Option<usize>) {
             })
             .min_by_key(|(pixels, _)| *pixels)
             .map(|(_, index)| index)
+    });
+    let sub = measured.or_else(|| {
+        (sizes.len() >= 2)
+            .then(|| (0..sizes.len()).find(|index| *index != main))
+            .flatten()
     });
     (main, sub)
 }
@@ -325,72 +337,34 @@ fn rtsp_credentials(config: &FrigateConfig, read: Option<(String, String)>) -> O
     }
 }
 
-/// How the resolution probe reaches one stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProbeOrder {
-    /// Ask both addresses at once and take the first answer.
-    Race,
-    /// RTSP first, MSE as the fallback.
-    RtspFirst,
-    /// MSE first, RTSP as the fallback.
-    MseFirst,
-}
-
-/// The probe order a protocol choice asks for.
+/// Measures one target's resolution over both its addresses at once.
 ///
-/// `auto` races both, so a slow or closed address does not hold the measurement
-/// up; a forced protocol tries its own address first and the other as the
-/// fallback, so `mse` does not wait on a closed RTSP port and `rtsp` prefers the
-/// cheaper measurement when it is there.
-fn probe_order(protocol: StreamProtocol) -> ProbeOrder {
-    match protocol {
-        StreamProtocol::Auto => ProbeOrder::Race,
-        StreamProtocol::Rtsp => ProbeOrder::RtspFirst,
-        StreamProtocol::Mse => ProbeOrder::MseFirst,
-    }
-}
-
-/// Measures one target's resolution, by the order [`probe_order`] gave. It
-/// follows the chosen protocol: `auto` races RTSP and MSE together, a forced
-/// one tries its own address first and the other as the fallback.
+/// The protocol only decides what a camera is *played* with, not how it is
+/// measured, so the probe is the same for `auto`, `rtsp` and `mse`: RTSP and
+/// MSE are asked together and whichever reads a size first answers. A closed
+/// RTSP port therefore costs the measurement nothing - which is the case MSE is
+/// for.
 async fn probe_target(
     rtsp_url: String,
     mse_url: String,
     rtsp_credentials: Option<(String, String)>,
     ws_credentials: Option<(String, String)>,
-    order: ProbeOrder,
 ) -> Option<(u32, u32)> {
-    match order {
-        ProbeOrder::RtspFirst => {
-            match probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT).await {
-                Some(size) => Some(size),
-                None => probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT).await,
-            }
-        }
-        ProbeOrder::MseFirst => {
-            match probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT).await {
-                Some(size) => Some(size),
-                None => probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT).await,
-            }
-        }
-        ProbeOrder::Race => {
-            // Both addresses are asked at once; the first to read a size wins,
-            // and the other is waited on only when the first could not.
-            let rtsp = probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT);
-            let mse = probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT);
-            tokio::pin!(rtsp);
-            tokio::pin!(mse);
-            tokio::select! {
-                size = &mut rtsp => match size {
-                    Some(size) => Some(size),
-                    None => mse.await,
-                },
-                size = &mut mse => match size {
-                    Some(size) => Some(size),
-                    None => rtsp.await,
-                },
-            }
-        }
+    let rtsp = probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT);
+    let mse = probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT);
+    tokio::pin!(rtsp);
+    tokio::pin!(mse);
+    // The first to read a size wins; the other is waited on only when the first
+    // could not.
+    tokio::select! {
+        size = &mut rtsp => match size {
+            Some(size) => Some(size),
+            None => mse.await,
+        },
+        size = &mut mse => match size {
+            Some(size) => Some(size),
+            None => rtsp.await,
+        },
     }
 }
 
@@ -398,14 +372,11 @@ async fn probe_all(
     targets: &[(String, String)],
     rtsp_credentials: Option<(String, String)>,
     ws_credentials: Option<(String, String)>,
-    order: ProbeOrder,
 ) -> Vec<Option<(u32, u32)>> {
     stream::iter(targets.iter().cloned().map(|(rtsp_url, mse_url)| {
         let rtsp_credentials = rtsp_credentials.clone();
         let ws_credentials = ws_credentials.clone();
-        async move {
-            probe_target(rtsp_url, mse_url, rtsp_credentials, ws_credentials, order).await
-        }
+        async move { probe_target(rtsp_url, mse_url, rtsp_credentials, ws_credentials).await }
     }))
     .buffered(PROBE_CONCURRENCY)
     .collect()
@@ -499,11 +470,9 @@ pub fn extract_rtsp_port(url: &str) -> Option<u16> {
 async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateImport {
     let credentials = rtsp_credentials(config, parts.rtsp.clone());
     let port = parts.restream_port;
-    // The probe follows the chosen protocol: `auto` races RTSP and MSE, a
-    // forced one tries its own address first. Both addresses of every stream
-    // are measured, so a camera whose RTSP port is closed outside the LAN - the
-    // case MSE is for - is still paired by the size its MSE stream reports.
-    let order = probe_order(config.protocol);
+    // Both addresses of every stream are measured at once, so a camera whose
+    // RTSP port is closed outside the LAN - the case MSE is for - is still
+    // paired by the size its MSE stream reports.
     let targets: Vec<(String, String)> = parts
         .cameras
         .iter()
@@ -514,7 +483,7 @@ async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateIm
                 .map(|name| (restream_url(&config.host, port, name), mse_url(config, name)))
         })
         .collect();
-    let sizes = probe_all(&targets, credentials.clone(), ws_credentials(config), order).await;
+    let sizes = probe_all(&targets, credentials.clone(), ws_credentials(config)).await;
 
     let mut cameras = Vec::new();
     let mut cursor = 0usize;
@@ -543,6 +512,7 @@ async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateIm
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::StreamProtocol;
     use crate::model::ConnectionMode;
 
     fn frigate_config() -> FrigateConfig {
@@ -662,12 +632,17 @@ mod tests {
         assert_eq!(select_pair(&sizes), (1, Some(0)));
     }
 
+    /// When the sizes cannot name a sub - they are equal, or none was read at
+    /// all - a camera with more than one stream still gets one by input order:
+    /// the first stream that is not the main.
     #[test]
-    fn equal_or_unknown_sizes_have_no_sub() {
-        assert_eq!(select_pair(&[Some((1920, 1080)), Some((1920, 1080))]), (0, None));
-        assert_eq!(select_pair(&[None, None]), (0, None));
-        // One size known, the other not: no size to be smaller than.
-        assert_eq!(select_pair(&[None, Some((1920, 1080))]), (1, None));
+    fn a_pair_with_no_measured_sub_falls_back_to_input_order() {
+        // Equal sizes: nothing is smaller than the main.
+        assert_eq!(select_pair(&[Some((1920, 1080)), Some((1920, 1080))]), (0, Some(1)));
+        // Nothing read at all.
+        assert_eq!(select_pair(&[None, None]), (0, Some(1)));
+        // One size known: the readable input is the main and the other the sub.
+        assert_eq!(select_pair(&[None, Some((1920, 1080))]), (1, Some(0)));
     }
 
     #[test]
@@ -711,15 +686,6 @@ mod tests {
         assert!(source.username.is_none());
         // An imported camera is marked as the import's to manage.
         assert!(source.imported);
-    }
-
-    /// The probe order follows the chosen protocol: `auto` races both, a forced
-    /// one tries its own address first.
-    #[test]
-    fn the_probe_order_follows_the_protocol() {
-        assert_eq!(probe_order(StreamProtocol::Auto), ProbeOrder::Race);
-        assert_eq!(probe_order(StreamProtocol::Rtsp), ProbeOrder::RtspFirst);
-        assert_eq!(probe_order(StreamProtocol::Mse), ProbeOrder::MseFirst);
     }
 
     /// The login the WebSocket endpoint is probed and played with is Frigate's
