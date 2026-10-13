@@ -270,9 +270,13 @@ build_hwcodecs() {
 # means a future feature that does reach one of them still finds it.
 #
 # Hardware decoding is compiled in as well: the VAAPI and CUDA hwaccels for
-# H.264, the only codec the pipeline ever asks a device for (`prefer_hardware`
-# is H.264 alone, crates/monitor_core/src/pipeline.rs). The headers and the
-# libva both need come from `build_hwcodecs`; the CUDA side links nothing.
+# H.264 and H.265, the two codecs the pipeline asks a device for (`prefer_hardware`
+# covers both, crates/monitor_core/src/pipeline.rs). Both `*_vaapi` and `*_nvdec`
+# have to be named one by one: `--enable-vaapi` / `--enable-nvdec` bring in the
+# hwaccel framework, but the per-codec modules are what libavcodec actually opens,
+# and a codec without one decodes on the CPU whatever device was handed over. The
+# headers and the libva both need come from `build_hwcodecs`; the CUDA side links
+# nothing.
 build_ffmpeg() {
     # nasm/yasm assemble the hand written x86 SIMD. Without one of them
     # `--disable-x86asm` is required and software decoding loses those paths;
@@ -285,7 +289,11 @@ build_ffmpeg() {
         asm_flags+=(--disable-x86asm)
         asm_state="noasm"
     fi
-    build_id="$FFMPEG_VERSION $asm_state libva-$LIBVA_VERSION $NVCODEC_VERSION"
+    # The hwaccel set is part of what the tree is keyed on as well: a build that
+    # gained a codec's hwaccel has to rebuild, or the marker would keep libraries
+    # that cannot decode it on the GPU however `prefer_hardware` reads.
+    local hwaccels="vaapi+nvdec:h264,hevc"
+    build_id="$FFMPEG_VERSION $asm_state libva-$LIBVA_VERSION $NVCODEC_VERSION $hwaccels"
 
     if [[ -f "$PREFIX/lib/libavcodec.so" && -f "$PREFIX/include/libavcodec/avcodec.h" \
           && -f "$PREFIX/.xgview-ffmpeg-version" \
@@ -339,6 +347,8 @@ build_ffmpeg() {
         --enable-nvdec \
         --enable-hwaccel=h264_vaapi \
         --enable-hwaccel=h264_nvdec \
+        --enable-hwaccel=hevc_vaapi \
+        --enable-hwaccel=hevc_nvdec \
         "${asm_flags[@]}"
     make -j"$(nproc 2>/dev/null || echo 4)"
     make install
