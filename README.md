@@ -403,9 +403,13 @@ Press `F2` to open the *add devices* window, which has five pages:
    each camera can be switched afterwards from the Cameras tab.
 5. **go2rtc** - sign in to a standalone go2rtc's HTTP API (`/api/streams`) and
    pick from a flat list of the streams it serves; each is added as a camera
-   whose sub stream is left empty. The restream port is read from go2rtc's
-   `rtsp.listen`, and the restream account from the configuration file it serves
-   at `/api/config` (entered by hand when that file is not available).
+   whose sub stream is left empty. As with Frigate, **both of its addresses are
+   captured**: the RTSP restream `rtsp://<host>:<port>/<stream>` and the MSE
+   endpoint `ws(s)://<host>:<port>/api/ws?src=<stream>` on go2rtc's own API
+   port. The restream port is read from go2rtc's `rtsp.listen` and the restream
+   account from the configuration file it serves at `/api/config` (entered by
+   hand when that file is not available); the WebSocket address uses go2rtc's
+   `api:` account instead.
 
 Cameras are listed in the **Cameras** tab, where they can be renamed, reordered,
 disabled, and given a display aspect (original, stretch, 16:9, 4:3 or 1:1) and a

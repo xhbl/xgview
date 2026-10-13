@@ -1,11 +1,13 @@
 //! Standalone go2rtc import.
 //!
 //! go2rtc serves every stream it is configured with on its RTSP port, as
-//! `rtsp://<host>:<port>/<name>` - 8554 unless `rtsp.listen` says otherwise.
-//! Its HTTP API lists the names; it carries no grouping at all, so each stream
-//! is offered on its own and the viewer picks what to add. This is deliberately
-//! independent of the Frigate import, which reads Frigate's API instead - the
-//! built-in go2rtc's management port is normally not published.
+//! `rtsp://<host>:<port>/<name>` - 8554 unless `rtsp.listen` says otherwise -
+//! and the same stream as MSE (fMP4 over a WebSocket) at `/api/ws?src=<name>`
+//! on its HTTP API port. Its HTTP API lists the names; it carries no grouping
+//! at all, so each stream is offered on its own and the viewer picks what to
+//! add. This is deliberately independent of the Frigate import, which reads
+//! Frigate's API instead - the built-in go2rtc's management port is normally
+//! not published.
 
 use std::time::Duration;
 
@@ -23,6 +25,16 @@ pub const RESTREAM_PORT: u16 = 8554;
 /// XGView pulls rather than the camera behind it.
 pub fn restream_url(host: &str, port: u16, stream: &str) -> String {
     format!("rtsp://{host}:{port}/{stream}")
+}
+
+/// The MSE (WebSocket) URL of one stream, on go2rtc's own HTTP API port.
+///
+/// go2rtc serves MSE at `/api/ws?src=<stream>` - the same shape Frigate fronts
+/// at `/live/mse/api/ws`, but on go2rtc's own port and behind its `api:` account
+/// (HTTP Basic) rather than Frigate's session login.
+pub fn mse_url(config: &Go2rtcConfig, stream: &str) -> String {
+    let scheme = if config.https { "wss" } else { "ws" };
+    format!("{scheme}://{}:{}/api/ws?src={stream}", config.host, config.port)
 }
 
 /// What one go2rtc fetch produced.
@@ -157,9 +169,20 @@ impl Go2rtcClient {
         source.host = self.config.host.clone();
         source.origin = CameraOrigin::Go2rtc;
         source.tags = vec!["go2rtc".to_string()];
+        // Both addresses are captured, as a Frigate import does: the RTSP
+        // restream, and the MSE endpoint on go2rtc's own API port. The camera
+        // prefers RTSP and reaches for the WebSocket when RTSP cannot be.
+        source.mse_main = Some(mse_url(&self.config, name));
+        // The restream account, for the RTSP address.
         if let Some((username, password)) = credentials {
             source.username = Some(username.clone());
             source.password = Some(password.clone());
+        }
+        // go2rtc's `api:` account, for the WebSocket address - a different
+        // credential from the restream one.
+        if !self.config.api_username.trim().is_empty() {
+            source.mse_username = Some(self.config.api_username.clone());
+            source.mse_password = Some(self.config.api_password.clone());
         }
         source
     }
@@ -270,6 +293,54 @@ fn strip_scalar(raw: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ConnectionMode;
+
+    /// A stream is offered with both addresses - the RTSP restream and the MSE
+    /// endpoint on go2rtc's own API port - and each carries its own account.
+    #[test]
+    fn a_stream_carries_both_addresses() {
+        let config = Go2rtcConfig {
+            host: "192.168.17.90".into(),
+            port: 1984,
+            api_username: "api".into(),
+            api_password: "api-pw".into(),
+            ..Default::default()
+        };
+        let client = Go2rtcClient::new(config).expect("a configured host");
+        let source = client.to_source("cam_1", 8554, &Some(("admin".into(), "secret".into())));
+
+        assert_eq!(source.rtsp_main, "rtsp://192.168.17.90:8554/cam_1");
+        assert_eq!(source.mse_main.as_deref(), Some("ws://192.168.17.90:1984/api/ws?src=cam_1"));
+        // The restream account on the RTSP address, the api account on the ws one.
+        assert_eq!(source.username.as_deref(), Some("admin"));
+        assert_eq!(source.password.as_deref(), Some("secret"));
+        assert_eq!(source.mse_username.as_deref(), Some("api"));
+        assert_eq!(source.mse_password.as_deref(), Some("api-pw"));
+        assert_eq!(source.origin, CameraOrigin::Go2rtc);
+        assert_eq!(source.connect, ConnectionMode::Auto);
+    }
+
+    /// No `api:` account: the MSE address is still captured, just without a
+    /// credential of its own.
+    #[test]
+    fn the_mse_address_captures_without_an_api_account() {
+        let config = Go2rtcConfig { host: "192.168.17.90".into(), ..Default::default() };
+        let client = Go2rtcClient::new(config).expect("a configured host");
+        let source = client.to_source("cam_1", 8554, &None);
+        assert_eq!(source.mse_main.as_deref(), Some("ws://192.168.17.90:1984/api/ws?src=cam_1"));
+        assert!(source.mse_username.is_none());
+    }
+
+    #[test]
+    fn the_mse_url_scheme_follows_https() {
+        let config = Go2rtcConfig {
+            host: "10.0.0.1".into(),
+            port: 1984,
+            https: true,
+            ..Default::default()
+        };
+        assert_eq!(mse_url(&config, "cam_1"), "wss://10.0.0.1:1984/api/ws?src=cam_1");
+    }
 
     #[test]
     fn reads_the_stream_names() {

@@ -1898,6 +1898,20 @@ impl rustls::client::danger::ServerCertVerifier for NoServerCertVerifier {
     }
 }
 
+/// Whether a WebSocket URL is Frigate's MSE endpoint rather than a standalone
+/// go2rtc's.
+///
+/// The two serve the same MSE stream at different paths and authenticate
+/// differently: Frigate fronts it at `/live/mse/api/ws` behind its own session
+/// login, while go2rtc serves `/api/ws` behind its HTTP API's Basic account.
+/// The path is what tells them apart - `live/mse/` is Frigate's, wherever a
+/// reverse proxy has placed it.
+fn is_frigate_mse(ws_url: &str) -> bool {
+    let after_scheme = ws_url.split_once("://").map_or(ws_url, |(_, rest)| rest);
+    let path = after_scheme.split_once('/').map_or("", |(_, path)| path);
+    path.contains("live/mse/")
+}
+
 /// Log in to Frigate's web API and return the JWT token that the WebSocket
 /// endpoint expects as a Bearer header.  The base URL is derived from the
 /// WebSocket URL (`wss://host:port/…` → `https://host:port`).
@@ -1947,9 +1961,10 @@ async fn frigate_ws_login(ws_url: &str, user: &str, pass: &str, timeout: Duratio
         .ok_or_else(|| crate::error::CoreError::network("Frigate login did not return a token"))
 }
 
-/// One WebSocket (MSE) session: connect to go2rtc's `/live/mse/api/ws`
-/// endpoint, receive fMP4 segments, decode the H.264/H.265 access units inside
-/// them and publish the pictures.
+/// One WebSocket (MSE) session: connect to a go2rtc MSE endpoint - Frigate's
+/// `/live/mse/api/ws` or a standalone go2rtc's `/api/ws` - receive fMP4
+/// segments, decode the H.264/H.265 access units inside them and publish the
+/// pictures.
 ///
 /// The protocol is go2rtc's MSE consumer: the client opens a WebSocket, sends a
 /// `{"type":"mse","value":"…"}` JSON handshake, then receives binary frames
@@ -1973,19 +1988,25 @@ async fn run_ws_session(
     let Endpoint { index, camera_id, uri, stream, credentials, .. } = endpoint;
     let camera_id_str = camera_id.as_str();
 
-    // 1. Build the WebSocket request.  Frigate's WebSocket endpoint lives
-    //    behind the same JWT auth as the REST API, so we log in first and
-    //    carry the token as a Bearer header — Basic auth is rejected with 401.
+    // 1. Build the WebSocket request, with the credentials the endpoint wants.
+    //    The two servers authenticate differently: Frigate fronts its MSE
+    //    stream behind the same JWT login as its REST API (Basic is rejected
+    //    with 401), while a standalone go2rtc answers its own `/api/ws` behind
+    //    the HTTP Basic account its `api:` section names.
     let mut request = uri
         .as_str()
         .into_client_request()
         .map_err(|e| crate::error::CoreError::network(format!("bad WebSocket URL: {e}")))?;
     if let Some((user, pass)) = &credentials {
-        let token = frigate_ws_login(&uri, user, pass, handshake_timeout).await?;
-        request.headers_mut().insert(
-            "Authorization",
-            format!("Bearer {token}").try_into().unwrap(),
-        );
+        let authorization = if is_frigate_mse(&uri) {
+            let token = frigate_ws_login(&uri, user, pass, handshake_timeout).await?;
+            format!("Bearer {token}")
+        } else {
+            use base64::Engine;
+            let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            format!("Basic {token}")
+        };
+        request.headers_mut().insert("Authorization", authorization.try_into().unwrap());
     }
 
     // 2. Build a TLS connector that accepts self-signed certificates (Frigate
@@ -2365,6 +2386,17 @@ mod tests {
         assert_eq!(endpoint.uri, "wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1");
         assert_eq!(endpoint.credentials, Some(("frigate".to_string(), "pw".to_string())));
         assert!(endpoint.fallback.is_none(), "a forced mse has no fallback");
+    }
+
+    /// The two MSE endpoints are told apart by their paths, because they
+    /// authenticate differently.
+    #[test]
+    fn frigate_and_go2rtc_mse_endpoints_are_told_apart() {
+        assert!(is_frigate_mse("wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1"));
+        // A reverse proxy may place it under a subpath.
+        assert!(is_frigate_mse("wss://host/frigate/live/mse/api/ws?src=cam_1"));
+        assert!(!is_frigate_mse("ws://10.0.0.1:1984/api/ws?src=cam_1"));
+        assert!(!is_frigate_mse("ws://host/rtc/api/ws?src=cam_1"));
     }
 
     #[test]
