@@ -444,6 +444,56 @@ const VIDEOTOOLBOX: Device = Device {
     name: "ffmpeg + videotoolbox",
 };
 
+// Asks the system whether this machine has a hardware decoder for a codec.
+//
+// Apple's own API rather than libavcodec's, because libavcodec does not answer
+// the question: its VideoToolbox decoder is built with software fallback
+// allowed for HEVC, and it hands its pictures over in the same format whichever
+// way it went, so which decoder ran is not something the picture says. The
+// framework it delegates to knows, so it is asked instead. An `extern` block is
+// not a documented item, so this is a plain comment rather than a doc one.
+#[cfg(target_os = "macos")]
+#[link(name = "VideoToolbox", kind = "framework")]
+extern "C" {
+    fn VTIsHardwareDecodeSupported(codec_type: u32) -> u8;
+}
+
+/// Whether the decoder going to be used has a hardware path for `codec` at all.
+///
+/// Asking for hardware is a preference, and on every other platform the answer
+/// to "was it granted" is read off the pictures that come back: a picture in the
+/// device's own format is the proof the GPU did the work. VideoToolbox is the
+/// exception, and the reason this exists. Its software HEVC decoder hands its
+/// pictures over in `AV_PIX_FMT_VIDEOTOOLBOX` exactly as its hardware one does,
+/// so the badge would say `HW` on a Mac that has no HEVC decoder at all - which
+/// is what a chip older than hardware HEVC looks like. The capability is asked
+/// up front instead, and a codec this machine cannot decode in hardware is not
+/// offered to VideoToolbox: it decodes on the CPU through FFmpeg, and the badge
+/// says `SW`, which is what actually happened.
+fn hardware_available(codec: Codec) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // CoreMedia names a codec by four character code, and these are the two
+        // VideoToolbox decodes in hardware.
+        const H264: u32 = u32::from_be_bytes(*b"avc1");
+        const HEVC: u32 = u32::from_be_bytes(*b"hvc1");
+        match codec {
+            // Safety: the call takes a codec type and answers a plain boolean;
+            // it touches nothing else, and both of these are in its table.
+            Codec::H264 => unsafe { VTIsHardwareDecodeSupported(H264) != 0 },
+            Codec::H265 => unsafe { VTIsHardwareDecodeSupported(HEVC) != 0 },
+            // Nothing else is decoded here, so no answer is invented for it.
+            Codec::Mjpeg | Codec::Unknown => true,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Everywhere else the pictures carry the answer, so nothing is asked.
+        let _ = codec;
+        true
+    }
+}
+
 /// The devices to try, best first.
 ///
 /// The order is a preference between devices and not a requirement on any of
@@ -697,8 +747,11 @@ impl VideoDecoder for FfmpegDecoder {
         // A hardware decoder needs its device, and its own say over which format
         // it may output, in place before the context is opened: that call is
         // where libavcodec chooses between the software and the hardware
-        // implementation of the codec.
-        let device = open_device(config.hardware);
+        // implementation of the codec. A machine whose decoder has no hardware
+        // path for this codec is not offered a device at all, so that the badge
+        // reports the CPU it is really using rather than the format the platform
+        // hands back either way.
+        let device = open_device(config.hardware && hardware_available(config.codec));
         if let Some((_device, handle)) = device {
             // Safety: the context is still unopened, so nothing else can observe
             // it. The reference is handed over to the context, which releases it

@@ -1106,8 +1106,22 @@ and the packages do not all get their decoder the same way:
 * **macOS** does not build FFmpeg at all (`scripts/build-macos.sh` links the
   `~/opt/ffmpeg` prefix through pkg-config), and that prefix is a near-default
   source build (`MACOS-SETUP.txt` 4B) or Homebrew's - neither disables anything,
-  so `hevc_videotoolbox` is in it. H.265 should come up `HW` there; it is the one
-  package not yet seen on hardware.
+  so `hevc_videotoolbox` is in it. It is also the one platform where the tile
+  lied. A mid-2012 MacBook Pro (Intel HD Graphics 4000) showed `HW` on H.265,
+  although that GPU has no HEVC decoder and the pictures were decoded on the CPU.
+  Two things line up to cause it. FFmpeg asks VideoToolbox for HEVC with
+  `EnableHardwareAcceleratedVideoDecoder` rather than `Require...` - software
+  fallback allowed, where every other codec gets `Require`
+  (`libavcodec/videotoolbox.c`) - so a session is created on a machine with no
+  HEVC hardware; and VideoToolbox hands its pictures over in
+  `AV_PIX_FMT_VIDEOTOOLBOX` whichever of its two decoders produced them, so the
+  format the badge reads carries no answer. The check is put to the system
+  instead: `VTIsHardwareDecodeSupported` (macOS 10.13+) is asked before a device
+  is opened, and a codec this machine has no hardware decoder for is not offered
+  to VideoToolbox at all - it decodes through FFmpeg's software HEVC and the tile
+  reads `SW`. H.264 is unaffected (HD 4000 has that decoder), so `HW` still means
+  `HW` where there is one. The fix is not yet run on that Mac; what it is expected
+  to show is H.264 `HW`, H.265 `SW`.
 * **Android** is not FFmpeg at all: it decodes through `AMediaCodec`, the
   platform's own decoder, so there is no hwaccel to compile in and no cache to
   key - and no software fallback for HEVC either.

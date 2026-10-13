@@ -115,10 +115,13 @@ needs a GPU that offers VAAPI or CUDA, which a desktop with an NVIDIA, Intel or
 AMD graphics does; a machine that offers neither decodes on the CPU, where the
 wall still runs - comfortable for a grid of sub streams, and heavier once it
 starts pulling main streams. macOS decodes through VideoToolbox, which is part
-of the system, and Android through `AMediaCodec` - with H.264 falling back to
-OpenH264 on the CPU when the platform's decoders will not have the stream. A tile
-whose corner is set to the frame-rate item shows `HW` or `SW`, so you can see at
-a glance which path a camera is on.
+of the system, and only where the Mac really has a decoder for the codec - which
+it is asked about up front, so a GPU older than hardware HEVC shows `SW` on an
+H.265 tile rather than a hardware badge it has not earned. Android decodes
+through `AMediaCodec` - with H.264 falling back to OpenH264 on the CPU when the
+platform's decoders will not have the stream. A tile whose corner is set to the
+frame-rate item shows `HW` or `SW`, so you can see at a glance which path a
+camera is on.
 
 ### Android: what the device needs
 
