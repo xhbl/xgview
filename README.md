@@ -419,8 +419,11 @@ camera offers: `AUTO` / `RTSP` / `MSE` when an MSE address is present (a press
 moves on to the next), or `TCP` / `UDP` for an RTSP camera without one. `AUTO`
 tries RTSP first and falls back to the MSE address when RTSP cannot be reached -
 the case of an RTSP port that is closed outside the LAN. The address shown
-beside the button is the one the camera currently pulls. A camera is added to
-the group the wall is on - the dialog's title names it; see
+beside the button is the one the camera currently pulls. A camera an import
+brought in keeps its addresses and credentials read-only in the edit form - the
+import manages them - until it is detached, which drops the MSE address and
+returns it to a camera edited by hand; the name is editable throughout. A camera
+is added to the group the wall is on - the dialog's title names it; see
 [Camera groups](#camera-groups).
 
 ### Camera groups

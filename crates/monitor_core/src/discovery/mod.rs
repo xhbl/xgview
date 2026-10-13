@@ -204,6 +204,7 @@ impl DiscoveryService {
         source.main_profile = resolved.main_profile.clone();
         source.sub_profile = resolved.sub_profile.clone();
         source.origin = CameraOrigin::Onvif;
+        source.imported = true;
         if let Some(credentials) = self.credentials() {
             source.username = Some(credentials.username);
             source.password = Some(credentials.password);

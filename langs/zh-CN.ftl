@@ -139,7 +139,8 @@ cameras-move-camera-down = 下移摄像头
 camera-edit-title = 编辑摄像头
 camera-edit-title-group = { camera-edit-title } ({ $group })
 camera-edit-sub-derived = 辅码流地址由主码流推断
-camera-edit-managed-hint = 导入得到的地址。用摄像头列表上的连接开关选择拉取哪一个，重新导入会刷新两者。
+camera-edit-imported-hint = 导入的摄像头：地址由导入设置。可“脱离导入”后手工编辑，或重新导入以刷新。
+camera-edit-detach = 脱离导入
 
 ## 移除确认
 remove-title = 移除“{ $name }”？

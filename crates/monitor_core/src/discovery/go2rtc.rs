@@ -168,6 +168,7 @@ impl Go2rtcClient {
         let mut source = CameraSource::new(name, restream_url(&self.config.host, port, name));
         source.host = self.config.host.clone();
         source.origin = CameraOrigin::Go2rtc;
+        source.imported = true;
         source.tags = vec!["go2rtc".to_string()];
         // Both addresses are captured, as a Frigate import does: the RTSP
         // restream, and the MSE endpoint on go2rtc's own API port. The camera
@@ -320,6 +321,7 @@ mod tests {
         assert_eq!(source.mse_password.as_deref(), Some("api-pw"));
         assert_eq!(source.origin, CameraOrigin::Go2rtc);
         assert_eq!(source.connect, ConnectionMode::Auto);
+        assert!(source.imported);
     }
 
     /// No `api:` account: the MSE address is still captured, just without a

@@ -348,6 +348,7 @@ fn source_for(
     let mut source = CameraSource::new(name, rtsp_url(config, port, stream));
     source.host = config.host.clone();
     source.origin = CameraOrigin::Frigate;
+    source.imported = true;
     source.tags = vec!["frigate".to_string()];
     // Both addresses are captured, always: which one is reachable depends on the
     // network, so the camera holds the pair and the connection switch decides.
@@ -619,6 +620,8 @@ mod tests {
         // The default import prefers RTSP.
         assert_eq!(source.connect, ConnectionMode::Auto);
         assert!(source.username.is_none());
+        // An imported camera is marked as the import's to manage.
+        assert!(source.imported);
     }
 
     /// The import preference is written onto each camera's connection mode.

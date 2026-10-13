@@ -4390,6 +4390,7 @@ impl XgViewApp {
         };
         let mut save = false;
         let mut cancel = false;
+        let mut detach = false;
         // The form edits the camera where it lives, so the heading names the
         // group it is in - when there is more than one to tell apart.
         let group = self
@@ -4403,9 +4404,9 @@ impl XgViewApp {
             "camera-edit-title",
             "camera-edit-title-group",
         );
-        // A camera an import gave a pair of addresses to has them shown
-        // read-only: a hand edit to one would leave the other stale.
-        let managed = self.config.find_camera(&id);
+        // An imported camera's form is drawn with its addresses greyed; this is
+        // read afresh each frame, so pressing Detach unlocks it on the spot.
+        let camera = self.config.find_camera(&id);
 
         // A modal: centred, and its backdrop swallows the presses that would
         // otherwise reach the panel it was opened from. It is left only by its
@@ -4415,9 +4416,12 @@ impl XgViewApp {
             ui.label(RichText::new(title).heading());
             ui.add_space(theme::space::S);
             self.nav.open("edit-body");
-            let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft, managed);
+            let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft, camera);
             // The dialog opens on the first control of the form.
             self.camera_edit_anchor = fields.first;
+            if fields.detach {
+                detach = true;
+            }
             if fields.inferred {
                 ui.label(RichText::new(monitor_i18n::tr("camera-edit-sub-derived")).small().color(theme::LIVE));
             }
@@ -4435,6 +4439,18 @@ impl XgViewApp {
             });
             self.nav.close();
         });
+
+        if detach {
+            // The camera leaves the import's hands: its MSE address and login go
+            // with the mark, so its addresses can be edited by hand without one
+            // falling out of step. The window stays open, now unlocked.
+            if let Some(camera) = self.config.cameras.iter_mut().find(|camera| camera.id == id) {
+                camera.detach();
+            }
+            self.needs_sync = true;
+            self.camera_edit = Some(CameraEdit { id, draft, from });
+            return true;
+        }
 
         if save {
             match draft.build() {

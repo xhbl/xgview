@@ -290,6 +290,7 @@ impl SynologyClient {
             enabled: camera.enabled,
             tags: vec!["synology".to_string()],
             origin: CameraOrigin::Synology,
+            imported: true,
             transport: RtspTransport::default(),
             aspect: TileAspect::default(),
             main_profile: None,

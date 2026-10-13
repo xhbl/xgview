@@ -860,6 +860,26 @@ pub struct CameraFields {
     pub first: Option<egui::Id>,
     /// Whether the "Infer" button was pressed.
     pub inferred: bool,
+    /// Whether the "Detach" button was pressed - the camera is to leave the
+    /// import's hands, its addresses becoming editable by hand.
+    pub detach: bool,
+}
+
+/// A camera field, drawn greyed and uneditable while the entry is managed by an
+/// import, so the layout still shows what the import put there.
+fn field_text(
+    ui: &mut egui::Ui,
+    nav: &mut Nav,
+    text: &mut String,
+    label: &str,
+    locked: bool,
+    build: impl for<'a> FnOnce(&'a mut String) -> egui::TextEdit<'a>,
+) -> egui::Response {
+    if locked {
+        ui.add_enabled(false, build(text))
+    } else {
+        text_field(ui, nav, text, label, false, false, build)
+    }
 }
 
 /// The camera fields, as the "Manual entry" tab and the settings panel's edit
@@ -868,57 +888,29 @@ pub struct CameraFields {
 /// `grid_id` names the grid - egui keys a grid's state on it, so the two must
 /// not share one.
 ///
-/// `managed` is the camera being edited, when there is one that carries a pair
-/// of addresses an import put there (a Frigate or go2rtc camera with an MSE
-/// fallback). Its addresses are then shown read-only: editing one of a managed
-/// pair by hand would leave the other pointing at a stream that no longer
-/// matches, and re-importing is what refreshes both. The name stays editable.
-/// See [`CameraFields`] for what comes back.
+/// `camera` is the entry being edited, when there is one. An entry an import
+/// brought in (`imported`) has its address and credential fields drawn greyed
+/// and uneditable: hand-editing one address of a managed pair - a Frigate or
+/// go2rtc camera's RTSP and MSE ones - would leave the other pointing at a
+/// different stream. The name stays editable, and a "Detach" button offers to
+/// take the camera over (see [`CameraSource::detach`]). See [`CameraFields`]
+/// for what comes back.
 pub fn camera_fields(
     ui: &mut egui::Ui,
     nav: &mut Nav,
     grid_id: &str,
     draft: &mut CameraDraft,
-    managed: Option<&CameraSource>,
+    camera: Option<&CameraSource>,
 ) -> CameraFields {
+    let locked = camera.is_some_and(|camera| camera.imported);
     let mut first = None;
     let mut inferred = false;
-
-    if let Some(camera) = managed.filter(|camera| camera.has_mse()) {
-        egui::Grid::new(grid_id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-            ui.label(monitor_i18n::tr("dialog-name"));
-            let name = text_field(ui, nav, &mut draft.name, &monitor_i18n::tr("dialog-name"), false, false, |s| {
-                egui::TextEdit::singleline(s).hint_text(theme::hint(&monitor_i18n::tr("dialog-name-hint"))).desired_width(f32::INFINITY)
-            });
-            first = Some(name.id);
-            ui.end_row();
-
-            // Read-only: the two addresses the import captured, masked.
-            ui.label(RichText::new("rtsp").small());
-            ui.label(
-                RichText::new(camera.masked_rtsp_uri(StreamKind::Main))
-                    .small()
-                    .monospace()
-                    .color(theme::TEXT_DIM),
-            );
-            ui.end_row();
-            if let Some(mse) = camera.masked_mse_uri(StreamKind::Main) {
-                ui.label(RichText::new("mse").small());
-                ui.label(RichText::new(mse).small().monospace().color(theme::TEXT_DIM));
-                ui.end_row();
-            }
-        });
-        ui.label(
-            RichText::new(monitor_i18n::tr("camera-edit-managed-hint"))
-                .small()
-                .color(theme::TEXT_DIM),
-        );
-        return CameraFields { first, inferred };
-    }
+    let mut detach = false;
 
     egui::Grid::new(grid_id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label(monitor_i18n::tr("dialog-name"));
-        // The first control of the form, and the one a window opens on.
+        // The first control of the form, and the one a window opens on. Always
+        // editable: a name holds no address that could fall out of step.
         let name = text_field(ui, nav, &mut draft.name, &monitor_i18n::tr("dialog-name"), false, false, |s| {
             egui::TextEdit::singleline(s).hint_text(theme::hint(&monitor_i18n::tr("dialog-name-hint"))).desired_width(f32::INFINITY)
         });
@@ -926,7 +918,7 @@ pub fn camera_fields(
         ui.end_row();
 
         ui.label(monitor_i18n::tr("dialog-main-stream"));
-        text_field(ui, nav, &mut draft.main, &monitor_i18n::tr("dialog-main-stream"), false, false, |s| {
+        field_text(ui, nav, &mut draft.main, &monitor_i18n::tr("dialog-main-stream"), locked, |s| {
             egui::TextEdit::singleline(s)
                 .hint_text(theme::hint("rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101"))
                 .desired_width(f32::INFINITY)
@@ -935,12 +927,12 @@ pub fn camera_fields(
 
         ui.label(monitor_i18n::tr("dialog-sub-stream"));
         ui.horizontal(|ui| {
-            text_field(ui, nav, &mut draft.sub, &monitor_i18n::tr("dialog-sub-stream"), false, false, |s| {
+            field_text(ui, nav, &mut draft.sub, &monitor_i18n::tr("dialog-sub-stream"), locked, |s| {
                 egui::TextEdit::singleline(s)
                     .hint_text(theme::hint(&monitor_i18n::tr("dialog-sub-hint")))
                     .desired_width(320.0)
             });
-            if nav.tracked(ui.button(monitor_i18n::tr("dialog-infer"))).clicked() {
+            if !locked && nav.tracked(ui.button(monitor_i18n::tr("dialog-infer"))).clicked() {
                 draft.infer_sub = true;
                 inferred = true;
                 let mut probe = draft.clone();
@@ -952,14 +944,44 @@ pub fn camera_fields(
         });
         ui.end_row();
     });
-    nav.tracked(ui.checkbox(&mut draft.infer_sub, monitor_i18n::tr("dialog-derive-sub")));
+    if !locked {
+        nav.tracked(ui.checkbox(&mut draft.infer_sub, monitor_i18n::tr("dialog-derive-sub")));
+    }
 
     // The stream account in the layout every other tab gives one: a heading
     // naming it, then the two fields on one row.
     ui.separator();
     ui.label(RichText::new(monitor_i18n::tr("dialog-stream-credentials")).small());
-    credentials_row(ui, nav, &mut draft.username, &mut draft.password);
-    CameraFields { first, inferred }
+    if locked {
+        ui.horizontal(|ui| {
+            let user = monitor_i18n::tr("dialog-user");
+            let pass = monitor_i18n::tr("dialog-password");
+            ui.label(user);
+            ui.add_enabled(false, egui::TextEdit::singleline(&mut draft.username).desired_width(140.0));
+            ui.label(pass);
+            ui.add_enabled(false, egui::TextEdit::singleline(&mut draft.password).password(true).desired_width(140.0));
+        });
+    } else {
+        credentials_row(ui, nav, &mut draft.username, &mut draft.password);
+    }
+
+    if locked {
+        ui.add_space(6.0);
+        // The MSE address the import also holds, so the managed pair is visible.
+        if let Some(mse) = camera.and_then(|camera| camera.masked_mse_uri(StreamKind::Main)) {
+            ui.label(RichText::new(format!("mse: {mse}")).small().monospace().color(theme::TEXT_DIM));
+        }
+        ui.label(
+            RichText::new(monitor_i18n::tr("camera-edit-imported-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+        if nav.tracked(ui.button(monitor_i18n::tr("camera-edit-detach"))).clicked() {
+            detach = true;
+        }
+    }
+
+    CameraFields { first, inferred, detach }
 }
 
 fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {

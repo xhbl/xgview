@@ -396,6 +396,14 @@ pub struct CameraSource {
     pub tags: Vec<String>,
     #[serde(default)]
     pub origin: CameraOrigin,
+    /// Whether a server import set this camera's addresses and still manages
+    /// them. While set, the edit form shows the address and credential fields
+    /// read-only: hand-editing one address of a managed pair - a Frigate or
+    /// go2rtc camera's RTSP and MSE ones - would leave the other pointing at a
+    /// different stream. Detaching clears this and the MSE pair, so the camera
+    /// becomes one to edit by hand; re-importing refreshes the addresses.
+    #[serde(default)]
+    pub imported: bool,
     /// Transport used to pull both streams of this camera. Kept per camera so
     /// that a device whose TCP relay damages the stream can be singled out.
     #[serde(default)]
@@ -443,6 +451,7 @@ impl CameraSource {
             enabled: true,
             tags: Vec::new(),
             origin: CameraOrigin::Manual,
+            imported: false,
             transport: RtspTransport::default(),
             aspect: TileAspect::default(),
             main_profile: None,
@@ -487,6 +496,25 @@ impl CameraSource {
         self.username = form.username.clone();
         self.password = form.password.clone();
         self.host = form.host.clone();
+    }
+
+    /// Takes a camera out of the import's hands, so its addresses can be edited
+    /// by hand.
+    ///
+    /// The MSE address and its login are dropped - a hand-edited camera holds
+    /// one address, and keeping a second that no longer matches is exactly what
+    /// the managed state exists to prevent - and a camera left on `Mse` with no
+    /// MSE address falls back to `Auto` rather than pulling nothing. The origin
+    /// is kept: where the camera came from is still true.
+    pub fn detach(&mut self) {
+        self.imported = false;
+        self.mse_main = None;
+        self.mse_sub = None;
+        self.mse_username = None;
+        self.mse_password = None;
+        if self.connect == ConnectionMode::Mse {
+            self.connect = ConnectionMode::Auto;
+        }
     }
 
     /// RTSP URL for the requested stream. Falls back to the main stream when no
@@ -1006,6 +1034,33 @@ mod tests {
         // masked RTSP URL is available whatever the mode.
         assert_eq!(camera.mse_credentials(), Some(("frigate".to_string(), "pw".to_string())));
         assert_eq!(camera.masked_rtsp_uri(StreamKind::Main), "rtsp://10.0.0.1:8554/cam_1");
+    }
+
+    /// A hand-added camera is nobody's import, so its form is editable.
+    #[test]
+    fn a_hand_added_camera_is_not_imported() {
+        assert!(!CameraSource::new("front", "rtsp://10.0.0.1/main").imported);
+    }
+
+    /// Detaching drops the MSE address and its login, clears the mark, and a
+    /// camera left on `Mse` falls back to `Auto` rather than pulling nothing.
+    /// The RTSP side and the origin are kept.
+    #[test]
+    fn detaching_drops_the_managed_address() {
+        let mut camera = frigate_camera();
+        camera.imported = true;
+        camera.connect = ConnectionMode::Mse;
+        camera.mse_sub = Some("wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1_sub".to_string());
+
+        camera.detach();
+
+        assert!(!camera.imported);
+        assert!(!camera.has_mse());
+        assert!(camera.mse_sub.is_none());
+        assert!(camera.mse_credentials().is_none());
+        assert_eq!(camera.connect, ConnectionMode::Auto);
+        assert_eq!(camera.rtsp_main, "rtsp://10.0.0.1:8554/cam_1");
+        assert_eq!(camera.origin, CameraOrigin::Frigate);
     }
 
     #[test]

@@ -2350,6 +2350,7 @@ mod tests {
             enabled: true,
             tags: Vec::new(),
             origin: CameraOrigin::Manual,
+            imported: false,
             transport: RtspTransport::default(),
             aspect: TileAspect::default(),
             main_profile: None,
