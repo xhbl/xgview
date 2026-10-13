@@ -325,28 +325,71 @@ fn rtsp_credentials(config: &FrigateConfig, read: Option<(String, String)>) -> O
     }
 }
 
-/// Measures one target's resolution, in the order the chosen protocol prefers.
+/// How the resolution probe reaches one stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOrder {
+    /// Ask both addresses at once and take the first answer.
+    Race,
+    /// RTSP first, MSE as the fallback.
+    RtspFirst,
+    /// MSE first, RTSP as the fallback.
+    MseFirst,
+}
+
+/// The probe order a protocol choice asks for.
 ///
-/// `rtsp_first` is `auto` / `rtsp`; the other way round is `mse`. Whichever
-/// address answers first gives the size, so a camera whose RTSP port is closed
-/// outside the LAN is still measured over its MSE stream - and one forced onto
-/// MSE is measured there without waiting on RTSP.
+/// `auto` races both, so a slow or closed address does not hold the measurement
+/// up; a forced protocol tries its own address first and the other as the
+/// fallback, so `mse` does not wait on a closed RTSP port and `rtsp` prefers the
+/// cheaper measurement when it is there.
+fn probe_order(protocol: StreamProtocol) -> ProbeOrder {
+    match protocol {
+        StreamProtocol::Auto => ProbeOrder::Race,
+        StreamProtocol::Rtsp => ProbeOrder::RtspFirst,
+        StreamProtocol::Mse => ProbeOrder::MseFirst,
+    }
+}
+
+/// Measures one target's resolution, by the order [`probe_order`] gave. It
+/// follows the chosen protocol: `auto` races RTSP and MSE together, a forced
+/// one tries its own address first and the other as the fallback.
 async fn probe_target(
     rtsp_url: String,
     mse_url: String,
     rtsp_credentials: Option<(String, String)>,
     ws_credentials: Option<(String, String)>,
-    rtsp_first: bool,
+    order: ProbeOrder,
 ) -> Option<(u32, u32)> {
-    if rtsp_first {
-        match probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT).await {
-            Some(size) => Some(size),
-            None => probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT).await,
+    match order {
+        ProbeOrder::RtspFirst => {
+            match probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT).await {
+                Some(size) => Some(size),
+                None => probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT).await,
+            }
         }
-    } else {
-        match probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT).await {
-            Some(size) => Some(size),
-            None => probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT).await,
+        ProbeOrder::MseFirst => {
+            match probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT).await {
+                Some(size) => Some(size),
+                None => probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT).await,
+            }
+        }
+        ProbeOrder::Race => {
+            // Both addresses are asked at once; the first to read a size wins,
+            // and the other is waited on only when the first could not.
+            let rtsp = probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT);
+            let mse = probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT);
+            tokio::pin!(rtsp);
+            tokio::pin!(mse);
+            tokio::select! {
+                size = &mut rtsp => match size {
+                    Some(size) => Some(size),
+                    None => mse.await,
+                },
+                size = &mut mse => match size {
+                    Some(size) => Some(size),
+                    None => rtsp.await,
+                },
+            }
         }
     }
 }
@@ -355,13 +398,13 @@ async fn probe_all(
     targets: &[(String, String)],
     rtsp_credentials: Option<(String, String)>,
     ws_credentials: Option<(String, String)>,
-    rtsp_first: bool,
+    order: ProbeOrder,
 ) -> Vec<Option<(u32, u32)>> {
     stream::iter(targets.iter().cloned().map(|(rtsp_url, mse_url)| {
         let rtsp_credentials = rtsp_credentials.clone();
         let ws_credentials = ws_credentials.clone();
         async move {
-            probe_target(rtsp_url, mse_url, rtsp_credentials, ws_credentials, rtsp_first).await
+            probe_target(rtsp_url, mse_url, rtsp_credentials, ws_credentials, order).await
         }
     }))
     .buffered(PROBE_CONCURRENCY)
@@ -374,15 +417,6 @@ async fn probe_all(
 fn ws_credentials(config: &FrigateConfig) -> Option<(String, String)> {
     (!config.username.trim().is_empty())
         .then(|| (config.username.clone(), config.password.clone()))
-}
-
-/// Whether the resolution probe tries RTSP before MSE.
-///
-/// It follows the chosen protocol: `auto` and `rtsp` measure over RTSP first,
-/// `mse` over the WebSocket first. Either way the other address is the fallback,
-/// so a closed RTSP port no longer costs a camera its main/sub pairing.
-fn probe_rtsp_first(protocol: StreamProtocol) -> bool {
-    !matches!(protocol, StreamProtocol::Mse)
 }
 
 fn source_for(
@@ -465,13 +499,11 @@ pub fn extract_rtsp_port(url: &str) -> Option<u16> {
 async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateImport {
     let credentials = rtsp_credentials(config, parts.rtsp.clone());
     let port = parts.restream_port;
-    // The probe follows the chosen protocol: RTSP first for `auto` / `rtsp`,
-    // MSE first for `mse`.
-    let rtsp_first = probe_rtsp_first(config.protocol);
-
-    // Both addresses of every stream are measured in that order, so a camera
-    // whose RTSP port is closed outside the LAN - the case MSE is for - is
-    // still paired by the size its MSE stream reports.
+    // The probe follows the chosen protocol: `auto` races RTSP and MSE, a
+    // forced one tries its own address first. Both addresses of every stream
+    // are measured, so a camera whose RTSP port is closed outside the LAN - the
+    // case MSE is for - is still paired by the size its MSE stream reports.
+    let order = probe_order(config.protocol);
     let targets: Vec<(String, String)> = parts
         .cameras
         .iter()
@@ -482,7 +514,7 @@ async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateIm
                 .map(|name| (restream_url(&config.host, port, name), mse_url(config, name)))
         })
         .collect();
-    let sizes = probe_all(&targets, credentials.clone(), ws_credentials(config), rtsp_first).await;
+    let sizes = probe_all(&targets, credentials.clone(), ws_credentials(config), order).await;
 
     let mut cameras = Vec::new();
     let mut cursor = 0usize;
@@ -681,12 +713,13 @@ mod tests {
         assert!(source.imported);
     }
 
-    /// The probe order follows the chosen protocol.
+    /// The probe order follows the chosen protocol: `auto` races both, a forced
+    /// one tries its own address first.
     #[test]
-    fn the_probe_follows_the_protocol() {
-        assert!(probe_rtsp_first(StreamProtocol::Auto));
-        assert!(probe_rtsp_first(StreamProtocol::Rtsp));
-        assert!(!probe_rtsp_first(StreamProtocol::Mse));
+    fn the_probe_order_follows_the_protocol() {
+        assert_eq!(probe_order(StreamProtocol::Auto), ProbeOrder::Race);
+        assert_eq!(probe_order(StreamProtocol::Rtsp), ProbeOrder::RtspFirst);
+        assert_eq!(probe_order(StreamProtocol::Mse), ProbeOrder::MseFirst);
     }
 
     /// The login the WebSocket endpoint is probed and played with is Frigate's
