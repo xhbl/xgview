@@ -363,6 +363,7 @@ xgview/
 │   │   ├── rtsp.rs             #   async RTSP client (TCP interleaved / UDP)
 │   │   ├── mjpeg.rs            #   MJPEG (`multipart/x-mixed-replace`) client
 │   │   ├── h264.rs             #   RTP depacketizer (the decoder is in monitor_codec)
+│   │   ├── hevc.rs             #   RTP depacketizer, RFC 7798
 │   │   ├── pipeline.rs         #   per channel supervisor + backoff reconnection
 │   │   ├── discovery/          #   ONVIF (WS-Discovery / SOAP), TCP scan, Synology
 │   │   └── autostart.rs        #   start on boot helpers

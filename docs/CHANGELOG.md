@@ -3,6 +3,35 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.4.6
+
+Changes since 1.3.57. **H.265 is decoded now, on every platform.** A camera that
+offers only HEVC no longer shows a placeholder - it is watched like any other
+one, on the GPU where the machine has a decoder for it.
+
+### H.265
+
+- **An H.265 (HEVC) stream is ingested and decoded** on Windows, Linux, macOS
+  and Android. A new RFC 7798 depacketizer rebuilds the pictures from the RTP
+  the way this codec packs them, and the sets an H.265 camera advertises -
+  `sprop-vps`, `sprop-sps`, `sprop-pps` - are read beside H.264's
+  `sprop-parameter-sets`. The decoder is the platform's own or FFmpeg's, chosen
+  as it is for H.264: the GPU where the machine offers one, the CPU otherwise.
+- **Android's `AMediaCodec` is handed what it asks for**: the VPS, SPS and PPS
+  as `csd-0`..`csd-2`, and the picture size read from the stream's own sequence
+  parameter set. There is **no software decoder for H.265 to fall back on** -
+  OpenH264 is H.264 alone - so a stream a device's own decoder will not take
+  shows the placeholder, where an H.264 stream still falls back as it did.
+- **The Linux package carries the H.265 hardware decoders** too, VAAPI and
+  NVDEC beside H.264's, which the trimmed FFmpeg build had never been asked for.
+- **A stream with B-frames is shown in order.** Every stream until now had none,
+  so the decoders were opened in low latency mode; the H.265 camera has them,
+  and a decoder told to be fast hands its pictures over in the order it decoded
+  them - the picture played a little, jumped back, played, jumped back. The
+  decoders now reorder by presentation time, which costs a few frames of latency
+  on a stream that reorders and nothing at all on one that does not.
+- **`Main` (8-bit) streams.** A `Main 10` stream is not decoded.
+
 ## 1.3.57
 
 Changes since 1.3.42. **A configuration is worth carrying now.** An export is
