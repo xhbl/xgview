@@ -22,6 +22,14 @@ use std::time::{Duration, Instant};
 /// The switch that makes a process a supervisor instead of a viewer.
 pub const SWITCH: &str = "--supervise";
 
+/// The environment variable a supervisor marks its child with, so the viewer
+/// knows it is being watched and can keep the wall from being left by accident.
+///
+/// A variable rather than a switch, so it cannot turn the child into a
+/// supervisor of itself: only [`SWITCH`] does that, and that is not handed
+/// down. Read once at start-up; the child does not change roles while it runs.
+pub const ENV: &str = "XGVIEW_SUPERVISED";
+
 /// Exit code of a viewer that stopped because it was asked to: the window was
 /// closed, or another instance holds the configuration.
 pub const STOPPED: i32 = 0;

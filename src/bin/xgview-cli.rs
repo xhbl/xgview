@@ -83,6 +83,7 @@ fn supervise(viewer: PathBuf, args: &[OsString]) -> ! {
 fn run_once(viewer: &Path, args: &[OsString]) -> ExitStatus {
     let mut child = match Command::new(viewer)
         .args(args)
+        .env(supervise::ENV, "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

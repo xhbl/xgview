@@ -119,6 +119,9 @@ fn main() -> Result<()> {
         fullscreen,
         // Launched by the start-on-boot entry: the window is not focused.
         from_autostart: args.iter().any(|arg| arg == "--autostart"),
+        // A supervisor leaves its mark on the child so the viewer knows to keep
+        // the wall from being left by accident; see `monitor_core::supervise`.
+        supervised: std::env::var(supervise::ENV).is_ok(),
         // Language packs live under the configuration directory here; only
         // Android names a second place a file transfer can reach.
         extra_lang_dir: None,
@@ -160,7 +163,11 @@ fn supervise_viewer(args: &[String]) -> ! {
 
     let mut record = supervise::Record::new();
     loop {
-        let status = match Command::new(&viewer).args(&passed).status() {
+        let status = match Command::new(&viewer)
+            .args(&passed)
+            .env(supervise::ENV, "1")
+            .status()
+        {
             Ok(status) => status,
             // The viewer is not there to be started at all, which is not
             // something waiting would fix.

@@ -54,6 +54,11 @@ pub struct RunOptions {
     pub fullscreen: bool,
     /// The process was started by the start-on-boot registration.
     pub from_autostart: bool,
+    /// The process is a viewer a supervisor is watching, which keeps the wall
+    /// from being left by accident: Back cannot end the program, only the exit
+    /// button in the settings can. Set from `XGVIEW_SUPERVISED` by the entry
+    /// point; Android supervises itself and passes `false`.
+    pub supervised: bool,
     /// A directory language packs are looked for in, beside the one in the
     /// configuration directory. Android names its own external data directory
     /// there, which a file transfer can reach; the desktop has none of its own
@@ -418,6 +423,9 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
         // Placeholder: on Android the launch intent - not this flag - says
         // whether the boot receiver started us, so `App::new` asks the activity.
         from_autostart: false,
+        // Android supervises itself through the activity, not through this
+        // binary, so the viewer is never a supervisor's child here.
+        supervised: false,
         extra_lang_dir,
     };
 

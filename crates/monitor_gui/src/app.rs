@@ -808,6 +808,9 @@ pub struct XgViewApp {
     /// is read at the end of a frame and shown at the start of the next.
     focused_name: Option<&'static str>,
     from_autostart: bool,
+    /// A supervisor is watching this process, so Back must not end the program:
+    /// the wall is meant to stay up, and the only way out is the exit button.
+    supervised: bool,
     time: f64,
 }
 
@@ -832,6 +835,11 @@ impl XgViewApp {
         let from_autostart = crate::android::from_autostart();
         #[cfg(not(target_os = "android"))]
         let from_autostart = options.from_autostart;
+
+        // A supervisor's child reads its mark from the environment, which the
+        // entry point has already turned into this flag. Android supervises
+        // itself and passes `false`.
+        let supervised = options.supervised;
 
         // The interface language is chosen before the first frame is drawn:
         // English is embedded, and a pack beside the executable or under the
@@ -1000,6 +1008,7 @@ impl XgViewApp {
             focus_names: HashMap::new(),
             focused_name: None,
             from_autostart,
+            supervised,
             time: 0.0,
         };
         app.sync();
@@ -1785,9 +1794,11 @@ impl XgViewApp {
         } else if self.show_settings {
             self.show_settings = false;
             self.exit_armed = None;
-        } else if self.chrome.visible {
+        } else if self.chrome.visible && !self.supervised {
             self.arm_exit(ctx);
         } else {
+            // Under a supervisor the wall is meant to stay up: Back is not a way
+            // out of the program, only the exit button in the settings is.
             self.exit_armed = None;
         }
     }
