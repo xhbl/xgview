@@ -1,0 +1,706 @@
+//! Minimal fMP4 (fragmented MP4) parser for go2rtc's MSE WebSocket stream.
+//!
+//! go2rtc sends two kinds of binary WebSocket messages:
+//! - Init segments (`ftyp` + `moov`): codec configuration (SPS/PPS).
+//! - Media segments (`moof` + `mdat`): one or more access units with
+//!   timestamps and keyframe flags.
+//!
+//! Each sample in `mdat` is in AVCC/HVCC format (4-byte length-prefixed NAL
+//! units). The parser converts them to Annex-B format (start-code-prefixed) so
+//! the existing decoders can consume them unchanged.
+
+use crate::error::{CoreError, Result};
+use monitor_codec::Codec;
+
+/// The codec and parameter sets parsed from an init segment.
+pub struct MseInit {
+    pub codec: Codec,
+    /// Parameter sets in Annex-B format (`00 00 00 01` + SPS + `00 00 00 01` + PPS …).
+    /// Feed these to the decoder before the first sample so it has the sequence
+    /// and picture parameter sets it needs to decode the first IDR.
+    pub param_sets: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One access unit extracted from a media segment.
+pub struct MseSample {
+    /// Annex-B formatted access unit data.
+    pub data: Vec<u8>,
+    /// Presentation timestamp in microseconds.
+    pub pts_us: i64,
+    /// Whether this is a keyframe (IDR).
+    pub keyframe: bool,
+}
+
+/// What [`MseParser::parse_message`] found in one WebSocket binary frame.
+pub struct ParsedMessage {
+    /// Present when the message contained a `moov` box (init segment).
+    pub init: Option<MseInit>,
+    /// Access units from `moof` + `mdat` pairs (media segment).
+    pub samples: Vec<MseSample>,
+}
+
+/// Parses fMP4 init and media segments from go2rtc's MSE WebSocket.
+pub struct MseParser {
+    timescale: u32,
+    nal_length_size: usize,
+}
+
+impl MseParser {
+    pub fn new() -> Self {
+        Self { timescale: 90000, nal_length_size: 4 }
+    }
+
+    /// Parses one binary WebSocket message, which may contain an init segment,
+    /// a media segment, or both.
+    pub fn parse_message(&mut self, data: &[u8]) -> Result<ParsedMessage> {
+        let mut init = None;
+        let mut samples = Vec::new();
+        let mut pending_run: Option<TrackRun> = None;
+
+        for (box_type, content) in iter_boxes(data) {
+            match box_type {
+                b"moov" => init = Some(self.parse_moov(content)?),
+                b"moof" => pending_run = Some(self.parse_moof(content, content.len() + 8)?),
+                b"mdat" => {
+                    if let Some(run) = pending_run.take() {
+                        self.extract_samples(&run, content, &mut samples)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(ParsedMessage { init, samples })
+    }
+
+    fn parse_moov(&mut self, data: &[u8]) -> Result<MseInit> {
+        for (box_type, content) in iter_boxes(data) {
+            if box_type == b"trak" {
+                if let Some(init) = self.parse_trak(content)? {
+                    return Ok(init);
+                }
+            }
+        }
+        Err(CoreError::network("moov had no usable video trak"))
+    }
+
+    fn parse_trak(&mut self, data: &[u8]) -> Result<Option<MseInit>> {
+        let mut mdia = None;
+        for (box_type, content) in iter_boxes(data) {
+            if box_type == b"mdia" {
+                mdia = Some(content);
+            }
+        }
+        let mdia = mdia.ok_or_else(|| CoreError::network("trak had no mdia"))?;
+
+        for (box_type, content) in iter_boxes(mdia) {
+            if box_type == b"mdhd" {
+                self.timescale = parse_mdhd(content);
+            }
+            if box_type == b"minf" {
+                if let Some(init) = self.parse_minf(content)? {
+                    return Ok(Some(init));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn parse_minf(&mut self, data: &[u8]) -> Result<Option<MseInit>> {
+        for (box_type, content) in iter_boxes(data) {
+            if box_type == b"stbl" {
+                if let Some(init) = self.parse_stbl(content)? {
+                    return Ok(Some(init));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn parse_stbl(&mut self, data: &[u8]) -> Result<Option<MseInit>> {
+        for (box_type, content) in iter_boxes(data) {
+            if box_type == b"stsd" {
+                if let Some(init) = self.parse_stsd(content)? {
+                    return Ok(Some(init));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn parse_stsd(&mut self, data: &[u8]) -> Result<Option<MseInit>> {
+        // stsd: 1 byte version + 3 bytes flags + 4 bytes entry_count, then entries.
+        if data.len() < 8 {
+            return Ok(None);
+        }
+        let entries = &data[8..];
+        for (box_type, content) in iter_boxes(entries) {
+            match box_type {
+                b"avc1" | b"avc3" => {
+                    if let Some(init) = self.parse_avc_entry(content)? {
+                        return Ok(Some(init));
+                    }
+                }
+                b"hvc1" | b"hev1" => {
+                    if let Some(init) = self.parse_hevc_entry(content)? {
+                        return Ok(Some(init));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
+    /// Parses an `avc1`/`avc3` sample entry to find the `avcC` box.
+    fn parse_avc_entry(&mut self, data: &[u8]) -> Result<Option<MseInit>> {
+        // VisualSampleEntry: 6 reserved + 2 data_ref_index + 16 pre_defined
+        // + 4 width + 4 height + ... then nested boxes.
+        // The avcC box starts after the fixed 78-byte VisualSampleEntry header.
+        if data.len() < 78 {
+            return Ok(None);
+        }
+        let width = u16::from_be_bytes(data[24..26].try_into().unwrap()) as u32;
+        let height = u16::from_be_bytes(data[26..28].try_into().unwrap()) as u32;
+        for (box_type, content) in iter_boxes(&data[78..]) {
+            if box_type == b"avcC" {
+                let (param_sets, nal_len) = parse_avcc(content)?;
+                self.nal_length_size = nal_len;
+                return Ok(Some(MseInit {
+                    codec: Codec::H264,
+                    param_sets,
+                    width,
+                    height,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Parses an `hvc1`/`hev1` sample entry to find the `hvcC` box.
+    fn parse_hevc_entry(&mut self, data: &[u8]) -> Result<Option<MseInit>> {
+        if data.len() < 78 {
+            return Ok(None);
+        }
+        let width = u16::from_be_bytes(data[24..26].try_into().unwrap()) as u32;
+        let height = u16::from_be_bytes(data[26..28].try_into().unwrap()) as u32;
+        for (box_type, content) in iter_boxes(&data[78..]) {
+            if box_type == b"hvcC" {
+                let (param_sets, nal_len) = parse_hvcc(content)?;
+                self.nal_length_size = nal_len;
+                return Ok(Some(MseInit {
+                    codec: Codec::H265,
+                    param_sets,
+                    width,
+                    height,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn parse_moof(&self, data: &[u8], moof_size: usize) -> Result<TrackRun> {
+        for (box_type, content) in iter_boxes(data) {
+            if box_type == b"traf" {
+                if let Some(mut run) = self.parse_traf(content)? {
+                    run.moof_size = moof_size;
+                    return Ok(run);
+                }
+            }
+        }
+        Err(CoreError::network("moof had no usable traf"))
+    }
+
+    fn parse_traf(&self, data: &[u8]) -> Result<Option<TrackRun>> {
+        let mut base_dts: u64 = 0;
+        let mut trun: Option<TrunData> = None;
+        let mut default_sample_duration: u32 = 0;
+        let mut default_sample_size: u32 = 0;
+        let mut default_sample_flags: u32 = 0;
+
+        for (box_type, content) in iter_boxes(data) {
+            match box_type {
+                b"tfhd" => {
+                    let (dur, size, flags) = parse_tfhd(content);
+                    default_sample_duration = dur;
+                    default_sample_size = size;
+                    default_sample_flags = flags;
+                }
+                b"tfdt" => base_dts = parse_tfdt(content),
+                b"trun" => trun = Some(parse_trun(content)?),
+                _ => {}
+            }
+        }
+
+        let trun = trun.ok_or_else(|| CoreError::network("traf had no trun"))?;
+        Ok(Some(TrackRun {
+            base_dts,
+            trun,
+            default_sample_duration,
+            default_sample_size,
+            default_sample_flags,
+            moof_size: 0,
+        }))
+    }
+
+    fn extract_samples(&self, run: &TrackRun, mdat: &[u8], out: &mut Vec<MseSample>) -> Result<()> {
+        let trun = &run.trun;
+        let timescale = self.timescale.max(1) as u64;
+
+        // trun.data_offset is from the start of the moof box. The mdat payload
+        // begins at moof_start + moof_size + 8 (mdat header), so the offset
+        // into the payload is data_offset - moof_size - 8.
+        let base_offset = match trun.data_offset {
+            Some(v) => (v as i64 - run.moof_size as i64 - 8).max(0) as usize,
+            None => 0,
+        };
+
+        let mut dts = run.base_dts;
+        let mut offset = base_offset;
+
+        for i in 0..trun.sample_count as usize {
+            let duration = trun.durations.get(i).copied().unwrap_or(run.default_sample_duration) as u64;
+            let size = trun.sizes.get(i).copied().unwrap_or(run.default_sample_size) as usize;
+            let comp_offset = trun.composition_offsets.get(i).copied().unwrap_or(0) as i64;
+            let flags = trun.sample_flags.get(i).copied().unwrap_or(run.default_sample_flags);
+
+            let pts = dts as i64 + comp_offset;
+            let pts_us = pts * 1_000_000 / timescale as i64;
+            let keyframe = (flags >> 24) & 0x03 == 0;
+
+            if offset + size <= mdat.len() && size > 0 {
+                let sample = &mdat[offset..offset + size];
+                if let Some(annexb) = avcc_to_annexb(sample, self.nal_length_size) {
+                    out.push(MseSample { data: annexb, pts_us, keyframe });
+                }
+            }
+
+            offset += size;
+            dts += duration;
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for MseParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Box iteration ───────────────────────────────────────────────────────────
+
+/// Iterates over top-level ISO BMFF boxes in `data`, yielding `(type, content)`
+/// where `content` is the box payload (header stripped).
+fn iter_boxes(data: &[u8]) -> BoxIter<'_> {
+    BoxIter { data, pos: 0 }
+}
+
+struct BoxIter<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Iterator for BoxIter<'a> {
+    type Item = (&'a [u8; 4], &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos + 8 > self.data.len() {
+            return None;
+        }
+        let size = u32::from_be_bytes(self.data[self.pos..self.pos + 4].try_into().ok()?) as usize;
+        let box_type: &[u8; 4] = self.data[self.pos + 4..self.pos + 8].try_into().ok()?;
+
+        let (header_size, box_size) = if size == 1 {
+            if self.pos + 16 > self.data.len() {
+                return None;
+            }
+            let large = u64::from_be_bytes(
+                self.data[self.pos + 8..self.pos + 16].try_into().ok()?,
+            ) as usize;
+            (16, large)
+        } else if size == 0 {
+            (8, self.data.len() - self.pos)
+        } else {
+            (8, size)
+        };
+
+        if self.pos + box_size > self.data.len() || box_size < header_size {
+            return None;
+        }
+        let content = &self.data[self.pos + header_size..self.pos + box_size];
+        self.pos += box_size;
+        Some((box_type, content))
+    }
+}
+
+// ── avcC / hvcC parsing ────────────────────────────────────────────────────
+
+/// Parses an `avcC` box payload into Annex-B parameter sets and the NAL length
+/// size.
+fn parse_avcc(data: &[u8]) -> Result<(Vec<u8>, usize)> {
+    if data.len() < 7 {
+        return Err(CoreError::network("avcC too short"));
+    }
+    let nal_length_size = (data[4] & 0x03) as usize + 1;
+    let mut out = Vec::new();
+
+    // SPSs
+    let num_sps = (data[5] & 0x1F) as usize;
+    let mut pos = 6;
+    for _ in 0..num_sps {
+        if pos + 2 > data.len() {
+            break;
+        }
+        let len = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+        pos += 2;
+        if pos + len > data.len() {
+            break;
+        }
+        out.extend_from_slice(&START_CODE);
+        out.extend_from_slice(&data[pos..pos + len]);
+        pos += len;
+    }
+
+    // PPSs
+    if pos < data.len() {
+        let num_pps = data[pos] as usize;
+        pos += 1;
+        for _ in 0..num_pps {
+            if pos + 2 > data.len() {
+                break;
+            }
+            let len = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+            pos += 2;
+            if pos + len > data.len() {
+                break;
+            }
+            out.extend_from_slice(&START_CODE);
+            out.extend_from_slice(&data[pos..pos + len]);
+            pos += len;
+        }
+    }
+
+    Ok((out, nal_length_size))
+}
+
+/// Parses an `hvcC` box payload into Annex-B parameter sets and the NAL length
+/// size.
+fn parse_hvcc(data: &[u8]) -> Result<(Vec<u8>, usize)> {
+    if data.len() < 23 {
+        return Err(CoreError::network("hvcC too short"));
+    }
+    // byte 21: constantFrameRate(2) + numTemporalLayers(3) + temporalIdNested(1) + lengthSizeMinusOne(2)
+    let nal_length_size = (data[21] & 0x03) as usize + 1;
+    let num_arrays = data[22] as usize;
+    let mut out = Vec::new();
+    let mut pos = 23;
+
+    for _ in 0..num_arrays {
+        if pos + 3 > data.len() {
+            break;
+        }
+        pos += 1; // array_completeness + NAL_unit_type
+        let num_nalus = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+        pos += 2;
+        for _ in 0..num_nalus {
+            if pos + 2 > data.len() {
+                break;
+            }
+            let len = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+            pos += 2;
+            if pos + len > data.len() {
+                break;
+            }
+            out.extend_from_slice(&START_CODE);
+            out.extend_from_slice(&data[pos..pos + len]);
+            pos += len;
+        }
+    }
+
+    Ok((out, nal_length_size))
+}
+
+// ── AVCC → Annex-B ──────────────────────────────────────────────────────────
+
+const START_CODE: [u8; 4] = [0, 0, 0, 1];
+
+/// Converts one sample from AVCC/HVCC format (length-prefixed NAL units) to
+/// Annex-B format (start-code-prefixed). Returns `None` if the data is too
+/// short or the lengths do not line up.
+fn avcc_to_annexb(data: &[u8], length_size: usize) -> Option<Vec<u8>> {
+    if length_size == 0 || data.len() < length_size {
+        return None;
+    }
+    let mut out = Vec::with_capacity(data.len() + 16);
+    let mut pos = 0;
+    while pos + length_size <= data.len() {
+        let mut nalu_len = 0usize;
+        for i in 0..length_size {
+            nalu_len = (nalu_len << 8) | data[pos + i] as usize;
+        }
+        pos += length_size;
+        if pos + nalu_len > data.len() || nalu_len == 0 {
+            break;
+        }
+        out.extend_from_slice(&START_CODE);
+        out.extend_from_slice(&data[pos..pos + nalu_len]);
+        pos += nalu_len;
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+// ── trun / tfhd / tfdt parsing ──────────────────────────────────────────────
+
+struct TrackRun {
+    base_dts: u64,
+    trun: TrunData,
+    default_sample_duration: u32,
+    default_sample_size: u32,
+    default_sample_flags: u32,
+    moof_size: usize,
+}
+
+struct TrunData {
+    sample_count: u32,
+    data_offset: Option<i32>,
+    durations: Vec<u32>,
+    sizes: Vec<u32>,
+    composition_offsets: Vec<i32>,
+    sample_flags: Vec<u32>,
+}
+
+fn full_box_header(data: &[u8]) -> Option<(u8, u32, &[u8])> {
+    if data.len() < 4 {
+        return None;
+    }
+    let version = data[0];
+    let flags = u32::from_be_bytes([0, data[1], data[2], data[3]]);
+    Some((version, flags, &data[4..]))
+}
+
+fn parse_trun(data: &[u8]) -> Result<TrunData> {
+    let (version, flags, body) = full_box_header(data)
+        .ok_or_else(|| CoreError::network("trun too short"))?;
+
+    if body.len() < 4 {
+        return Err(CoreError::network("trun has no sample_count"));
+    }
+    let sample_count = u32::from_be_bytes(body[0..4].try_into().unwrap());
+    let mut pos = 4;
+
+    let data_offset = if flags & 0x000001 != 0 {
+        if pos + 4 > body.len() {
+            return Err(CoreError::network("trun data_offset truncated"));
+        }
+        let v = i32::from_be_bytes(body[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+        Some(v)
+    } else {
+        None
+    };
+
+    if flags & 0x000004 != 0 {
+        // first_sample_flags — skip (we use per-sample or default).
+        pos += 4;
+    }
+
+    let has_dur = flags & 0x000100 != 0;
+    let has_size = flags & 0x000200 != 0;
+    let has_comp = flags & 0x000400 != 0;
+    let has_flags = flags & 0x000800 != 0;
+    let comp_is_64 = version == 1 && has_comp;
+
+    let mut durations = Vec::with_capacity(if has_dur { sample_count as usize } else { 0 });
+    let mut sizes = Vec::with_capacity(if has_size { sample_count as usize } else { 0 });
+    let mut composition_offsets = Vec::with_capacity(if has_comp { sample_count as usize } else { 0 });
+    let mut sample_flags = Vec::with_capacity(if has_flags { sample_count as usize } else { 0 });
+
+    for _ in 0..sample_count {
+        if has_dur {
+            if pos + 4 > body.len() { break; }
+            durations.push(u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap()));
+            pos += 4;
+        }
+        if has_size {
+            if pos + 4 > body.len() { break; }
+            sizes.push(u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap()));
+            pos += 4;
+        }
+        if has_comp {
+            if comp_is_64 {
+                if pos + 8 > body.len() { break; }
+                composition_offsets.push(i64::from_be_bytes(body[pos..pos + 8].try_into().unwrap()) as i32);
+                pos += 8;
+            } else {
+                if pos + 4 > body.len() { break; }
+                composition_offsets.push(i32::from_be_bytes(body[pos..pos + 4].try_into().unwrap()));
+                pos += 4;
+            }
+        }
+        if has_flags {
+            if pos + 4 > body.len() { break; }
+            sample_flags.push(u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap()));
+            pos += 4;
+        }
+    }
+
+    Ok(TrunData {
+        sample_count,
+        data_offset,
+        durations,
+        sizes,
+        composition_offsets,
+        sample_flags,
+    })
+}
+
+fn parse_tfhd(data: &[u8]) -> (u32, u32, u32) {
+    let (_, flags, body) = match full_box_header(data) {
+        Some(t) => t,
+        None => return (0, 0, 0),
+    };
+
+    if body.len() < 4 {
+        return (0, 0, 0);
+    }
+    let mut pos = 4;
+
+    if flags & 0x000002 != 0 {
+        pos += 4;
+    }
+
+    let mut dur = 0u32;
+    let mut size = 0u32;
+    let mut sflags = 0u32;
+
+    if flags & 0x000008 != 0 {
+        if pos + 4 <= body.len() {
+            dur = u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap());
+        }
+        pos += 4;
+    }
+    if flags & 0x000010 != 0 {
+        if pos + 4 <= body.len() {
+            size = u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap());
+        }
+        pos += 4;
+    }
+    if flags & 0x000020 != 0 {
+        if pos + 4 <= body.len() {
+            sflags = u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap());
+        }
+    }
+
+    (dur, size, sflags)
+}
+
+fn parse_tfdt(data: &[u8]) -> u64 {
+    let (version, _, body) = match full_box_header(data) {
+        Some(t) => t,
+        None => return 0,
+    };
+    if version == 1 && body.len() >= 8 {
+        u64::from_be_bytes(body[0..8].try_into().unwrap())
+    } else if body.len() >= 4 {
+        u32::from_be_bytes(body[0..4].try_into().unwrap()) as u64
+    } else {
+        0
+    }
+}
+
+fn parse_mdhd(data: &[u8]) -> u32 {
+    let (version, _, body) = match full_box_header(data) {
+        Some(t) => t,
+        None => return 90000,
+    };
+    // version 0: creation(4) + modification(4) + timescale(4) + duration(4)
+    // version 1: creation(8) + modification(8) + timescale(4) + duration(8)
+    let ts_pos = if version == 1 { 16 } else { 8 };
+    if body.len() >= ts_pos + 4 {
+        u32::from_be_bytes(body[ts_pos..ts_pos + 4].try_into().unwrap())
+    } else {
+        90000
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avcc_to_annexb_converts_length_prefix_to_start_code() {
+        // Two NAL units: [7, 0x42, 0x00, 0x1e] (SPS) and [8, 0x06] (PPS),
+        // each prefixed with a 4-byte big-endian length.
+        let avcc = [
+            0, 0, 0, 4, 0x67, 0x42, 0x00, 0x1e,
+            0, 0, 0, 2, 0x68, 0x06,
+        ];
+        let annexb = avcc_to_annexb(&avcc, 4).unwrap();
+        assert_eq!(annexb, [
+            0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1e,
+            0, 0, 0, 1, 0x68, 0x06,
+        ]);
+    }
+
+    #[test]
+    fn avcc_to_annexb_handles_3_byte_length() {
+        // 3-byte length prefix: 0x000002 = 2 bytes of NAL data.
+        let avcc = [0, 0, 2, 0x67, 0x42];
+        let annexb = avcc_to_annexb(&avcc, 3).unwrap();
+        assert_eq!(annexb, [0, 0, 0, 1, 0x67, 0x42]);
+    }
+
+    #[test]
+    fn avcc_to_annexb_rejects_truncated() {
+        assert_eq!(avcc_to_annexb(&[], 4), None);
+        assert_eq!(avcc_to_annexb(&[0, 0, 0, 10, 1, 2], 4), None);
+    }
+
+    #[test]
+    fn parse_avcc_extracts_sps_and_pps() {
+        // Minimal avcC: version 1, profile 66, compat 0, level 30,
+        // lengthSizeMinusOne = 3 (→ 4), 1 SPS of 3 bytes, 1 PPS of 1 byte.
+        let sps = [0x67u8, 0x42, 0x1e];
+        let pps = [0x68u8];
+        let mut avcc = Vec::new();
+        avcc.push(1); // configurationVersion
+        avcc.push(0x42); // profile
+        avcc.push(0x00); // compat
+        avcc.push(0x1e); // level
+        avcc.push(0xFF); // 0xFC | 3 → lengthSize = 4
+        avcc.push(0xE1); // 0xE0 | 1 → 1 SPS
+        avcc.extend_from_slice(&3u16.to_be_bytes());
+        avcc.extend_from_slice(&sps);
+        avcc.push(1); // 1 PPS
+        avcc.extend_from_slice(&1u16.to_be_bytes());
+        avcc.extend_from_slice(&pps);
+
+        let (params, nal_len) = parse_avcc(&avcc).unwrap();
+        assert_eq!(nal_len, 4);
+        assert_eq!(params, [
+            0, 0, 0, 1, 0x67, 0x42, 0x1e,
+            0, 0, 0, 1, 0x68,
+        ]);
+    }
+
+    #[test]
+    fn iter_boxes_walks_top_level_boxes() {
+        // Two boxes: "ftyp" (8 bytes total, 0 content) and "moov" (12 bytes, 4 content).
+        let data = [
+            0, 0, 0, 8, b'f', b't', b'y', b'p',
+            0, 0, 0, 12, b'm', b'o', b'o', b'v', 1, 2, 3, 4,
+        ];
+        let boxes: Vec<_> = iter_boxes(&data).collect();
+        assert_eq!(boxes.len(), 2);
+        assert_eq!(boxes[0].0, b"ftyp");
+        assert!(boxes[0].1.is_empty());
+        assert_eq!(boxes[1].0, b"moov");
+        assert_eq!(boxes[1].1, &[1, 2, 3, 4]);
+    }
+}

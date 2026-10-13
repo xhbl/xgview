@@ -469,7 +469,7 @@ impl CameraSource {
         if let Ok(parsed) = RtspUrl::parse(uri) {
             return parsed.masked();
         }
-        if is_http_url(uri) {
+        if is_http_url(uri) || is_ws_url(uri) {
             return mask_http_url(uri);
         }
         "<invalid stream url>".to_string()
@@ -592,6 +592,13 @@ fn split_host_port(authority: &str) -> (&str, Option<u16>) {
 pub fn is_http_url(url: &str) -> bool {
     let url = url.trim_start().to_ascii_lowercase();
     url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// True for a `ws://` or `wss://` URL, which is how a go2rtc MSE (WebSocket)
+/// stream is addressed.
+pub fn is_ws_url(url: &str) -> bool {
+    let url = url.trim_start().to_ascii_lowercase();
+    url.starts_with("ws://") || url.starts_with("wss://")
 }
 
 /// An `http://` stream URL with its credentials and its query masked.

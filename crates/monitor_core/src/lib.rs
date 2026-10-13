@@ -40,6 +40,7 @@ pub mod hevc;
 pub mod layout;
 pub mod mjpeg;
 pub mod model;
+pub mod mse;
 pub mod pipeline;
 pub mod power;
 pub mod reboot;

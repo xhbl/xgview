@@ -26,7 +26,7 @@ use crate::error::Result;
 use crate::h264::{nal_unit_type, AccessUnit, H264Depacketizer, START_CODE};
 use crate::hevc::{nal_unit_type as hevc_nal_unit_type, HevcDepacketizer};
 use crate::mjpeg::{JpegDepacketizer, MjpegClient};
-use crate::model::{is_http_url, CameraSource, ConnectionState, RtspTransport, StreamKind};
+use crate::model::{is_http_url, is_ws_url, CameraSource, ConnectionState, RtspTransport, StreamKind};
 use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtspStage, RtpHeader, SdpTrack};
 use crate::scheduler::ScheduleChange;
 
@@ -388,6 +388,10 @@ impl Endpoint {
     fn is_mjpeg(&self) -> bool {
         is_http_url(&self.uri)
     }
+
+    fn is_ws(&self) -> bool {
+        is_ws_url(&self.uri)
+    }
 }
 
 struct ChannelRuntime {
@@ -580,6 +584,9 @@ async fn run_channel(
         let started = Instant::now();
         let outcome = if endpoint.is_mjpeg() {
             run_mjpeg_session(endpoint.clone(), settings.handshake_timeout, &events, &frames).await
+        } else if endpoint.is_ws() {
+            run_ws_session(endpoint.clone(), prefer_hardware, settings.handshake_timeout, &events, &frames)
+                .await
         } else {
             run_session(endpoint.clone(), prefer_hardware, settings.handshake_timeout, &events, &frames)
                 .await
@@ -1756,6 +1763,368 @@ async fn run_mjpeg_session(
                 fps,
                 kbps = (window_bytes as f32 * 8.0 / 1000.0) / seconds,
                 "mjpeg window"
+            );
+            window_start = Instant::now();
+            window_frames = 0;
+            window_pictures = 0;
+            window_bytes = 0;
+            window_errors = 0;
+        }
+    }
+}
+
+/// Accept any server certificate — the LAN Frigate box uses a self-signed cert
+/// and the user already opted in by selecting `wss`.  TLS handshake signatures
+/// are still verified cryptographically so the channel is not plaintext.
+#[derive(Debug)]
+struct NoServerCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        let alg = &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms;
+        rustls::crypto::verify_tls12_signature(message, cert, dss, alg)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        let alg = &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms;
+        rustls::crypto::verify_tls13_signature(message, cert, dss, alg)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Log in to Frigate's web API and return the JWT token that the WebSocket
+/// endpoint expects as a Bearer header.  The base URL is derived from the
+/// WebSocket URL (`wss://host:port/…` → `https://host:port`).
+async fn frigate_ws_login(ws_url: &str, user: &str, pass: &str, timeout: Duration) -> Result<String> {
+    let (scheme, rest) = ws_url
+        .split_once("://")
+        .ok_or_else(|| crate::error::CoreError::network("bad WebSocket URL"))?;
+    let http_scheme = match scheme {
+        "wss" => "https",
+        "ws" => "http",
+        _ => return Err(crate::error::CoreError::network("not a WebSocket URL")),
+    };
+    let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+    let base_url = format!("{http_scheme}://{authority}");
+
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(timeout)
+        .build()?;
+
+    let response = http
+        .post(format!("{base_url}/api/login"))
+        .json(&serde_json::json!({"user": user, "password": pass}))
+        .send()
+        .await?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(crate::error::CoreError::network("Frigate rejected the login"));
+    }
+    if !status.is_success() {
+        return Err(crate::error::CoreError::network(format!(
+            "Frigate /api/login answered {status}"
+        )));
+    }
+
+    response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|cookie| {
+            let (name, rest) = cookie.split_once('=')?;
+            (name.trim() == "frigate_token")
+                .then(|| rest.split(';').next().unwrap_or_default().to_string())
+        })
+        .ok_or_else(|| crate::error::CoreError::network("Frigate login did not return a token"))
+}
+
+/// One WebSocket (MSE) session: connect to go2rtc's `/live/mse/api/ws`
+/// endpoint, receive fMP4 segments, decode the H.264/H.265 access units inside
+/// them and publish the pictures.
+///
+/// The protocol is go2rtc's MSE consumer: the client opens a WebSocket, sends a
+/// `{"type":"mse","value":"…"}` JSON handshake, then receives binary frames
+/// that are fragmented MP4 — an init segment (`ftyp`+`moov` with the codec
+/// configuration) followed by media segments (`moof`+`mdat` with the samples).
+/// Each sample is length-prefixed (AVCC/HVCC); the [`MseParser`] converts them
+/// to Annex-B so the existing decoders consume them unchanged.
+async fn run_ws_session(
+    endpoint: Endpoint,
+    prefer_hardware: bool,
+    handshake_timeout: Duration,
+    events: &Sender<StreamEvent>,
+    frames: &FrameStore,
+) -> Result<()> {
+
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::connect_async_tls_with_config;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let Endpoint { index, camera_id, uri, stream, credentials, .. } = endpoint;
+    let camera_id_str = camera_id.as_str();
+
+    // 1. Build the WebSocket request.  Frigate's WebSocket endpoint lives
+    //    behind the same JWT auth as the REST API, so we log in first and
+    //    carry the token as a Bearer header — Basic auth is rejected with 401.
+    let mut request = uri
+        .as_str()
+        .into_client_request()
+        .map_err(|e| crate::error::CoreError::network(format!("bad WebSocket URL: {e}")))?;
+    if let Some((user, pass)) = &credentials {
+        let token = frigate_ws_login(&uri, user, pass, handshake_timeout).await?;
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {token}").try_into().unwrap(),
+        );
+    }
+
+    // 2. Build a TLS connector that accepts self-signed certificates (Frigate
+    //    LAN boxes use them).  For plain `ws://` no connector is needed.
+    let connector = if uri.starts_with("wss://") {
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| crate::error::CoreError::network(format!("rustls config error: {e}")))?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoServerCertVerifier))
+            .with_no_client_auth();
+        Some(tokio_tungstenite::Connector::Rustls(Arc::new(cfg)))
+    } else {
+        None
+    };
+
+    // 3. Connect with a handshake timeout.
+    let connect = connect_async_tls_with_config(request, None, false, connector);
+    let mut ws = match tokio::time::timeout(handshake_timeout, connect).await {
+        Ok(Ok((ws, _))) => ws,
+        Ok(Err(e)) => {
+            return Err(crate::error::CoreError::network(format!(
+                "WebSocket handshake failed: {e}"
+            )));
+        }
+        Err(_) => {
+            return Err(crate::error::CoreError::network(format!(
+                "the stream did not answer within {} s",
+                handshake_timeout.as_secs()
+            )));
+        }
+    };
+
+    // 4. MSE handshake: tell go2rtc we want MSE mode with H.264/H.265 video.
+    ws.send(Message::text(
+        r#"{"type":"mse","value":"video/mp4; codecs=\"avc1.640029,hvc1.1.6.L153.B0\""}"#,
+    ))
+    .await
+    .map_err(|e| crate::error::CoreError::network(format!("WebSocket send failed: {e}")))?;
+
+    // 5. Receive the first message — go2rtc replies with JSON confirming the
+    //    codec. We don't need to parse it: the actual codec config arrives in
+    //    the init segment's avcC/hvcC box.
+    let _hello = match ws.next().await {
+        Some(Ok(msg)) => msg,
+        Some(Err(e)) => {
+            return Err(crate::error::CoreError::network(format!(
+                "WebSocket handshake read failed: {e}"
+            )));
+        }
+        None => {
+            return Err(crate::error::CoreError::network(
+                "WebSocket closed before MSE handshake",
+            ));
+        }
+    };
+
+    let mut parser = crate::mse::MseParser::new();
+    let mut decoder: Option<Box<dyn VideoDecoder>> = None;
+    let mut codec_label: Option<String> = None;
+    let mut width: Option<u32> = None;
+    let mut height: Option<u32> = None;
+    let mut sequence: u64 = 0;
+    let mut total_frames: u64 = 0;
+    let mut window_frames: u64 = 0;
+    let mut window_pictures: u64 = 0;
+    let mut window_bytes: u64 = 0;
+    let mut window_errors: u64 = 0;
+    let mut window_start = Instant::now();
+    let mut announced = false;
+
+    loop {
+        let msg = match tokio::time::timeout(MJPEG_IDLE_TIMEOUT, ws.next()).await {
+            Ok(Some(Ok(msg))) => msg,
+            Ok(Some(Err(e))) => {
+                return Err(crate::error::CoreError::network(format!(
+                    "WebSocket read failed: {e}"
+                )));
+            }
+            Ok(None) => {
+                return Err(crate::error::CoreError::network(
+                    "WebSocket closed by peer",
+                ));
+            }
+            Err(_) => {
+                return Err(crate::error::CoreError::network(format!(
+                    "no data received for {} s",
+                    MJPEG_IDLE_TIMEOUT.as_secs()
+                )));
+            }
+        };
+
+        let data = match msg {
+            Message::Binary(data) => data,
+            Message::Text(_) => continue,
+            Message::Close(_) => {
+                return Err(crate::error::CoreError::network(
+                    "WebSocket closed by peer",
+                ));
+            }
+            _ => continue,
+        };
+
+        window_bytes += data.len() as u64;
+
+        let parsed = parser.parse_message(&data)?;
+
+        // Init segment: open the decoder and feed it the parameter sets.
+        if let Some(init) = parsed.init {
+            codec_label = Some(match init.codec {
+                Codec::H264 => "H264".to_string(),
+                Codec::H265 => "H265".to_string(),
+                other => other.as_str().to_string(),
+            });
+            width = if init.width > 0 { Some(init.width) } else { width };
+            height = if init.height > 0 { Some(init.height) } else { height };
+            decoder = video_decoder(init.codec, Some(init.width), Some(init.height), index, prefer_hardware);
+            if let Some(dec) = decoder.as_mut() {
+                if !init.param_sets.is_empty() {
+                    if let Err(err) = dec.decode(&init.param_sets, 0, true) {
+                        tracing::debug!(
+                            target: "xgview::pipeline",
+                            index,
+                            %err,
+                            "MSE param sets rejected by decoder (non-fatal, may arrive with first IDR)",
+                        );
+                    }
+                }
+            }
+            emit(
+                events,
+                StreamEvent::Stats {
+                    index,
+                    camera_id: camera_id_str.to_string(),
+                    stream,
+                    codec: codec_label.clone(),
+                    width,
+                    height,
+                    hardware: uses_hardware(&decoder),
+                    fps: 0.0,
+                    bitrate_kbps: 0.0,
+                    total_frames: 0,
+                },
+            );
+        }
+
+        // Media segment: decode each access unit.
+        for sample in parsed.samples {
+            window_frames += 1;
+            total_frames += 1;
+
+            if !announced {
+                announced = true;
+                emit(
+                    events,
+                    StreamEvent::State {
+                        index,
+                        camera_id: camera_id_str.to_string(),
+                        state: ConnectionState::Streaming,
+                        detail: format!("receiving {} stream", stream.label()),
+                    },
+                );
+            }
+
+            if let Some(dec) = decoder.as_mut() {
+                match dec.decode(&sample.data, sample.pts_us, sample.keyframe) {
+                    Ok(decoded) => {
+                        window_pictures += decoded.len() as u64;
+                        if let Some((w, h)) = publish_frames(frames, index, &mut sequence, decoded) {
+                            width = Some(w);
+                            height = Some(h);
+                        }
+                    }
+                    Err(err) => {
+                        window_errors += 1;
+                        tracing::debug!(
+                            target: "xgview::pipeline",
+                            index,
+                            len = sample.data.len(),
+                            %err,
+                            "MSE sample rejected by decoder",
+                        );
+                    }
+                }
+            }
+        }
+
+        let elapsed = window_start.elapsed();
+        if elapsed >= STATS_INTERVAL {
+            let seconds = elapsed.as_secs_f32().max(0.001);
+            let fps = window_frames as f32 / seconds;
+            emit(
+                events,
+                StreamEvent::Stats {
+                    index,
+                    camera_id: camera_id_str.to_string(),
+                    stream,
+                    codec: codec_label.clone(),
+                    width,
+                    height,
+                    hardware: uses_hardware(&decoder),
+                    fps,
+                    bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                    total_frames,
+                },
+            );
+            tracing::debug!(
+                target: "xgview::pipeline",
+                index,
+                stream = stream.as_str(),
+                frames = window_frames,
+                pictures = window_pictures,
+                bytes = window_bytes,
+                errors = window_errors,
+                resolution = ?width.zip(height),
+                fps,
+                kbps = (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                "mse window",
             );
             window_start = Instant::now();
             window_frames = 0;

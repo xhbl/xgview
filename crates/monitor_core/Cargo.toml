@@ -25,6 +25,8 @@ sha1 = "0.10"
 socket2 = "0.6"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+rustls = "0.23"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
