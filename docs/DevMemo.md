@@ -1080,6 +1080,31 @@ FFmpeg's software H.265 decoder is in the build, so hardware-refused-software-
 retried works as it does for H.264. NV12, the texture path of §6, the stall
 detector of §8 and everything above the decoder are untouched.
 
+**Where the GPU is, platform by platform.** That last sentence - libavcodec
+picking the mode itself - holds only where the hwaccel was actually compiled in,
+and the three packages do not get FFmpeg the same way:
+
+* **Windows** links vcpkg's `ffmpeg:x64-windows`, a full build: the HEVC DXVA and
+  CUDA modes are in it, and H.265 decodes on the GPU (measured: `HW`, D3D11).
+* **Linux** builds its own trimmed FFmpeg (`scripts/build-linux.sh`,
+  `--disable-everything`), and there `--enable-vaapi` / `--enable-nvdec` bring in
+  only the framework - the per-codec module is what libavcodec opens, and just
+  `h264_vaapi` and `h264_nvdec` were named. H.265 decoded on the CPU with a CUDA
+  device open beside it. Fixed by naming `hevc_vaapi` and `hevc_nvdec` as well,
+  and by folding the hwaccel set into the marker that keys the FFmpeg tree - which
+  it was not, so a machine with the libraries already cached kept the H.264-only
+  build and the new flags were never compiled. Measured after: 8-14 ms a picture
+  through CUDA against about 34 on the CPU.
+* **macOS** does not build FFmpeg at all (`scripts/build-macos.sh` links the
+  `~/opt/ffmpeg` prefix through pkg-config), and that prefix is a near-default
+  source build (`MACOS-SETUP.txt` 4B) or Homebrew's - neither disables anything,
+  so `hevc_videotoolbox` is in it. H.265 should come up `HW` there; it is the one
+  of the three not yet seen on hardware.
+
+The lesson for a trimmed build: each codec's hwaccel has to be named one by one,
+and the cache that skips the build has to be keyed on that set. The Linux package
+had neither, and decoded H.265 on the CPU because of it.
+
 **What is left is Android.** Two pieces, both on the ingest side:
 
 1. **An H.265 sequence parameter set reader, for the size.** `monitor_codec::sps`
