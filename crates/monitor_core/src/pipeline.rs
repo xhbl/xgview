@@ -1961,6 +1961,84 @@ async fn frigate_ws_login(ws_url: &str, user: &str, pass: &str, timeout: Duratio
         .ok_or_else(|| crate::error::CoreError::network("Frigate login did not return a token"))
 }
 
+/// A connected MSE WebSocket, with the handshake sent but no message read yet.
+pub(crate) type MseSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Opens a go2rtc MSE WebSocket: builds the request with the endpoint's
+/// credentials, connects (accepting a self-signed certificate), and sends the
+/// MSE handshake. The caller reads the messages that follow - the JSON reply,
+/// then the fMP4 segments - so the same opener serves the playback session and
+/// the discovery probe.
+///
+/// The two servers authenticate differently: Frigate fronts its MSE stream
+/// behind the same JWT login as its REST API (Basic is rejected with 401),
+/// while a standalone go2rtc answers its own `/api/ws` behind the HTTP Basic
+/// account its `api:` section names - see [`is_frigate_mse`].
+pub(crate) async fn open_mse(
+    uri: &str,
+    credentials: Option<&(String, String)>,
+    handshake_timeout: Duration,
+) -> Result<MseSocket> {
+    use futures::SinkExt;
+    use tokio_tungstenite::connect_async_tls_with_config;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let mut request = uri
+        .into_client_request()
+        .map_err(|e| crate::error::CoreError::network(format!("bad WebSocket URL: {e}")))?;
+    if let Some((user, pass)) = credentials {
+        let authorization = if is_frigate_mse(uri) {
+            let token = frigate_ws_login(uri, user, pass, handshake_timeout).await?;
+            format!("Bearer {token}")
+        } else {
+            use base64::Engine;
+            let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            format!("Basic {token}")
+        };
+        request.headers_mut().insert("Authorization", authorization.try_into().unwrap());
+    }
+
+    // A TLS connector that accepts self-signed certificates (Frigate's LAN box
+    // uses one). For plain `ws://` no connector is needed.
+    let connector = if uri.starts_with("wss://") {
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| crate::error::CoreError::network(format!("rustls config error: {e}")))?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoServerCertVerifier))
+            .with_no_client_auth();
+        Some(tokio_tungstenite::Connector::Rustls(Arc::new(cfg)))
+    } else {
+        None
+    };
+
+    let connect = connect_async_tls_with_config(request, None, false, connector);
+    let mut ws = match tokio::time::timeout(handshake_timeout, connect).await {
+        Ok(Ok((ws, _))) => ws,
+        Ok(Err(e)) => {
+            return Err(crate::error::CoreError::network(format!("WebSocket handshake failed: {e}")));
+        }
+        Err(_) => {
+            return Err(crate::error::CoreError::network(format!(
+                "the stream did not answer within {} s",
+                handshake_timeout.as_secs()
+            )));
+        }
+    };
+
+    // MSE handshake: tell go2rtc we want MSE mode with H.264/H.265 video.
+    ws.send(Message::text(
+        r#"{"type":"mse","value":"video/mp4; codecs=\"avc1.640029,hvc1.1.6.L153.B0\""}"#,
+    ))
+    .await
+    .map_err(|e| crate::error::CoreError::network(format!("WebSocket send failed: {e}")))?;
+
+    Ok(ws)
+}
+
 /// One WebSocket (MSE) session: connect to a go2rtc MSE endpoint - Frigate's
 /// `/live/mse/api/ws` or a standalone go2rtc's `/api/ws` - receive fMP4
 /// segments, decode the H.264/H.265 access units inside them and publish the
@@ -1980,90 +2058,15 @@ async fn run_ws_session(
     frames: &FrameStore,
 ) -> Result<()> {
 
-    use futures::{SinkExt, StreamExt};
-    use tokio_tungstenite::connect_async_tls_with_config;
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
 
     let Endpoint { index, camera_id, uri, stream, credentials, .. } = endpoint;
     let camera_id_str = camera_id.as_str();
 
-    // 1. Build the WebSocket request, with the credentials the endpoint wants.
-    //    The two servers authenticate differently: Frigate fronts its MSE
-    //    stream behind the same JWT login as its REST API (Basic is rejected
-    //    with 401), while a standalone go2rtc answers its own `/api/ws` behind
-    //    the HTTP Basic account its `api:` section names.
-    let mut request = uri
-        .as_str()
-        .into_client_request()
-        .map_err(|e| crate::error::CoreError::network(format!("bad WebSocket URL: {e}")))?;
-    if let Some((user, pass)) = &credentials {
-        let authorization = if is_frigate_mse(&uri) {
-            let token = frigate_ws_login(&uri, user, pass, handshake_timeout).await?;
-            format!("Bearer {token}")
-        } else {
-            use base64::Engine;
-            let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
-            format!("Basic {token}")
-        };
-        request.headers_mut().insert("Authorization", authorization.try_into().unwrap());
-    }
-
-    // 2. Build a TLS connector that accepts self-signed certificates (Frigate
-    //    LAN boxes use them).  For plain `ws://` no connector is needed.
-    let connector = if uri.starts_with("wss://") {
-        let provider = rustls::crypto::aws_lc_rs::default_provider();
-        let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
-            .with_safe_default_protocol_versions()
-            .map_err(|e| crate::error::CoreError::network(format!("rustls config error: {e}")))?
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoServerCertVerifier))
-            .with_no_client_auth();
-        Some(tokio_tungstenite::Connector::Rustls(Arc::new(cfg)))
-    } else {
-        None
-    };
-
-    // 3. Connect with a handshake timeout.
-    let connect = connect_async_tls_with_config(request, None, false, connector);
-    let mut ws = match tokio::time::timeout(handshake_timeout, connect).await {
-        Ok(Ok((ws, _))) => ws,
-        Ok(Err(e)) => {
-            return Err(crate::error::CoreError::network(format!(
-                "WebSocket handshake failed: {e}"
-            )));
-        }
-        Err(_) => {
-            return Err(crate::error::CoreError::network(format!(
-                "the stream did not answer within {} s",
-                handshake_timeout.as_secs()
-            )));
-        }
-    };
-
-    // 4. MSE handshake: tell go2rtc we want MSE mode with H.264/H.265 video.
-    ws.send(Message::text(
-        r#"{"type":"mse","value":"video/mp4; codecs=\"avc1.640029,hvc1.1.6.L153.B0\""}"#,
-    ))
-    .await
-    .map_err(|e| crate::error::CoreError::network(format!("WebSocket send failed: {e}")))?;
-
-    // 5. Receive the first message — go2rtc replies with JSON confirming the
-    //    codec. We don't need to parse it: the actual codec config arrives in
-    //    the init segment's avcC/hvcC box.
-    let _hello = match ws.next().await {
-        Some(Ok(msg)) => msg,
-        Some(Err(e)) => {
-            return Err(crate::error::CoreError::network(format!(
-                "WebSocket handshake read failed: {e}"
-            )));
-        }
-        None => {
-            return Err(crate::error::CoreError::network(
-                "WebSocket closed before MSE handshake",
-            ));
-        }
-    };
+    // Open the MSE socket and leave the handshake sent; the messages that
+    // follow - the JSON reply, then the fMP4 segments - are read below.
+    let mut ws = open_mse(&uri, credentials.as_ref(), handshake_timeout).await?;
 
     let mut parser = crate::mse::MseParser::new();
     let mut decoder: Option<Box<dyn VideoDecoder>> = None;

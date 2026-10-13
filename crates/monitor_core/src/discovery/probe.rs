@@ -18,8 +18,10 @@ use std::time::Duration;
 
 use monitor_codec::sps;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::h264::{nal_unit_type, H264Depacketizer};
+use crate::mse::MseParser;
+use crate::pipeline::open_mse;
 use crate::rtsp::{parse_rtp_header, parse_sdp, MediaPacket, RtspClient};
 
 /// Measures the resolution of an RTSP stream, or `None` if it could not be read
@@ -82,6 +84,64 @@ async fn read_resolution(
             return Ok(Some(size));
         }
     }
+}
+
+/// Measures the resolution of an MSE (WebSocket) stream, or `None` if it could
+/// not be read within `timeout`.
+///
+/// The size comes from the init segment go2rtc sends first: the `moov` box's
+/// sample entry carries the picture size, so one binary message answers - no
+/// key frame has to arrive, which is why this answers where the RTSP probe on a
+/// closed port cannot.
+pub async fn probe_resolution_mse(
+    url: &str,
+    credentials: Option<(String, String)>,
+    timeout: Duration,
+) -> Option<(u32, u32)> {
+    match tokio::time::timeout(timeout, read_mse_size(url, credentials, timeout)).await {
+        Ok(Ok(size)) => size,
+        Ok(Err(err)) => {
+            tracing::debug!(target: "xgview::discovery", %url, %err, "mse resolution probe failed");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(
+                target: "xgview::discovery",
+                %url,
+                timeout_s = timeout.as_secs(),
+                "mse resolution probe timed out"
+            );
+            None
+        }
+    }
+}
+
+async fn read_mse_size(
+    url: &str,
+    credentials: Option<(String, String)>,
+    timeout: Duration,
+) -> Result<Option<(u32, u32)>> {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let mut ws = open_mse(url, credentials.as_ref(), timeout).await?;
+    let mut parser = MseParser::new();
+    while let Some(message) = ws.next().await {
+        let message = message.map_err(|err| CoreError::network(format!("WebSocket read failed: {err}")))?;
+        let data = match message {
+            Message::Binary(data) => data,
+            // The JSON reply confirming the codec; the init segment follows.
+            Message::Text(_) => continue,
+            Message::Close(_) => return Ok(None),
+            _ => continue,
+        };
+        let parsed = parser.parse_message(&data)?;
+        if let Some(init) = parsed.init {
+            let size = (init.width > 0 && init.height > 0).then_some((init.width, init.height));
+            return Ok(size);
+        }
+    }
+    Ok(None)
 }
 
 /// The picture size a stream's cached sequence parameter set describes.

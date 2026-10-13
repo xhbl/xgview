@@ -22,13 +22,13 @@ use std::time::Duration;
 use futures::stream::{self, StreamExt};
 use serde_json::{Map, Value};
 
-use crate::config::FrigateConfig;
+use crate::config::{FrigateConfig, StreamProtocol};
 use crate::error::{CoreError, Result};
 use crate::model::{CameraOrigin, CameraSource};
 use crate::rtsp::RtspUrl;
 
 use super::go2rtc::{port_of_listen, restream_url, RESTREAM_PORT};
-use super::probe::probe_resolution;
+use super::probe::{probe_resolution, probe_resolution_mse};
 
 /// How long one stream's resolution may take to read.
 ///
@@ -325,17 +325,64 @@ fn rtsp_credentials(config: &FrigateConfig, read: Option<(String, String)>) -> O
     }
 }
 
+/// Measures one target's resolution, in the order the chosen protocol prefers.
+///
+/// `rtsp_first` is `auto` / `rtsp`; the other way round is `mse`. Whichever
+/// address answers first gives the size, so a camera whose RTSP port is closed
+/// outside the LAN is still measured over its MSE stream - and one forced onto
+/// MSE is measured there without waiting on RTSP.
+async fn probe_target(
+    rtsp_url: String,
+    mse_url: String,
+    rtsp_credentials: Option<(String, String)>,
+    ws_credentials: Option<(String, String)>,
+    rtsp_first: bool,
+) -> Option<(u32, u32)> {
+    if rtsp_first {
+        match probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT).await {
+            Some(size) => Some(size),
+            None => probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT).await,
+        }
+    } else {
+        match probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT).await {
+            Some(size) => Some(size),
+            None => probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT).await,
+        }
+    }
+}
+
 async fn probe_all(
-    urls: &[String],
-    credentials: Option<(String, String)>,
+    targets: &[(String, String)],
+    rtsp_credentials: Option<(String, String)>,
+    ws_credentials: Option<(String, String)>,
+    rtsp_first: bool,
 ) -> Vec<Option<(u32, u32)>> {
-    stream::iter(urls.iter().cloned().map(|url| {
-        let credentials = credentials.clone();
-        async move { probe_resolution(&url, credentials, PROBE_TIMEOUT).await }
+    stream::iter(targets.iter().cloned().map(|(rtsp_url, mse_url)| {
+        let rtsp_credentials = rtsp_credentials.clone();
+        let ws_credentials = ws_credentials.clone();
+        async move {
+            probe_target(rtsp_url, mse_url, rtsp_credentials, ws_credentials, rtsp_first).await
+        }
     }))
     .buffered(PROBE_CONCURRENCY)
     .collect()
     .await
+}
+
+/// The login Frigate's WebSocket endpoint is pulled with, when the tab names
+/// one - Frigate's own login, not the restream account.
+fn ws_credentials(config: &FrigateConfig) -> Option<(String, String)> {
+    (!config.username.trim().is_empty())
+        .then(|| (config.username.clone(), config.password.clone()))
+}
+
+/// Whether the resolution probe tries RTSP before MSE.
+///
+/// It follows the chosen protocol: `auto` and `rtsp` measure over RTSP first,
+/// `mse` over the WebSocket first. Either way the other address is the fallback,
+/// so a closed RTSP port no longer costs a camera its main/sub pairing.
+fn probe_rtsp_first(protocol: StreamProtocol) -> bool {
+    !matches!(protocol, StreamProtocol::Mse)
 }
 
 fn source_for(
@@ -361,9 +408,9 @@ fn source_for(
     }
     // Frigate's own login, for the WebSocket stream: it goes through Frigate's
     // own port and uses its session auth, not the restream account.
-    if !config.username.trim().is_empty() {
-        source.mse_username = Some(config.username.clone());
-        source.mse_password = Some(config.password.clone());
+    if let Some((username, password)) = ws_credentials(config) {
+        source.mse_username = Some(username);
+        source.mse_password = Some(password);
     }
     source
 }
@@ -418,13 +465,24 @@ pub fn extract_rtsp_port(url: &str) -> Option<u16> {
 async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateImport {
     let credentials = rtsp_credentials(config, parts.rtsp.clone());
     let port = parts.restream_port;
+    // The probe follows the chosen protocol: RTSP first for `auto` / `rtsp`,
+    // MSE first for `mse`.
+    let rtsp_first = probe_rtsp_first(config.protocol);
 
-    let urls: Vec<String> = parts
+    // Both addresses of every stream are measured in that order, so a camera
+    // whose RTSP port is closed outside the LAN - the case MSE is for - is
+    // still paired by the size its MSE stream reports.
+    let targets: Vec<(String, String)> = parts
         .cameras
         .iter()
-        .flat_map(|camera| camera.streams.iter().map(|name| restream_url(&config.host, port, name)))
+        .flat_map(|camera| {
+            camera
+                .streams
+                .iter()
+                .map(|name| (restream_url(&config.host, port, name), mse_url(config, name)))
+        })
         .collect();
-    let sizes = probe_all(&urls, credentials.clone()).await;
+    let sizes = probe_all(&targets, credentials.clone(), ws_credentials(config), rtsp_first).await;
 
     let mut cameras = Vec::new();
     let mut cursor = 0usize;
@@ -453,7 +511,6 @@ async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateIm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::StreamProtocol;
     use crate::model::ConnectionMode;
 
     fn frigate_config() -> FrigateConfig {
@@ -622,6 +679,30 @@ mod tests {
         assert!(source.username.is_none());
         // An imported camera is marked as the import's to manage.
         assert!(source.imported);
+    }
+
+    /// The probe order follows the chosen protocol.
+    #[test]
+    fn the_probe_follows_the_protocol() {
+        assert!(probe_rtsp_first(StreamProtocol::Auto));
+        assert!(probe_rtsp_first(StreamProtocol::Rtsp));
+        assert!(!probe_rtsp_first(StreamProtocol::Mse));
+    }
+
+    /// The login the WebSocket endpoint is probed and played with is Frigate's
+    /// own, and only when the tab names one.
+    #[test]
+    fn the_ws_login_comes_from_the_frigate_account() {
+        assert!(ws_credentials(&frigate_config()).is_none());
+        let config = FrigateConfig {
+            username: "frigate-user".into(),
+            password: "frigate-pass".into(),
+            ..frigate_config()
+        };
+        assert_eq!(
+            ws_credentials(&config),
+            Some(("frigate-user".to_string(), "frigate-pass".to_string()))
+        );
     }
 
     /// The import preference is written onto each camera's connection mode.
