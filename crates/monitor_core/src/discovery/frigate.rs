@@ -345,39 +345,44 @@ fn source_for(
     stream: &str,
     credentials: &Option<(String, String)>,
 ) -> CameraSource {
-    let mut source = CameraSource::new(name, stream_url(config, port, stream));
+    let mut source = CameraSource::new(name, rtsp_url(config, port, stream));
     source.host = config.host.clone();
     source.origin = CameraOrigin::Frigate;
     source.tags = vec!["frigate".to_string()];
-    if config.wss {
-        // The WebSocket stream goes through Frigate's own port and uses its
-        // session auth, so each camera carries the Frigate login — the user may
-        // add cameras from different Frigate instances.
-        if !config.username.trim().is_empty() {
-            source.username = Some(config.username.clone());
-            source.password = Some(config.password.clone());
-        }
-    } else if let Some((username, password)) = credentials {
+    // Both addresses are captured, always: which one is reachable depends on the
+    // network, so the camera holds the pair and the connection switch decides.
+    source.mse_main = Some(mse_url(config, stream));
+    source.connect = config.protocol.connection_mode();
+    // The restream account, for the RTSP address.
+    if let Some((username, password)) = credentials {
         source.username = Some(username.clone());
         source.password = Some(password.clone());
+    }
+    // Frigate's own login, for the WebSocket stream: it goes through Frigate's
+    // own port and uses its session auth, not the restream account.
+    if !config.username.trim().is_empty() {
+        source.mse_username = Some(config.username.clone());
+        source.mse_password = Some(config.password.clone());
     }
     source
 }
 
-/// The URL XGView pulls for one stream: go2rtc's WebSocket (MSE) endpoint when
-/// `wss` is chosen, the RTSP restream otherwise. The WebSocket URL goes through
-/// Frigate's own port and carries its session auth, so no restream credentials
-/// are needed alongside it.
-pub fn stream_url(config: &FrigateConfig, restream_port: u16, stream: &str) -> String {
-    if config.wss {
-        let scheme = if config.https { "wss" } else { "ws" };
-        format!(
-            "{scheme}://{}:{}/live/mse/api/ws?src={stream}",
-            config.host, config.port
-        )
-    } else {
-        restream_url(&config.host, restream_port, stream)
-    }
+/// The RTSP restream URL of one stream - the address the viewer prefers.
+pub fn rtsp_url(config: &FrigateConfig, restream_port: u16, stream: &str) -> String {
+    restream_url(&config.host, restream_port, stream)
+}
+
+/// The MSE (go2rtc WebSocket) URL of one stream.
+///
+/// Frigate fronts go2rtc's MSE endpoint at `/live/mse/api/ws` on the port its
+/// web UI answers on, behind its own session auth - so this URL needs no
+/// restream account, only Frigate's login.
+pub fn mse_url(config: &FrigateConfig, stream: &str) -> String {
+    let scheme = if config.https { "wss" } else { "ws" };
+    format!(
+        "{scheme}://{}:{}/live/mse/api/ws?src={stream}",
+        config.host, config.port
+    )
 }
 
 /// The stream name embedded in a restream or WebSocket URL, so the URL can be
@@ -428,7 +433,9 @@ async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateIm
         cursor += count;
         let mut source = source_for(config, port, &camera.name, &camera.streams[main], &credentials);
         if let Some(sub) = sub {
-            source.rtsp_sub = Some(stream_url(config, port, &camera.streams[sub]));
+            let name = &camera.streams[sub];
+            source.rtsp_sub = Some(rtsp_url(config, port, name));
+            source.mse_sub = Some(mse_url(config, name));
         }
         cameras.push(source);
     }
@@ -445,6 +452,8 @@ async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateIm
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::FrigateProtocol;
+    use crate::model::ConnectionMode;
 
     fn frigate_config() -> FrigateConfig {
         FrigateConfig { host: "192.168.17.88".into(), ..Default::default() }
@@ -596,45 +605,70 @@ mod tests {
         );
     }
 
+    /// Both addresses are captured: the RTSP restream and the MSE endpoint,
+    /// whichever protocol the import was told to prefer.
     #[test]
-    fn rtsp_streams_use_the_restream_url() {
+    fn both_addresses_are_captured() {
         let config = frigate_config();
         let source = source_for(&config, 8554, "cam", "cam_1", &None);
         assert_eq!(source.rtsp_main, "rtsp://192.168.17.88:8554/cam_1");
+        assert_eq!(
+            source.mse_main.as_deref(),
+            Some("wss://192.168.17.88:8971/live/mse/api/ws?src=cam_1")
+        );
+        // The default import prefers RTSP.
+        assert_eq!(source.connect, ConnectionMode::Auto);
         assert!(source.username.is_none());
     }
 
+    /// The import preference is written onto each camera's connection mode.
     #[test]
-    fn wss_streams_use_the_websocket_endpoint() {
+    fn the_protocol_sets_the_connection_mode() {
+        for (protocol, expected) in [
+            (FrigateProtocol::Auto, ConnectionMode::Auto),
+            (FrigateProtocol::Rtsp, ConnectionMode::Rtsp),
+            (FrigateProtocol::Mse, ConnectionMode::Mse),
+        ] {
+            let config = FrigateConfig { protocol, ..frigate_config() };
+            let source = source_for(&config, 8554, "cam", "cam_1", &None);
+            assert_eq!(source.connect, expected);
+        }
+    }
+
+    /// The two protocols carry their own credentials: the restream account on
+    /// the RTSP address, Frigate's own login on the MSE one.
+    #[test]
+    fn each_address_carries_its_own_credentials() {
         let config = FrigateConfig {
-            wss: true,
             username: "frigate-user".into(),
             password: "frigate-pass".into(),
             ..frigate_config()
         };
         let source = source_for(&config, 8554, "cam", "cam_1", &Some(("admin".into(), "pw".into())));
-        assert_eq!(
-            source.rtsp_main,
-            "wss://192.168.17.88:8971/live/mse/api/ws?src=cam_1"
-        );
-        // wss carries Frigate's own login, not the restream credentials.
-        assert_eq!(source.username.as_deref(), Some("frigate-user"));
-        assert_eq!(source.password.as_deref(), Some("frigate-pass"));
+        assert_eq!(source.username.as_deref(), Some("admin"));
+        assert_eq!(source.password.as_deref(), Some("pw"));
+        assert_eq!(source.mse_username.as_deref(), Some("frigate-user"));
+        assert_eq!(source.mse_password.as_deref(), Some("frigate-pass"));
     }
 
+    /// No Frigate login set: the MSE address is still captured, just without a
+    /// credential of its own.
     #[test]
-    fn wss_without_login_carries_no_credentials() {
-        let config = FrigateConfig { wss: true, ..frigate_config() };
+    fn the_mse_address_captures_without_a_login() {
+        let config = frigate_config();
         let source = source_for(&config, 8554, "cam", "cam_1", &None);
-        assert!(source.username.is_none());
-        assert!(source.password.is_none());
+        assert!(source.mse_main.is_some());
+        assert!(source.mse_username.is_none());
+        assert!(source.mse_credentials().is_none());
     }
 
     #[test]
-    fn ws_scheme_when_not_https() {
-        let config = FrigateConfig { wss: true, https: false, port: 5000, ..frigate_config() };
-        let url = stream_url(&config, 8554, "cam_1");
-        assert_eq!(url, "ws://192.168.17.88:5000/live/mse/api/ws?src=cam_1");
+    fn the_mse_url_scheme_follows_https() {
+        let config = FrigateConfig { https: false, port: 5000, ..frigate_config() };
+        assert_eq!(
+            mse_url(&config, "cam_1"),
+            "ws://192.168.17.88:5000/live/mse/api/ws?src=cam_1"
+        );
     }
 
     #[test]

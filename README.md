@@ -88,7 +88,7 @@ the hand.
 | Reconnection | Exponential-backoff self-healing with a non-blocking "reconnecting…" overlay; the backoff shape and the handshake timeout are configurable and reach channels already running |
 | Decoding | H.264 and H.265 on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, VideoToolbox on macOS, `AMediaCodec` on Android) and on the CPU elsewhere - Android falling back to OpenH264 by itself for an H.264 stream its own decoder will not take; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW` |
 | Codecs | H.264, H.265 (HEVC) and MJPEG are decoded and displayed. H.265 uses the platform's decoder (VideoToolbox on macOS, `AMediaCodec` on Android) or FFmpeg on the desktop, on the GPU or the CPU. Android has no software HEVC, so a stream a device's own decoder will not take shows no picture - use its H.264 sub stream there |
-| Transports | RTSP over TCP (interleaved, the default) or UDP, chosen per camera; HTTP / HTTPS MJPEG (`multipart/x-mixed-replace`) cameras are supported too |
+| Transports | RTSP over TCP (interleaved, the default) or UDP, chosen per camera; HTTP / HTTPS MJPEG (`multipart/x-mixed-replace`) cameras are supported too. A Frigate or go2rtc camera also carries an MSE (fMP4 over WebSocket) address, which the connection switch can prefer or fall back to when RTSP cannot be reached |
 | On-screen display | Each tile corner independently shows one of: none, name, number + name, stream, codec + rate, frame rate + decoder, size + shape, or all statistics |
 | Power management | Keeps the machine awake and/or the screen on while the wall is up (`SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` + the desktop's D-Bus inhibit on Linux, `WakeLock` + `FLAG_KEEP_SCREEN_ON` on Android); both switches default on |
 | Blackout | Scheduled periods, per weekday, in which the wall blanks itself and parks every channel - sockets closed, decoders dropped; input brings it back for a chosen number of minutes |
@@ -96,7 +96,7 @@ the hand.
 | Toolbar | An on-screen bar for the layout, paging, full screen, settings and adding cameras; usable with a mouse, touch or a remote |
 | Discovery | ONVIF WS-Discovery multicast probe, cross-subnet unicast scan, and a TCP 554/80/8000 fallback probe, followed by `GetProfiles` / `GetStreamUri` |
 | Server import | Import every camera in one go from Synology Surveillance Station (`SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera`), Frigate (its API, each camera's main and sub stream paired by measured resolution) or a standalone go2rtc (`/api/streams`) |
-| Cameras | Add, edit, reorder and remove cameras; per-camera display aspect and RTSP transport (UDP when a relay damages the TCP interleaving) |
+| Cameras | Add, edit, reorder and remove cameras; per-camera display aspect and a connection switch - `AUTO`/`RTSP`/`MSE` where a WebSocket address exists, `TCP`/`UDP` otherwise |
 | Groups | Named camera groups, each with its own cameras, grid layout and paging, switched from the settings; the same camera may sit in more than one |
 | Start on boot | A Windows `HKCU\...\Run` registry entry (or a scheduled task), an XDG autostart entry on Linux, a LaunchAgent on macOS, and an Android `BOOT_COMPLETED` receiver |
 | Configuration | Everything persisted to a cross-platform `config.json`, with export / import |
@@ -392,9 +392,15 @@ Press `F2` to open the *add devices* window, which has five pages:
    credentials empty for the unauthenticated internal port `5000`). It reads
    `/api/config`, groups the cameras it defines with the go2rtc streams behind
    them, pairs each camera's main and sub stream by measured resolution, and
-   lists any go2rtc stream no camera references on its own. A camera is imported
-   as `rtsp://<host>:<port>/<stream>`, with the restream port and account read
-   from Frigate's own configuration (both overridable in the tab).
+   lists any go2rtc stream no camera references on its own. **Each camera is
+   imported with both of its addresses**: the RTSP restream
+   `rtsp://<host>:<port>/<stream>` and go2rtc's MSE endpoint
+   `ws(s)://<host>:<port>/live/mse/api/ws?src=<stream>`. The restream port and
+   account are read from Frigate's own configuration; the WebSocket address
+   carries Frigate's own login instead (all overridable in the tab). The tab's
+   *Stream protocol* chooses what the imported cameras prefer - **auto** (RTSP
+   first, MSE when RTSP cannot be reached), **rtsp**, or the WebSocket one - and
+   each camera can be switched afterwards from the Cameras tab.
 5. **go2rtc** - sign in to a standalone go2rtc's HTTP API (`/api/streams`) and
    pick from a flat list of the streams it serves; each is added as a camera
    whose sub stream is left empty. The restream port is read from go2rtc's
@@ -403,8 +409,14 @@ Press `F2` to open the *add devices* window, which has five pages:
 
 Cameras are listed in the **Cameras** tab, where they can be renamed, reordered,
 disabled, and given a display aspect (original, stretch, 16:9, 4:3 or 1:1) and a
-transport per camera. A camera is added to the group the wall is on - the
-dialog's title names it; see [Camera groups](#camera-groups).
+connection per camera. The connection is one button that cycles the stops the
+camera offers: `AUTO` / `RTSP` / `MSE` when an MSE address is present (a press
+moves on to the next), or `TCP` / `UDP` for an RTSP camera without one. `AUTO`
+tries RTSP first and falls back to the MSE address when RTSP cannot be reached -
+the case of an RTSP port that is closed outside the LAN. The address shown
+beside the button is the one the camera currently pulls. A camera is added to
+the group the wall is on - the dialog's title names it; see
+[Camera groups](#camera-groups).
 
 ### Camera groups
 

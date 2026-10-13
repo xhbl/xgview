@@ -21,7 +21,7 @@ use monitor_core::power::{self, PowerStatus};
 use monitor_core::reboot;
 use monitor_core::config::AppConfig;
 use monitor_core::layout::{GridLayout, NavigateOutcome};
-use monitor_core::model::{ConnectionState, OsdItem, RtspTransport, StreamKind, TileAspect};
+use monitor_core::model::{ConnectionState, OsdItem, StreamKind, TileAspect};
 use monitor_core::pipeline::{ChannelManager, StreamEvent};
 use monitor_core::scheduler::Scheduler;
 use monitor_core::{CameraSource, Direction};
@@ -3954,7 +3954,7 @@ impl XgViewApp {
         let mut edit: Option<(String, Id)> = None;
         let mut aspect_change: Option<(usize, TileAspect)> = None;
         let mut infer: Option<usize> = None;
-        let mut transport_change: Option<(usize, RtspTransport)> = None;
+        let mut connect_change: Option<usize> = None;
         // Only the group the selector chose. The slot is a position in the whole
         // list, which is what the actions below write back through.
         let active = self.config.active_group;
@@ -3990,17 +3990,15 @@ impl XgViewApp {
                         infer = Some(slot);
                     }
                 }
-                let transport = camera.transport;
-                let transport_button = ui
-                    .small_button(RichText::new(transport.as_str()).small().color(if transport.is_udp() {
-                        theme::ACCENT
-                    } else {
-                        theme::TEXT_DIM
-                    }))
-                    .on_hover_text(monitor_i18n::tr("cameras-transport-tip"));
-                self.nav.item(&transport_button);
-                if transport_button.clicked() {
-                    transport_change = Some((slot, transport.toggled()));
+                // The connection switch: a press moves the camera on to the next
+                // stop it offers - `AUTO/RTSP/MSE` for a camera with an MSE
+                // address, `TCP/UDP` for one on RTSP alone.
+                let connect_button = ui
+                    .small_button(RichText::new(camera.connection_label()).small().color(theme::ACCENT))
+                    .on_hover_text(monitor_i18n::tr("cameras-connect-tip"));
+                self.nav.item(&connect_button);
+                if connect_button.clicked() {
+                    connect_change = Some(slot);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     // Drawn right to left so the pair reads edit, remove;
@@ -4035,8 +4033,18 @@ impl XgViewApp {
                 if aspect_button.clicked() {
                     aspect_change = Some((slot, aspect.next()));
                 }
+                // The address follows the connection mode, so a camera on MSE
+                // reads out its MSE address. Where there is a second address,
+                // the tooltip names both.
                 let address = theme::truncate(&camera.masked_uri(StreamKind::Main), 26);
-                ui.label(RichText::new(address).small().monospace().color(theme::TEXT_DIM));
+                let address_label = ui.label(RichText::new(address).small().monospace().color(theme::TEXT_DIM));
+                if let Some(mse) = camera.masked_mse_uri(StreamKind::Main) {
+                    address_label.on_hover_text(format!(
+                        "rtsp: {}\nmse:  {}",
+                        camera.masked_rtsp_uri(StreamKind::Main),
+                        mse
+                    ));
+                }
                 ui.label(RichText::new(monitor_i18n::tr(camera.origin.label())).small().color(theme::TEXT_DIM));
             });
             ui.add_space(theme::space::XS);
@@ -4080,11 +4088,11 @@ impl XgViewApp {
                 self.camera_edit = Some(CameraEdit { id, draft, from });
             }
         }
-        if let Some((slot, transport)) = transport_change {
+        if let Some(slot) = connect_change {
             if let Some(camera) = self.config.cameras.get_mut(slot) {
-                camera.transport = transport;
+                camera.advance_connection();
             }
-            // The transport is part of the schedule plan, so the channel is
+            // The connection is part of the schedule plan, so the channel is
             // reopened with the new one on the next sync.
             self.needs_sync = true;
             dirty = true;
@@ -4395,6 +4403,9 @@ impl XgViewApp {
             "camera-edit-title",
             "camera-edit-title-group",
         );
+        // A camera an import gave a pair of addresses to has them shown
+        // read-only: a hand edit to one would leave the other stale.
+        let managed = self.config.find_camera(&id);
 
         // A modal: centred, and its backdrop swallows the presses that would
         // otherwise reach the panel it was opened from. It is left only by its
@@ -4404,7 +4415,7 @@ impl XgViewApp {
             ui.label(RichText::new(title).heading());
             ui.add_space(theme::space::S);
             self.nav.open("edit-body");
-            let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft);
+            let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft, managed);
             // The dialog opens on the first control of the form.
             self.camera_edit_anchor = fields.first;
             if fields.inferred {

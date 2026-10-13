@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 use crate::layout::GridLayout;
-use crate::model::{CameraSource, Osd};
+use crate::model::{CameraSource, ConnectionMode, Osd};
 use crate::{APP_NAME, CONFIG_FILE_NAME};
 
 /// Version of the configuration schema written to disk.
@@ -172,6 +172,34 @@ impl SynologyConfig {
     }
 }
 
+/// Which protocol the Frigate import builds its stream URLs for.
+///
+/// The import captures both the RTSP restream and go2rtc's MSE (WebSocket)
+/// URL for every camera, so this only decides what the imported cameras start
+/// out preferring. It may be overridden per camera afterwards.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FrigateProtocol {
+    /// Capture both, prefer RTSP, fall back to MSE. The default.
+    #[default]
+    Auto,
+    /// RTSP only.
+    Rtsp,
+    /// MSE (go2rtc WebSocket) only.
+    Mse,
+}
+
+impl FrigateProtocol {
+    /// The connection mode an imported camera starts on.
+    pub fn connection_mode(self) -> ConnectionMode {
+        match self {
+            FrigateProtocol::Auto => ConnectionMode::Auto,
+            FrigateProtocol::Rtsp => ConnectionMode::Rtsp,
+            FrigateProtocol::Mse => ConnectionMode::Mse,
+        }
+    }
+}
+
 /// Frigate NVR connection settings.
 ///
 /// Read through Frigate's own API alone: the built-in go2rtc's management port
@@ -198,11 +226,11 @@ pub struct FrigateConfig {
     /// configuration - the port a go2rtc input path names, or
     /// `go2rtc.rtsp.listen` - and only then falls back to 8554.
     pub rtsp_port: Option<u16>,
-    /// Whether to pull streams via go2rtc's WebSocket (MSE) endpoint instead of
-    /// RTSP. The wss URL carries Frigate's own session auth, so no restream
-    /// credentials are needed when this is set.
+    /// Which protocol the imported cameras start out preferring. Both addresses
+    /// are always captured; this only picks what is tried first. See
+    /// [`FrigateProtocol`].
     #[serde(default)]
-    pub wss: bool,
+    pub protocol: FrigateProtocol,
 }
 
 impl Default for FrigateConfig {
@@ -216,7 +244,7 @@ impl Default for FrigateConfig {
             rtsp_username: String::new(),
             rtsp_password: String::new(),
             rtsp_port: None,
-            wss: false,
+            protocol: FrigateProtocol::default(),
         }
     }
 }

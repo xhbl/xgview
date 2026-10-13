@@ -146,6 +146,40 @@ impl RtspTransport {
     }
 }
 
+/// How a channel reaches a camera.
+///
+/// A camera Frigate or go2rtc describes can be pulled twice over: the RTSP
+/// restream, and go2rtc's MSE endpoint (fragmented MP4 over a WebSocket). Which
+/// one is reachable depends on the network - the RTSP port is often closed
+/// outside the LAN while the web port the MSE stream rides is not. `Auto` keeps
+/// one preference, RTSP first, and answers an unreachable RTSP with the MSE
+/// address rather than with a backoff.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionMode {
+    /// Prefer RTSP, fall back to MSE when it cannot be reached.
+    #[default]
+    Auto,
+    /// RTSP only, with the camera's [`RtspTransport`].
+    Rtsp,
+    /// MSE (go2rtc WebSocket) only.
+    Mse,
+}
+
+/// One stop of the per-camera connection switch.
+///
+/// The switch folds the protocol and the RTSP transport into one walk: a camera
+/// with an MSE address moves `Auto -> RtspTcp -> Mse` (its restream is TCP
+/// only), and one without just flips the transport, `RtspTcp <-> RtspUdp`. It
+/// is derived from [`CameraSource::connect`] and the transport, not stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionStop {
+    Auto,
+    RtspTcp,
+    RtspUdp,
+    Mse,
+}
+
 fn default_onvif_port() -> u16 {
     80
 }
@@ -332,10 +366,30 @@ pub struct CameraSource {
     /// empty (see [`CameraSource::apply_sub_inference`]).
     #[serde(default)]
     pub rtsp_sub: Option<String>,
+    /// Optional MSE (go2rtc WebSocket) main URL. A Frigate or go2rtc import
+    /// fills it in beside the RTSP one; the viewer prefers RTSP and reaches for
+    /// this only as the fallback of [`ConnectionMode::Auto`], or when the mode
+    /// is [`ConnectionMode::Mse`].
+    #[serde(default)]
+    pub mse_main: Option<String>,
+    /// Optional MSE sub URL, the counterpart of `rtsp_sub`.
+    #[serde(default)]
+    pub mse_sub: Option<String>,
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    /// Login the MSE endpoint is pulled with. Frigate's WebSocket stream is
+    /// behind its own session auth, which is not the restream account in
+    /// `username` / `password`; they are kept apart so one camera can carry
+    /// both.
+    #[serde(default)]
+    pub mse_username: Option<String>,
+    #[serde(default)]
+    pub mse_password: Option<String>,
+    /// How the channel reaches this camera. See [`ConnectionMode`].
+    #[serde(default)]
+    pub connect: ConnectionMode,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -379,8 +433,13 @@ impl CameraSource {
             onvif_port: default_onvif_port(),
             rtsp_main,
             rtsp_sub: None,
+            mse_main: None,
+            mse_sub: None,
             username: None,
             password: None,
+            mse_username: None,
+            mse_password: None,
+            connect: ConnectionMode::default(),
             enabled: true,
             tags: Vec::new(),
             origin: CameraOrigin::Manual,
@@ -447,6 +506,121 @@ impl CameraSource {
         }
     }
 
+    /// The MSE URL of a stream, when one is configured; an empty sub falls back
+    /// to the MSE main, the way [`CameraSource::stream_uri`] does for RTSP.
+    pub fn mse_uri(&self, kind: StreamKind) -> Option<&str> {
+        let value = match kind {
+            StreamKind::Main => self.mse_main.as_deref(),
+            StreamKind::Sub => self.mse_sub.as_deref().or(self.mse_main.as_deref()),
+        };
+        value.filter(|url| !url.trim().is_empty())
+    }
+
+    /// Whether an MSE address is available - so the connection switch can offer
+    /// the MSE stop, and `Auto` has something to fall back to.
+    pub fn has_mse(&self) -> bool {
+        self.mse_uri(StreamKind::Main).is_some()
+    }
+
+    /// The login the MSE endpoint is pulled with, if one is configured.
+    pub fn mse_credentials(&self) -> Option<(String, String)> {
+        let username = self.mse_username.as_deref().filter(|name| !name.trim().is_empty())?;
+        Some((username.to_string(), self.mse_password.clone().unwrap_or_default()))
+    }
+
+    /// The URL a channel pulls first, for the configured [`ConnectionMode`]: the
+    /// MSE address in `Mse`, the RTSP address otherwise.
+    pub fn active_uri(&self, kind: StreamKind) -> &str {
+        match self.connect {
+            ConnectionMode::Mse => self.mse_uri(kind).unwrap_or_else(|| self.stream_uri(kind)),
+            ConnectionMode::Auto | ConnectionMode::Rtsp => self.stream_uri(kind),
+        }
+    }
+
+    /// Whether an RTSP transport switch is meaningful for this camera.
+    ///
+    /// A go2rtc or Frigate restream carries RTSP over TCP only - go2rtc answers
+    /// every UDP `SETUP` with `461` on purpose - so UDP is not offered for the
+    /// cameras those imports bring in.
+    pub fn udp_available(&self) -> bool {
+        !matches!(self.origin, CameraOrigin::Frigate | CameraOrigin::Go2rtc)
+    }
+
+    /// The stops the per-camera connection switch walks, in the order a press
+    /// moves through them.
+    ///
+    /// A camera with an MSE address offers `Auto -> Rtsp -> Mse`; one without
+    /// offers only the RTSP transport (`Tcp -> Udp`), which is what it always
+    /// did. UDP is left out where the restream carries TCP alone.
+    pub fn connection_stops(&self) -> &'static [ConnectionStop] {
+        match (self.has_mse(), self.udp_available()) {
+            (true, true) => &[
+                ConnectionStop::Auto,
+                ConnectionStop::RtspTcp,
+                ConnectionStop::RtspUdp,
+                ConnectionStop::Mse,
+            ],
+            (true, false) => &[ConnectionStop::Auto, ConnectionStop::RtspTcp, ConnectionStop::Mse],
+            (false, _) => &[ConnectionStop::RtspTcp, ConnectionStop::RtspUdp],
+        }
+    }
+
+    /// The stop the camera is on now.
+    ///
+    /// `Auto` without an MSE address has nothing to fall back to, so it reads
+    /// as the RTSP transport it really pulls rather than as a stop the switch
+    /// does not offer.
+    pub fn connection_stop(&self) -> ConnectionStop {
+        let transport = match self.transport {
+            RtspTransport::Tcp => ConnectionStop::RtspTcp,
+            RtspTransport::Udp => ConnectionStop::RtspUdp,
+        };
+        match self.connect {
+            ConnectionMode::Auto if self.has_mse() => ConnectionStop::Auto,
+            ConnectionMode::Auto | ConnectionMode::Rtsp => transport,
+            ConnectionMode::Mse => ConnectionStop::Mse,
+        }
+    }
+
+    /// The label the connection switch shows for the camera's current stop. It
+    /// names the protocol where there are two to choose from, and the transport
+    /// where there is only RTSP.
+    pub fn connection_label(&self) -> &'static str {
+        match self.connection_stop() {
+            ConnectionStop::Auto => "AUTO",
+            ConnectionStop::Mse => "MSE",
+            ConnectionStop::RtspTcp => {
+                if self.has_mse() {
+                    "RTSP"
+                } else {
+                    "TCP"
+                }
+            }
+            ConnectionStop::RtspUdp => "UDP",
+        }
+    }
+
+    /// Moves the connection switch on to the next stop it offers, writing both
+    /// the mode and the transport back.
+    pub fn advance_connection(&mut self) {
+        let stops = self.connection_stops();
+        let current = self.connection_stop();
+        let index = stops.iter().position(|stop| *stop == current).unwrap_or(0);
+        let next = stops[(index + 1) % stops.len()];
+        match next {
+            ConnectionStop::Auto => self.connect = ConnectionMode::Auto,
+            ConnectionStop::RtspTcp => {
+                self.connect = ConnectionMode::Rtsp;
+                self.transport = RtspTransport::Tcp;
+            }
+            ConnectionStop::RtspUdp => {
+                self.connect = ConnectionMode::Rtsp;
+                self.transport = RtspTransport::Udp;
+            }
+            ConnectionStop::Mse => self.connect = ConnectionMode::Mse,
+        }
+    }
+
     /// `host:port` string used inside the UI.
     pub fn display_address(&self) -> String {
         match RtspUrl::parse(&self.rtsp_main) {
@@ -460,19 +634,28 @@ impl CameraSource {
 
     /// Stream URL with credentials replaced by a mask, safe for logging / UI.
     ///
+    /// It follows the connection mode: the URL shown is the one the channel
+    /// pulls first, so a camera forced onto MSE reads out its MSE address and
+    /// the tile, the log and the settings row all agree with what is running.
+    ///
     /// A Synology camera keeps its sub stream on HTTP MJPEG rather than RTSP, so
     /// the RTSP parser is only the first of two readings: an `http://` URL is
     /// masked here instead. The stream key it carries as a query parameter is no
     /// less of a credential than a password, and a log is where it would end up.
     pub fn masked_uri(&self, kind: StreamKind) -> String {
-        let uri = self.stream_uri(kind);
-        if let Ok(parsed) = RtspUrl::parse(uri) {
-            return parsed.masked();
-        }
-        if is_http_url(uri) || is_ws_url(uri) {
-            return mask_http_url(uri);
-        }
-        "<invalid stream url>".to_string()
+        mask_stream_url(self.active_uri(kind))
+    }
+
+    /// The masked RTSP URL of a stream, whatever the connection mode - so an
+    /// edit form can show both addresses of a managed pair at once.
+    pub fn masked_rtsp_uri(&self, kind: StreamKind) -> String {
+        mask_stream_url(self.stream_uri(kind))
+    }
+
+    /// The masked MSE URL of a stream, when one is configured - so a row can
+    /// show the fallback beside the address it is actually pulling.
+    pub fn masked_mse_uri(&self, kind: StreamKind) -> Option<String> {
+        self.mse_uri(kind).map(mask_stream_url)
     }
 
     /// Derives a sub stream URL from the main stream URL using well known
@@ -599,6 +782,19 @@ pub fn is_http_url(url: &str) -> bool {
 pub fn is_ws_url(url: &str) -> bool {
     let url = url.trim_start().to_ascii_lowercase();
     url.starts_with("ws://") || url.starts_with("wss://")
+}
+
+/// A stream URL with its credentials masked, whatever scheme it carries: RTSP
+/// through its own parser, an HTTP (MJPEG) or WebSocket (MSE) URL through the
+/// HTTP one, which also hides the query a stream key may ride in.
+fn mask_stream_url(url: &str) -> String {
+    if let Ok(parsed) = RtspUrl::parse(url) {
+        return parsed.masked();
+    }
+    if is_http_url(url) || is_ws_url(url) {
+        return mask_http_url(url);
+    }
+    "<invalid stream url>".to_string()
 }
 
 /// An `http://` stream URL with its credentials and its query masked.
@@ -729,6 +925,87 @@ mod tests {
         assert_eq!(camera.tags, vec!["gate".to_string()]);
         assert_eq!(camera.vendor.as_deref(), Some("FOSCAM"));
         assert_eq!(camera.main_profile.as_deref(), Some("prof0"));
+    }
+
+    /// A camera an import gave a pair of addresses to, as Frigate does.
+    fn frigate_camera() -> CameraSource {
+        let mut camera = CameraSource::new("cam", "rtsp://10.0.0.1:8554/cam_1");
+        camera.origin = CameraOrigin::Frigate;
+        camera.mse_main = Some("wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1".to_string());
+        camera.mse_username = Some("frigate".to_string());
+        camera.mse_password = Some("pw".to_string());
+        camera
+    }
+
+    /// A camera with an MSE address walks `AUTO -> RTSP -> MSE` and back.
+    #[test]
+    fn a_camera_with_an_mse_address_walks_auto_rtsp_mse() {
+        let mut camera = frigate_camera();
+        assert_eq!(camera.connection_label(), "AUTO");
+        camera.advance_connection();
+        assert_eq!(camera.connect, ConnectionMode::Rtsp);
+        assert_eq!(camera.transport, RtspTransport::Tcp);
+        assert_eq!(camera.connection_label(), "RTSP");
+        camera.advance_connection();
+        assert_eq!(camera.connect, ConnectionMode::Mse);
+        assert_eq!(camera.connection_label(), "MSE");
+        camera.advance_connection();
+        assert_eq!(camera.connect, ConnectionMode::Auto);
+        assert_eq!(camera.connection_label(), "AUTO");
+    }
+
+    /// A go2rtc/Frigate restream carries RTSP over TCP alone, so the switch
+    /// never lands on UDP for it.
+    #[test]
+    fn a_restream_never_offers_udp() {
+        let mut camera = frigate_camera();
+        for _ in 0..3 {
+            camera.advance_connection();
+            assert!(!camera.transport.is_udp(), "RTSP over TCP alone here");
+        }
+    }
+
+    /// A camera with no MSE address keeps the transport-only switch it had.
+    #[test]
+    fn a_camera_without_an_mse_address_cycles_its_transport() {
+        let mut camera = CameraSource::new("plain", "rtsp://10.0.0.1/live");
+        assert_eq!(camera.connection_label(), "TCP");
+        camera.advance_connection();
+        assert_eq!(camera.transport, RtspTransport::Udp);
+        assert_eq!(camera.connect, ConnectionMode::Rtsp);
+        assert_eq!(camera.connection_label(), "UDP");
+        camera.advance_connection();
+        assert_eq!(camera.transport, RtspTransport::Tcp);
+        assert_eq!(camera.connection_label(), "TCP");
+    }
+
+    /// The URL pulled first follows the mode: MSE reads out its own address,
+    /// RTSP and Auto the RTSP one.
+    #[test]
+    fn the_active_uri_follows_the_mode() {
+        let mut camera = frigate_camera();
+        assert_eq!(camera.active_uri(StreamKind::Main), "rtsp://10.0.0.1:8554/cam_1");
+        camera.connect = ConnectionMode::Mse;
+        assert_eq!(
+            camera.active_uri(StreamKind::Main),
+            "wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1"
+        );
+    }
+
+    /// The masked URL shown, in a row or a log, is the one the mode pulls.
+    #[test]
+    fn the_masked_uri_follows_the_mode() {
+        let mut camera = frigate_camera();
+        assert_eq!(camera.masked_uri(StreamKind::Main), "rtsp://10.0.0.1:8554/cam_1");
+        camera.connect = ConnectionMode::Mse;
+        assert_eq!(
+            camera.masked_uri(StreamKind::Main),
+            "wss://10.0.0.1:8971/live/mse/api/ws?…"
+        );
+        // The MSE credentials are separate from the restream account, and the
+        // masked RTSP URL is available whatever the mode.
+        assert_eq!(camera.mse_credentials(), Some(("frigate".to_string(), "pw".to_string())));
+        assert_eq!(camera.masked_rtsp_uri(StreamKind::Main), "rtsp://10.0.0.1:8554/cam_1");
     }
 
     #[test]

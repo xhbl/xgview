@@ -26,7 +26,9 @@ use crate::error::Result;
 use crate::h264::{nal_unit_type, AccessUnit, H264Depacketizer, START_CODE};
 use crate::hevc::{nal_unit_type as hevc_nal_unit_type, HevcDepacketizer};
 use crate::mjpeg::{JpegDepacketizer, MjpegClient};
-use crate::model::{is_http_url, is_ws_url, CameraSource, ConnectionState, RtspTransport, StreamKind};
+use crate::model::{
+    is_http_url, is_ws_url, CameraSource, ConnectionMode, ConnectionState, RtspTransport, StreamKind,
+};
 use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtspStage, RtpHeader, SdpTrack};
 use crate::scheduler::ScheduleChange;
 
@@ -367,17 +369,31 @@ struct Endpoint {
     credentials: Option<(String, String)>,
     stream: StreamKind,
     transport: RtspTransport,
+    /// The second address a channel may try when the first cannot be reached,
+    /// with its own credentials. Present only for [`ConnectionMode::Auto`]: a
+    /// protocol the user forced has no fallback.
+    fallback: Option<Fallback>,
+}
+
+/// The MSE address a channel falls back to, and the login it is pulled with.
+#[derive(Clone, PartialEq, Eq)]
+struct Fallback {
+    uri: String,
+    credentials: Option<(String, String)>,
 }
 
 impl Endpoint {
     /// True when this is the same stream as the one already running, so that a
     /// revisit of a channel does not reopen it. The camera is not compared: the
-    /// URI it contributes is, and so is the transport it is pulled with.
+    /// URI it contributes is, and so is the transport it is pulled with - and
+    /// the fallback, so that switching `Auto` off (which drops it) reopens the
+    /// channel rather than leaving the old attempt in place.
     fn is_same_stream(&self, other: &Endpoint) -> bool {
         self.stream == other.stream
             && self.uri == other.uri
             && self.credentials == other.credentials
             && self.transport == other.transport
+            && self.fallback == other.fallback
     }
 
     /// True when the stream is an MJPEG endpoint rather than an RTSP session.
@@ -408,6 +424,38 @@ fn credentials_of(source: &CameraSource) -> Option<(String, String)> {
     Some((username.to_string(), source.password.clone().unwrap_or_default()))
 }
 
+/// Builds the endpoint one channel pulls, from the camera and the connection
+/// mode it carries.
+///
+/// The address pulled first is the RTSP one everywhere but a camera forced onto
+/// MSE. An `Auto` camera keeps the MSE address as the fallback, with Frigate's
+/// own login rather than the restream account; a forced protocol carries no
+/// fallback, so `Rtsp` means RTSP alone and `Mse` means MSE alone.
+fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endpoint {
+    let mse_primary = matches!(source.connect, ConnectionMode::Mse) && source.has_mse();
+    let (uri, credentials) = if mse_primary {
+        (source.active_uri(stream).to_string(), source.mse_credentials())
+    } else {
+        (source.stream_uri(stream).to_string(), credentials_of(source))
+    };
+    let fallback = match source.connect {
+        ConnectionMode::Auto => source.mse_uri(stream).map(|uri| Fallback {
+            uri: uri.to_string(),
+            credentials: source.mse_credentials(),
+        }),
+        ConnectionMode::Rtsp | ConnectionMode::Mse => None,
+    };
+    Endpoint {
+        index,
+        camera_id: source.id.clone(),
+        uri,
+        credentials,
+        stream,
+        transport: source.transport,
+        fallback,
+    }
+}
+
 async fn supervisor(
     mut commands: UnboundedReceiver<ChannelCommand>,
     events: Sender<StreamEvent>,
@@ -430,14 +478,7 @@ async fn supervisor(
                     }
                     kind => kind,
                 };
-                let endpoint = Endpoint {
-                    index,
-                    camera_id: source.id.clone(),
-                    uri: source.stream_uri(stream).to_string(),
-                    credentials: credentials_of(&source),
-                    stream,
-                    transport: source.transport,
-                };
+                let endpoint = endpoint_for(&source, stream, index);
                 if let Some(existing) = channels.get(&index) {
                     if existing.endpoint.is_same_stream(&endpoint) {
                         continue;
@@ -532,6 +573,26 @@ async fn supervisor(
     tracing::debug!(target: "xgview::pipeline", "supervisor stopped");
 }
 
+/// Runs one attempt on one endpoint, opening the session its address calls for.
+///
+/// The scheme is what decides: an `http://` address is an MJPEG stream, a
+/// `ws://`/`wss://` one go2rtc's MSE, and anything else an RTSP session.
+async fn run_once(
+    endpoint: &Endpoint,
+    prefer_hardware: bool,
+    handshake_timeout: Duration,
+    events: &Sender<StreamEvent>,
+    frames: &FrameStore,
+) -> Result<()> {
+    if endpoint.is_mjpeg() {
+        run_mjpeg_session(endpoint.clone(), handshake_timeout, events, frames).await
+    } else if endpoint.is_ws() {
+        run_ws_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames).await
+    } else {
+        run_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames).await
+    }
+}
+
 /// Reconnection state machine of one channel.
 async fn run_channel(
     endpoint: Endpoint,
@@ -578,19 +639,37 @@ async fn run_channel(
         let published = frames.published(index);
 
         // Each attempt opens its own session, so it is handed its own copy. The
-        // two transports have nothing in common beyond the backoff around them,
-        // so the endpoint picks the one it needs rather than a single session
-        // branching on it statement by statement.
+        // sessions have nothing in common beyond the backoff around them, so the
+        // endpoint picks the one it needs rather than a single session branching
+        // on it statement by statement.
         let started = Instant::now();
-        let outcome = if endpoint.is_mjpeg() {
-            run_mjpeg_session(endpoint.clone(), settings.handshake_timeout, &events, &frames).await
-        } else if endpoint.is_ws() {
-            run_ws_session(endpoint.clone(), prefer_hardware, settings.handshake_timeout, &events, &frames)
-                .await
-        } else {
-            run_session(endpoint.clone(), prefer_hardware, settings.handshake_timeout, &events, &frames)
-                .await
-        };
+        let mut outcome = run_once(&endpoint, prefer_hardware, settings.handshake_timeout, &events, &frames).await;
+
+        // `Auto`: RTSP is preferred, and an RTSP that could not be reached at
+        // all is answered with the MSE address at once rather than with a
+        // backoff - which is the whole point of keeping two addresses. Only when
+        // the attempt put nothing on screen: a stream that worked and was then
+        // cut keeps to RTSP, so a healthy channel does not flap between the two.
+        if outcome.is_err() && endpoint.fallback.is_some() && frames.published(index) == published {
+            let fallback = endpoint.fallback.clone().expect("checked above");
+            tracing::debug!(
+                target: "xgview::pipeline",
+                index,
+                "rtsp was not reachable, trying the mse address"
+            );
+            emit(
+                &events,
+                StreamEvent::State {
+                    index,
+                    camera_id: endpoint.camera_id.clone(),
+                    state,
+                    detail: format!("#{attempt} rtsp unreachable, trying mse"),
+                },
+            );
+            let mse = Endpoint { uri: fallback.uri, credentials: fallback.credentials, fallback: None, ..endpoint.clone() };
+            outcome = run_once(&mse, prefer_hardware, settings.handshake_timeout, &events, &frames).await;
+        }
+
         let lived = started.elapsed();
         match outcome {
             Ok(()) => failure = "stream closed by peer".to_string(),
@@ -971,7 +1050,7 @@ async fn run_session(
     events: &Sender<StreamEvent>,
     frames: &FrameStore,
 ) -> Result<()> {
-    let Endpoint { index, camera_id, uri, credentials, stream, transport } = endpoint;
+    let Endpoint { index, camera_id, uri, credentials, stream, transport, .. } = endpoint;
     let camera_id = camera_id.as_str();
     let uri = uri.as_str();
     let mut client = RtspClient::connect_with_auth(uri, credentials.clone()).await?;
@@ -1774,8 +1853,9 @@ async fn run_mjpeg_session(
 }
 
 /// Accept any server certificate — the LAN Frigate box uses a self-signed cert
-/// and the user already opted in by selecting `wss`.  TLS handshake signatures
-/// are still verified cryptographically so the channel is not plaintext.
+/// and the user already opted in by aiming the camera at an MSE (`wss://`)
+/// address.  TLS handshake signatures are still verified cryptographically so
+/// the channel is not plaintext.
 #[derive(Debug)]
 struct NoServerCertVerifier;
 
@@ -2239,8 +2319,13 @@ mod tests {
             onvif_port: 80,
             rtsp_main: uri.to_string(),
             rtsp_sub: Some(format!("{uri}-sub")),
+            mse_main: None,
+            mse_sub: None,
             username: None,
             password: None,
+            mse_username: None,
+            mse_password: None,
+            connect: ConnectionMode::default(),
             enabled: true,
             tags: Vec::new(),
             origin: CameraOrigin::Manual,
@@ -2250,6 +2335,36 @@ mod tests {
             sub_profile: None,
             group: 0,
         }
+    }
+
+    /// The connection mode decides what a channel pulls and what it may fall
+    /// back to: `Auto` keeps the MSE address as a fallback with Frigate's own
+    /// login, a forced protocol carries none.
+    #[test]
+    fn the_connection_mode_decides_the_fallback() {
+        let mut camera = camera("cam", "rtsp://10.0.0.1:8554/cam_1");
+        camera.origin = CameraOrigin::Frigate;
+        camera.mse_main = Some("wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1".to_string());
+        camera.mse_username = Some("frigate".to_string());
+        camera.mse_password = Some("pw".to_string());
+
+        camera.connect = ConnectionMode::Auto;
+        let endpoint = endpoint_for(&camera, StreamKind::Main, 0);
+        assert_eq!(endpoint.uri, "rtsp://10.0.0.1:8554/cam_1");
+        let fallback = endpoint.fallback.expect("an auto camera keeps the mse address");
+        assert_eq!(fallback.uri, "wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1");
+        assert_eq!(fallback.credentials, Some(("frigate".to_string(), "pw".to_string())));
+
+        camera.connect = ConnectionMode::Rtsp;
+        let endpoint = endpoint_for(&camera, StreamKind::Main, 0);
+        assert_eq!(endpoint.uri, "rtsp://10.0.0.1:8554/cam_1");
+        assert!(endpoint.fallback.is_none(), "a forced rtsp has no fallback");
+
+        camera.connect = ConnectionMode::Mse;
+        let endpoint = endpoint_for(&camera, StreamKind::Main, 0);
+        assert_eq!(endpoint.uri, "wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1");
+        assert_eq!(endpoint.credentials, Some(("frigate".to_string(), "pw".to_string())));
+        assert!(endpoint.fallback.is_none(), "a forced mse has no fallback");
     }
 
     #[test]

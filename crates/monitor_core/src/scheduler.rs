@@ -1,5 +1,5 @@
 use crate::layout::{self, Direction, GridLayout, NavigateOutcome, PageInfo};
-use crate::model::{CameraSource, RtspTransport, StreamKind};
+use crate::model::{CameraSource, ConnectionMode, RtspTransport, StreamKind};
 
 /// Decoding decision for a single channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +48,10 @@ pub struct ChannelPlan {
     /// Transport the worker opens the stream with. Part of the plan too, so
     /// switching a camera between TCP and UDP reconnects it.
     pub transport: RtspTransport,
+    /// How the worker reaches the camera. Part of the plan so that switching a
+    /// camera between `Auto`, `Rtsp` and `Mse` reconnects it - two of those
+    /// share a URL, so the URL alone would not tell them apart.
+    pub connect: ConnectionMode,
 }
 
 /// The complete decoding plan derived from layout, page, zoom and focus.
@@ -468,8 +472,15 @@ impl Scheduler {
                 } else {
                     ChannelMode::Suspend
                 };
-                let uri = mode.stream().map(|stream| camera.stream_uri(stream).to_string());
-                ChannelPlan { index, camera_id: camera.id.clone(), mode, uri, transport: camera.transport }
+                let uri = mode.stream().map(|stream| camera.active_uri(stream).to_string());
+                ChannelPlan {
+                    index,
+                    camera_id: camera.id.clone(),
+                    mode,
+                    uri,
+                    transport: camera.transport,
+                    connect: camera.connect,
+                }
             })
             .collect();
 

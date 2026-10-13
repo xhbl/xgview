@@ -10,13 +10,15 @@ use crossbeam_channel::Sender;
 use egui::{Align, Layout, RichText};
 use tokio::runtime::Handle;
 
-use monitor_core::config::{AppConfig, DiscoveryConfig, FrigateConfig, Go2rtcConfig, SynologyConfig};
+use monitor_core::config::{
+    AppConfig, DiscoveryConfig, FrigateConfig, FrigateProtocol, Go2rtcConfig, SynologyConfig,
+};
 use monitor_core::discovery::{
     DiscoveryEvent, DiscoveryReport, DiscoveryService, DiscoveredDevice, FrigateImport, Go2rtcImport,
     PortHit, ProgressCallback,
 };
-use monitor_core::discovery::frigate::{extract_rtsp_port, extract_stream, stream_url};
-use monitor_core::model::CameraSource;
+use monitor_core::discovery::frigate::{extract_rtsp_port, extract_stream, mse_url, rtsp_url};
+use monitor_core::model::{CameraSource, StreamKind};
 
 use crate::controls;
 use crate::icons::{self, Icon};
@@ -861,10 +863,56 @@ pub struct CameraFields {
 /// window both lay them out.
 ///
 /// `grid_id` names the grid - egui keys a grid's state on it, so the two must
-/// not share one. See [`CameraFields`] for what comes back.
-pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mut CameraDraft) -> CameraFields {
+/// not share one.
+///
+/// `managed` is the camera being edited, when there is one that carries a pair
+/// of addresses an import put there (a Frigate or go2rtc camera with an MSE
+/// fallback). Its addresses are then shown read-only: editing one of a managed
+/// pair by hand would leave the other pointing at a stream that no longer
+/// matches, and re-importing is what refreshes both. The name stays editable.
+/// See [`CameraFields`] for what comes back.
+pub fn camera_fields(
+    ui: &mut egui::Ui,
+    nav: &mut Nav,
+    grid_id: &str,
+    draft: &mut CameraDraft,
+    managed: Option<&CameraSource>,
+) -> CameraFields {
     let mut first = None;
     let mut inferred = false;
+
+    if let Some(camera) = managed.filter(|camera| camera.has_mse()) {
+        egui::Grid::new(grid_id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+            ui.label(monitor_i18n::tr("dialog-name"));
+            let name = text_field(ui, nav, &mut draft.name, &monitor_i18n::tr("dialog-name"), false, false, |s| {
+                egui::TextEdit::singleline(s).hint_text(theme::hint(&monitor_i18n::tr("dialog-name-hint"))).desired_width(f32::INFINITY)
+            });
+            first = Some(name.id);
+            ui.end_row();
+
+            // Read-only: the two addresses the import captured, masked.
+            ui.label(RichText::new("rtsp").small());
+            ui.label(
+                RichText::new(camera.masked_rtsp_uri(StreamKind::Main))
+                    .small()
+                    .monospace()
+                    .color(theme::TEXT_DIM),
+            );
+            ui.end_row();
+            if let Some(mse) = camera.masked_mse_uri(StreamKind::Main) {
+                ui.label(RichText::new("mse").small());
+                ui.label(RichText::new(mse).small().monospace().color(theme::TEXT_DIM));
+                ui.end_row();
+            }
+        });
+        ui.label(
+            RichText::new(monitor_i18n::tr("camera-edit-managed-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+        return CameraFields { first, inferred };
+    }
+
     egui::Grid::new(grid_id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label(monitor_i18n::tr("dialog-name"));
         // The first control of the form, and the one a window opens on.
@@ -913,7 +961,7 @@ pub fn camera_fields(ui: &mut egui::Ui, nav: &mut Nav, grid_id: &str, draft: &mu
 
 fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {
     let mut changed = false;
-    if camera_fields(ui, nav, "manual-camera", &mut state.manual).inferred {
+    if camera_fields(ui, nav, "manual-camera", &mut state.manual, None).inferred {
         state.note(Tab::Manual, monitor_i18n::tr("dialog-sub-derived-msg"));
     }
 
@@ -1227,35 +1275,46 @@ fn apply_add(config: &mut AppConfig, state: &mut DiscoveryUi, tab: Tab, camera: 
     });
 }
 
-/// Rewrites the stream URLs of already-fetched cameras when the protocol is
-/// switched, so the server does not have to be contacted again: the cameras are
-/// the same, only the address XGView pulls changes.
+/// Re-applies the Frigate settings to the cameras already fetched, when the
+/// protocol, the address or a credential changes, so the server does not have
+/// to be contacted again.
+///
+/// Both addresses are held on every camera, so the two set is refreshed from the
+/// stream name each carries and the connection mode from the tab's choice: the
+/// cameras are the same, only what XGView prefers and the addresses it holds
+/// change.
 fn rewrite_frigate_urls(frigate: &FrigateConfig, cameras: &mut [CameraSource]) {
     let restream_port = cameras
         .first()
         .and_then(|c| extract_rtsp_port(&c.rtsp_main))
         .or(frigate.rtsp_port)
         .unwrap_or(8554);
+    let connect = frigate.protocol.connection_mode();
     for camera in cameras {
         if let Some(stream) = extract_stream(&camera.rtsp_main) {
-            camera.rtsp_main = stream_url(frigate, restream_port, &stream);
+            camera.rtsp_main = rtsp_url(frigate, restream_port, &stream);
+            camera.mse_main = Some(mse_url(frigate, &stream));
         }
         if let Some(sub) = camera.rtsp_sub.as_mut() {
             if let Some(stream) = extract_stream(sub) {
-                *sub = stream_url(frigate, restream_port, &stream);
+                *sub = rtsp_url(frigate, restream_port, &stream);
+                camera.mse_sub = Some(mse_url(frigate, &stream));
             }
         }
-        if frigate.wss {
-            if !frigate.username.trim().is_empty() {
-                camera.username = Some(frigate.username.clone());
-                camera.password = Some(frigate.password.clone());
-            } else {
-                camera.username = None;
-                camera.password = None;
-            }
-        } else if !frigate.rtsp_username.trim().is_empty() {
+        camera.connect = connect;
+        // The restream account, for the RTSP address - kept as the import read
+        // it when the tab names none of its own.
+        if !frigate.rtsp_username.trim().is_empty() {
             camera.username = Some(frigate.rtsp_username.clone());
             camera.password = Some(frigate.rtsp_password.clone());
+        }
+        // Frigate's own login, for the WebSocket stream.
+        if !frigate.username.trim().is_empty() {
+            camera.mse_username = Some(frigate.username.clone());
+            camera.mse_password = Some(frigate.password.clone());
+        } else {
+            camera.mse_username = None;
+            camera.mse_password = None;
         }
     }
 }
@@ -1332,41 +1391,56 @@ fn frigate_tab(
     // pull.
     if !state.frigate_cameras.is_empty() || !state.frigate_leftovers.is_empty() {
         ui.add_space(6.0);
-        let wss_before = frigate.wss;
+        // The protocol is a preference between two addresses both of which are
+        // captured, so it can be switched without contacting the server again.
         ui.horizontal(|ui| {
             ui.label(RichText::new(monitor_i18n::tr("dialog-frigate-protocol")).small());
-            nav.tracked(ui.radio_value(&mut frigate.wss, false, monitor_i18n::tr("dialog-frigate-protocol-rtsp")));
+            nav.tracked(ui.radio_value(
+                &mut frigate.protocol,
+                FrigateProtocol::Auto,
+                monitor_i18n::tr("dialog-frigate-protocol-auto"),
+            ));
+            nav.tracked(ui.radio_value(
+                &mut frigate.protocol,
+                FrigateProtocol::Rtsp,
+                monitor_i18n::tr("dialog-frigate-protocol-rtsp"),
+            ));
             let ws_label = if frigate.https { "wss" } else { "ws" };
-            nav.tracked(ui.radio_value(&mut frigate.wss, true, ws_label));
+            nav.tracked(ui.radio_value(&mut frigate.protocol, FrigateProtocol::Mse, ws_label));
         });
-        if frigate.wss {
-            ui.label(
-                RichText::new(monitor_i18n::tr("dialog-frigate-wss-hint"))
-                    .small()
-                    .color(theme::TEXT_DIM),
-            );
-        } else {
-            ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-credentials")).small());
-            credentials_row(ui, nav, &mut frigate.rtsp_username, &mut frigate.rtsp_password);
-            ui.label(
-                RichText::new(monitor_i18n::tr("dialog-rtsp-override-hint"))
-                    .small()
-                    .color(theme::TEXT_DIM),
-            );
-            restream_port_row(
-                ui,
-                nav,
-                state.frigate_rtsp_port.get_or_insert_with(|| port_text(frigate.rtsp_port)),
-                &mut frigate.rtsp_port,
-            );
-        }
-        if frigate.wss != wss_before {
-            rewrite_frigate_urls(frigate, &mut state.frigate_cameras);
-            rewrite_frigate_urls(frigate, &mut state.frigate_leftovers);
-            changed = true;
-        }
+        ui.label(
+            RichText::new(monitor_i18n::tr(match frigate.protocol {
+                FrigateProtocol::Auto => "dialog-frigate-auto-hint",
+                FrigateProtocol::Rtsp => "dialog-frigate-rtsp-hint",
+                FrigateProtocol::Mse => "dialog-frigate-wss-hint",
+            }))
+            .small()
+            .color(theme::TEXT_DIM),
+        );
+
+        // The restream account belongs below the separator with the streams. It
+        // is always shown: the RTSP address is captured whichever protocol is
+        // preferred, and a switch back to it must find the account in place.
+        ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-credentials")).small());
+        credentials_row(ui, nav, &mut frigate.rtsp_username, &mut frigate.rtsp_password);
+        ui.label(
+            RichText::new(monitor_i18n::tr("dialog-rtsp-override-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+        restream_port_row(
+            ui,
+            nav,
+            state.frigate_rtsp_port.get_or_insert_with(|| port_text(frigate.rtsp_port)),
+            &mut frigate.rtsp_port,
+        );
     }
     if *frigate != before {
+        // The cameras already fetched hold both addresses, so a change to the
+        // protocol, the address or a credential is applied to them here rather
+        // than waiting for another fetch.
+        rewrite_frigate_urls(frigate, &mut state.frigate_cameras);
+        rewrite_frigate_urls(frigate, &mut state.frigate_leftovers);
         changed = true;
     }
 
