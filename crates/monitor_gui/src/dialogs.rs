@@ -11,13 +11,16 @@ use egui::{Align, Layout, RichText};
 use tokio::runtime::Handle;
 
 use monitor_core::config::{
-    AppConfig, DiscoveryConfig, FrigateConfig, FrigateProtocol, Go2rtcConfig, SynologyConfig,
+    AppConfig, DiscoveryConfig, FrigateConfig, Go2rtcConfig, StreamProtocol, SynologyConfig,
 };
 use monitor_core::discovery::{
     DiscoveryEvent, DiscoveryReport, DiscoveryService, DiscoveredDevice, FrigateImport, Go2rtcImport,
     PortHit, ProgressCallback,
 };
-use monitor_core::discovery::frigate::{extract_rtsp_port, extract_stream, mse_url, rtsp_url};
+use monitor_core::discovery::frigate::{
+    extract_rtsp_port, extract_stream, mse_url as frigate_mse_url, rtsp_url as frigate_rtsp_url,
+};
+use monitor_core::discovery::go2rtc::{mse_url as go2rtc_mse_url, restream_url as go2rtc_rtsp_url};
 use monitor_core::model::{CameraSource, StreamKind};
 
 use crate::controls;
@@ -1292,13 +1295,13 @@ fn rewrite_frigate_urls(frigate: &FrigateConfig, cameras: &mut [CameraSource]) {
     let connect = frigate.protocol.connection_mode();
     for camera in cameras {
         if let Some(stream) = extract_stream(&camera.rtsp_main) {
-            camera.rtsp_main = rtsp_url(frigate, restream_port, &stream);
-            camera.mse_main = Some(mse_url(frigate, &stream));
+            camera.rtsp_main = frigate_rtsp_url(frigate, restream_port, &stream);
+            camera.mse_main = Some(frigate_mse_url(frigate, &stream));
         }
         if let Some(sub) = camera.rtsp_sub.as_mut() {
             if let Some(stream) = extract_stream(sub) {
-                *sub = rtsp_url(frigate, restream_port, &stream);
-                camera.mse_sub = Some(mse_url(frigate, &stream));
+                *sub = frigate_rtsp_url(frigate, restream_port, &stream);
+                camera.mse_sub = Some(frigate_mse_url(frigate, &stream));
             }
         }
         camera.connect = connect;
@@ -1312,6 +1315,66 @@ fn rewrite_frigate_urls(frigate: &FrigateConfig, cameras: &mut [CameraSource]) {
         if !frigate.username.trim().is_empty() {
             camera.mse_username = Some(frigate.username.clone());
             camera.mse_password = Some(frigate.password.clone());
+        } else {
+            camera.mse_username = None;
+            camera.mse_password = None;
+        }
+    }
+}
+
+/// The protocol choice a server import offers: both addresses are always
+/// captured, so this only picks which one the imported cameras start on - a
+/// fallback from one to the other, or one forced. `https` only renames the
+/// WebSocket stop, `wss` or `ws`.
+fn protocol_choice(
+    ui: &mut egui::Ui,
+    nav: &mut Nav,
+    protocol: &mut StreamProtocol,
+    https: bool,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(monitor_i18n::tr("dialog-stream-protocol")).small());
+        nav.tracked(ui.radio_value(protocol, StreamProtocol::Auto, monitor_i18n::tr("dialog-protocol-auto")));
+        nav.tracked(ui.radio_value(protocol, StreamProtocol::Rtsp, monitor_i18n::tr("dialog-protocol-rtsp")));
+        let ws_label = if https { "wss" } else { "ws" };
+        nav.tracked(ui.radio_value(protocol, StreamProtocol::Mse, ws_label));
+    });
+    ui.label(
+        RichText::new(monitor_i18n::tr(match protocol {
+            StreamProtocol::Auto => "dialog-protocol-auto-hint",
+            StreamProtocol::Rtsp => "dialog-protocol-rtsp-hint",
+            StreamProtocol::Mse => "dialog-protocol-ws-hint",
+        }))
+        .small()
+        .color(theme::TEXT_DIM),
+    );
+}
+
+/// Re-applies the go2rtc settings to the streams already fetched, when the
+/// protocol, the address or a credential changes, so the server does not have
+/// to be contacted again.
+fn rewrite_go2rtc_urls(go2rtc: &Go2rtcConfig, cameras: &mut [CameraSource]) {
+    let restream_port = cameras
+        .first()
+        .and_then(|c| extract_rtsp_port(&c.rtsp_main))
+        .or(go2rtc.rtsp_port)
+        .unwrap_or(8554);
+    let connect = go2rtc.protocol.connection_mode();
+    for camera in cameras {
+        if let Some(stream) = extract_stream(&camera.rtsp_main) {
+            camera.rtsp_main = go2rtc_rtsp_url(&go2rtc.host, restream_port, &stream);
+            camera.mse_main = Some(go2rtc_mse_url(go2rtc, &stream));
+        }
+        camera.connect = connect;
+        // The restream account, for the RTSP address.
+        if !go2rtc.rtsp_username.trim().is_empty() {
+            camera.username = Some(go2rtc.rtsp_username.clone());
+            camera.password = Some(go2rtc.rtsp_password.clone());
+        }
+        // go2rtc's `api:` account, for the WebSocket address.
+        if !go2rtc.api_username.trim().is_empty() {
+            camera.mse_username = Some(go2rtc.api_username.clone());
+            camera.mse_password = Some(go2rtc.api_password.clone());
         } else {
             camera.mse_username = None;
             camera.mse_password = None;
@@ -1393,30 +1456,7 @@ fn frigate_tab(
         ui.add_space(6.0);
         // The protocol is a preference between two addresses both of which are
         // captured, so it can be switched without contacting the server again.
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(monitor_i18n::tr("dialog-frigate-protocol")).small());
-            nav.tracked(ui.radio_value(
-                &mut frigate.protocol,
-                FrigateProtocol::Auto,
-                monitor_i18n::tr("dialog-frigate-protocol-auto"),
-            ));
-            nav.tracked(ui.radio_value(
-                &mut frigate.protocol,
-                FrigateProtocol::Rtsp,
-                monitor_i18n::tr("dialog-frigate-protocol-rtsp"),
-            ));
-            let ws_label = if frigate.https { "wss" } else { "ws" };
-            nav.tracked(ui.radio_value(&mut frigate.protocol, FrigateProtocol::Mse, ws_label));
-        });
-        ui.label(
-            RichText::new(monitor_i18n::tr(match frigate.protocol {
-                FrigateProtocol::Auto => "dialog-frigate-auto-hint",
-                FrigateProtocol::Rtsp => "dialog-frigate-rtsp-hint",
-                FrigateProtocol::Mse => "dialog-frigate-wss-hint",
-            }))
-            .small()
-            .color(theme::TEXT_DIM),
-        );
+        protocol_choice(ui, nav, &mut frigate.protocol, frigate.https);
 
         // The restream account belongs below the separator with the streams. It
         // is always shown: the RTSP address is captured whichever protocol is
@@ -1550,6 +1590,10 @@ fn go2rtc_tab(
     // streams to pull.
     if !state.go2rtc_cameras.is_empty() {
         ui.add_space(6.0);
+        // The protocol is a preference between two addresses both of which are
+        // captured, so it can be switched without contacting the server again.
+        protocol_choice(ui, nav, &mut go2rtc.protocol, go2rtc.https);
+
         ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-credentials")).small());
         credentials_row(ui, nav, &mut go2rtc.rtsp_username, &mut go2rtc.rtsp_password);
         // No account could be read, so there is nothing to fall back to: say so
@@ -1567,6 +1611,10 @@ fn go2rtc_tab(
         );
     }
     if *go2rtc != before {
+        // The streams already fetched hold both addresses, so a change to the
+        // protocol, the address or a credential is applied to them here rather
+        // than waiting for another fetch.
+        rewrite_go2rtc_urls(go2rtc, &mut state.go2rtc_cameras);
         changed = true;
     }
 

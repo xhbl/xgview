@@ -172,14 +172,14 @@ impl SynologyConfig {
     }
 }
 
-/// Which protocol the Frigate import builds its stream URLs for.
+/// Which protocol a server import prefers for the cameras it brings in.
 ///
-/// The import captures both the RTSP restream and go2rtc's MSE (WebSocket)
-/// URL for every camera, so this only decides what the imported cameras start
-/// out preferring. It may be overridden per camera afterwards.
+/// A Frigate or go2rtc import captures both the RTSP restream and the MSE
+/// (WebSocket) address of every camera, so this only chooses what the imported
+/// cameras start out preferring. It may be overridden per camera afterwards.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum FrigateProtocol {
+pub enum StreamProtocol {
     /// Capture both, prefer RTSP, fall back to MSE. The default.
     #[default]
     Auto,
@@ -189,13 +189,13 @@ pub enum FrigateProtocol {
     Mse,
 }
 
-impl FrigateProtocol {
+impl StreamProtocol {
     /// The connection mode an imported camera starts on.
     pub fn connection_mode(self) -> ConnectionMode {
         match self {
-            FrigateProtocol::Auto => ConnectionMode::Auto,
-            FrigateProtocol::Rtsp => ConnectionMode::Rtsp,
-            FrigateProtocol::Mse => ConnectionMode::Mse,
+            StreamProtocol::Auto => ConnectionMode::Auto,
+            StreamProtocol::Rtsp => ConnectionMode::Rtsp,
+            StreamProtocol::Mse => ConnectionMode::Mse,
         }
     }
 }
@@ -228,9 +228,9 @@ pub struct FrigateConfig {
     pub rtsp_port: Option<u16>,
     /// Which protocol the imported cameras start out preferring. Both addresses
     /// are always captured; this only picks what is tried first. See
-    /// [`FrigateProtocol`].
+    /// [`StreamProtocol`].
     #[serde(default)]
-    pub protocol: FrigateProtocol,
+    pub protocol: StreamProtocol,
 }
 
 impl Default for FrigateConfig {
@@ -244,7 +244,7 @@ impl Default for FrigateConfig {
             rtsp_username: String::new(),
             rtsp_password: String::new(),
             rtsp_port: None,
-            protocol: FrigateProtocol::default(),
+            protocol: StreamProtocol::default(),
         }
     }
 }
@@ -290,6 +290,11 @@ pub struct Go2rtcConfig {
     /// The restream port. Left unset, `rtsp.listen` is read from go2rtc's
     /// `/api`, and only then does it fall back to 8554.
     pub rtsp_port: Option<u16>,
+    /// Which protocol the imported cameras start out preferring. Both addresses
+    /// are always captured; this only picks what is tried first. See
+    /// [`StreamProtocol`].
+    #[serde(default)]
+    pub protocol: StreamProtocol,
 }
 
 impl Default for Go2rtcConfig {
@@ -303,6 +308,7 @@ impl Default for Go2rtcConfig {
             rtsp_username: String::new(),
             rtsp_password: String::new(),
             rtsp_port: None,
+            protocol: StreamProtocol::default(),
         }
     }
 }

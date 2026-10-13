@@ -409,7 +409,8 @@ Press `F2` to open the *add devices* window, which has five pages:
    port. The restream port is read from go2rtc's `rtsp.listen` and the restream
    account from the configuration file it serves at `/api/config` (entered by
    hand when that file is not available); the WebSocket address uses go2rtc's
-   `api:` account instead.
+   `api:` account instead. The tab's *Stream protocol* chooses what the imported
+   cameras prefer, as on the Frigate tab.
 
 Cameras are listed in the **Cameras** tab, where they can be renamed, reordered,
 disabled, and given a display aspect (original, stretch, 16:9, 4:3 or 1:1) and a

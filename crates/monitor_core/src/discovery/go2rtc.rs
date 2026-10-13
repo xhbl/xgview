@@ -173,6 +173,7 @@ impl Go2rtcClient {
         // restream, and the MSE endpoint on go2rtc's own API port. The camera
         // prefers RTSP and reaches for the WebSocket when RTSP cannot be.
         source.mse_main = Some(mse_url(&self.config, name));
+        source.connect = self.config.protocol.connection_mode();
         // The restream account, for the RTSP address.
         if let Some((username, password)) = credentials {
             source.username = Some(username.clone());
@@ -293,6 +294,7 @@ fn strip_scalar(raw: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::StreamProtocol;
     use crate::model::ConnectionMode;
 
     /// A stream is offered with both addresses - the RTSP restream and the MSE
@@ -329,6 +331,21 @@ mod tests {
         let source = client.to_source("cam_1", 8554, &None);
         assert_eq!(source.mse_main.as_deref(), Some("ws://192.168.17.90:1984/api/ws?src=cam_1"));
         assert!(source.mse_username.is_none());
+    }
+
+    /// The tab's protocol choice is written onto each imported stream.
+    #[test]
+    fn the_protocol_sets_the_connection_mode() {
+        for (protocol, expected) in [
+            (StreamProtocol::Auto, ConnectionMode::Auto),
+            (StreamProtocol::Rtsp, ConnectionMode::Rtsp),
+            (StreamProtocol::Mse, ConnectionMode::Mse),
+        ] {
+            let config = Go2rtcConfig { host: "10.0.0.1".into(), protocol, ..Default::default() };
+            let client = Go2rtcClient::new(config).expect("a configured host");
+            let source = client.to_source("cam_1", 8554, &None);
+            assert_eq!(source.connect, expected);
+        }
     }
 
     #[test]

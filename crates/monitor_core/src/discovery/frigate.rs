@@ -452,7 +452,7 @@ async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateIm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::FrigateProtocol;
+    use crate::config::StreamProtocol;
     use crate::model::ConnectionMode;
 
     fn frigate_config() -> FrigateConfig {
@@ -625,9 +625,9 @@ mod tests {
     #[test]
     fn the_protocol_sets_the_connection_mode() {
         for (protocol, expected) in [
-            (FrigateProtocol::Auto, ConnectionMode::Auto),
-            (FrigateProtocol::Rtsp, ConnectionMode::Rtsp),
-            (FrigateProtocol::Mse, ConnectionMode::Mse),
+            (StreamProtocol::Auto, ConnectionMode::Auto),
+            (StreamProtocol::Rtsp, ConnectionMode::Rtsp),
+            (StreamProtocol::Mse, ConnectionMode::Mse),
         ] {
             let config = FrigateConfig { protocol, ..frigate_config() };
             let source = source_for(&config, 8554, "cam", "cam_1", &None);
