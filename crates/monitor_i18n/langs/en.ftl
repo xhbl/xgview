@@ -161,11 +161,13 @@ about-import = Import…
 about-author-name = Author
 about-repository = Project on GitHub
 about-export-name = Export configuration
+about-encrypt-export = Encrypt the exported file
+about-encrypt-export-name = Encrypt the exported file
 about-import-name = Import configuration
 about-only-cameras = Only import the cameras
 about-only-cameras-name = Only import the cameras
-about-import-hint = Importing overwrites your current configuration. Check the box to import the cameras and their groups only, keeping your viewer settings. The export is sealed with a passphrase before it is written.
-about-import-hint-android = Export saves a sealed config.age to Download/xgview. Import opens the system file picker. { about-import-hint }
+about-import-hint = Importing overwrites your current configuration. Check the box to import the cameras and their groups only, keeping your viewer settings. The export is sealed with a passphrase unless you untick the box beside it.
+about-import-hint-android = Export saves a config.age to Download/xgview, sealed with a passphrase unless you untick the box beside it. Import opens the system file picker. { about-import-hint }
 
 ## Passphrase prompt
 prompt-seal-title = Seal the configuration

@@ -236,18 +236,20 @@ Everything is stored in one `config.json`:
 | Any | set `XGVIEW_CONFIG_DIR` to override the folder, or pass `--config <PATH>` |
 
 The **About** tab exports and imports the file (on Android, export writes to
-`Download/xgview/config.age` and import opens the system file picker). On the
-desktop both open a file browser drawn **inside the wall** rather than a dialog
+`Download/xgview` and import opens the system file picker). On the desktop both
+open a file browser drawn **inside the wall** rather than a dialog
 of the desktop's, so it looks and behaves the same everywhere and needs no
-desktop session behind it. An export is **sealed with a passphrase** - an
-[`age`](https://age-encryption.org) document holding the whole configuration, so
-the copy you carry between machines is of no use to anyone who finds it - and the
-passphrase is asked for twice and stored nowhere. Importing reads either form: a
-sealed file asks for its passphrase, an older clear `config.json` is read as
-before. Importing replaces the whole configuration - the one it replaces is kept
-beside it as `config.json.bak`, and a file that is not an XGView configuration is
-refused rather than adopted. A checkbox imports only the cameras and keeps your
-viewer settings.
+desktop session behind it. An export is **sealed with a passphrase** by default -
+an [`age`](https://age-encryption.org) document holding the whole configuration,
+so the copy you carry between machines is of no use to anyone who finds it - and
+the passphrase is asked for twice and stored nowhere. A box beside the export
+button writes the JSON in clear instead, for a file that is going no further than
+a machine you trust; like the import box, it lasts for the session and is not
+saved. Importing reads either form: a sealed file asks for its passphrase, an
+older clear `config.json` is read as before. Importing replaces the whole
+configuration - the one it replaces is kept beside it as `config.json.bak`, and a
+file that is not an XGView configuration is refused rather than adopted. A
+checkbox imports only the cameras and keeps your viewer settings.
 
 ---
 

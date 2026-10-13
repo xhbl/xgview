@@ -159,11 +159,13 @@ about-import = 导入…
 about-author-name = 作者
 about-repository = GitHub 项目主页
 about-export-name = 导出配置
+about-encrypt-export = 加密导出文件
+about-encrypt-export-name = 加密导出文件
 about-import-name = 导入配置
 about-only-cameras = 仅导入摄像头
 about-only-cameras-name = 仅导入摄像头
-about-import-hint = 导入会覆盖当前配置。勾选此框仅导入摄像头及其分组，保留本查看器自身的设置。导出会用口令加密后写入。
-about-import-hint-android = 导出会将加密后的 config.age 保存到 Download/xgview。导入会打开系统文件选择器。{ about-import-hint }
+about-import-hint = 导入会覆盖当前配置。勾选此框仅导入摄像头及其分组，保留本查看器自身的设置。导出默认用口令加密后写入，取消旁边的勾选则明文导出。
+about-import-hint-android = 导出会将 config.age 保存到 Download/xgview，默认用口令加密，取消勾选则明文导出。导入会打开系统文件选择器。{ about-import-hint }
 
 ## 口令
 prompt-seal-title = 加密配置

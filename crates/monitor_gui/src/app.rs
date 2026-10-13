@@ -459,8 +459,9 @@ impl Passphrase {
 /// an import. See [`XgViewApp::ask_for_file`].
 #[derive(Debug)]
 enum FileJob {
-    /// Sealing the configuration for another machine, under this passphrase.
-    Export(String),
+    /// Writing the configuration for another machine, sealed under this
+    /// passphrase, or in clear when there is none.
+    Export(Option<String>),
     /// Reading a configuration in - sealed, or in clear from an older export.
     Import,
 }
@@ -705,6 +706,13 @@ pub struct XgViewApp {
     /// default: taking the cameras alone is the import that cannot surprise a
     /// machine that is already installed.
     import_cameras_only: bool,
+    /// Whether an export is sealed with a passphrase before it is written.
+    /// Ticked by default: a configuration carries the cameras' credentials, so
+    /// a copy that travels is sealed unless the viewer says otherwise.
+    /// Unticking it writes the JSON in clear, for a file that is going no
+    /// further than a machine the viewer trusts. Like the import box beside it,
+    /// this is a preference for the session and is not saved.
+    encrypt_export: bool,
     /// The passphrase prompt, while it is up: what seals an export, and what
     /// opens a sealed one. See [`Passphrase`].
     passphrase: Option<Passphrase>,
@@ -946,6 +954,7 @@ impl XgViewApp {
             swallow_enter: 0,
             restore_focus: None,
             import_cameras_only: true,
+            encrypt_export: true,
             passphrase: None,
             passphrase_anchor: None,
             passphrase_handoff: Handoff::default(),
@@ -1395,9 +1404,16 @@ impl XgViewApp {
     #[cfg(not(target_os = "android"))]
     fn ask_for_file(&mut self, job: FileJob) {
         match &job {
-            FileJob::Export(_) => {
-                self.file_dialog.config_mut().default_file_name =
-                    monitor_core::EXPORT_FILE_NAME.to_owned();
+            FileJob::Export(passphrase) => {
+                // The name says which of the two the file is: the sealed export
+                // carries an `.age` and the one written in clear a `.json`, and
+                // both are what the dialog's filter accepts.
+                self.file_dialog.config_mut().default_file_name = if passphrase.is_some() {
+                    monitor_core::EXPORT_FILE_NAME
+                } else {
+                    monitor_core::CONFIG_FILE_NAME
+                }
+                .to_owned();
                 self.file_dialog.save_file();
             }
             FileJob::Import => self.file_dialog.pick_file(),
@@ -1432,7 +1448,7 @@ impl XgViewApp {
         self.file_dialog.update(ctx);
         if let Some(path) = self.file_dialog.take_picked() {
             match self.file_job.take() {
-                Some(FileJob::Export(passphrase)) => self.export_to(&path, &passphrase),
+                Some(FileJob::Export(passphrase)) => self.export_to(&path, passphrase.as_deref()),
                 Some(FileJob::Import) => self.import_from(path),
                 None => {}
             }
@@ -1460,7 +1476,7 @@ impl XgViewApp {
     #[cfg(target_os = "android")]
     fn ask_for_file(&mut self, job: FileJob) {
         match job {
-            FileJob::Export(passphrase) => self.export_sealed(&passphrase),
+            FileJob::Export(passphrase) => self.export_config(passphrase.as_deref()),
             FileJob::Import => self.import_config(),
         }
     }
@@ -4521,7 +4537,7 @@ impl XgViewApp {
                     } else {
                         // Asked for here, and drawn from the next frame on by
                         // `poll_file_dialog`.
-                        self.ask_for_file(FileJob::Export(prompt.first.clone()));
+                        self.ask_for_file(FileJob::Export(Some(prompt.first.clone())));
                         leave = true;
                     }
                 }
@@ -4617,29 +4633,42 @@ impl XgViewApp {
             &[("path", self.config_path.display().to_string().into())],
         ));
 
-        // The export / import pair. The export is sealed with a passphrase, which
-        // the prompt asks for before the file is written; the desktop opens a
-        // file dialog for each, while Android writes into the public
-        // Download/xgview folder and opens the system's document picker, and the
-        // hint says so.
+        // The export / import pair. The export is sealed with a passphrase by
+        // default, which the prompt asks for before the file is written;
+        // unticking the box beside it writes the JSON in clear instead. The
+        // desktop opens a file dialog for each, while Android writes into the
+        // public Download/xgview folder and opens the system's document picker,
+        // and the hint says so.
         ui.add_space(theme::space::M);
-        let export = ui.button(monitor_i18n::tr("about-export"));
-        self.nav.item(&export);
-        self.name(&export, "about-export-name");
-        if export.clicked() {
-            // The passphrase first: nothing is written until it has been typed
-            // twice, and the file dialog that follows is opened from the prompt.
-            // The button is remembered here, because by the time that dialog is
-            // up the focus has been through the prompt on the way.
-            //
-            // Only for a press that came from the keyboard or a remote: a
-            // pointer does not move the focus anywhere else in this program, so
-            // it must not appear to move it here either.
-            if !export.clicked_by(egui::PointerButton::Primary) {
-                self.file_dialog_anchor = Some(export.id);
+        ui.horizontal(|ui| {
+            let export = ui.button(monitor_i18n::tr("about-export"));
+            self.nav.item(&export);
+            self.name(&export, "about-export-name");
+            if export.clicked() {
+                // The passphrase first: nothing is written until it has been
+                // typed twice, and the file dialog that follows is opened from
+                // the prompt. With the box unticked there is none to ask for,
+                // and the dialog opens straight away.
+                //
+                // The button is remembered here, because by the time that dialog
+                // is up the focus has been through the prompt on the way.
+                //
+                // Only for a press that came from the keyboard or a remote: a
+                // pointer does not move the focus anywhere else in this program,
+                // so it must not appear to move it here either.
+                if !export.clicked_by(egui::PointerButton::Primary) {
+                    self.file_dialog_anchor = Some(export.id);
+                }
+                if self.encrypt_export {
+                    self.passphrase = Some(Passphrase::for_export());
+                } else {
+                    self.ask_for_file(FileJob::Export(None));
+                }
             }
-            self.passphrase = Some(Passphrase::for_export());
-        }
+            let encrypt = ui.checkbox(&mut self.encrypt_export, monitor_i18n::tr("about-encrypt-export"));
+            self.nav.item(&encrypt);
+            self.name(&encrypt, "about-encrypt-export-name");
+        });
         ui.horizontal(|ui| {
             let import = ui.button(monitor_i18n::tr("about-import"));
             self.nav.item(&import);
@@ -4683,15 +4712,15 @@ impl XgViewApp {
     /// Choosing it is the dialog [`Self::ask_for_file`] opens on another thread;
     /// this is what happens once its answer is in.
     #[cfg(not(target_os = "android"))]
-    fn export_to(&mut self, path: &Path, passphrase: &str) {
-        let sealed = match monitor_core::sealed::seal(&self.config, passphrase) {
-            Ok(sealed) => sealed,
+    fn export_to(&mut self, path: &Path, passphrase: Option<&str>) {
+        let written = match self.exported_text(passphrase) {
+            Ok(written) => written,
             Err(error) => {
                 self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]), ToastKind::Error);
                 return;
             }
         };
-        match std::fs::write(path, sealed.as_bytes()) {
+        match std::fs::write(path, written.as_bytes()) {
             Ok(()) => self.flash(
                 monitor_i18n::tr_args(
                     "toast-config-exported",
@@ -4703,23 +4732,44 @@ impl XgViewApp {
         }
     }
 
-    /// Writes the configuration out sealed with `passphrase`, into the public
-    /// `Download/xgview` folder.
+    /// The configuration as it goes into an export: sealed under `passphrase`,
+    /// or the JSON in clear when there is none.
+    ///
+    /// One place for the two, because the desktop writes the text to a file the
+    /// dialog chose and Android hands it to the activity's `MediaStore`, and
+    /// neither should be deciding what an export is.
+    fn exported_text(&self, passphrase: Option<&str>) -> Result<String, String> {
+        match passphrase {
+            Some(passphrase) => monitor_core::sealed::seal(&self.config, passphrase)
+                .map_err(|error| error.to_string()),
+            None => self.config.to_json().map_err(|error| error.to_string()),
+        }
+    }
+
+    /// Writes the configuration out into the public `Download/xgview` folder:
+    /// sealed with `passphrase`, or the JSON in clear when there is none.
     ///
     /// The write is the activity's - `MediaStore` from Android 10 on, a plain
     /// file into the public Downloads folder before that - because a
     /// `NativeActivity` has no storage of its own the viewer can reach. See
     /// `MainActivity.writeDownloadFile`.
     #[cfg(target_os = "android")]
-    fn export_sealed(&mut self, passphrase: &str) {
-        let sealed = match monitor_core::sealed::seal(&self.config, passphrase) {
-            Ok(sealed) => sealed,
+    fn export_config(&mut self, passphrase: Option<&str>) {
+        // The name says which of the two the file is, as it does for the
+        // desktop's dialog.
+        let name = if passphrase.is_some() {
+            monitor_core::EXPORT_FILE_NAME
+        } else {
+            monitor_core::CONFIG_FILE_NAME
+        };
+        let written = match self.exported_text(passphrase) {
+            Ok(written) => written,
             Err(error) => {
                 self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]), ToastKind::Error);
                 return;
             }
         };
-        match crate::android::write_download(monitor_core::EXPORT_FILE_NAME, &sealed) {
+        match crate::android::write_download(name, &written) {
             Ok(crate::android::ExportOutcome::Written(path)) => self.flash(
                 monitor_i18n::tr_args("toast-config-exported", &[("path", path.into())]),
                 ToastKind::Info,
