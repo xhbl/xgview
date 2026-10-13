@@ -177,28 +177,7 @@ impl AMediaCodecDecoder {
         let (csd, size) = decode_parameter_sets(config.codec, access_unit);
         let size = size.or(Some((config.width, config.height)).filter(|(w, h)| *w > 0 && *h > 0));
 
-        // Low latency is asked for first and given up only if the codec refuses
-        // the whole configuration over it. `ACodec` does not treat the option as
-        // a hint it may drop: HiSilicon's H.264 decoder answers
-        // `OMX_ErrorUndefined` to it and the configuration is lost, which the
-        // NDK reports as the same meaningless `-10000` it reports for a format
-        // the codec will not take at all. The public NDK has no way to ask a
-        // codec whether it supports the option - `AMediaCodecInfo` is not in it
-        // - so trying is what keeps the option on the decoders that do take it.
-        let mut low_latency = config.low_latency;
-        let codec = match Self::open_session(&mime, &csd, size, low_latency) {
-            Ok(codec) => codec,
-            Err(err) if low_latency => {
-                low_latency = false;
-                tracing::debug!(
-                    target: "xgview::codec",
-                    %err,
-                    "the decoder refused low latency; opening without it"
-                );
-                Self::open_session(&mime, &csd, size, false)?
-            }
-            Err(err) => return Err(err),
-        };
+        let codec = Self::open_session(&mime, &csd, size)?;
 
         self.handle = Some(codec);
         self.started = true;
@@ -211,7 +190,6 @@ impl AMediaCodecDecoder {
         tracing::debug!(
             target: "xgview::codec",
             codec = config.codec.as_str(),
-            low_latency,
             "AMediaCodec session open, decoding into byte buffers"
         );
         Ok(())
@@ -229,7 +207,6 @@ impl AMediaCodecDecoder {
         mime: &CString,
         csd: &[Vec<u8>],
         size: Option<(u32, u32)>,
-        low_latency: bool,
     ) -> Result<*mut AMediaCodec> {
         let codec = unsafe { AMediaCodec_createDecoderByType(mime.as_ptr()) };
         if codec.is_null() {
@@ -252,10 +229,13 @@ impl AMediaCodecDecoder {
                 let key = CString::new(format!("csd-{slot}")).expect("csd-N has no nul byte");
                 AMediaFormat_setBuffer(format, key.as_ptr(), set.as_ptr().cast(), set.len());
             }
-            // Low latency: do not buffer more than one frame in the codec.
-            if low_latency {
-                AMediaFormat_setInt32(format, c"low-latency".as_ptr(), 1);
-            }
+            // Deliberately no `low-latency`. A decoder told to run at low
+            // latency hands its pictures over in the order it decoded them,
+            // which for a stream with B-frames is not the order they are shown
+            // in - the picture then jumps backwards, regularly, on every GOP.
+            // Left alone, the codec reorders by the presentation times it was
+            // given and hands them over to be shown, and a stream with no
+            // B-frames still comes out one after another as it always did.
             AMediaFormat_setInt32(format, c"color-format".as_ptr(), COLOR_FORMAT_FLEXIBLE);
         }
 
@@ -265,7 +245,6 @@ impl AMediaCodecDecoder {
             width = size.map(|(width, _)| width).unwrap_or(0),
             height = size.map(|(_, height)| height).unwrap_or(0),
             csd = ?csd.iter().map(Vec::len).collect::<Vec<_>>(),
-            low_latency,
             "configuring the decoder"
         );
         // A null window is what asks for byte buffers instead of a surface.

@@ -1634,7 +1634,6 @@ async fn run_mjpeg_session(
             codec: Codec::Mjpeg,
             width: 0,
             height: 0,
-            low_latency: true,
             hardware: false,
         },
         index,
@@ -1813,7 +1812,6 @@ fn video_decoder(
         codec: kind,
         width: width.unwrap_or(0),
         height: height.unwrap_or(0),
-        low_latency: true,
         hardware: prefer_hardware,
     };
     if prefer_hardware {

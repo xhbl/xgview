@@ -148,7 +148,7 @@ mod tests {
     use crate::{Codec, ColorSpace, PixelFormat};
 
     fn config() -> DecoderConfig {
-        DecoderConfig { codec: Codec::H264, width: 0, height: 0, low_latency: true, hardware: true }
+        DecoderConfig { codec: Codec::H264, width: 0, height: 0, hardware: true }
     }
 
     fn frame() -> DecodedFrame {

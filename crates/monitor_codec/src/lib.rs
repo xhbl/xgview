@@ -119,8 +119,6 @@ pub struct DecoderConfig {
     /// parameter sets are what really decide the picture.
     pub width: u32,
     pub height: u32,
-    /// Keep only the newest frame, dropping the ones that pile up.
-    pub low_latency: bool,
     /// Run the decoding itself on the GPU. This is a preference and not a
     /// demand: a backend that finds no usable device, or that is offered no
     /// hardware format for the stream, decodes on the CPU instead of failing.
@@ -133,7 +131,6 @@ impl Default for DecoderConfig {
             codec: Codec::H264,
             width: 1280,
             height: 720,
-            low_latency: true,
             hardware: true,
         }
     }

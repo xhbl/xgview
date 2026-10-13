@@ -26,10 +26,10 @@
 //! expects. The colour matrix itself is not applied here: the renderer runs it
 //! on the GPU, once per picture and separately from the CPU work.
 //!
-//! Latency is bounded on purpose. The default configuration holds several
-//! pictures back for frame threading and for reordering, which a live view feels
-//! as a delay of a few frames, so the decoder is opened single threaded and
-//! without reordering.
+//! Latency is bounded on purpose: a picture is not held back for frame
+//! threading, so the decoder is opened single threaded. Reordering is left on
+//! where the stream asks for it - a picture with B-frames cannot be shown in
+//! order otherwise - and costs nothing on a stream that has none.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::Once;
@@ -683,12 +683,13 @@ impl VideoDecoder for FfmpegDecoder {
             }
         }
 
-        // One thread and no reordering, so a picture leaves in the order it
-        // arrived and without waiting for the ones behind it.
+        // One thread, so a picture is not held back for frame threading. The
+        // decoder is left free to reorder: a stream with B-frames has to be
+        // reordered to be shown in order at all, and one without pays nothing
+        // for the freedom - it comes out as it is decoded.
         // Safety: same context, still unopened, same reasoning as above.
         unsafe {
             let raw = context.as_mut_ptr();
-            (*raw).flags |= ffmpeg::ffi::AV_CODEC_FLAG_LOW_DELAY as i32;
             (*raw).thread_count = 1;
             (*raw).thread_type = 0;
         }
@@ -787,7 +788,7 @@ mod tests {
     use super::*;
 
     fn config(codec: Codec) -> DecoderConfig {
-        DecoderConfig { codec, width: 0, height: 0, low_latency: true, hardware: false }
+        DecoderConfig { codec, width: 0, height: 0, hardware: false }
     }
 
     #[test]

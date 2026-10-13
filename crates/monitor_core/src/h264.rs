@@ -939,7 +939,6 @@ mod tests {
             codec: monitor_codec::Codec::H264,
             width: 0,
             height: 0,
-            low_latency: true,
             hardware: false,
         };
         decoder.configure(&config).expect("configure the decoder");

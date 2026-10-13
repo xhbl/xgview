@@ -1128,6 +1128,20 @@ There is no software H.265 on Android - OpenH264 is H.264 alone - so an HEVC
 stream a device's own decoder will not take has nowhere to fall back to and
 shows the placeholder, where an H.264 one still falls to OpenH264.
 
+**Low latency is safe only on a stream that does not reorder.** The decoders were
+opened in low latency mode on purpose - `low-latency` on Android,
+`AV_CODEC_FLAG_LOW_DELAY` on the desktop - which was fine while every camera was
+H.264 with no B-frames: there is nothing to put back in order, so nothing is
+lost. This H.265 stream has B-frames, and a decoder told to be fast hands its
+pictures over in the order it decoded them - `2, 7, 5, 4, 6, 11, 9, 8, 10` - so
+the tile showed a picture and then an older one, over and over, which reads as a
+regular shudder (the report was "it plays a bit, jumps back, plays, jumps
+back"). Both flags are gone: the decoder reorders by the presentation times it
+was given, and a stream that needs no reordering pays nothing for the freedom.
+The order measured after the change is strictly one frame after the next. The
+cost on a reordered stream is its reorder depth, a few frames - the price of
+showing it in order at all.
+
 **One way the picture would still be wrong once it decodes.**
 
 - **Ten bits.** `Main 10` is a different problem: the whole path is NV12, eight
