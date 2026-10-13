@@ -198,6 +198,11 @@ pub struct FrigateConfig {
     /// configuration - the port a go2rtc input path names, or
     /// `go2rtc.rtsp.listen` - and only then falls back to 8554.
     pub rtsp_port: Option<u16>,
+    /// Whether to pull streams via go2rtc's WebSocket (MSE) endpoint instead of
+    /// RTSP. The wss URL carries Frigate's own session auth, so no restream
+    /// credentials are needed when this is set.
+    #[serde(default)]
+    pub wss: bool,
 }
 
 impl Default for FrigateConfig {
@@ -211,6 +216,7 @@ impl Default for FrigateConfig {
             rtsp_username: String::new(),
             rtsp_password: String::new(),
             rtsp_port: None,
+            wss: false,
         }
     }
 }

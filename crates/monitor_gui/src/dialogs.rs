@@ -15,6 +15,7 @@ use monitor_core::discovery::{
     DiscoveryEvent, DiscoveryReport, DiscoveryService, DiscoveredDevice, FrigateImport, Go2rtcImport,
     PortHit, ProgressCallback,
 };
+use monitor_core::discovery::frigate::{extract_rtsp_port, extract_stream, stream_url};
 use monitor_core::model::CameraSource;
 
 use crate::controls;
@@ -1226,6 +1227,39 @@ fn apply_add(config: &mut AppConfig, state: &mut DiscoveryUi, tab: Tab, camera: 
     });
 }
 
+/// Rewrites the stream URLs of already-fetched cameras when the protocol is
+/// switched, so the server does not have to be contacted again: the cameras are
+/// the same, only the address XGView pulls changes.
+fn rewrite_frigate_urls(frigate: &FrigateConfig, cameras: &mut [CameraSource]) {
+    let restream_port = cameras
+        .first()
+        .and_then(|c| extract_rtsp_port(&c.rtsp_main))
+        .or(frigate.rtsp_port)
+        .unwrap_or(8554);
+    for camera in cameras {
+        if let Some(stream) = extract_stream(&camera.rtsp_main) {
+            camera.rtsp_main = stream_url(frigate, restream_port, &stream);
+        }
+        if let Some(sub) = camera.rtsp_sub.as_mut() {
+            if let Some(stream) = extract_stream(sub) {
+                *sub = stream_url(frigate, restream_port, &stream);
+            }
+        }
+        if frigate.wss {
+            if !frigate.username.trim().is_empty() {
+                camera.username = Some(frigate.username.clone());
+                camera.password = Some(frigate.password.clone());
+            } else {
+                camera.username = None;
+                camera.password = None;
+            }
+        } else if !frigate.rtsp_username.trim().is_empty() {
+            camera.username = Some(frigate.rtsp_username.clone());
+            camera.password = Some(frigate.rtsp_password.clone());
+        }
+    }
+}
+
 fn frigate_tab(
     ui: &mut egui::Ui,
     state: &mut DiscoveryUi,
@@ -1298,19 +1332,39 @@ fn frigate_tab(
     // pull.
     if !state.frigate_cameras.is_empty() || !state.frigate_leftovers.is_empty() {
         ui.add_space(6.0);
-        ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-credentials")).small());
-        credentials_row(ui, nav, &mut frigate.rtsp_username, &mut frigate.rtsp_password);
-        ui.label(
-            RichText::new(monitor_i18n::tr("dialog-rtsp-override-hint"))
-                .small()
-                .color(theme::TEXT_DIM),
-        );
-        restream_port_row(
-            ui,
-            nav,
-            state.frigate_rtsp_port.get_or_insert_with(|| port_text(frigate.rtsp_port)),
-            &mut frigate.rtsp_port,
-        );
+        let wss_before = frigate.wss;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(monitor_i18n::tr("dialog-frigate-protocol")).small());
+            nav.tracked(ui.radio_value(&mut frigate.wss, false, monitor_i18n::tr("dialog-frigate-protocol-rtsp")));
+            let ws_label = if frigate.https { "wss" } else { "ws" };
+            nav.tracked(ui.radio_value(&mut frigate.wss, true, ws_label));
+        });
+        if frigate.wss {
+            ui.label(
+                RichText::new(monitor_i18n::tr("dialog-frigate-wss-hint"))
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+        } else {
+            ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-credentials")).small());
+            credentials_row(ui, nav, &mut frigate.rtsp_username, &mut frigate.rtsp_password);
+            ui.label(
+                RichText::new(monitor_i18n::tr("dialog-rtsp-override-hint"))
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+            restream_port_row(
+                ui,
+                nav,
+                state.frigate_rtsp_port.get_or_insert_with(|| port_text(frigate.rtsp_port)),
+                &mut frigate.rtsp_port,
+            );
+        }
+        if frigate.wss != wss_before {
+            rewrite_frigate_urls(frigate, &mut state.frigate_cameras);
+            rewrite_frigate_urls(frigate, &mut state.frigate_leftovers);
+            changed = true;
+        }
     }
     if *frigate != before {
         changed = true;

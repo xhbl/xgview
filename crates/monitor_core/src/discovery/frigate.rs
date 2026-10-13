@@ -345,15 +345,68 @@ fn source_for(
     stream: &str,
     credentials: &Option<(String, String)>,
 ) -> CameraSource {
-    let mut source = CameraSource::new(name, restream_url(&config.host, port, stream));
+    let mut source = CameraSource::new(name, stream_url(config, port, stream));
     source.host = config.host.clone();
     source.origin = CameraOrigin::Frigate;
     source.tags = vec!["frigate".to_string()];
-    if let Some((username, password)) = credentials {
+    if config.wss {
+        // The WebSocket stream goes through Frigate's own port and uses its
+        // session auth, so each camera carries the Frigate login — the user may
+        // add cameras from different Frigate instances.
+        if !config.username.trim().is_empty() {
+            source.username = Some(config.username.clone());
+            source.password = Some(config.password.clone());
+        }
+    } else if let Some((username, password)) = credentials {
         source.username = Some(username.clone());
         source.password = Some(password.clone());
     }
     source
+}
+
+/// The URL XGView pulls for one stream: go2rtc's WebSocket (MSE) endpoint when
+/// `wss` is chosen, the RTSP restream otherwise. The WebSocket URL goes through
+/// Frigate's own port and carries its session auth, so no restream credentials
+/// are needed alongside it.
+pub fn stream_url(config: &FrigateConfig, restream_port: u16, stream: &str) -> String {
+    if config.wss {
+        let scheme = if config.https { "wss" } else { "ws" };
+        format!(
+            "{scheme}://{}:{}/live/mse/api/ws?src={stream}",
+            config.host, config.port
+        )
+    } else {
+        restream_url(&config.host, restream_port, stream)
+    }
+}
+
+/// The stream name embedded in a restream or WebSocket URL, so the URL can be
+/// rewritten when the protocol is switched without re-fetching the server.
+/// `rtsp://host:port/<stream>` gives `<stream>`; `wss://…?src=<stream>` gives
+/// `<stream>` too. `None` when the URL is neither shape.
+pub fn extract_stream(url: &str) -> Option<String> {
+    if url.starts_with("rtsp://") || url.starts_with("rtsps://") {
+        let after_scheme = &url[url.find("://")? + 3..];
+        let path = after_scheme.split_once('/')?.1;
+        return Some(path.trim_end_matches('/').to_string());
+    }
+    if url.starts_with("wss://") || url.starts_with("ws://") {
+        let src = url.split("src=").nth(1)?;
+        return Some(src.to_string());
+    }
+    None
+}
+
+/// The restream port in an RTSP URL, so it can be preserved when switching back
+/// from WebSocket to RTSP. `None` for a WebSocket URL or a malformed one.
+pub fn extract_rtsp_port(url: &str) -> Option<u16> {
+    if !url.starts_with("rtsp://") && !url.starts_with("rtsps://") {
+        return None;
+    }
+    let after_scheme = &url[url.find("://")? + 3..];
+    let authority = after_scheme.split('/').next()?;
+    let host_part = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    host_part.rsplit_once(':').and_then(|(_, port)| port.parse().ok())
 }
 
 async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateImport {
@@ -375,7 +428,7 @@ async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateIm
         cursor += count;
         let mut source = source_for(config, port, &camera.name, &camera.streams[main], &credentials);
         if let Some(sub) = sub {
-            source.rtsp_sub = Some(restream_url(&config.host, port, &camera.streams[sub]));
+            source.rtsp_sub = Some(stream_url(config, port, &camera.streams[sub]));
         }
         cameras.push(source);
     }
@@ -541,5 +594,83 @@ mod tests {
             rtsp_credentials(&config, Some(("a".into(), "b".into()))),
             Some(("me".into(), "pw".into()))
         );
+    }
+
+    #[test]
+    fn rtsp_streams_use_the_restream_url() {
+        let config = frigate_config();
+        let source = source_for(&config, 8554, "cam", "cam_1", &None);
+        assert_eq!(source.rtsp_main, "rtsp://192.168.17.88:8554/cam_1");
+        assert!(source.username.is_none());
+    }
+
+    #[test]
+    fn wss_streams_use_the_websocket_endpoint() {
+        let config = FrigateConfig {
+            wss: true,
+            username: "frigate-user".into(),
+            password: "frigate-pass".into(),
+            ..frigate_config()
+        };
+        let source = source_for(&config, 8554, "cam", "cam_1", &Some(("admin".into(), "pw".into())));
+        assert_eq!(
+            source.rtsp_main,
+            "wss://192.168.17.88:8971/live/mse/api/ws?src=cam_1"
+        );
+        // wss carries Frigate's own login, not the restream credentials.
+        assert_eq!(source.username.as_deref(), Some("frigate-user"));
+        assert_eq!(source.password.as_deref(), Some("frigate-pass"));
+    }
+
+    #[test]
+    fn wss_without_login_carries_no_credentials() {
+        let config = FrigateConfig { wss: true, ..frigate_config() };
+        let source = source_for(&config, 8554, "cam", "cam_1", &None);
+        assert!(source.username.is_none());
+        assert!(source.password.is_none());
+    }
+
+    #[test]
+    fn ws_scheme_when_not_https() {
+        let config = FrigateConfig { wss: true, https: false, port: 5000, ..frigate_config() };
+        let url = stream_url(&config, 8554, "cam_1");
+        assert_eq!(url, "ws://192.168.17.88:5000/live/mse/api/ws?src=cam_1");
+    }
+
+    #[test]
+    fn extract_stream_from_rtsp_url() {
+        assert_eq!(
+            extract_stream("rtsp://192.168.17.88:8554/cam_front_door_1"),
+            Some("cam_front_door_1".into())
+        );
+        assert_eq!(
+            extract_stream("rtsp://192.168.17.88:8554/cam_front_door_1/"),
+            Some("cam_front_door_1".into())
+        );
+    }
+
+    #[test]
+    fn extract_stream_from_wss_url() {
+        assert_eq!(
+            extract_stream("wss://192.168.17.88:8971/live/mse/api/ws?src=cam_front_door_1"),
+            Some("cam_front_door_1".into())
+        );
+        assert_eq!(
+            extract_stream("ws://192.168.17.88:5000/live/mse/api/ws?src=cam_1"),
+            Some("cam_1".into())
+        );
+    }
+
+    #[test]
+    fn extract_stream_rejects_unknown_schemes() {
+        assert_eq!(extract_stream("http://example.com/stream"), None);
+        assert_eq!(extract_stream("not a url"), None);
+    }
+
+    #[test]
+    fn extract_rtsp_port_from_url() {
+        assert_eq!(extract_rtsp_port("rtsp://192.168.17.88:8554/cam_1"), Some(8554));
+        assert_eq!(extract_rtsp_port("rtsp://192.168.17.88:9000/cam_1"), Some(9000));
+        assert_eq!(extract_rtsp_port("wss://192.168.17.88:8971/live/mse/api/ws?src=cam_1"), None);
     }
 }
