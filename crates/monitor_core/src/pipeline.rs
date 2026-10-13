@@ -24,6 +24,7 @@ use monitor_codec::{Codec, ColorSpace, DecodedFrame, DecoderConfig, VideoDecoder
 use crate::config::ReconnectPolicy;
 use crate::error::Result;
 use crate::h264::{nal_unit_type, AccessUnit, H264Depacketizer, START_CODE};
+use crate::hevc::{nal_unit_type as hevc_nal_unit_type, HevcDepacketizer};
 use crate::mjpeg::{JpegDepacketizer, MjpegClient};
 use crate::model::{is_http_url, CameraSource, ConnectionState, RtspTransport, StreamKind};
 use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtspStage, RtpHeader, SdpTrack};
@@ -661,12 +662,19 @@ fn describe(err: &dyn std::error::Error) -> String {
     out
 }
 
-/// NAL unit types of an Annex-B access unit, in order.
+/// NAL unit types of an Annex-B access unit, in order, read in the codec's own
+/// layout.
 ///
-/// A rejected picture is named by what it holds: a slice that arrived without
-/// its parameter sets reads as `[7, 1]` or `[8, 1]`, while a complete picture
-/// that the decoder merely has no reference for reads as `[7, 8, 1]`.
-fn nal_types(data: &[u8]) -> Vec<u8> {
+/// A rejected picture is named by what it holds: an H.264 slice that arrived
+/// without its parameter sets reads as `[7, 1]` or `[8, 1]`, while a complete
+/// picture the decoder merely has no reference for reads as `[7, 8, 1]`. For
+/// H.265 the numbers are the RFC 7798 ones - 32 / 33 / 34 for the sets, 0..=31
+/// for the slices - because the type lives in two bytes there.
+fn nal_types(data: &[u8], kind: Codec) -> Vec<u8> {
+    let nal_type: fn(u8) -> u8 = match kind {
+        Codec::H265 => hevc_nal_unit_type,
+        _ => nal_unit_type,
+    };
     let mut types = Vec::new();
     let mut offset = 0;
     while offset + 3 <= data.len() {
@@ -680,18 +688,18 @@ fn nal_types(data: &[u8]) -> Vec<u8> {
         };
         offset += code;
         if let Some(&first) = data.get(offset) {
-            types.push(nal_unit_type(first));
+            types.push(nal_type(first));
         }
     }
     types
 }
 
 /// Type and length of every cached parameter set.
-fn sets(depacketizer: &H264Depacketizer) -> Vec<(u8, usize)> {
-    depacketizer
-        .parameter_sets()
-        .map(|nal| (nal_unit_type(nal[0]), nal.len()))
-        .collect()
+///
+/// `nal_type` is the codec's own type reader, since an H.264 set and an H.265
+/// set put the type in different bits of different sized headers.
+fn sets<'a>(nals: impl Iterator<Item = &'a [u8]>, nal_type: fn(u8) -> u8) -> Vec<(u8, usize)> {
+    nals.map(|nal| (nal_type(nal[0]), nal.len())).collect()
 }
 
 /// Hexadecimal form of the leading bytes of a unit, for reading a rejected
@@ -804,12 +812,14 @@ impl StallDeadline {
 /// The RTP depacketizer a session pulls its pictures out of.
 ///
 /// A session picks one when it opens, from the codec the SDP named, and the
-/// loop around it is the same for both: a packet goes in, zero or more complete
-/// pictures come out. Only these two codecs reach a decoder, so only these two
-/// reassemblies are needed.
+/// loop around it is the same for all of them: a packet goes in, zero or more
+/// complete pictures come out. These are the codecs that reach a decoder, so
+/// these are the reassemblies that are needed.
 enum Depacketizer {
     /// H.264, the NAL units of an access unit spread over RTP packets.
     H264(H264Depacketizer),
+    /// H.265 / HEVC, the same idea with RFC 7798's header and packet types.
+    Hevc(HevcDepacketizer),
     /// MJPEG, the fragments of one JPEG scan spread over RTP packets.
     Jpeg(JpegDepacketizer),
 }
@@ -818,6 +828,7 @@ impl Depacketizer {
     fn push(&mut self, header: &RtpHeader, payload: &[u8]) -> Vec<AccessUnit> {
         match self {
             Depacketizer::H264(depacketizer) => depacketizer.push(header, payload),
+            Depacketizer::Hevc(depacketizer) => depacketizer.push(header, payload),
             Depacketizer::Jpeg(depacketizer) => depacketizer.push(header, payload),
         }
     }
@@ -827,15 +838,19 @@ impl Depacketizer {
     fn invalidate(&mut self) {
         match self {
             Depacketizer::H264(depacketizer) => depacketizer.invalidate_current(),
+            Depacketizer::Hevc(depacketizer) => depacketizer.invalidate_current(),
             Depacketizer::Jpeg(depacketizer) => depacketizer.invalidate(),
         }
     }
 
-    /// Cached parameter sets, which only an H.264 stream has: a JPEG carries
-    /// its tables in the stream rather than in a cache.
+    /// Cached parameter sets, which an H.264 or H.265 stream has: a JPEG
+    /// carries its tables in the stream rather than in a cache.
     fn parameter_sets(&self) -> Vec<(u8, usize)> {
         match self {
-            Depacketizer::H264(depacketizer) => sets(depacketizer),
+            Depacketizer::H264(depacketizer) => sets(depacketizer.parameter_sets(), nal_unit_type),
+            Depacketizer::Hevc(depacketizer) => {
+                sets(depacketizer.parameter_sets(), hevc_nal_unit_type)
+            }
             Depacketizer::Jpeg(_) => Vec::new(),
         }
     }
@@ -1004,9 +1019,11 @@ async fn run_session(
 
     let mut decoder = video_decoder(kind, width, height, index, prefer_hardware);
     // Each codec arrives in its own shape over RTP: an H.264 access unit spread
-    // over NAL units, or the fragments of a single JPEG scan.
+    // over NAL units, an H.265 one in the RFC 7798 shape - two byte headers, AP
+    // and FU instead of STAP and FU-A - or the fragments of a single JPEG scan.
     let mut depacketizer = match kind {
         Codec::Mjpeg => Depacketizer::Jpeg(JpegDepacketizer::new(payload_type)),
+        Codec::H265 => Depacketizer::Hevc(HevcDepacketizer::new(payload_type, parameter_sets)),
         _ => Depacketizer::H264(H264Depacketizer::new(payload_type, parameter_sets)),
     };
     let mut sequence: u64 = 0;
@@ -1313,7 +1330,9 @@ async fn run_session(
                         // Once per session, from the first access unit that
                         // carries a parameter set of its own: a camera whose
                         // SDP advertised none only ever says what it is here.
-                        if !sps_logged {
+                        // H.264's reader, so an H.265 access unit is left out of
+                        // it rather than read with H.264's layout.
+                        if kind == Codec::H264 && !sps_logged {
                             if let Some(nal) = sps::access_unit_sps(&unit.data) {
                                 if let Some(info) = sps::sps_info(nal) {
                                     // What a hardware decoder screens the
@@ -1342,8 +1361,9 @@ async fn run_session(
                         // hardware decoder has no mode for; the flag that says
                         // otherwise is set before the picture is handed over.
                         // Decided from the first parameter set, so the healthy
-                        // majority of streams is never touched at all.
-                        if !constrain_decided {
+                        // majority of streams is never touched at all. Baseline
+                        // is an H.264 profile, so this is H.264's alone.
+                        if kind == Codec::H264 && !constrain_decided {
                             if let Some(nal) = sps::access_unit_sps(&unit.data) {
                                 constrain_baseline = sps::needs_constrained_baseline(nal);
                                 constrain_decided = true;
@@ -1434,7 +1454,7 @@ async fn run_session(
                                             target: "xgview::pipeline",
                                             index,
                                             len = unit.data.len(),
-                                            types = ?nal_types(&unit.data),
+                                            types = ?nal_types(&unit.data, kind),
                                             keyframe = unit.keyframe,
                                             au = %hex(&unit.data, 24),
                                             cached = ?depacketizer.parameter_sets(),
@@ -1749,10 +1769,17 @@ async fn run_mjpeg_session(
 
 /// Creates the decoder for a stream's codec.
 ///
-/// H.264 and MJPEG are wired to a backend; HEVC and an unrecognised codec are
-/// not, and that is not an error: the session keeps running, reports its
-/// statistics and shows a placeholder, which is what an `H265` camera should
-/// look like rather than a connection that never stops reconnecting.
+/// H.264, H.265 and MJPEG are wired to a backend. H.265 is decoded on the
+/// desktop this release: FFmpeg reads its size and its parameter sets from the
+/// bitstream, so nothing above the decoder has to know HEVC's layout. Android
+/// is not wired for it yet - its platform decoder wants VPS/SPS/PPS as
+/// `csd-0`/`csd-1`/`csd-2` and the size from a HEVC sequence parameter set, and
+/// neither is in place - so a `H265` stream there keeps showing its placeholder
+/// for one more round (DevMemo §17).
+///
+/// An unrecognised codec has no decoder anywhere, and that is not an error: the
+/// session keeps running, reports its statistics and shows a placeholder rather
+/// than a connection that never stops reconnecting.
 ///
 /// Either way the depacketizer has already turned the packets into whole
 /// pictures, so what reaches the decoder here is the same shape whether the
@@ -1769,7 +1796,13 @@ fn video_decoder(
     index: usize,
     prefer_hardware: bool,
 ) -> Option<Box<dyn VideoDecoder>> {
-    if !matches!(kind, Codec::H264 | Codec::Mjpeg) {
+    let supported = match kind {
+        Codec::H264 | Codec::Mjpeg => true,
+        // The desktop only, for now: see the note above on Android's ingest.
+        Codec::H265 => cfg!(not(target_os = "android")),
+        Codec::Unknown => false,
+    };
+    if !supported {
         tracing::warn!(
             target: "xgview::pipeline",
             index,
@@ -1778,7 +1811,8 @@ fn video_decoder(
         );
         return None;
     }
-    let prefer_hardware = prefer_hardware && kind == Codec::H264;
+    // H.264 and H.265 have a hardware path; MJPEG does not.
+    let prefer_hardware = prefer_hardware && matches!(kind, Codec::H264 | Codec::H265);
     let config = DecoderConfig {
         codec: kind,
         width: width.unwrap_or(0),

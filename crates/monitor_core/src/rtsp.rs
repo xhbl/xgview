@@ -286,9 +286,11 @@ pub struct SdpTrack {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub fps: Option<f32>,
-    /// Raw SPS / PPS NAL units of the `sprop-parameter-sets` attribute, in the
-    /// order the camera listed them. Empty when the device does not advertise
-    /// them, in which case they have to be picked up from the stream itself.
+    /// Raw parameter set NAL units the SDP advertised - H.264's SPS and PPS
+    /// from `sprop-parameter-sets`, or H.265's VPS, SPS and PPS from
+    /// `sprop-vps` / `sprop-sps` / `sprop-pps` - in the order the camera listed
+    /// them. Empty when the device does not advertise them, in which case they
+    /// have to be picked up from the stream itself.
     pub parameter_sets: Vec<Vec<u8>>,
 }
 
@@ -332,27 +334,46 @@ pub fn parse_session_header(value: &str) -> (Option<String>, Option<Duration>) {
     (identifier, timeout)
 }
 
-/// Extracts the SPS / PPS NAL units advertised by an `a=fmtp` line.
+/// Extracts the parameter sets advertised by an `a=fmtp` line.
 ///
-/// Cameras list them base64 encoded, e.g.
-/// `a=fmtp:96 packetization-mode=1;sprop-parameter-sets=Z0IAKeKQCgC3YC3AQEBpB4kRUA==,aM48gA==`.
-/// Advertising them lets a viewer that joins mid-stream wait for an IDR instead
-/// of having to guess the decoder configuration.
+/// H.264 lists them in one comma separated `sprop-parameter-sets` field, e.g.
+/// `a=fmtp:96 packetization-mode=1;sprop-parameter-sets=Z0IAKeKQCgC3YC3AQEBpB4kRUA==,aM48gA==`;
+/// HEVC (RFC 7798) advertises the three separately, e.g.
+/// `a=fmtp:96 sprop-pps=RAHApXwMyQ==;sprop-sps=QgEBAWAA...;sprop-vps=QAEMAf//AWAA...`.
+/// Both are collected here, in the order the camera listed them: the consumer
+/// keys the sets by the type inside each NAL, so that order is not relied on.
+///
+/// Advertising them lets a viewer that joins mid-stream wait for a key frame
+/// instead of having to guess the decoder configuration.
 pub fn parse_parameter_sets(fmtp: &str) -> Vec<Vec<u8>> {
     use base64::Engine;
 
+    let engine = base64::engine::general_purpose::STANDARD;
+    let mut sets = Vec::new();
     for parameter in fmtp.split(';') {
         let Some((key, value)) = parameter.split_once('=') else { continue };
-        if !key.trim().eq_ignore_ascii_case("sprop-parameter-sets") {
-            continue;
+        let key = key.trim();
+        if key.eq_ignore_ascii_case("sprop-parameter-sets") {
+            // H.264: one field, the sets inside it comma separated.
+            sets.extend(
+                value
+                    .split(',')
+                    .filter_map(|entry| engine.decode(entry.trim()).ok())
+                    .filter(|nal| !nal.is_empty()),
+            );
+        } else if key.eq_ignore_ascii_case("sprop-vps")
+            || key.eq_ignore_ascii_case("sprop-sps")
+            || key.eq_ignore_ascii_case("sprop-pps")
+        {
+            // H.265: VPS, SPS and PPS each in a field of its own.
+            if let Ok(nal) = engine.decode(value.trim()) {
+                if !nal.is_empty() {
+                    sets.push(nal);
+                }
+            }
         }
-        return value
-            .split(',')
-            .filter_map(|entry| base64::engine::general_purpose::STANDARD.decode(entry.trim()).ok())
-            .filter(|nal| !nal.is_empty())
-            .collect();
     }
-    Vec::new()
+    sets
 }
 
 /// Minimal SDP parser extracting the media tracks of a session description.
@@ -1461,6 +1482,24 @@ a=control:trackID=1\r\n";
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].parameter_sets.len(), 2);
         assert_eq!(tracks[0].parameter_sets[0][0] & 0x1f, 7);
+    }
+
+    /// HEVC advertises its three parameter sets in `sprop-vps` / `sprop-sps` /
+    /// `sprop-pps`, and any order is accepted: the types are in the NAL headers.
+    #[test]
+    fn parses_hevc_parameter_sets_from_fmtp() {
+        // The fmtp the H.265 camera at 192.168.17.87 sent, its sets listed
+        // pps, sps, vps.
+        let fmtp = "sprop-pps=RAHApXwMyQ==;\
+sprop-sps=QgEBAWAAAAMAkAAAAwAAAwB4oAPAgBEHy5ZnSkIRkb9QwFqAgICCAAADAAIAAAMAPMALvKIAAW42AAB6EgI=;\
+sprop-vps=QAEMAf//AWAAAAMAkAAAAwAAAwB4mcCQ";
+        let sets = parse_parameter_sets(fmtp);
+        assert_eq!(sets.len(), 3, "VPS, SPS and PPS");
+        // The type is (byte0 >> 1) & 0x3f in HEVC, not the H.264 byte0 & 0x1f.
+        let kinds: Vec<u8> = sets.iter().map(|nal| (nal[0] >> 1) & 0x3f).collect();
+        for expected in [32, 33, 34] {
+            assert!(kinds.contains(&expected), "missing NAL type {expected} in {kinds:?}");
+        }
     }
 
     fn response(status: u16, headers: &[(&str, &str)]) -> RtspResponse {

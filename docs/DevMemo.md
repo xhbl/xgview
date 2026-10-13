@@ -1036,14 +1036,33 @@ as the back-pressure it is.
 
 ---
 
-## 17. H.265: the decoder half is already there, the ingest half is not
+## 17. H.265: the desktop ingests and decodes; Android is what is left
 
-*Nothing in this section is implemented, and nothing was measured: no H.265
-camera has been in front of the viewer. It is what a reading of the code says
-the work would be, written down while the question was open so that the next
-person does not have to walk it again.*
+*Landed 2026-10-13, opening 1.4. The desktop half is implemented and measured —
+"What landed" first, then the Android plan that section used to be.*
 
-**The decoder half is already in place**, which is not what was expected. `Codec`
+**What landed.** An H.265 camera has now been in front of the viewer:
+`rtsp://192.168.17.87:8554/webcam`, a gortsplib relay whose SDP names `H265` at
+90000 and advertises its sets as `sprop-vps` / `sprop-sps` / `sprop-pps`, with
+no `a=framesize`. It decodes at 30 fps, `errors=0`, with `HW` on Direct3D 11 and
+with `SW` on the CPU. Three pieces did it:
+
+- `monitor_core::hevc`, a sibling of `h264.rs` rather than a shared body: the
+  two byte header (`(byte0 >> 1) & 0x3f`), VPS / SPS / PPS as types 32 / 33 /
+  34, the aggregation packet 48 with its two byte length prefixes, the fragment
+  unit 49 whose `FuType` rebuilds the header, and key frames found by IRAP type
+  16-23. The parts of `h264.rs` that are not codec specific carry over
+  unchanged: closing a picture on a timestamp change or the marker, caching the
+  sets and replaying them VPS, SPS, PPS before a picture that brings none, and
+  `invalidate_current` on a sequence gap.
+- `rtsp::parse_parameter_sets` now also collects `sprop-vps` / `sprop-sps` /
+  `sprop-pps`; the depacketizer keys them by the type inside each NAL, so the
+  order the camera lists them in (`{pps, sps, vps}` here) is not relied on.
+- `run_session` picks the depacketizer from the codec, and `video_decoder`
+  releases H.265 — and its hardware preference — on the desktop. The H.264-only
+  calls beside the decode loop are now guarded by the codec.
+
+**The decoder half was already in place**, which is not what was expected. `Codec`
 has carried `H265` for a while — `from_encoding` answers both `H265` and `HEVC`,
 `mime()` answers `video/hevc` — and the FFmpeg backend already maps it:
 
@@ -1061,60 +1080,50 @@ FFmpeg's software H.265 decoder is in the build, so hardware-refused-software-
 retried works as it does for H.264. NV12, the texture path of §6, the stall
 detector of §8 and everything above the decoder are untouched.
 
-**What is missing is entirely on the ingest side.** Five pieces, largest first:
+**What is left is Android.** Two pieces, both on the ingest side:
 
-1. **An RFC 7798 depacketizer.** `H264Depacketizer` is the only one and
-   `run_session` sends everything that is not MJPEG through it, so an H.265
-   stream is misread rather than refused. HEVC over RTP is not H.264's shape: a
-   two byte NAL header with the type in `(byte0 >> 1) & 0x3f`, VPS / SPS / PPS
-   as three parameter sets (32 / 33 / 34) rather than two, an aggregation packet
-   (48) whose NAL units carry a two byte length prefix, and key frames found by
-   IRAP type 16-23 rather than by one IDR type. The bones of `h264.rs` carry
-   over — splitting on start codes, closing a picture on a timestamp change or a
-   marker, caching parameter sets by (type, id), `invalidate_current` on a
-   sequence gap — so it is a sibling module, not a new design.
-2. **An H.265 SPS parser, for the size.** `monitor_codec::sps` is H.264
-   throughout: `picture_size`, `sps_info` and `needs_constrained_baseline` all
-   index the H.264 layout. The desktop can do without it, because FFmpeg reads
-   the size from the bitstream; Android cannot, and §9 is why — a reader whose
-   size is not the stream's refuses every picture with `-30003`.
-3. **Three CSD buffers on Android.** The mime is already right, but H.265 wants
-   `csd-0` = VPS, `csd-1` = SPS, `csd-2` = PPS where `amediacodec.rs` writes
-   `csd-0` = SPS and `csd-1` = PPS.
-4. **The SDP.** `sprop-parameter-sets` is one comma separated field; H.265
-   advertises `sprop-vps`, `sprop-sps` and `sprop-pps` separately.
-5. **The guards.** `video_decoder` refuses everything but H.264 and MJPEG, and
-   the H.264-only calls in `run_session` (`access_unit_sps`,
-   `needs_constrained_baseline`, `constrain_baseline`) have to be skipped for
-   H.265. They are harmless as they stand — none of them finds an H.264 NAL type
-   inside an H.265 access unit, so they quietly do nothing.
+1. **An H.265 sequence parameter set reader, for the size.** `monitor_codec::sps`
+   is H.264 throughout — `picture_size`, `sps_info` and
+   `needs_constrained_baseline` all index the H.264 layout. The desktop does
+   without it, because FFmpeg reads the size from the bitstream; Android cannot,
+   and §9 is why — a reader whose size is not the stream's refuses every picture
+   with `-30003`.
+2. **Three CSD buffers.** The mime is already right (`video/hevc`), but H.265
+   wants `csd-0` = VPS, `csd-1` = SPS, `csd-2` = PPS, where `amediacodec.rs`
+   writes `csd-0` = SPS and `csd-1` = PPS — and its `parameter_sets` reader looks
+   for NAL types 7 / 8, which an HEVC header never presents.
 
-**Two ways the picture would still be wrong once it decodes.**
+Until those land, `video_decoder` gates H.265 to `not(target_os = "android")`, so
+an HEVC stream on Android keeps showing its placeholder.
 
-- **The colour matrix.** The fragment shader of §6 writes BT.601 and nothing
-  else, while H.265 streams are normally tagged BT.709, often in the limited
-  range. The picture would arrive with the colours a step off. `ColorSpace.matrix`
-  is already read from the stream — it is the shader that ignores it — so this
-  is a uniform and a second matrix in the WGSL.
+**One way the picture would still be wrong once it decodes.**
+
 - **Ten bits.** `Main 10` is a different problem: the whole path is NV12, eight
   bits per sample, one layout. A ten bit stream would fail at decode or at the
-  copy back, not at the depacketizer.
+  copy back, not at the depacketizer. Still open — what landed is `Main` (eight
+  bit).
 
-**What happens today if one is plugged in.** Nothing breaks, which is worth
-knowing before buying one: the channel connects, negotiates, keeps reporting its
-statistics and shows a placeholder, with a single `no decoder for this codec`
-warning to say why. That is deliberate — `video_decoder` documents it as what an
-`H265` camera *should* look like, rather than a channel that never stops
-reconnecting.
+The colour matrix, once named here as a second fault, is no longer one: the
+fragment shader of §6 now writes the matrix and the range of every
+`DecodedFrame` from `ColorSpace`, so an H.265 stream tagged BT.709 is read as
+BT.709 with no change to the WGSL.
 
-**How the work would be cut.** The first step needs neither the SPS parser nor
-Android: the depacketizer plus the guards, with FFmpeg left to learn the size
-from the stream, is enough to put a picture on a desktop. The second is Android
-and the polish — SPS parser, CSD layout, `sprop-*`, colour matrix.
+**What happens today if one is plugged in.** On the desktop it decodes and shows
+its picture, hardware first and software if the GPU will not have it. On Android
+nothing breaks but nothing shows: the channel connects, negotiates, keeps
+reporting its statistics and shows a placeholder, with a single `no decoder for
+this codec` warning to say why — deliberate, so an unsupported stream looks like
+a waiting tile rather than a connection that never stops reconnecting.
+
+**How the work was cut, and what it leaves.** The desktop step needed neither
+the SPS parser nor Android: the depacketizer plus the guards, with FFmpeg left
+to learn the size from the stream, put a picture on a desktop — this is what
+landed. The second step is Android: the SPS reader and the CSD layout above.
 
 **For whoever buys the cameras.** `Main` (eight bit) rather than `Main 10`, and
-a model that still offers an H.264 profile on another stream, so that the camera
-is usable before any of this lands.
+a model that still offers an H.264 profile on another stream — the H.264 sub
+stream is what an Android viewer can show today, and what any machine can fall
+back to.
 
 ## 18. The floor moves to 27: a Mi Pad 4 that could not be installed
 

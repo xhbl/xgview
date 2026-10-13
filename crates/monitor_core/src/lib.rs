@@ -12,6 +12,8 @@
 //! * [`digest`]     – RFC 2617 / RFC 7616 credentials, shared by the ONVIF HTTP
 //!   calls and the RTSP session.
 //! * [`h264`]       – H.264 RTP depacketization and access unit reassembly.
+//! * [`hevc`]       – H.265 / HEVC RTP depacketization and access unit
+//!   reassembly (RFC 7798).
 //! * [`mjpeg`]      – HTTP MJPEG (`multipart/x-mixed-replace`) client.
 //! * [`rtsp`]       – asynchronous RTSP (TCP interleaved) client.
 //! * [`pipeline`]   – non blocking per channel streaming supervisor with
@@ -33,6 +35,7 @@ pub mod digest;
 pub mod discovery;
 pub mod error;
 pub mod h264;
+pub mod hevc;
 pub mod layout;
 pub mod mjpeg;
 pub mod model;
@@ -46,6 +49,7 @@ pub mod supervise;
 
 pub use error::{CoreError, Result};
 pub use h264::{AccessUnit, H264Depacketizer};
+pub use hevc::HevcDepacketizer;
 pub use layout::{Direction, GridLayout, NavigateOutcome, PageInfo};
 pub use model::{CameraSource, ConnectionState, StreamKind};
 pub use scheduler::{ChannelMode, ChannelPlan, Schedule, ScheduleChange, Scheduler};

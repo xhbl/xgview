@@ -86,8 +86,8 @@ the hand.
 | Seamless transition | The last sub-stream frame is held until the main stream delivers its first keyframe - no black or green frames |
 | Suspend | Channels on a non-visible page are suspended to save bandwidth, CPU and decoder handles |
 | Reconnection | Exponential-backoff self-healing with a non-blocking "reconnecting…" overlay; the backoff shape and the handshake timeout are configurable and reach channels already running |
-| Decoding | H.264 on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, VideoToolbox on macOS, `AMediaCodec` on Android) and on the CPU elsewhere - Android falling back to OpenH264 by itself for a stream its own decoder will not take; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW` |
-| Codecs | H.264 and MJPEG are decoded and displayed. HEVC is recognised in the stream description but has no decoder yet, so an HEVC-only camera shows no picture |
+| Decoding | H.264 - and H.265 on the desktop - on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, VideoToolbox on macOS, `AMediaCodec` on Android) and on the CPU elsewhere - Android falling back to OpenH264 by itself for an H.264 stream its own decoder will not take; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW` |
+| Codecs | H.264, H.265 (HEVC) and MJPEG are decoded and displayed. H.265 is decoded on Windows, Linux and macOS, in software or through the GPU; on Android an HEVC-only camera still shows no picture, so use its H.264 sub stream there |
 | Transports | RTSP over TCP (interleaved, the default) or UDP, chosen per camera; HTTP / HTTPS MJPEG (`multipart/x-mixed-replace`) cameras are supported too |
 | On-screen display | Each tile corner independently shows one of: none, name, number + name, stream, codec + rate, frame rate + decoder, size + shape, or all statistics |
 | Power management | Keeps the machine awake and/or the screen on while the wall is up (`SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` + the desktop's D-Bus inhibit on Linux, `WakeLock` + `FLAG_KEEP_SCREEN_ON` on Android); both switches default on |
@@ -110,7 +110,8 @@ the hand.
 | **Linux** x64 | desktop, mini PC | VAAPI or CUDA - hardware, with a CPU fallback |
 | **macOS** (universal) | desktop, laptop | VideoToolbox - hardware, with a CPU fallback |
 
-Hardware decoding covers H.264; MJPEG is always decoded on the CPU. It needs a
+Hardware decoding covers H.264, and H.265 on the desktop; MJPEG is always
+decoded on the CPU, and an HEVC stream on Android is not decoded yet. It needs a
 GPU that offers VAAPI or CUDA, which a desktop with an NVIDIA, Intel or AMD
 graphics does; a machine that offers neither decodes on the CPU, where the wall
 still runs - comfortable for a grid of sub streams, and heavier once it starts
@@ -618,8 +619,8 @@ XGView.app/Contents/MacOS/xgview --print-schedule
   XGView, and try the other transport (UDP is often what fixes a stream that a
   relay or a NAT mangles over TCP).
 - **A camera stays on `waiting for video`.** The connection is up but no picture
-  has arrived. Confirm the stream is H.264 or MJPEG - HEVC cameras are not
-  decoded yet, so use their H.264 sub stream meanwhile.
+  has arrived. Confirm the stream is H.264, H.265 or MJPEG - on Android an HEVC
+  stream is not decoded yet, so use its H.264 sub stream there meanwhile.
 - **The picture freezes and jumps.** A software decode of a high-resolution
   stream can fall behind the camera. Leave hardware decoding on, and prefer the
   sub stream for the grid.
