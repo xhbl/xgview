@@ -21,6 +21,7 @@
 //! * [`autostart`]  – start-on-boot helpers for Windows / Linux / Android.
 //! * [`power`]      – keep the machine awake and the screen on for a wall that
 //!   is meant to stay visible.
+//! * [`reboot`]     – whether this process may restart the machine, and how.
 //! * [`blackout`]   – the local clock and the evaluation behind the scheduled
 //!   blank that saves the display at night.
 //! * [`supervise`]  – the policy over the viewer's restarts, and the exit codes
@@ -41,6 +42,7 @@ pub mod mjpeg;
 pub mod model;
 pub mod pipeline;
 pub mod power;
+pub mod reboot;
 pub mod rtcp;
 pub mod rtsp;
 pub mod scheduler;

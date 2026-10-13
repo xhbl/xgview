@@ -63,6 +63,7 @@ key-page = previous / next
 key-settings = settings
 key-add-devices = add devices
 key-fullscreen = full screen
+settings-actions = actions
 
 ## Settings / Blackout
 settings-blackout = Blackout
@@ -146,6 +147,13 @@ remove-title = Remove "{ $name }"?
 remove-hint = It leaves the wall and the configuration; the camera itself is untouched.
 action-keep = Keep
 action-remove = Remove
+action-cancel = cancel
+action-exit = exit
+action-reboot = reboot
+
+## Reboot confirmation
+reboot-confirm-title = reboot the system?
+reboot-confirm-hint = the machine restarts now; unsaved work elsewhere is lost.
 
 ## About
 about-description = A grid viewer for surveillance cameras
@@ -258,6 +266,7 @@ exit-hint = Press BACK again to quit
 toast-autostart-on = registered for start-on-boot
 toast-autostart-off = start-on-boot registration removed
 toast-autostart-failed = start-on-boot: { $error }
+toast-reboot-failed = cannot reboot: { $error }
 toast-decoding-gpu = channels reopening, the GPU decodes where it can
 toast-decoding-cpu = channels reopening on the CPU
 toast-no-sub = no sub stream pattern recognised

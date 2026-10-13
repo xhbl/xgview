@@ -18,6 +18,7 @@ use tokio::runtime::Handle;
 
 use monitor_core::autostart::{self, AutostartStatus};
 use monitor_core::power::{self, PowerStatus};
+use monitor_core::reboot;
 use monitor_core::config::AppConfig;
 use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{ConnectionState, OsdItem, RtspTransport, StreamKind, TileAspect};
@@ -367,6 +368,13 @@ struct RemoveConfirm {
     id: String,
     name: String,
     /// The remove button that opened the window, to give it back its focus.
+    from: Id,
+}
+
+/// A reboot the settings panel is asking confirmation for.
+#[derive(Debug)]
+struct SystemConfirm {
+    /// The button that opened the window, to give it back its focus.
     from: Id,
 }
 
@@ -754,6 +762,15 @@ pub struct XgViewApp {
     remove_confirm_anchor: Option<Id>,
     /// Watches the remove window for the frame it appears on.
     remove_confirm_handoff: Handoff,
+    /// A system action (exit or reboot) the settings panel is asking about.
+    ///
+    /// Asked for in a window, so that a press on a button beside its neighbour
+    /// cannot leave the program or restart the machine on its own.
+    system_confirm: Option<SystemConfirm>,
+    /// First control of the system confirm window, to hand it the focus.
+    system_confirm_anchor: Option<Id>,
+    /// Watches the system confirm window for the frame it appears on.
+    system_confirm_handoff: Handoff,
     /// Whether the group-name field is to be given the focus as it is drawn:
     /// set when a group has just been added, so its name is typed over at once.
     focus_group_name: bool,
@@ -970,6 +987,9 @@ impl XgViewApp {
             remove_confirm: None,
             remove_confirm_anchor: None,
             remove_confirm_handoff: Handoff::default(),
+            system_confirm: None,
+            system_confirm_anchor: None,
+            system_confirm_handoff: Handoff::default(),
             focus_group_name: false,
             group_remove: None,
             reorder: None,
@@ -1016,6 +1036,8 @@ impl XgViewApp {
             self.passphrase_anchor
         } else if self.remove_confirm.is_some() {
             self.remove_confirm_anchor
+        } else if self.system_confirm.is_some() {
+            self.system_confirm_anchor
         } else if self.camera_edit.is_some() {
             self.camera_edit_anchor
         } else if self.discovery.open {
@@ -2284,7 +2306,10 @@ impl XgViewApp {
         // it, whatever inside it has the focus. A field's caret must not hold it
         // open - Back on the first field would otherwise hand the focus back to
         // that same field, and the window could never be left.
-        if (self.passphrase.is_some() || self.camera_edit.is_some() || self.remove_confirm.is_some())
+        if (self.passphrase.is_some()
+            || self.camera_edit.is_some()
+            || self.remove_confirm.is_some()
+            || self.system_confirm.is_some())
             && self.dialog_back_pressed(ctx)
         {
             if self.passphrase.take().is_some() {
@@ -2294,6 +2319,9 @@ impl XgViewApp {
                 self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
             } else if let Some(confirm) = self.remove_confirm.take() {
                 self.remove_confirm_anchor = None;
+                self.restore_focus = Some(confirm.from);
+            } else if let Some(confirm) = self.system_confirm.take() {
+                self.system_confirm_anchor = None;
                 self.restore_focus = Some(confirm.from);
             } else if let Some(edit) = self.camera_edit.take() {
                 self.camera_edit_anchor = None;
@@ -2509,6 +2537,7 @@ impl XgViewApp {
         let dialog_open = self.discovery.open
             || self.camera_edit.is_some()
             || self.remove_confirm.is_some()
+            || self.system_confirm.is_some()
             || self.passphrase.is_some();
         if keys.settings && !dialog_open {
             self.show_settings = !self.show_settings;
@@ -3583,6 +3612,35 @@ impl XgViewApp {
                 }
             });
 
+        ui.add_space(theme::space::L);
+        ui.label(RichText::new(monitor_i18n::tr("settings-actions")).strong());
+        // Two actions that end the session. Exit leaves at once — a viewer that
+        // pressed it has read the label. Reboot is behind a confirmation window:
+        // a press beside a neighbour must not restart the machine on its own,
+        // and it is drawn only where the process has the privilege to do it.
+        let mut do_exit = false;
+        let mut ask_reboot: Option<Id> = None;
+        ui.horizontal(|ui| {
+            let exit_label = monitor_i18n::tr("action-exit");
+            let exit_btn = self.nav.tracked(ui.button(exit_label));
+            if exit_btn.clicked() {
+                do_exit = true;
+            }
+            if reboot::is_supported() {
+                let reboot_label = monitor_i18n::tr("action-reboot");
+                let reboot_btn = self.nav.tracked(ui.button(reboot_label));
+                if reboot_btn.clicked() {
+                    ask_reboot = Some(reboot_btn.id);
+                }
+            }
+        });
+        if do_exit {
+            self.quit(ui.ctx());
+        }
+        if let Some(from) = ask_reboot {
+            self.system_confirm = Some(SystemConfirm { from });
+        }
+
         dirty
     }
 
@@ -4446,6 +4504,79 @@ impl XgViewApp {
             self.restore_focus = Some(from);
         }
         false
+    }
+
+    /// The reboot confirmation window.
+    ///
+    /// A modal, like the remove window: centred, and nothing behind it
+    /// answers. Its own buttons (or Back) are the only way out, and the dialog
+    /// opens on the answer that changes nothing.
+    fn system_confirm_window(&mut self, ctx: &egui::Context) {
+        let Some(SystemConfirm { from }) = self.system_confirm.take() else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+
+        egui::Modal::new(Id::new("xgview-system-confirm")).show(ctx, |ui| {
+            self.nav.open("confirm-body");
+            ui.set_width(380.0);
+            ui.label(RichText::new(monitor_i18n::tr("reboot-confirm-title")).heading());
+            ui.label(
+                RichText::new(monitor_i18n::tr("reboot-confirm-hint"))
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+            ui.add_space(theme::space::M);
+            ui.horizontal(|ui| {
+                let cancel_label = monitor_i18n::tr("action-cancel");
+                let reboot_label = monitor_i18n::tr("action-reboot");
+                ui.add_space(Self::center_offset(ui, &[&cancel_label, &reboot_label]));
+                let cancel_button = self.nav.tracked(ui.button(cancel_label));
+                // The dialog opens on the answer that changes nothing.
+                self.system_confirm_anchor = Some(cancel_button.id);
+                if cancel_button.clicked() {
+                    cancel = true;
+                }
+                if self
+                    .nav
+                    .tracked(ui.button(RichText::new(reboot_label).color(theme::ERROR)))
+                    .clicked()
+                {
+                    confirm = true;
+                }
+            });
+            self.nav.close();
+        });
+
+        if confirm {
+            self.system_confirm_anchor = None;
+            // Save first: a reboot ends the process, and the debounced save
+            // would otherwise never happen.
+            self.save_now();
+            match reboot::reboot() {
+                Ok(()) => self.quit(ctx),
+                Err(err) => {
+                    self.flash(
+                        monitor_i18n::tr_args(
+                            "toast-reboot-failed",
+                            &[("error", err.to_string().into())],
+                        ),
+                        ToastKind::Error,
+                    );
+                    // The machine was not restarted, so the viewer is still
+                    // here — give the button its focus back.
+                    self.restore_focus = Some(from);
+                }
+            }
+            return;
+        }
+        if !cancel {
+            self.system_confirm = Some(SystemConfirm { from });
+        } else {
+            self.system_confirm_anchor = None;
+            self.restore_focus = Some(from);
+        }
     }
 
     /// The passphrase prompt: what seals a configuration for the trip, and what
@@ -5502,6 +5633,7 @@ impl eframe::App for XgViewApp {
         if self.remove_confirm_window(ctx) {
             self.mark_dirty();
         }
+        self.system_confirm_window(ctx);
         if self.passphrase_window(ctx) {
             self.mark_dirty();
         }
@@ -5545,6 +5677,12 @@ impl eframe::App for XgViewApp {
         if self.remove_confirm_handoff.entering(self.remove_confirm.is_some()) {
             self.swallow_enter = 10;
             if let Some(id) = self.remove_confirm_anchor {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
+        if self.system_confirm_handoff.entering(self.system_confirm.is_some()) {
+            self.swallow_enter = 10;
+            if let Some(id) = self.system_confirm_anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }

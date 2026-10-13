@@ -61,6 +61,7 @@ key-page = 上一页 / 下一页
 key-settings = 设置
 key-add-devices = 添加设备
 key-fullscreen = 全屏
+settings-actions = 操作
 
 ## 设置 / 黑屏
 settings-blackout = 黑屏
@@ -144,6 +145,13 @@ remove-title = 移除“{ $name }”？
 remove-hint = 它将离开大屏和配置；摄像头本身不受影响。
 action-keep = 保留
 action-remove = 移除
+action-cancel = 取消
+action-exit = 退出
+action-reboot = 重启
+
+## 重启确认
+reboot-confirm-title = 重启系统？
+reboot-confirm-hint = 机器将立即重启，其他未保存的工作会丢失。
 
 ## 关于
 about-description = 监控摄像头网格查看器
@@ -256,6 +264,7 @@ exit-hint = 再按一次返回退出
 toast-autostart-on = 已注册开机自启
 toast-autostart-off = 已移除开机自启注册
 toast-autostart-failed = 开机自启：{ $error }
+toast-reboot-failed = 无法重启：{ $error }
 toast-decoding-gpu = 通道重开，GPU 尽力解码
 toast-decoding-cpu = 通道在 CPU 上重开
 toast-no-sub = 未识别辅码流模式
