@@ -1012,16 +1012,23 @@ impl XgViewApp {
             time: 0.0,
         };
         app.sync();
-        let message = if app.from_autostart {
-            monitor_i18n::tr_args(
+        let message = match (app.from_autostart, app.supervised) {
+            (true, true) => monitor_i18n::tr_args(
+                "toast-started-autostart-supervised",
+                &[("version", env!("CARGO_PKG_VERSION").into()), ("decoder", app.decoder.into())],
+            ),
+            (true, false) => monitor_i18n::tr_args(
                 "toast-started-autostart",
                 &[("version", env!("CARGO_PKG_VERSION").into()), ("decoder", app.decoder.into())],
-            )
-        } else {
-            monitor_i18n::tr_args(
+            ),
+            (false, true) => monitor_i18n::tr_args(
+                "toast-started-supervised",
+                &[("version", env!("CARGO_PKG_VERSION").into()), ("decoder", app.decoder.into())],
+            ),
+            (false, false) => monitor_i18n::tr_args(
                 "toast-started",
                 &[("version", env!("CARGO_PKG_VERSION").into()), ("decoder", app.decoder.into())],
-            )
+            ),
         };
         app.flash(message, ToastKind::Info);
         app
