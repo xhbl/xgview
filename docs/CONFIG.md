@@ -102,9 +102,11 @@ powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -NoBuild -N
 without installing it.
 
 The Run key entry starts the viewer *supervised*, so that a wall on a machine
-nobody watches comes back by itself if it dies. The scheduled task above is left
-without that: it has a failure restart of its own, and two policies layered over
-one viewer would only disagree. See the README's
+nobody watches comes back by itself if it dies. A supervised viewer is marked
+with `XGVIEW_SUPERVISED=1`, and `Back` cannot end it — only the exit button in
+the settings can — so the wall is not dropped by accident. The scheduled task
+above is left without that: it has a failure restart of its own, and two
+policies layered over one viewer would only disagree. See the README's
 [Keep it running](../README.md#keep-it-running).
 
 ## 5. Linux build and deployment

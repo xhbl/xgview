@@ -304,7 +304,9 @@ or green frames. `Esc` / `BACK`, or another double click, returns to the grid.
 `BACK` is layered: it first leaves a magnified view, then closes a window, then
 closes the settings panel, then brings the bar back - and only a second press on
 an otherwise idle wall asks whether to quit, so one accidental press never drops
-the wall.
+the wall. Under a supervisor (`--supervise`, including the start-on-boot entry)
+that last step is held: `Back` cannot end the program, only the exit button in
+the settings can.
 
 Mouse and touch dragging horizontally over the grid also turns the page. The
 toolbar across the top offers the same layout, paging, full screen, settings and
@@ -558,6 +560,13 @@ same arrangement as having no supervisor at all, and the right way round where t
 wall being up matters more than who is watching it. A Windows scheduled task or a
 systemd unit can be layered over the top where a second restart policy is wanted;
 `scripts/install-windows.ps1` registers one.
+
+A supervisor marks the viewer it starts with `XGVIEW_SUPERVISED=1`, and the
+viewer reads it once at start-up. Under that mark `Back` on the wall does not
+end the program — the wall is meant to stay up, and the only way out is the
+exit button in the settings. The start-up toast says *started supervised* (or
+*started automatically, supervised* where both are true), so the constraint is
+visible from the first frame.
 
 ### Language
 

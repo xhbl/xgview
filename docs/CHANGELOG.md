@@ -3,6 +3,36 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.4.12
+
+Changes since 1.4.6. **The system tab can leave the program and restart the
+machine, and a viewer under a supervisor cannot be left by accident.**
+
+### Exit and reboot
+
+- **The system settings tab ends with two buttons.** *Exit* leaves the program
+  at once. *Reboot* restarts the machine behind a confirmation window, and
+  only where the process has the privilege to do it: `SeShutdownPrivilege` on
+  Windows, the `admin` or `wheel` group on macOS, root or `systemctl` on Linux.
+  Android has no reboot permission, so the button is left out there.
+- **Reboot saves the configuration first**, then runs `shutdown /r /t 0`,
+  `osascript … restart`, or `systemctl reboot` per platform. A failure is shown
+  as a toast and the viewer stays up.
+
+### A supervised viewer keeps the wall up
+
+- **A supervisor marks its child with `XGVIEW_SUPERVISED=1`**, and the viewer
+  reads it once at start-up. Under that mark, `Back` on the wall no longer ends
+  the program — the wall is meant to stay up, and the only way out is the exit
+  button in the settings. `Back` still unwinds a zoom, the discovery panel, and
+  the settings themselves; only the exit path is closed.
+- **The start-up toast says so.** A supervised viewer is told it is supervised
+  the moment the wall comes up, the way an autostarted one already is, so the
+  kiosk constraint is visible from the first frame.
+- The variable rather than `--supervise` so the child cannot become a
+  supervisor of itself; Android supervises itself through the activity and is
+  never a supervisor's child.
+
 ## 1.4.6
 
 Changes since 1.3.57. **H.265 is decoded now, on every platform.** A camera that

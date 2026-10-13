@@ -1462,5 +1462,40 @@ so the cases are unit-tested without a device -
 names, a named sub winning over the resolution fallback, one profile, and two
 equally sized ones.
 
+---
+
+## 18. A supervised viewer keeps the wall up
+
+*Landed 2026-10-13, in 1.4.12.*
+
+**What landed.** A supervisor now sets `XGVIEW_SUPERVISED=1` on the child it
+starts, and the viewer reads it once at start-up. Under that mark, `Back` on
+the wall no longer ends the program — the wall is meant to stay up, and the
+only way out is the exit button in the settings.
+
+**Why a variable and not `--supervise`.** `--supervise` is not handed down to
+the child, or the child would be a supervisor of itself, one process deeper,
+for ever. A variable cannot turn the child into a supervisor: only the switch
+does that, and the switch is filtered out. The variable is inherited, but the
+child is a viewer and never looks for the switch, so the inheritance is inert.
+
+**Why not the parent process.** The child could read its parent's command line
+and find `--supervise` there — `/proc/<ppid>/cmdline` on Linux,
+`NtQueryInformationProcess` on Windows, `libproc` on macOS. But the parent may
+already be gone: a supervisor that crashed leaves the child reparented to init,
+and the very moment the mark is most needed is the moment it cannot be read.
+The process tree is also reshaped by `xgview-cli`, systemd and the kiosk
+wrapper, so the parent is not reliably the supervisor. A variable is set once,
+at the only point the relationship is certain, and asks nothing of the tree
+after that.
+
+**The exit button.** The system settings tab ends with an *exit* button and a
+*reboot* button. Exit leaves at once; reboot restarts the machine behind a
+confirmation window, and only where the process has the privilege to do it
+(`SeShutdownPrivilege` on Windows, the `admin`/`wheel` group on macOS, root or
+`systemctl` on Linux; Android has no reboot permission). Under a supervisor
+the exit button is the only way out of the program — `Back` is held — which is
+the point of the mark.
+
 
 
