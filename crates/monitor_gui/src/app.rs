@@ -4406,7 +4406,7 @@ impl XgViewApp {
         );
         // An imported camera's form is drawn with its addresses greyed; this is
         // read afresh each frame, so pressing Detach unlocks it on the spot.
-        let camera = self.config.find_camera(&id);
+        let locked = self.config.find_camera(&id).is_some_and(|camera| camera.imported);
 
         // A modal: centred, and its backdrop swallows the presses that would
         // otherwise reach the panel it was opened from. It is left only by its
@@ -4416,7 +4416,7 @@ impl XgViewApp {
             ui.label(RichText::new(title).heading());
             ui.add_space(theme::space::S);
             self.nav.open("edit-body");
-            let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft, camera);
+            let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft, locked);
             // The dialog opens on the first control of the form.
             self.camera_edit_anchor = fields.first;
             if fields.detach {

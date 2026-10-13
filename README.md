@@ -421,10 +421,10 @@ tries RTSP first and falls back to the MSE address when RTSP cannot be reached -
 the case of an RTSP port that is closed outside the LAN. The address shown
 beside the button is the one the camera currently pulls. A camera an import
 brought in keeps its addresses and credentials read-only in the edit form - the
-import manages them - until it is detached, which drops the MSE address and
-returns it to a camera edited by hand; the name is editable throughout. A camera
-is added to the group the wall is on - the dialog's title names it; see
-[Camera groups](#camera-groups).
+import manages them - until it is detached, after which both halves of a pair
+(RTSP and MSE, each with its own login) can be edited by hand; the name is
+editable throughout. A camera is added to the group the wall is on - the dialog's
+title names it; see [Camera groups](#camera-groups).
 
 ### Camera groups
 

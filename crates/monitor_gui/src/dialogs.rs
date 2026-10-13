@@ -21,7 +21,7 @@ use monitor_core::discovery::frigate::{
     extract_rtsp_port, extract_stream, mse_url as frigate_mse_url, rtsp_url as frigate_rtsp_url,
 };
 use monitor_core::discovery::go2rtc::{mse_url as go2rtc_mse_url, restream_url as go2rtc_rtsp_url};
-use monitor_core::model::{CameraSource, StreamKind};
+use monitor_core::model::CameraSource;
 
 use crate::controls;
 use crate::icons::{self, Icon};
@@ -210,14 +210,22 @@ fn parse_ports(text: &str) -> Vec<u16> {
     ports
 }
 
-/// Manually entered camera.
+/// A camera as the entry form holds it.
+///
+/// The MSE fields are only filled in when the entry carries an MSE address (an
+/// imported camera, or one detached from an import): a hand-added camera has
+/// none, and the form leaves them out.
 #[derive(Debug, Clone, Default)]
 pub struct CameraDraft {
     pub name: String,
     pub main: String,
     pub sub: String,
+    pub mse_main: String,
+    pub mse_sub: String,
     pub username: String,
     pub password: String,
+    pub mse_username: String,
+    pub mse_password: String,
     pub infer_sub: bool,
 }
 
@@ -251,6 +259,19 @@ impl CameraDraft {
         } else if self.infer_sub {
             source.apply_sub_inference();
         }
+        // The MSE address and its own login, when the entry carries them.
+        let mse_main = self.mse_main.trim();
+        if !mse_main.is_empty() {
+            source.mse_main = Some(mse_main.to_string());
+        }
+        let mse_sub = self.mse_sub.trim();
+        if !mse_sub.is_empty() {
+            source.mse_sub = Some(mse_sub.to_string());
+        }
+        if !self.mse_username.trim().is_empty() {
+            source.mse_username = Some(self.mse_username.trim().to_string());
+            source.mse_password = Some(self.mse_password.clone());
+        }
         Ok(source)
     }
 
@@ -264,8 +285,12 @@ impl CameraDraft {
             name: camera.name.clone(),
             main: camera.rtsp_main.clone(),
             sub: camera.rtsp_sub.clone().unwrap_or_default(),
+            mse_main: camera.mse_main.clone().unwrap_or_default(),
+            mse_sub: camera.mse_sub.clone().unwrap_or_default(),
             username: camera.username.clone().unwrap_or_default(),
             password: camera.password.clone().unwrap_or_default(),
+            mse_username: camera.mse_username.clone().unwrap_or_default(),
+            mse_password: camera.mse_password.clone().unwrap_or_default(),
             // A sub stream already there is not to be overwritten by inference.
             infer_sub: camera.rtsp_sub.is_none(),
         }
@@ -888,24 +913,27 @@ fn field_text(
 /// `grid_id` names the grid - egui keys a grid's state on it, so the two must
 /// not share one.
 ///
-/// `camera` is the entry being edited, when there is one. An entry an import
-/// brought in (`imported`) has its address and credential fields drawn greyed
-/// and uneditable: hand-editing one address of a managed pair - a Frigate or
-/// go2rtc camera's RTSP and MSE ones - would leave the other pointing at a
-/// different stream. The name stays editable, and a "Detach" button offers to
-/// take the camera over (see [`CameraSource::detach`]). See [`CameraFields`]
-/// for what comes back.
+/// `locked` is set for an entry an import brought in (`imported`): its address
+/// and credential fields are drawn greyed and uneditable, because hand-editing
+/// one address of a managed pair - a Frigate or go2rtc camera's RTSP and MSE
+/// ones - would leave the other pointing at a different stream. The name stays
+/// editable, and a "Detach" button offers to take the camera over (see
+/// [`CameraSource::detach`]). The MSE fields only appear when the entry carries
+/// an MSE address, so a hand-added camera keeps the short form. See
+/// [`CameraFields`] for what comes back.
 pub fn camera_fields(
     ui: &mut egui::Ui,
     nav: &mut Nav,
     grid_id: &str,
     draft: &mut CameraDraft,
-    camera: Option<&CameraSource>,
+    locked: bool,
 ) -> CameraFields {
-    let locked = camera.is_some_and(|camera| camera.imported);
     let mut first = None;
     let mut inferred = false;
     let mut detach = false;
+    // The MSE rows appear only when the entry carries an MSE address: an
+    // imported camera, or one detached from an import.
+    let has_mse = !draft.mse_main.trim().is_empty();
 
     egui::Grid::new(grid_id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label(monitor_i18n::tr("dialog-name"));
@@ -943,6 +971,24 @@ pub fn camera_fields(
             }
         });
         ui.end_row();
+
+        // The MSE address the import also captured, so both halves of the pair
+        // are in front of the user and stay in step when edited by hand.
+        if has_mse {
+            ui.label(monitor_i18n::tr("dialog-mse-main"));
+            field_text(ui, nav, &mut draft.mse_main, &monitor_i18n::tr("dialog-mse-main"), locked, |s| {
+                egui::TextEdit::singleline(s)
+                    .hint_text(theme::hint("wss://host:8971/live/mse/api/ws?src=…"))
+                    .desired_width(f32::INFINITY)
+            });
+            ui.end_row();
+
+            ui.label(monitor_i18n::tr("dialog-mse-sub"));
+            field_text(ui, nav, &mut draft.mse_sub, &monitor_i18n::tr("dialog-mse-sub"), locked, |s| {
+                egui::TextEdit::singleline(s).desired_width(320.0)
+            });
+            ui.end_row();
+        }
     });
     if !locked {
         nav.tracked(ui.checkbox(&mut draft.infer_sub, monitor_i18n::tr("dialog-derive-sub")));
@@ -952,25 +998,16 @@ pub fn camera_fields(
     // naming it, then the two fields on one row.
     ui.separator();
     ui.label(RichText::new(monitor_i18n::tr("dialog-stream-credentials")).small());
-    if locked {
-        ui.horizontal(|ui| {
-            let user = monitor_i18n::tr("dialog-user");
-            let pass = monitor_i18n::tr("dialog-password");
-            ui.label(user);
-            ui.add_enabled(false, egui::TextEdit::singleline(&mut draft.username).desired_width(140.0));
-            ui.label(pass);
-            ui.add_enabled(false, egui::TextEdit::singleline(&mut draft.password).password(true).desired_width(140.0));
-        });
-    } else {
-        credentials_row(ui, nav, &mut draft.username, &mut draft.password);
+    credentials_fields(ui, nav, &mut draft.username, &mut draft.password, locked);
+
+    if has_mse {
+        ui.add_space(6.0);
+        ui.label(RichText::new(monitor_i18n::tr("dialog-mse-credentials")).small());
+        credentials_fields(ui, nav, &mut draft.mse_username, &mut draft.mse_password, locked);
     }
 
     if locked {
         ui.add_space(6.0);
-        // The MSE address the import also holds, so the managed pair is visible.
-        if let Some(mse) = camera.and_then(|camera| camera.masked_mse_uri(StreamKind::Main)) {
-            ui.label(RichText::new(format!("mse: {mse}")).small().monospace().color(theme::TEXT_DIM));
-        }
         ui.label(
             RichText::new(monitor_i18n::tr("camera-edit-imported-hint"))
                 .small()
@@ -984,9 +1021,32 @@ pub fn camera_fields(
     CameraFields { first, inferred, detach }
 }
 
+/// A credentials row, editable or greyed - the shape a managed camera's account
+/// takes until it is detached.
+fn credentials_fields(
+    ui: &mut egui::Ui,
+    nav: &mut Nav,
+    username: &mut String,
+    password: &mut String,
+    locked: bool,
+) {
+    if locked {
+        ui.horizontal(|ui| {
+            let user = monitor_i18n::tr("dialog-user");
+            let pass = monitor_i18n::tr("dialog-password");
+            ui.label(user);
+            ui.add_enabled(false, egui::TextEdit::singleline(username).desired_width(140.0));
+            ui.label(pass);
+            ui.add_enabled(false, egui::TextEdit::singleline(password).password(true).desired_width(140.0));
+        });
+    } else {
+        credentials_row(ui, nav, username, password);
+    }
+}
+
 fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {
     let mut changed = false;
-    if camera_fields(ui, nav, "manual-camera", &mut state.manual, None).inferred {
+    if camera_fields(ui, nav, "manual-camera", &mut state.manual, false).inferred {
         state.note(Tab::Manual, monitor_i18n::tr("dialog-sub-derived-msg"));
     }
 

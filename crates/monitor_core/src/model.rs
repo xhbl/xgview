@@ -493,28 +493,25 @@ impl CameraSource {
         self.name = form.name.clone();
         self.rtsp_main = form.rtsp_main.clone();
         self.rtsp_sub = form.rtsp_sub.clone();
+        self.mse_main = form.mse_main.clone();
+        self.mse_sub = form.mse_sub.clone();
         self.username = form.username.clone();
         self.password = form.password.clone();
+        self.mse_username = form.mse_username.clone();
+        self.mse_password = form.mse_password.clone();
         self.host = form.host.clone();
     }
 
     /// Takes a camera out of the import's hands, so its addresses can be edited
     /// by hand.
     ///
-    /// The MSE address and its login are dropped - a hand-edited camera holds
-    /// one address, and keeping a second that no longer matches is exactly what
-    /// the managed state exists to prevent - and a camera left on `Mse` with no
-    /// MSE address falls back to `Auto` rather than pulling nothing. The origin
-    /// is kept: where the camera came from is still true.
+    /// Only the mark is cleared: the addresses, the credentials and the
+    /// connection are kept, so an imported camera keeps the MSE address its
+    /// `Auto` preference falls back to. The edit form offers the two addresses
+    /// together, so a hand edit keeps them in step. The origin is kept too:
+    /// where the camera came from is still true.
     pub fn detach(&mut self) {
         self.imported = false;
-        self.mse_main = None;
-        self.mse_sub = None;
-        self.mse_username = None;
-        self.mse_password = None;
-        if self.connect == ConnectionMode::Mse {
-            self.connect = ConnectionMode::Auto;
-        }
     }
 
     /// RTSP URL for the requested stream. Falls back to the main stream when no
@@ -1042,25 +1039,22 @@ mod tests {
         assert!(!CameraSource::new("front", "rtsp://10.0.0.1/main").imported);
     }
 
-    /// Detaching drops the MSE address and its login, clears the mark, and a
-    /// camera left on `Mse` falls back to `Auto` rather than pulling nothing.
-    /// The RTSP side and the origin are kept.
+    /// Detaching only clears the mark: the MSE pair, its login and the
+    /// connection are kept, so the camera still has the address `Auto` falls
+    /// back to. The form is what becomes editable.
     #[test]
-    fn detaching_drops_the_managed_address() {
+    fn detaching_only_unlocks_the_form() {
         let mut camera = frigate_camera();
         camera.imported = true;
         camera.connect = ConnectionMode::Mse;
-        camera.mse_sub = Some("wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1_sub".to_string());
 
         camera.detach();
 
         assert!(!camera.imported);
-        assert!(!camera.has_mse());
-        assert!(camera.mse_sub.is_none());
-        assert!(camera.mse_credentials().is_none());
-        assert_eq!(camera.connect, ConnectionMode::Auto);
+        assert!(camera.has_mse());
+        assert_eq!(camera.connect, ConnectionMode::Mse);
+        assert_eq!(camera.mse_credentials(), Some(("frigate".to_string(), "pw".to_string())));
         assert_eq!(camera.rtsp_main, "rtsp://10.0.0.1:8554/cam_1");
-        assert_eq!(camera.origin, CameraOrigin::Frigate);
     }
 
     #[test]
