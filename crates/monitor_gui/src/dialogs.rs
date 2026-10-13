@@ -913,21 +913,22 @@ fn field_text(
 /// `grid_id` names the grid - egui keys a grid's state on it, so the two must
 /// not share one.
 ///
-/// `locked` is set for an entry an import brought in (`imported`): its address
-/// and credential fields are drawn greyed and uneditable, because hand-editing
-/// one address of a managed pair - a Frigate or go2rtc camera's RTSP and MSE
-/// ones - would leave the other pointing at a different stream. The name stays
-/// editable, and a "Detach" button offers to take the camera over (see
-/// [`CameraSource::detach`]). The MSE fields only appear when the entry carries
-/// an MSE address, so a hand-added camera keeps the short form. See
-/// [`CameraFields`] for what comes back.
+/// `camera` is the entry being edited, when there is one. An entry an import
+/// brought in (`imported`) is drawn with its address and credential fields
+/// greyed and uneditable, because hand-editing one address of a managed pair -
+/// a Frigate or go2rtc camera's RTSP and MSE ones - would leave the other
+/// pointing at a different stream; the name stays editable, and a "Detach"
+/// button offers to take the camera over (see [`CameraSource::detach`]). The MSE
+/// fields only appear when the entry carries an MSE address, so a hand-added
+/// camera keeps the short form. See [`CameraFields`] for what comes back.
 pub fn camera_fields(
     ui: &mut egui::Ui,
     nav: &mut Nav,
     grid_id: &str,
     draft: &mut CameraDraft,
-    locked: bool,
+    camera: Option<&CameraSource>,
 ) -> CameraFields {
+    let locked = camera.is_some_and(|camera| camera.imported);
     let mut first = None;
     let mut inferred = false;
     let mut detach = false;
@@ -935,9 +936,11 @@ pub fn camera_fields(
     // imported camera, or one detached from an import.
     let has_mse = !draft.mse_main.trim().is_empty();
     // The vendor sub-stream rules only match a camera's own address. A go2rtc or
-    // Frigate restream is a stream name, so the "infer" offer is drawn only
-    // where there is something to infer - on a manual or ONVIF address.
-    let infer_ok = infer_sub_stream(&draft.main).is_some();
+    // Frigate restream is a stream name, and its addresses are the import's, so
+    // the "infer" offer is drawn only on a hand-carried camera whose url matches
+    // a rule - a manual or ONVIF one.
+    let infer_ok = !camera.is_some_and(|camera| camera.is_restream())
+        && infer_sub_stream(&draft.main).is_some();
 
     egui::Grid::new(grid_id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label(monitor_i18n::tr("dialog-name"));
@@ -1050,7 +1053,7 @@ fn credentials_fields(
 
 fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {
     let mut changed = false;
-    if camera_fields(ui, nav, "manual-camera", &mut state.manual, false).inferred {
+    if camera_fields(ui, nav, "manual-camera", &mut state.manual, None).inferred {
         state.note(Tab::Manual, monitor_i18n::tr("dialog-sub-derived-msg"));
     }
 

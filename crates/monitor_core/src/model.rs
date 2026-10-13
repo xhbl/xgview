@@ -562,13 +562,17 @@ impl CameraSource {
         }
     }
 
-    /// Whether an RTSP transport switch is meaningful for this camera.
+    /// Whether this camera is addressed through a go2rtc or Frigate restream
+    /// rather than the device itself.
     ///
-    /// A go2rtc or Frigate restream carries RTSP over TCP only - go2rtc answers
-    /// every UDP `SETUP` with `461` on purpose - so UDP is not offered for the
-    /// cameras those imports bring in.
-    pub fn udp_available(&self) -> bool {
-        !matches!(self.origin, CameraOrigin::Frigate | CameraOrigin::Go2rtc)
+    /// Both importers hold the camera in their own configuration and serve it
+    /// under a stream name, which tells two things apart from a camera carried
+    /// directly: the RTSP transport is the server's own (TCP only - go2rtc
+    /// answers every UDP `SETUP` with `461` on purpose), and the vendor
+    /// sub-stream patterns, which read a camera's own url, have nothing to
+    /// match.
+    pub fn is_restream(&self) -> bool {
+        matches!(self.origin, CameraOrigin::Frigate | CameraOrigin::Go2rtc)
     }
 
     /// The stops the per-camera connection switch walks, in the order a press
@@ -578,7 +582,7 @@ impl CameraSource {
     /// offers only the RTSP transport (`Tcp -> Udp`), which is what it always
     /// did. UDP is left out where the restream carries TCP alone.
     pub fn connection_stops(&self) -> &'static [ConnectionStop] {
-        match (self.has_mse(), self.udp_available()) {
+        match (self.has_mse(), !self.is_restream()) {
             (true, true) => &[
                 ConnectionStop::Auto,
                 ConnectionStop::RtspTcp,
@@ -977,6 +981,17 @@ mod tests {
         camera.advance_connection();
         assert_eq!(camera.connect, ConnectionMode::Auto);
         assert_eq!(camera.connection_label(), "AUTO");
+    }
+
+    /// Only the two importer's holdings are a restream; a camera carried
+    /// directly - manual or ONVIF - is not.
+    #[test]
+    fn a_restream_is_a_go2rtc_or_frigate_camera() {
+        assert!(frigate_camera().is_restream());
+        assert!(!CameraSource::new("plain", "rtsp://10.0.0.1/live").is_restream());
+        let mut synology = CameraSource::new("syno", "rtsp://nas/live");
+        synology.origin = CameraOrigin::Synology;
+        assert!(!synology.is_restream());
     }
 
     /// A go2rtc/Frigate restream carries RTSP over TCP alone, so the switch

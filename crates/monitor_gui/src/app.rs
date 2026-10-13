@@ -3983,7 +3983,7 @@ impl XgViewApp {
                             .small()
                             .color(theme::ACCENT),
                     );
-                } else if infer_sub_stream(&camera.rtsp_main).is_some() {
+                } else if !camera.is_restream() && infer_sub_stream(&camera.rtsp_main).is_some() {
                     // The vendor sub-stream rules only match a camera's own
                     // address; a go2rtc or Frigate restream is a stream name, so
                     // the offer is drawn only where there is something to infer.
@@ -4407,9 +4407,10 @@ impl XgViewApp {
             "camera-edit-title",
             "camera-edit-title-group",
         );
-        // An imported camera's form is drawn with its addresses greyed; this is
+        // The form reads the entry to decide what it draws - greyed addresses
+        // for an imported camera, and no "infer sub" offer on a restream. It is
         // read afresh each frame, so pressing Detach unlocks it on the spot.
-        let locked = self.config.find_camera(&id).is_some_and(|camera| camera.imported);
+        let camera = self.config.find_camera(&id);
 
         // A modal: centred, and its backdrop swallows the presses that would
         // otherwise reach the panel it was opened from. It is left only by its
@@ -4419,7 +4420,7 @@ impl XgViewApp {
             ui.label(RichText::new(title).heading());
             ui.add_space(theme::space::S);
             self.nav.open("edit-body");
-            let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft, locked);
+            let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft, camera);
             // The dialog opens on the first control of the form.
             self.camera_edit_anchor = fields.first;
             if fields.detach {
