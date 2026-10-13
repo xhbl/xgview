@@ -21,7 +21,7 @@ use monitor_core::discovery::frigate::{
     extract_rtsp_port, extract_stream, mse_url as frigate_mse_url, rtsp_url as frigate_rtsp_url,
 };
 use monitor_core::discovery::go2rtc::{mse_url as go2rtc_mse_url, restream_url as go2rtc_rtsp_url};
-use monitor_core::model::CameraSource;
+use monitor_core::model::{infer_sub_stream, CameraSource};
 
 use crate::controls;
 use crate::icons::{self, Icon};
@@ -934,6 +934,10 @@ pub fn camera_fields(
     // The MSE rows appear only when the entry carries an MSE address: an
     // imported camera, or one detached from an import.
     let has_mse = !draft.mse_main.trim().is_empty();
+    // The vendor sub-stream rules only match a camera's own address. A go2rtc or
+    // Frigate restream is a stream name, so the "infer" offer is drawn only
+    // where there is something to infer - on a manual or ONVIF address.
+    let infer_ok = infer_sub_stream(&draft.main).is_some();
 
     egui::Grid::new(grid_id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label(monitor_i18n::tr("dialog-name"));
@@ -960,7 +964,7 @@ pub fn camera_fields(
                     .hint_text(theme::hint(&monitor_i18n::tr("dialog-sub-hint")))
                     .desired_width(320.0)
             });
-            if !locked && nav.tracked(ui.button(monitor_i18n::tr("dialog-infer"))).clicked() {
+            if !locked && infer_ok && nav.tracked(ui.button(monitor_i18n::tr("dialog-infer"))).clicked() {
                 draft.infer_sub = true;
                 inferred = true;
                 let mut probe = draft.clone();
@@ -990,7 +994,7 @@ pub fn camera_fields(
             ui.end_row();
         }
     });
-    if !locked {
+    if !locked && infer_ok {
         nav.tracked(ui.checkbox(&mut draft.infer_sub, monitor_i18n::tr("dialog-derive-sub")));
     }
 

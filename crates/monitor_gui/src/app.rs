@@ -21,7 +21,7 @@ use monitor_core::power::{self, PowerStatus};
 use monitor_core::reboot;
 use monitor_core::config::AppConfig;
 use monitor_core::layout::{GridLayout, NavigateOutcome};
-use monitor_core::model::{ConnectionState, OsdItem, StreamKind, TileAspect};
+use monitor_core::model::{infer_sub_stream, ConnectionState, OsdItem, StreamKind, TileAspect};
 use monitor_core::pipeline::{ChannelManager, StreamEvent};
 use monitor_core::scheduler::Scheduler;
 use monitor_core::{CameraSource, Direction};
@@ -3983,7 +3983,10 @@ impl XgViewApp {
                             .small()
                             .color(theme::ACCENT),
                     );
-                } else {
+                } else if infer_sub_stream(&camera.rtsp_main).is_some() {
+                    // The vendor sub-stream rules only match a camera's own
+                    // address; a go2rtc or Frigate restream is a stream name, so
+                    // the offer is drawn only where there is something to infer.
                     let infer_button = ui.small_button(monitor_i18n::tr("cameras-infer-sub"));
                     self.nav.item(&infer_button);
                     if infer_button.clicked() {
