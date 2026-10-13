@@ -86,8 +86,8 @@ the hand.
 | Seamless transition | The last sub-stream frame is held until the main stream delivers its first keyframe - no black or green frames |
 | Suspend | Channels on a non-visible page are suspended to save bandwidth, CPU and decoder handles |
 | Reconnection | Exponential-backoff self-healing with a non-blocking "reconnecting…" overlay; the backoff shape and the handshake timeout are configurable and reach channels already running |
-| Decoding | H.264 - and H.265 on the desktop - on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, VideoToolbox on macOS, `AMediaCodec` on Android) and on the CPU elsewhere - Android falling back to OpenH264 by itself for an H.264 stream its own decoder will not take; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW` |
-| Codecs | H.264, H.265 (HEVC) and MJPEG are decoded and displayed. H.265 is decoded on Windows, Linux and macOS, in software or through the GPU; on Android an HEVC-only camera still shows no picture, so use its H.264 sub stream there |
+| Decoding | H.264 and H.265 on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, VideoToolbox on macOS, `AMediaCodec` on Android) and on the CPU elsewhere - Android falling back to OpenH264 by itself for an H.264 stream its own decoder will not take; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW` |
+| Codecs | H.264, H.265 (HEVC) and MJPEG are decoded and displayed. H.265 uses the platform's decoder (VideoToolbox on macOS, `AMediaCodec` on Android) or FFmpeg on the desktop, on the GPU or the CPU. Android has no software HEVC, so a stream a device's own decoder will not take shows no picture - use its H.264 sub stream there |
 | Transports | RTSP over TCP (interleaved, the default) or UDP, chosen per camera; HTTP / HTTPS MJPEG (`multipart/x-mixed-replace`) cameras are supported too |
 | On-screen display | Each tile corner independently shows one of: none, name, number + name, stream, codec + rate, frame rate + decoder, size + shape, or all statistics |
 | Power management | Keeps the machine awake and/or the screen on while the wall is up (`SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` + the desktop's D-Bus inhibit on Linux, `WakeLock` + `FLAG_KEEP_SCREEN_ON` on Android); both switches default on |
@@ -110,16 +110,15 @@ the hand.
 | **Linux** x64 | desktop, mini PC | VAAPI or CUDA - hardware, with a CPU fallback |
 | **macOS** (universal) | desktop, laptop | VideoToolbox - hardware, with a CPU fallback |
 
-Hardware decoding covers H.264, and H.265 on the desktop; MJPEG is always
-decoded on the CPU, and an HEVC stream on Android is not decoded yet. It needs a
-GPU that offers VAAPI or CUDA, which a desktop with an NVIDIA, Intel or AMD
-graphics does; a machine that offers neither decodes on the CPU, where the wall
-still runs - comfortable for a grid of sub streams, and heavier once it starts
-pulling main streams. macOS decodes through VideoToolbox, which is part of the
-system, and Android through `AMediaCodec` - with H.264 falling back to OpenH264
-on the CPU when the platform's decoders will not have the stream. A tile whose
-corner is set to the frame-rate item shows `HW` or `SW`, so you can see at a
-glance which path a camera is on.
+Hardware decoding covers H.264 and H.265; MJPEG is always decoded on the CPU. It
+needs a GPU that offers VAAPI or CUDA, which a desktop with an NVIDIA, Intel or
+AMD graphics does; a machine that offers neither decodes on the CPU, where the
+wall still runs - comfortable for a grid of sub streams, and heavier once it
+starts pulling main streams. macOS decodes through VideoToolbox, which is part
+of the system, and Android through `AMediaCodec` - with H.264 falling back to
+OpenH264 on the CPU when the platform's decoders will not have the stream. A tile
+whose corner is set to the frame-rate item shows `HW` or `SW`, so you can see at
+a glance which path a camera is on.
 
 ### Android: what the device needs
 
@@ -133,9 +132,10 @@ glance which path a camera is on.
   Android 8.x) is sent to the **OpenGL ES** backend instead - and that is decided
   before the renderer is built, so such a device comes up on GL from its first
   launch rather than failing once and recovering on the next.
-- **H.264 is decoded in hardware** (`AMediaCodec`) where the chip offers it;
-  MJPEG is always decoded on the CPU. A tile whose corner shows the frame-rate
-  item says `HW` or `SW`.
+- **H.264 and H.265 are decoded in hardware** (`AMediaCodec`) where the chip
+  offers it - with a software fallback for H.264 only, since there is none for
+  HEVC; MJPEG is always decoded on the CPU. A tile whose corner shows the
+  frame-rate item says `HW` or `SW`.
 
 Two kinds of device fall below that floor and are refused rather than half run: a
 box that offers only **OpenGL ES 2.0** - an Amlogic S905 / Mali-450 on its stock
@@ -620,7 +620,8 @@ XGView.app/Contents/MacOS/xgview --print-schedule
   relay or a NAT mangles over TCP).
 - **A camera stays on `waiting for video`.** The connection is up but no picture
   has arrived. Confirm the stream is H.264, H.265 or MJPEG - on Android an HEVC
-  stream is not decoded yet, so use its H.264 sub stream there meanwhile.
+  stream needs a device whose own decoder takes it, so use its H.264 sub stream
+  if a tile stays blank.
 - **The picture freezes and jumps.** A software decode of a high-resolution
   stream can fall behind the camera. Leave hardware decoding on, and prefer the
   sub stream for the grid.

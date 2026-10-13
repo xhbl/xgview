@@ -1770,12 +1770,13 @@ async fn run_mjpeg_session(
 /// Creates the decoder for a stream's codec.
 ///
 /// H.264, H.265 and MJPEG are wired to a backend. H.265 is decoded on the
-/// desktop this release: FFmpeg reads its size and its parameter sets from the
-/// bitstream, so nothing above the decoder has to know HEVC's layout. Android
-/// is not wired for it yet - its platform decoder wants VPS/SPS/PPS as
-/// `csd-0`/`csd-1`/`csd-2` and the size from a HEVC sequence parameter set, and
-/// neither is in place - so a `H265` stream there keeps showing its placeholder
-/// for one more round (DevMemo §17).
+/// desktop by FFmpeg, which reads the size and the parameter sets from the
+/// bitstream, and on Android by `AMediaCodec`, which is handed the VPS, SPS and
+/// PPS as `csd-0`/`csd-1`/`csd-2` and the size read out of the stream's own
+/// sequence parameter set. There is no software H.265 on Android - OpenH264 is
+/// H.264 alone - so a device whose platform decoder will not take an HEVC
+/// stream shows no picture for it, the same placeholder an unrecognised codec
+/// gets.
 ///
 /// An unrecognised codec has no decoder anywhere, and that is not an error: the
 /// session keeps running, reports its statistics and shows a placeholder rather
@@ -1796,12 +1797,7 @@ fn video_decoder(
     index: usize,
     prefer_hardware: bool,
 ) -> Option<Box<dyn VideoDecoder>> {
-    let supported = match kind {
-        Codec::H264 | Codec::Mjpeg => true,
-        // The desktop only, for now: see the note above on Android's ingest.
-        Codec::H265 => cfg!(not(target_os = "android")),
-        Codec::Unknown => false,
-    };
+    let supported = matches!(kind, Codec::H264 | Codec::H265 | Codec::Mjpeg);
     if !supported {
         tracing::warn!(
             target: "xgview::pipeline",

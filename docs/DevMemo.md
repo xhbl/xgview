@@ -1036,16 +1036,18 @@ as the back-pressure it is.
 
 ---
 
-## 17. H.265: the desktop ingests and decodes; Android is what is left
+## 17. H.265: decoded on every platform
 
-*Landed 2026-10-13, opening 1.4. The desktop half is implemented and measured —
-"What landed" first, then the Android plan that section used to be.*
+*Landed 2026-10-13, opening 1.4. The desktop and Android halves are both
+implemented and measured — "What landed" first, then the parts only found on the
+way there.*
 
 **What landed.** An H.265 camera has now been in front of the viewer:
 `rtsp://192.168.17.87:8554/webcam`, a gortsplib relay whose SDP names `H265` at
 90000 and advertises its sets as `sprop-vps` / `sprop-sps` / `sprop-pps`, with
-no `a=framesize`. It decodes at 30 fps, `errors=0`, with `HW` on Direct3D 11 and
-with `SW` on the CPU. Three pieces did it:
+no `a=framesize`. It decodes at 30 fps with `errors=0` on every package - `HW` on
+Direct3D 11, on CUDA in WSL, and through `AMediaCodec` on a SHIELD, `SW` on the
+CPU when asked for. Four pieces did it:
 
 - `monitor_core::hevc`, a sibling of `h264.rs` rather than a shared body: the
   two byte header (`(byte0 >> 1) & 0x3f`), VPS / SPS / PPS as types 32 / 33 /
@@ -1059,8 +1061,14 @@ with `SW` on the CPU. Three pieces did it:
   `sprop-pps`; the depacketizer keys them by the type inside each NAL, so the
   order the camera lists them in (`{pps, sps, vps}` here) is not relied on.
 - `run_session` picks the depacketizer from the codec, and `video_decoder`
-  releases H.265 — and its hardware preference — on the desktop. The H.264-only
-  calls beside the decode loop are now guarded by the codec.
+  releases H.265 — and its hardware preference — everywhere now. The H.264-only
+  calls beside the decode loop are guarded by the codec.
+- `monitor_codec::sps` gained `hevc_picture_size`, and `decode_parameter_sets`
+  returns H.264's SPS and PPS or H.265's VPS, SPS and PPS in the order a decoder
+  reads them. That was Android's half: `AMediaCodec` is opened with the sets in
+  `csd-0`..`csd-2` and a size, and refuses every picture when the size is not
+  the stream's (`-30003`, §9). Measured on a SHIELD: H.265 at 1920x1080, `HW`,
+  30 fps, `errors=0`, `csd=[24, 62, 7]`.
 
 **The decoder half was already in place**, which is not what was expected. `Codec`
 has carried `H265` for a while — `from_encoding` answers both `H265` and `HEVC`,
@@ -1082,7 +1090,7 @@ detector of §8 and everything above the decoder are untouched.
 
 **Where the GPU is, platform by platform.** That last sentence - libavcodec
 picking the mode itself - holds only where the hwaccel was actually compiled in,
-and the three packages do not get FFmpeg the same way:
+and the packages do not all get their decoder the same way:
 
 * **Windows** links vcpkg's `ffmpeg:x64-windows`, a full build: the HEVC DXVA and
   CUDA modes are in it, and H.265 decodes on the GPU (measured: `HW`, D3D11).
@@ -1099,27 +1107,26 @@ and the three packages do not get FFmpeg the same way:
   `~/opt/ffmpeg` prefix through pkg-config), and that prefix is a near-default
   source build (`MACOS-SETUP.txt` 4B) or Homebrew's - neither disables anything,
   so `hevc_videotoolbox` is in it. H.265 should come up `HW` there; it is the one
-  of the three not yet seen on hardware.
+  package not yet seen on hardware.
+* **Android** is not FFmpeg at all: it decodes through `AMediaCodec`, the
+  platform's own decoder, so there is no hwaccel to compile in and no cache to
+  key - and no software fallback for HEVC either.
 
 The lesson for a trimmed build: each codec's hwaccel has to be named one by one,
 and the cache that skips the build has to be keyed on that set. The Linux package
 had neither, and decoded H.265 on the CPU because of it.
 
-**What is left is Android.** Two pieces, both on the ingest side:
+**Android, and how it differed.** The platform decoder is opened from the first
+access unit and built to a size, so the two things FFmpeg had been reading out of
+the bitstream for free had to be read here instead: a HEVC sequence parameter set
+parser for the size, and the parameter sets as separate `csd-N` buffers - VPS,
+SPS and PPS, where the H.264 path wrote SPS and PPS. Both are in
+`monitor_codec::sps` now (`hevc_picture_size`, `decode_parameter_sets`), and
+`amediacodec.rs` fills `csd-0`.. in the order they come back in.
 
-1. **An H.265 sequence parameter set reader, for the size.** `monitor_codec::sps`
-   is H.264 throughout — `picture_size`, `sps_info` and
-   `needs_constrained_baseline` all index the H.264 layout. The desktop does
-   without it, because FFmpeg reads the size from the bitstream; Android cannot,
-   and §9 is why — a reader whose size is not the stream's refuses every picture
-   with `-30003`.
-2. **Three CSD buffers.** The mime is already right (`video/hevc`), but H.265
-   wants `csd-0` = VPS, `csd-1` = SPS, `csd-2` = PPS, where `amediacodec.rs`
-   writes `csd-0` = SPS and `csd-1` = PPS — and its `parameter_sets` reader looks
-   for NAL types 7 / 8, which an HEVC header never presents.
-
-Until those land, `video_decoder` gates H.265 to `not(target_os = "android")`, so
-an HEVC stream on Android keeps showing its placeholder.
+There is no software H.265 on Android - OpenH264 is H.264 alone - so an HEVC
+stream a device's own decoder will not take has nowhere to fall back to and
+shows the placeholder, where an H.264 one still falls to OpenH264.
 
 **One way the picture would still be wrong once it decodes.**
 

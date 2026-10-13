@@ -27,7 +27,7 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::ptr;
 use std::time::{Duration, Instant};
 
-use crate::sps::picture_size;
+use crate::sps::decode_parameter_sets;
 use crate::{
     plane_stride, CodecError, ColorMatrix, ColorRange, ColorSpace, DecodedFrame, DecoderConfig,
     PixelFormat, Result, VideoDecoder, VideoStreamInfo,
@@ -115,49 +115,6 @@ extern "C" {
     ) -> bool;
 }
 
-/// The parameter sets an Annex-B access unit carries: sequence first, then
-/// picture, each without its start code.
-///
-/// A decoder is configured with these, and the pipeline has prepended the sets
-/// it cached to every key frame by the time one reaches the decoder, so they are
-/// here even when the session's `SDP` announced none.
-fn parameter_sets(access_unit: &[u8]) -> (Option<&[u8]>, Option<&[u8]>) {
-    let mut sps = None;
-    let mut pps = None;
-    let mut offset = 0;
-    while offset + 3 <= access_unit.len() {
-        let code = if access_unit[offset..].starts_with(&[0, 0, 0, 1]) {
-            4
-        } else if access_unit[offset..].starts_with(&[0, 0, 1]) {
-            3
-        } else {
-            offset += 1;
-            continue;
-        };
-        let start = offset + code;
-        if start >= access_unit.len() {
-            break;
-        }
-        // The NAL runs to the next start code, less the zeros a four byte one
-        // leaves in front of it.
-        let mut end = start;
-        while end + 3 <= access_unit.len() && !access_unit[end..].starts_with(&[0, 0, 1]) {
-            end += 1;
-        }
-        let mut nal = &access_unit[start..end];
-        while nal.last() == Some(&0) {
-            nal = &nal[..nal.len() - 1];
-        }
-        match nal.first().map(|byte| byte & 0x1f) {
-            Some(7) => sps = Some(nal),
-            Some(8) => pps = Some(nal),
-            _ => {}
-        }
-        offset = end.max(offset + 1);
-    }
-    (sps, pps)
-}
-
 /// `AMediaCodec` decoder reading its pictures back as byte buffers.
 #[derive(Debug, Default)]
 pub struct AMediaCodecDecoder {
@@ -213,12 +170,12 @@ impl AMediaCodecDecoder {
         let config = self.config.clone();
         let mime = CString::new(config.codec.mime())
             .map_err(|err| CodecError::Configure(err.to_string()))?;
-        let (sps, pps) = parameter_sets(access_unit);
-        // What the stream describes beats what the session announced, which is
-        // only a hint for the buffers the decoder sizes up front.
-        let size = sps
-            .and_then(picture_size)
-            .or(Some((config.width, config.height)).filter(|(w, h)| *w > 0 && *h > 0));
+        // The sets to configure the decoder with, and the picture size the
+        // sequence one describes - H.264's SPS and PPS, or H.265's VPS, SPS and
+        // PPS. What the stream describes beats what the session announced, which
+        // is only a hint for the buffers the decoder sizes up front.
+        let (csd, size) = decode_parameter_sets(config.codec, access_unit);
+        let size = size.or(Some((config.width, config.height)).filter(|(w, h)| *w > 0 && *h > 0));
 
         // Low latency is asked for first and given up only if the codec refuses
         // the whole configuration over it. `ACodec` does not treat the option as
@@ -229,7 +186,7 @@ impl AMediaCodecDecoder {
         // codec whether it supports the option - `AMediaCodecInfo` is not in it
         // - so trying is what keeps the option on the decoders that do take it.
         let mut low_latency = config.low_latency;
-        let codec = match Self::open_session(&mime, sps, pps, size, low_latency) {
+        let codec = match Self::open_session(&mime, &csd, size, low_latency) {
             Ok(codec) => codec,
             Err(err) if low_latency => {
                 low_latency = false;
@@ -238,7 +195,7 @@ impl AMediaCodecDecoder {
                     %err,
                     "the decoder refused low latency; opening without it"
                 );
-                Self::open_session(&mime, sps, pps, size, false)?
+                Self::open_session(&mime, &csd, size, false)?
             }
             Err(err) => return Err(err),
         };
@@ -262,13 +219,15 @@ impl AMediaCodecDecoder {
 
     /// Creates, configures and starts one codec session, handing back the codec.
     ///
+    /// `csd` is the parameter sets in the order the codec wants them, one per
+    /// `csd-N` slot: H.264's SPS then PPS, or H.265's VPS, SPS and PPS.
+    ///
     /// A codec that failed to configure is released before the error comes back,
     /// so a caller that wants to try again with a different format has nothing
     /// to clean up.
     fn open_session(
         mime: &CString,
-        sps: Option<&[u8]>,
-        pps: Option<&[u8]>,
+        csd: &[Vec<u8>],
         size: Option<(u32, u32)>,
         low_latency: bool,
     ) -> Result<*mut AMediaCodec> {
@@ -289,11 +248,9 @@ impl AMediaCodecDecoder {
             }
             // The parameter sets themselves, which is what a decoder that will
             // not take a bare format is waiting for.
-            if let Some(sps) = sps {
-                AMediaFormat_setBuffer(format, c"csd-0".as_ptr(), sps.as_ptr().cast(), sps.len());
-            }
-            if let Some(pps) = pps {
-                AMediaFormat_setBuffer(format, c"csd-1".as_ptr(), pps.as_ptr().cast(), pps.len());
+            for (slot, set) in csd.iter().enumerate() {
+                let key = CString::new(format!("csd-{slot}")).expect("csd-N has no nul byte");
+                AMediaFormat_setBuffer(format, key.as_ptr(), set.as_ptr().cast(), set.len());
             }
             // Low latency: do not buffer more than one frame in the codec.
             if low_latency {
@@ -307,8 +264,7 @@ impl AMediaCodecDecoder {
             mime = mime.to_string_lossy().as_ref(),
             width = size.map(|(width, _)| width).unwrap_or(0),
             height = size.map(|(_, height)| height).unwrap_or(0),
-            sps = sps.map(|nal| nal.len()).unwrap_or(0),
-            pps = pps.map(|nal| nal.len()).unwrap_or(0),
+            csd = ?csd.iter().map(Vec::len).collect::<Vec<_>>(),
             low_latency,
             "configuring the decoder"
         );
