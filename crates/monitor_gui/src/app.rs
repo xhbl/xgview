@@ -3995,10 +3995,13 @@ impl XgViewApp {
                 }
                 // The connection switch: a press moves the camera on to the next
                 // stop it offers - `AUTO/RTSP/MSE` for a camera with an MSE
-                // address, `TCP/UDP` for one on RTSP alone.
+                // address, `TCP/UDP` for one on RTSP alone. Its tip names what it
+                // switches: the protocol where there are two to choose from, the
+                // RTSP transport where there is only RTSP.
+                let tip = if camera.has_mse() { "cameras-connect-tip" } else { "cameras-transport-tip" };
                 let connect_button = ui
                     .small_button(RichText::new(camera.connection_label()).small().color(theme::ACCENT))
-                    .on_hover_text(monitor_i18n::tr("cameras-connect-tip"));
+                    .on_hover_text(monitor_i18n::tr(tip));
                 self.nav.item(&connect_button);
                 if connect_button.clicked() {
                     connect_change = Some(slot);
