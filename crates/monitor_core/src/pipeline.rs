@@ -573,6 +573,52 @@ async fn supervisor(
     tracing::debug!(target: "xgview::pipeline", "supervisor stopped");
 }
 
+/// The one H.264 declaration a hardware decoder has no mode for.
+///
+/// A stream that declares plain Baseline - `profile_idc` 66 without
+/// `constraint_set1_flag` - finds no entry in the Direct3D 11 / DXVA profile
+/// table (`CONSTRAINED_BASELINE`, `MAIN` and `HIGH` are the whole of it), so
+/// `dxva_get_decoder_guid` fails and libavcodec falls back to the software
+/// decoder. `sps::constrain_baseline` sets that one flag, which is true of every
+/// stream here and is what the camera should have said itself. The decision is
+/// made once, from the first parameter set a session carries, and applied to
+/// every access unit after it; the healthy majority of streams is never touched.
+/// Baseline is an H.264 profile, so the codec gates it.
+struct BaselineFix {
+    decided: bool,
+    apply: bool,
+}
+
+impl BaselineFix {
+    fn new() -> Self {
+        Self { decided: false, apply: false }
+    }
+
+    /// Rewrites `data` in place when the stream needs it, and says whether it
+    /// changed anything. Called with every access unit - and with the MSE init
+    /// segment's parameter sets - so the decision is taken from the first set
+    /// that arrives, whichever form the session is in.
+    fn observe(&mut self, index: usize, codec: Codec, data: &mut [u8]) -> bool {
+        if codec == Codec::H264 && !self.decided {
+            if let Some(nal) = sps::access_unit_sps(data) {
+                self.apply = sps::needs_constrained_baseline(nal);
+                self.decided = true;
+                if self.apply {
+                    // Said out loud: the channel is about to be decoded from
+                    // bytes the camera did not send.
+                    tracing::info!(
+                        target: "xgview::pipeline",
+                        index,
+                        "declaring the stream's baseline profile as constrained, \
+                         which is what the hardware decoder asks of it"
+                    );
+                }
+            }
+        }
+        self.apply && sps::constrain_baseline(data) > 0
+    }
+}
+
 /// Runs one attempt on one endpoint, opening the session its address calls for.
 ///
 /// The scheme is what decides: an `http://` address is an MJPEG stream, a
@@ -1190,13 +1236,10 @@ async fn run_session(
     // appear, and a hardware decoder that turns a stream down is otherwise a
     // refusal with no visible cause.
     let mut sps_logged = false;
-    // Whether the stream declares Baseline without the constrained flag, which
-    // is the one declaration the hardware decoder has no mode for and the
-    // software one takes as it is. Decided once, from the first parameter set
-    // the stream carries, and applied to every access unit after that - see
-    // `sps::constrain_baseline`.
-    let mut constrain_baseline = false;
-    let mut constrain_decided = false;
+    // The plain-Baseline declaration a hardware decoder has no mode for; the
+    // flag that says otherwise is set before any picture is handed over. See
+    // [`BaselineFix`].
+    let mut baseline_fix = BaselineFix::new();
     // The server announces how much silence it tolerates. The probe is sent
     // before the read, never after: a check placed after a blocking read is
     // starved for as long as the camera stays quiet.
@@ -1443,32 +1486,7 @@ async fn run_session(
                                 }
                             }
                         }
-                        // A stream that calls itself plain Baseline is one the
-                        // hardware decoder has no mode for; the flag that says
-                        // otherwise is set before the picture is handed over.
-                        // Decided from the first parameter set, so the healthy
-                        // majority of streams is never touched at all. Baseline
-                        // is an H.264 profile, so this is H.264's alone.
-                        if kind == Codec::H264 && !constrain_decided {
-                            if let Some(nal) = sps::access_unit_sps(&unit.data) {
-                                constrain_baseline = sps::needs_constrained_baseline(nal);
-                                constrain_decided = true;
-                                if constrain_baseline {
-                                    // Said out loud: the channel is about to be
-                                    // decoded from bytes the camera did not
-                                    // send.
-                                    tracing::info!(
-                                        target: "xgview::pipeline",
-                                        index,
-                                        "declaring the stream's baseline profile as constrained, \
-                                         which is what the hardware decoder asks of it"
-                                    );
-                                }
-                            }
-                        }
-                        if constrain_baseline {
-                            sps::constrain_baseline(&mut unit.data);
-                        }
+                        baseline_fix.observe(index, kind, &mut unit.data);
                         stall.observe(unit.keyframe, Instant::now());
                         let started = Instant::now();
                         let decoded = decoder.decode(&unit.data, unit.pts_us(), unit.keyframe);
@@ -2070,6 +2088,11 @@ async fn run_ws_session(
 
     let mut parser = crate::mse::MseParser::new();
     let mut decoder: Option<Box<dyn VideoDecoder>> = None;
+    // The codec the init segment named, so the plain-Baseline fix can apply to
+    // the media segments - and the fix itself, decided from the init's parameter
+    // sets. See [`BaselineFix`].
+    let mut codec: Option<Codec> = None;
+    let mut baseline_fix = BaselineFix::new();
     let mut codec_label: Option<String> = None;
     let mut width: Option<u32> = None;
     let mut height: Option<u32> = None;
@@ -2119,7 +2142,8 @@ async fn run_ws_session(
         let parsed = parser.parse_message(&data)?;
 
         // Init segment: open the decoder and feed it the parameter sets.
-        if let Some(init) = parsed.init {
+        if let Some(mut init) = parsed.init {
+            codec = Some(init.codec);
             codec_label = Some(match init.codec {
                 Codec::H264 => "H264".to_string(),
                 Codec::H265 => "H265".to_string(),
@@ -2128,6 +2152,11 @@ async fn run_ws_session(
             width = if init.width > 0 { Some(init.width) } else { width };
             height = if init.height > 0 { Some(init.height) } else { height };
             decoder = video_decoder(init.codec, Some(init.width), Some(init.height), index, prefer_hardware);
+            // The init segment's parameter sets carry the sequence parameter set,
+            // so the plain-Baseline decision is taken and applied here - before
+            // they are handed to the decoder, which is where libavcodec reads
+            // the profile and picks the hardware path over the software one.
+            baseline_fix.observe(index, init.codec, &mut init.param_sets);
             if let Some(dec) = decoder.as_mut() {
                 if !init.param_sets.is_empty() {
                     if let Err(err) = dec.decode(&init.param_sets, 0, true) {
@@ -2158,7 +2187,7 @@ async fn run_ws_session(
         }
 
         // Media segment: decode each access unit.
-        for sample in parsed.samples {
+        for mut sample in parsed.samples {
             window_frames += 1;
             total_frames += 1;
 
@@ -2173,6 +2202,13 @@ async fn run_ws_session(
                         detail: format!("receiving {} stream", stream.label()),
                     },
                 );
+            }
+
+            // The same plain-Baseline fix the RTSP path applies - an in-band
+            // sequence parameter set is the only place it could still be decided
+            // if the init segment carried none.
+            if let Some(codec) = codec {
+                baseline_fix.observe(index, codec, &mut sample.data);
             }
 
             if let Some(dec) = decoder.as_mut() {
@@ -2401,6 +2437,29 @@ mod tests {
         assert!(is_frigate_mse("wss://host/frigate/live/mse/api/ws?src=cam_1"));
         assert!(!is_frigate_mse("ws://10.0.0.1:1984/api/ws?src=cam_1"));
         assert!(!is_frigate_mse("ws://host/rtc/api/ws?src=cam_1"));
+    }
+
+    /// The plain-Baseline fix rewrites an H.264 set that needs it, once, and
+    /// leaves an already-constrained set and another codec alone.
+    #[test]
+    fn the_baseline_fix_rewrites_a_plain_h264_set_once() {
+        // Annex-B: a start code, then an SPS NAL (type 7) with profile_idc 66
+        // and a clear constraint byte.
+        let mut unit = vec![0x00, 0x00, 0x01, 0x67, 66, 0x00, 0x1e];
+        let mut fix = BaselineFix::new();
+        assert!(fix.observe(0, Codec::H264, &mut unit), "the set is rewritten");
+        assert_eq!(unit[5], 0x40, "constraint_set1_flag is what changes");
+        assert!(!sps::needs_constrained_baseline(&unit[3..]), "and it is now constrained");
+
+        // A set already constrained, and a stream of another codec, are left as
+        // they arrived.
+        let mut already = vec![0x00, 0x00, 0x01, 0x67, 66, 0x40, 0x1e];
+        assert!(!BaselineFix::new().observe(0, Codec::H264, &mut already));
+        assert_eq!(already[5], 0x40);
+
+        let mut hevc = vec![0x00, 0x00, 0x01, 0x42, 0x01, 0x02];
+        assert!(!BaselineFix::new().observe(0, Codec::H265, &mut hevc));
+        assert_eq!(hevc[3], 0x42, "an H.265 unit is untouched");
     }
 
     #[test]
