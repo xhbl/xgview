@@ -3266,6 +3266,7 @@ impl XgViewApp {
             for layout in GridLayout::STANDARD {
                 let selected = self.scheduler.layout() == layout;
                 let response = self.nav.tracked(ui.selectable_label(selected, layout.label()));
+                self.name(&response, layout_hint(layout));
                 if response.clicked() {
                     self.set_layout(layout);
                 }
@@ -3275,6 +3276,7 @@ impl XgViewApp {
             let more = self
                 .nav
                 .tracked(ui.selectable_label(active || self.layout_picker, current.numeric_label().unwrap_or("…")));
+            self.name(&more, "toolbar-layout-more");
             if more.clicked() {
                 self.layout_picker = !self.layout_picker;
                 self.layout_picker_from = self.layout_picker.then_some(more.id);
