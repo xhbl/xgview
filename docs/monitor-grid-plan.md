@@ -286,37 +286,52 @@ them (before the separator at `:2877`):
 Add field `layout_picker: bool` to `XgViewApp` (init `false`; near
 `show_settings`, `app.rs:630`).
 
-### 8.2 Picker panel
+### 8.2 Picker panel (as built)
 
-A floating panel drawn with `egui::Area` (the pattern already used for the
-settings dismiss strip and the input overlay, `app.rs:5656,2018`), or
-`egui::Modal` (used by dialogs, `dialogs.rs:592`). Contents:
+An `egui::Modal` (`draw_layout_picker`, `app.rs:5419`), the way "Add devices"
+is: it centres itself, its backdrop swallows the presses that would otherwise
+land behind it, and its own Close - or Back - is the only way out. A press on
+the backdrop does **not** close it. Contents:
 
-* Title from a new key `layout-picker-title`.
+* Title from a new key `layout-picker-title`, and a Close cross at the far end
+  of the title row (the `dialog-close` key as its tooltip). The cross is a
+  mouse / touch way out and is registered with the navigation layer, so a remote
+  reaches it with the arrows as well as with Back.
 * Nine thumbnail buttons, one per extended layout, in cell-count order
-  (2, 3, 5, 6, 7, 8, 10, 12, 13). Each thumbnail draws its cell table scaled
-  into a small box (reusing the §5 geometry on the thumbnail rect), with the
-  number drawn overlaid — "graphical layout with numbers", per the requirement.
-  Highlight the current extended layout.
+  (2, 3, 5, 6, 7, 8, 10, 12, 13), three to a row. Each thumbnail draws its cell
+  table scaled into a small box (reusing the §5 geometry on the thumbnail rect),
+  with the number drawn overlaid — "graphical layout with numbers", per the
+  requirement.
+* A thumbnail is a control drawn by hand, the way the toolbar's icons are: the
+  rectangle is allocated with `Sense::click` and painted from the same
+  `WidgetVisuals` a `selectable_label` uses, so the fill, the number and the
+  focus ring all match the toolbar's own layout buttons. The layout in use
+  carries the accent fill; the thumbnail the remote is on carries the focus
+  ring.
 * Click a thumbnail → `self.set_layout(chosen)`, then close the picker. The
   toolbar button now shows the chosen number.
-* Close without choosing (Esc / Back / an outside click) → leave the layout
-  unchanged; the button shows `…` if no extended layout is active.
+* Close without choosing (Back, or the cross) → leave the layout unchanged; the
+  button shows `…` if no extended layout is active.
 
 Keyboard / remote:
 
-* Register a nav scope, e.g. `("layout-picker", ScopeDef::new(Axis::Column))` in
-  `app.rs:967-975`. A single Column scope walking the nine entries top-to-bottom
-  is the simplest option; a 3×3 grid would need three `Axis::Row` scopes wired
-  with `Exit::Scope` (see `nav.rs:84-110`) — acceptable but more work. Start
-  with the Column list; upgrade to the grid only if the list reads poorly.
-* While `layout_picker` is open it owns the keyboard: extend the `dialog_open`
-  gate (`app.rs:2555-2559`) or handle it before the wall, so Back/Esc closes the
-  picker and nothing behind it (settings panel, wall) reacts. Back must not
-  also unwind the settings panel — the same hazard the file dialog handles
-  (`app.rs:600-611`).
-* Move focus into the picker when it opens (mirror how the file dialog takes
-  focus) and give it back to the toolbar button on close.
+* The three rows are three `Axis::Row` scopes (`layout-picker-row-0/1/2`,
+  `app.rs:1007-1009`). The sideways arrows walk a row and are spent at either
+  end rather than wrapping; the vertical arrows cross between rows at the same
+  column through a new `Exit::ScopeAt` (`nav.rs`), so Down from the middle of a
+  row lands on the middle of the next rather than back at its left edge. A
+  target shorter than the seat falls back to its last member.
+* While `layout_picker` is open it owns the keyboard: the wall's own keys - page
+  turns and the layout digits - are spent (`app.rs:2619`), and Back closes the
+  picker without unwinding the settings panel behind it (`app.rs:2710`).
+* The focus moves into the picker when it opens (`layout_picker_handoff` /
+  `layout_picker_anchor`) and is given back to the button it was opened from on
+  close (`layout_picker_from` → `restore_focus`).
+* The picker also joins `panel_anchor`, so a focus dropped while it is up comes
+  back to it rather than to the settings panel behind.
+* The picker holds the bars open while it is up: `chrome_visible` counts it with
+  the panels (`app.rs:1776`), so the toolbar it was opened from does not fade
+  away under it after the idle delay.
 * Digit keys: because digits are global and mean cell count (§7), pressing
   `5` with the picker open naturally selects `N5`. No extra wiring — but ensure
   the picker does not swallow digits before `handle_keys` maps them, or map them
@@ -408,6 +423,7 @@ packs, English has no key the Chinese pack lacks, no key is defined twice.
 | `crates/monitor_core/src/layout.rs` | `Cell`, cell tables, accessors, `next/prev`, `for_digit`, `navigate`, tests |
 | `crates/monitor_gui/src/grid.rs` | `tile_rect`, tests |
 | `crates/monitor_gui/src/app.rs` | `layout_picker` field, toolbar button, picker panel, settings row, `layout_hint`, digit keys, `Keys.layout` |
+| `crates/monitor_gui/src/nav.rs` | `Exit::ScopeAt` for the picker's same-column row crossing, and its tests |
 | `crates/monitor_core/src/scheduler.rs` | drop/rename unused `Schedule::{rows,cols}` |
 | `crates/monitor_i18n/langs/en.ftl` | new keys |
 | `langs/zh-CN.ftl` | new keys |
@@ -450,10 +466,14 @@ the UI layer.
   doc comment.
 * **Nav scopes are single-axis** (`nav.rs:3-29`, "no geometry inside a scope").
   The 3×3 picker grid needs three `Axis::Row` scopes chained by `Exit::Scope`;
-  a single `Axis::Column` list is the low-risk fallback.
+  a single `Axis::Column` list is the low-risk fallback. **Resolved:** the three
+  rows are chained by a new `Exit::ScopeAt`, which keeps the seat across rows
+  rather than landing on the first member — see §8.2.
 * **Keyboard ownership / Esc layering** for the picker is the subtlest part —
   reuse the file-dialog precedent (`app.rs:600-611`) so Back does not unwind the
-  settings panel behind the picker.
+  settings panel behind the picker. **Resolved:** Back closes the picker alone
+  (`app.rs:2710`), and the wall's own keys are spent while it is up
+  (`app.rs:2619`).
 * **Digit-key change** (`4` → 4 cells, not 4×4) is intentional and
   user-confirmed; it will surprise existing users, so it belongs in the release
   notes.
