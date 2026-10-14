@@ -3,6 +3,45 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.4.38
+
+Changes since 1.4.30. **The wall is no longer limited to square grids.** Nine
+mixed layouts - 2, 3, 5, 6, 7, 8, 10, 12 and 13 cells - join the four square
+ones, chosen from a graphical picker on the toolbar. The digit keys now select
+by cell count rather than by grid size.
+
+### Nine more layouts
+
+- **A large cell beside smaller ones.** The new layouts pair a primary cell with
+  a ring of smaller ones, so a wall can give one camera the room it needs
+  without giving up the rest. The four square grids - 1x1, 2x2, 3x3 and 4x4 -
+  keep their own toolbar buttons; the nine mixed ones live behind the toolbar's
+  `…` button, which shows the number of the layout in use.
+- **A picker of numbered thumbnails.** The `…` button opens a modal, the way
+  *Add devices* is: each layout is drawn as a thumbnail of its own grid with its
+  viewport count over it, three to a row. It is a focus list like the other
+  windows - the arrows walk it, `DPAD_CENTER` selects and `BACK` closes - and
+  the focus returns to the button it was opened from.
+- **The digit keys select by cell count.** `1` is 1x1, `2` the two-cell layout,
+  `3` three cells, `4` 2x2, `5` five cells, `6` six, `7` seven, `8` eight, `9`
+  3x3, and `0` the ten-cell layout. The 12-, 13- and 16-cell layouts have no
+  digit and are reached from the picker or the toolbar alone. **This changes
+  what `4` does**: it is 2x2 now, not 4x4.
+- **Each layout keeps its own geometry.** A cell may span several grid units, so
+  the mixed layouts are drawn from a table of rectangles rather than a uniform
+  division; the four square grids paint exactly as before. Paging, the sub/main
+  stream switch and the per-camera aspect all follow the new cell count.
+
+### The two dialogs line up
+
+- **The add-devices window's cross moves to its title row**, where the layout
+  picker's already sits - a way out for a mouse or a finger, with `BACK` left to
+  the remote.
+- **The layout picker holds the toolbar open while it is up**, so the button it
+  was opened from does not fade away under it after the idle delay.
+- **Both dialogs hand the focus back to the button they were opened from** when
+  they close, whether by `BACK`, by the cross, or by choosing a layout.
+
 ## 1.4.30
 
 Changes since 1.4.12. **A Frigate or go2rtc camera can be watched over its
