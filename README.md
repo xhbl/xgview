@@ -89,7 +89,7 @@ the hand.
 | Decoding | H.264 and H.265 on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, VideoToolbox on macOS, `AMediaCodec` on Android) and on the CPU elsewhere - Android falling back to OpenH264 by itself for an H.264 stream its own decoder will not take; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW` |
 | Codecs | H.264, H.265 (HEVC) and MJPEG are decoded and displayed. H.265 uses the platform's decoder (VideoToolbox on macOS, `AMediaCodec` on Android) or FFmpeg on the desktop, on the GPU or the CPU. Android has no software HEVC, so a stream a device's own decoder will not take shows no picture - use its H.264 sub stream there |
 | Transports | RTSP over TCP (interleaved, the default) or UDP, chosen per camera; HTTP / HTTPS MJPEG (`multipart/x-mixed-replace`) cameras are supported too. A Frigate or go2rtc camera also carries an MSE (fMP4 over WebSocket) address, which the connection switch can prefer or fall back to when RTSP cannot be reached |
-| On-screen display | Each tile corner independently shows one of: none, name, number + name, stream, codec + rate, frame rate + decoder, size + shape, or all statistics |
+| On-screen display | Each tile corner independently shows one of: none, name, number + name, stream, codec + rate, frame rate + decoder, size + shape, transport + url, or all statistics |
 | Power management | Keeps the machine awake and/or the screen on while the wall is up (`SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` + the desktop's D-Bus inhibit on Linux, `WakeLock` + `FLAG_KEEP_SCREEN_ON` on Android); both switches default on |
 | Blackout | Scheduled periods, per weekday, in which the wall blanks itself and parks every channel - sockets closed, decoders dropped; input brings it back for a chosen number of minutes |
 | Language | English, Chinese, or any language added as an external `.ftl` pack; a partial pack falls back to English key by key |
@@ -385,7 +385,10 @@ Press `F2` to open the *add devices* window, which has five pages:
 2. **Manual entry** - paste a main stream RTSP URL and let the built-in rules
    derive the sub stream, or fill both in by hand. The rules know the usual
    Hikvision, Dahua, Foscam, Axis and generic `/stream1` → `/stream2` and
-   `/main` → `/sub` conventions; an HTTP or HTTPS MJPEG URL works here too.
+   `/main` → `/sub` conventions. An HTTP or HTTPS MJPEG URL works here too, and
+   so does a `ws://` / `wss://` MSE one - a camera carried over a WebSocket by
+   itself rather than over RTSP, which the connection switch leaves without (a
+   single transport has nothing to switch between).
 3. **Synology SS** - sign in to a Surveillance Station host and import every
    camera bound to it in one go, main stream and sub stream both.
 4. **Frigate** - sign in to Frigate's API (a JWT from `/api/login`; leave the

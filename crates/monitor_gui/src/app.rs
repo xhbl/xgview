@@ -3997,14 +3997,18 @@ impl XgViewApp {
                 // stop it offers - `AUTO/RTSP/MSE` for a camera with an MSE
                 // address, `TCP/UDP` for one on RTSP alone. Its tip names what it
                 // switches: the protocol where there are two to choose from, the
-                // RTSP transport where there is only RTSP.
-                let tip = if camera.has_mse() { "cameras-connect-tip" } else { "cameras-transport-tip" };
-                let connect_button = ui
-                    .small_button(RichText::new(camera.connection_label()).small().color(theme::ACCENT))
-                    .on_hover_text(monitor_i18n::tr(tip));
-                self.nav.item(&connect_button);
-                if connect_button.clicked() {
-                    connect_change = Some(slot);
+                // RTSP transport where there is only RTSP. A camera carried over
+                // a WebSocket url has a single transport, so it has nothing to
+                // switch and the button is left off.
+                if !camera.is_ws_stream() {
+                    let tip = if camera.has_mse() { "cameras-connect-tip" } else { "cameras-transport-tip" };
+                    let connect_button = ui
+                        .small_button(RichText::new(camera.connection_label()).small().color(theme::ACCENT))
+                        .on_hover_text(monitor_i18n::tr(tip));
+                    self.nav.item(&connect_button);
+                    if connect_button.clicked() {
+                        connect_change = Some(slot);
+                    }
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     // Drawn right to left so the pair reads edit, remove;

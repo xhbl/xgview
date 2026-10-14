@@ -289,13 +289,17 @@ pub enum OsdItem {
     Fps,
     /// Picture size, the shape it is drawn in, and the decoder.
     Format,
-    /// [`OsdItem::Codec`], [`OsdItem::Fps`] and [`OsdItem::Format`], one per line.
+    /// The connection the channel pulls over and the masked address it pulls -
+    /// `AUTO rtsp://…`, `MSE wss://…`, `TCP rtsp://…`.
+    Transport,
+    /// [`OsdItem::Codec`], [`OsdItem::Fps`], [`OsdItem::Format`] and
+    /// [`OsdItem::Transport`], one per line.
     Detail,
 }
 
 impl OsdItem {
     /// Every item, in the order the settings button walks them.
-    pub const ALL: [OsdItem; 8] = [
+    pub const ALL: [OsdItem; 9] = [
         OsdItem::Off,
         OsdItem::Name,
         OsdItem::NumberName,
@@ -303,6 +307,7 @@ impl OsdItem {
         OsdItem::Codec,
         OsdItem::Fps,
         OsdItem::Format,
+        OsdItem::Transport,
         OsdItem::Detail,
     ];
 
@@ -322,6 +327,7 @@ impl OsdItem {
             OsdItem::Codec => "osd-codec",
             OsdItem::Fps => "osd-fps",
             OsdItem::Format => "osd-format",
+            OsdItem::Transport => "osd-transport",
             OsdItem::Detail => "osd-detail",
         }
     }
@@ -428,10 +434,7 @@ impl CameraSource {
     /// Creates a camera with a generated id.
     pub fn new(name: impl Into<String>, rtsp_main: impl Into<String>) -> Self {
         let rtsp_main = rtsp_main.into();
-        let host = RtspUrl::parse(&rtsp_main)
-            .ok()
-            .and_then(|uri| uri.host().map(str::to_string))
-            .unwrap_or_default();
+        let host = stream_host(&rtsp_main).unwrap_or_default();
         Self {
             id: new_id(),
             name: name.into(),
@@ -562,6 +565,16 @@ impl CameraSource {
         }
     }
 
+    /// Whether this camera is carried over a WebSocket (MSE) address as its one
+    /// transport - a hand-entered `ws(s)://` url standing in for the RTSP one.
+    ///
+    /// Such a camera has no RTSP session to fall back to and no transport to
+    /// pick between, so the connection switch has nothing to offer and is drawn
+    /// without.
+    pub fn is_ws_stream(&self) -> bool {
+        is_ws_url(&self.rtsp_main)
+    }
+
     /// Whether this camera is addressed through a go2rtc or Frigate restream
     /// rather than the device itself.
     ///
@@ -580,8 +593,12 @@ impl CameraSource {
     ///
     /// A camera with an MSE address offers `Auto -> Rtsp -> Mse`; one without
     /// offers only the RTSP transport (`Tcp -> Udp`), which is what it always
-    /// did. UDP is left out where the restream carries TCP alone.
+    /// did. UDP is left out where the restream carries TCP alone. A camera
+    /// carried over a WebSocket url has one transport, so its only stop is MSE.
     pub fn connection_stops(&self) -> &'static [ConnectionStop] {
+        if self.is_ws_stream() {
+            return &[ConnectionStop::Mse];
+        }
         match (self.has_mse(), !self.is_restream()) {
             (true, true) => &[
                 ConnectionStop::Auto,
@@ -600,6 +617,9 @@ impl CameraSource {
     /// as the RTSP transport it really pulls rather than as a stop the switch
     /// does not offer.
     pub fn connection_stop(&self) -> ConnectionStop {
+        if self.is_ws_stream() {
+            return ConnectionStop::Mse;
+        }
         let transport = match self.transport {
             RtspTransport::Tcp => ConnectionStop::RtspTcp,
             RtspTransport::Udp => ConnectionStop::RtspUdp,
@@ -755,8 +775,8 @@ fn normalize_stream_url(url: &str) -> String {
     let (host, port) = split_host_port(authority);
     let default_port = match scheme {
         "rtsp" => 554,
-        "https" => 443,
-        "http" => 80,
+        "https" | "wss" => 443,
+        "http" | "ws" => 80,
         _ => 0,
     };
     let host = host.to_ascii_lowercase();
@@ -795,6 +815,20 @@ fn split_host_port(authority: &str) -> (&str, Option<u16>) {
     }
 }
 
+/// The host of a stream url, whatever scheme it carries: read through the RTSP
+/// parser where the scheme is one it knows (its userinfo and IPv6 handling come
+/// along), and otherwise off the authority an HTTP or WebSocket url gives.
+fn stream_host(url: &str) -> Option<String> {
+    if let Ok(parsed) = RtspUrl::parse(url) {
+        return parsed.host().map(str::to_string);
+    }
+    let (_, rest) = url.trim().split_once("://")?;
+    let authority = rest.split(['/', '?']).next()?;
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let (host, _) = split_host_port(authority);
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 /// True for an `http://` or `https://` URL, which is how an MJPEG stream is
 /// addressed.
 ///
@@ -811,6 +845,19 @@ pub fn is_http_url(url: &str) -> bool {
 pub fn is_ws_url(url: &str) -> bool {
     let url = url.trim_start().to_ascii_lowercase();
     url.starts_with("ws://") || url.starts_with("wss://")
+}
+
+/// True for the schemes a stream url may carry: RTSP (`rtsp` / `rtsps`), an
+/// MJPEG stream (`http` / `https`) or an MSE one (`ws` / `wss`).
+///
+/// The entry form validates a hand-typed address against this, so a camera can
+/// be a WebSocket stream alone rather than only over RTSP.
+pub fn is_stream_url(url: &str) -> bool {
+    let url = url.trim_start().to_ascii_lowercase();
+    is_http_url(&url)
+        || is_ws_url(&url)
+        || url.starts_with("rtsp://")
+        || url.starts_with("rtsps://")
 }
 
 /// A stream URL with its credentials masked, whatever scheme it carries: RTSP
@@ -1017,6 +1064,30 @@ mod tests {
         camera.advance_connection();
         assert_eq!(camera.transport, RtspTransport::Tcp);
         assert_eq!(camera.connection_label(), "TCP");
+    }
+
+    /// A hand-entered WebSocket address carries the host the rest of the app
+    /// reads, and its one transport is MSE - so the switch has nothing to walk.
+    #[test]
+    fn a_websocket_camera_reads_its_host_and_carries_no_switch() {
+        let camera = CameraSource::new("mse", "ws://10.0.0.5:1984/api/ws?src=cam");
+        assert_eq!(camera.host, "10.0.0.5");
+        assert_eq!(camera.display_address(), "10.0.0.5");
+        assert!(camera.is_ws_stream());
+        assert_eq!(camera.connection_stops(), &[ConnectionStop::Mse]);
+        assert_eq!(camera.connection_label(), "MSE");
+    }
+
+    /// The WebSocket camera's stop is MSE whatever the mode says, and a press
+    /// leaves it there rather than walking onto an RTSP transport it lacks.
+    #[test]
+    fn a_websocket_camera_stays_on_mse() {
+        let mut camera = CameraSource::new("mse", "wss://user:pw@cam.local/api/ws?src=a");
+        assert_eq!(camera.host, "cam.local");
+        assert_eq!(camera.identity(), "wss://cam.local:443/api/ws?src=a");
+        camera.advance_connection();
+        assert_eq!(camera.connect, ConnectionMode::Mse);
+        assert_eq!(camera.connection_label(), "MSE");
     }
 
     /// The URL pulled first follows the mode: MSE reads out its own address,

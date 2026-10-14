@@ -21,7 +21,7 @@ use monitor_core::discovery::frigate::{
     extract_rtsp_port, extract_stream, mse_url as frigate_mse_url, rtsp_url as frigate_rtsp_url,
 };
 use monitor_core::discovery::go2rtc::{mse_url as go2rtc_mse_url, restream_url as go2rtc_rtsp_url};
-use monitor_core::model::{infer_sub_stream, CameraSource};
+use monitor_core::model::{infer_sub_stream, is_stream_url, CameraSource};
 
 use crate::controls;
 use crate::icons::{self, Icon};
@@ -234,9 +234,9 @@ impl CameraDraft {
     pub fn build(&self) -> Result<CameraSource, String> {
         let main = self.main.trim();
         if main.is_empty() {
-            return Err(monitor_i18n::tr("dialog-an-rtsp-url-required"));
+            return Err(monitor_i18n::tr("dialog-stream-url-required"));
         }
-        if !main.to_ascii_lowercase().starts_with("rtsp://") {
+        if !is_stream_url(main) {
             return Err(monitor_i18n::tr("dialog-url-must-start"));
         }
         let mut source = CameraSource::new(String::new(), main);
@@ -958,7 +958,7 @@ pub fn camera_fields(
         ui.label(monitor_i18n::tr("dialog-main-stream"));
         field_text(ui, nav, &mut draft.main, &monitor_i18n::tr("dialog-main-stream"), locked, |s| {
             egui::TextEdit::singleline(s)
-                .hint_text(theme::hint("rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101"))
+                .hint_text(theme::hint(&monitor_i18n::tr("dialog-main-stream-hint")))
                 .desired_width(f32::INFINITY)
         });
         ui.end_row();

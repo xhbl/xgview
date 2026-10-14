@@ -312,6 +312,21 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
             None => format!("?x? {}", monitor_i18n::tr(tile.aspect.short_label())),
         },
     };
+    // The connection the channel pulls over, then the address it is pulling -
+    // the mode the switch is on, and the url that follows it. The address is
+    // masked the way the settings row masks it, so a password or a stream key
+    // never reaches the picture, and shortened to the room a corner has.
+    let transport = || OsdLine {
+        dot: None,
+        text: format!(
+            "{} {}",
+            camera.connection_label(),
+            theme::truncate(
+                &camera.masked_uri(channel.and_then(|channel| channel.stream).unwrap_or(StreamKind::Main)),
+                34
+            )
+        ),
+    };
     match item {
         OsdItem::Off => Vec::new(),
         OsdItem::Name => vec![OsdLine { dot: None, text: camera.short_label(24) }],
@@ -338,7 +353,8 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
         OsdItem::Codec => vec![codec()],
         OsdItem::Fps => vec![fps()],
         OsdItem::Format => vec![format()],
-        OsdItem::Detail => vec![codec(), fps(), format()],
+        OsdItem::Transport => vec![transport()],
+        OsdItem::Detail => vec![transport(), codec(), fps(), format()],
     }
 }
 
