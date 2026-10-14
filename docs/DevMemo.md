@@ -1497,5 +1497,77 @@ confirmation window, and only where the process has the privilege to do it
 the exit button is the only way out of the program — `Back` is held — which is
 the point of the mark.
 
+---
+
+## 22. MSE: the same stream over a WebSocket, and the reason a channel decodes on the CPU
+
+*Landed 2026-10-13, in the 1.4.x line.*
+
+**What it is.** go2rtc can serve every stream it holds twice: as RTSP (the
+restream, `rtsp://host:8554/<stream>`) and as **MSE** — fragmented MP4 pushed
+over a WebSocket. Frigate's UI uses the second, and so does the viewer now,
+which matters off the LAN: the RTSP port is often closed outside, while the web
+port the WebSocket rides is not. The two endpoints differ by server:
+
+```text
+Frigate      ws(s)://<host>:8971/live/mse/api/ws?src=<stream>   (its own port)
+go2rtc       ws(s)://<host>:1984/api/ws?src=<stream>            (its API port)
+```
+
+**The protocol.** The client opens the WebSocket, sends a JSON handshake naming
+the codecs it takes, and then reads binary frames:
+
+```text
+-> {"type":"mse","value":"video/mp4; codecs=\"avc1.640029,hvc1.1.6.L153.B0\""}
+<- {"type":"mse","value":"video/mp4; codecs=\"…\""}   (JSON reply, skipped)
+<- <binary> ftyp+moov   init: codec config (SPS/PPS in avcC/hvcC)
+<- <binary> moof+mdat   media: access units, AVCC/HVCC length-prefixed
+```
+
+`crates/monitor_core/src/mse.rs` parses the boxes (`moov`→`avcC`/`hvcC` for the
+parameter sets and the picture size, `moof`/`trun`/`tfhd`/`tfdt` for the sample
+table) and converts each AVCC/HVCC sample to Annex-B, so the decoders take it
+unchanged. The playback session is `run_ws_session` in
+`crates/monitor_core/src/pipeline.rs`.
+
+**Two servers, two logins.** The endpoints authenticate differently, and the
+path is what tells them apart (`is_frigate_mse`): Frigate fronts its MSE stream
+behind the same JWT as its REST API — Basic is rejected with 401, so
+`frigate_ws_login` POSTs `/api/login` and carries the `frigate_token` cookie as
+a Bearer header — while a standalone go2rtc answers its own `/api/ws` behind the
+HTTP Basic account its `api:` section names. The connection, the credential and
+the self-signed-certificate TLS (accepted, but with the handshake signatures
+still verified) live in one `open_mse`, shared by the playback session and the
+discovery probe that measures a stream over MSE. Each camera keeps the two
+logins apart — the restream account on the RTSP address, the WebSocket login on
+the MSE one.
+
+**The plain-Baseline fix applies here too — this is the part that bit.** §7
+covers why a channel can decode on the CPU over RTSP: a stream declaring plain
+Baseline (`profile_idc` 66, `constraint_set1_flag` clear) matches no entry in
+the Direct3D 11 / DXVA profile table, so the hwaccel is refused and libavcodec
+falls back to software. That fix — `sps::constrain_baseline`, setting the one
+flag — lived only in the RTSP session, and the MSE session was written
+separately without it, so a camera that decoded on the GPU over RTSP fell to the
+CPU over MSE. It is now one `BaselineFix` both sessions hold: the RTSP session
+observes every access unit as before, and the MSE session observes the init
+segment's parameter sets — where its sequence parameter set arrives, before they
+are handed to the decoder, which is where `ff_get_format` reads the profile —
+and every media sample after. Decided once per session; the flag is H.264's
+alone, and the healthy majority of streams is never touched. It is announced at
+`info` (`declaring the stream's baseline profile as constrained…`) because
+decoding from bytes the camera did not send is not something to do quietly.
+
+**One consequence for the import.** A Frigate camera is imported with **both**
+addresses, and its main/sub pairing is measured by resolution over both at once
+(`probe_resolution` and `probe_resolution_mse` raced together) — so a closed
+RTSP port no longer costs a camera its sub stream. The protocol a camera is
+*played* with is a separate choice (`ConnectionMode`: `Auto` prefers RTSP and
+falls back to MSE, `Rtsp`/`Mse` force one), per camera, switched from the
+Cameras tab. An imported camera's addresses are read-only in the edit form
+(`imported`) until it is detached, so one half of a managed pair cannot be
+edited out of step with the other.
+
+
 
 
