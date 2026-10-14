@@ -4,7 +4,8 @@
 
 XGView is a production-grade, cross-platform surveillance wall written in Rust.
 It turns a single screen into a live grid of your IP cameras - from 1x1 up to
-4x4, with paging beyond that - and is built to run unattended around the clock.
+4x4, plus nine mixed layouts of 2, 3, 5, 6, 7, 8, 10, 12 and 13 cells, with
+paging beyond that - and is built to run unattended around the clock.
 
 It targets:
 
@@ -82,7 +83,7 @@ the hand.
 
 | Area                | What it does                                                                                                                                                                                                                                                                                                                                                   |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Grid layouts        | 1x1, 2x2, 3x3 and 4x4, switchable at runtime with the `1`-`4` keys or the toolbar                                                                                                                                                                                                                                                                              |
+| Grid layouts        | 1x1, 2x2, 3x3 and 4x4 as direct buttons, plus nine mixed layouts (2, 3, 5, 6, 7, 8, 10, 12, 13 cells) behind a graphical picker; switchable at runtime with the digit keys or the toolbar                                                                                                                                                                    |
 | Pagination          | Channels beyond the grid's capacity are paged; swipe, `PageUp` / `PageDown` or the toolbar slides between pages                                                                                                                                                                                                                                                |
 | Focus navigation    | A 2 px cyan focus ring walks the tiles with the arrow keys or a TV remote's DPAD; the sideways arrows turn the page at the left and right edges, and the vertical ones stop at the top and bottom, where the wall hands the keys to the bars                                                                                                                   |
 | Temporary zoom      | Double click, `DPAD_CENTER`, `Enter` or `Space` magnifies a viewport to 1x1; `Esc` / `BACK` restores the grid                                                                                                                                                                                                                                                  |
@@ -275,12 +276,23 @@ and come back as soon as you move a mouse, a finger or the remote.
 
 ### Grid layouts and paging
 
-Pick a layout with the `1`, `2`, `3` or `4` key, or with the toolbar buttons:
-**1x1**, **2x2** (the default), **3x3** and **4x4**. When there are more cameras
-than the grid can hold, the extra ones go onto further pages; move between pages
-with `PageUp` / `PageDown`, the toolbar arrows, or a horizontal swipe. Channels on
-the pages you are not looking at are suspended, so a wall of sixteen cameras does
-not open sixteen decoders to show four.
+Pick a layout with the digit keys or the toolbar. The four square grids -
+**1x1**, **2x2** (the default), **3x3** and **4x4** - have buttons of their own;
+the nine mixed layouts, which pair a large cell with smaller ones, live behind
+the toolbar's **`…`** button, which opens a picker of numbered thumbnails, three
+to a row. The button shows the number of the layout in use, or `…` while a
+square grid is on.
+
+The digit keys select by **cell count**, not by grid size: `1` → 1x1, `2` → the
+2-cell layout, `3` → 3 cells, `4` → 2x2, `5` → 5 cells, `6` → 6, `7` → 7, `8` →
+8, `9` → 3x3, and `0` → the 10-cell layout. The 12-, 13- and 16-cell layouts have
+no digit and are reached from the picker or the toolbar alone.
+
+When there are more cameras than the grid can hold, the extra ones go onto
+further pages; move between pages with `PageUp` / `PageDown`, the toolbar arrows,
+or a horizontal swipe. Channels on the pages you are not looking at are
+suspended, so a wall of sixteen cameras does not open sixteen decoders to show
+four.
 
 ### Zooming a camera
 
@@ -298,7 +310,7 @@ or green frames. `Esc` / `BACK`, or another double click, returns to the grid.
 | `Enter` / `Space` / `DPAD_CENTER` | Magnify the focused viewport to 1x1, press again to return     |
 | `Esc` / `Backspace` / `BACK`      | Leave the magnified view                                       |
 | `PageUp` / `PageDown`             | Previous / next page                                           |
-| `1` `2` `3` `4`                   | Select the 1x1 / 2x2 / 3x3 / 4x4 layout                        |
+| `1` `2` `3` `4` `5` `6` `7` `8` `9` `0` | Select the layout by cell count (see [Grid layouts and paging](#grid-layouts-and-paging)) |
 | `F1`                              | Settings panel                                                 |
 | `F2`                              | Camera discovery / management window                           |
 | `F11`                             | Toggle full screen                                             |
@@ -333,10 +345,10 @@ reachable through the five DPAD keys - up, down, left, right and center - plus
   (`BACK`), so a remote with a minimal key set is enough.
 - **Long press repeats.** Holding a direction keeps moving the focus at the
   remote's own auto-repeat rate, which makes long grids and menus quick to cross.
-- **Menus follow the same model.** The settings panel and the camera and
-  discovery windows are plain focus lists: arrows move, `DPAD_CENTER` selects
-  and `BACK` closes, so the whole application - not just the wall - is remote
-  friendly.
+- **Menus follow the same model.** The settings panel, the layout picker and the
+  camera and discovery windows are plain focus lists: arrows move, `DPAD_CENTER`
+  selects and `BACK` closes, so the whole application - not just the wall - is
+  remote friendly.
 
 #### Touch screen
 
