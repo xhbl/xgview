@@ -421,6 +421,7 @@ dialog-sub-stream = Sub stream
 dialog-mse-main = MSE main stream
 dialog-mse-sub = MSE sub stream
 dialog-sub-hint = optional, derived from the main url
+dialog-sub-hint-plain = optional
 dialog-infer = Infer
 dialog-derive-sub = Derive the sub stream from the main url when it is empty
 dialog-add-camera = Add camera

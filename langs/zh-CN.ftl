@@ -408,6 +408,7 @@ dialog-sub-stream = 辅码流
 dialog-mse-main = MSE 主码流
 dialog-mse-sub = MSE 辅码流
 dialog-sub-hint = 可选，由主码流推断
+dialog-sub-hint-plain = 可选
 dialog-infer = 推断
 dialog-derive-sub = 辅码流为空时由主码流推断
 dialog-add-camera = 添加摄像头

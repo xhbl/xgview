@@ -941,6 +941,9 @@ pub fn camera_fields(
     // a rule - a manual or ONVIF one.
     let infer_ok = !camera.is_some_and(|camera| camera.is_restream())
         && infer_sub_stream(&draft.main).is_some();
+    // The sub field's placeholder says how it may be filled: from the main url
+    // where a vendor rule can read one, and only "optional" where none can.
+    let sub_hint = if infer_ok { "dialog-sub-hint" } else { "dialog-sub-hint-plain" };
 
     egui::Grid::new(grid_id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label(monitor_i18n::tr("dialog-name"));
@@ -964,7 +967,7 @@ pub fn camera_fields(
         ui.horizontal(|ui| {
             field_text(ui, nav, &mut draft.sub, &monitor_i18n::tr("dialog-sub-stream"), locked, |s| {
                 egui::TextEdit::singleline(s)
-                    .hint_text(theme::hint(&monitor_i18n::tr("dialog-sub-hint")))
+                    .hint_text(theme::hint(&monitor_i18n::tr(sub_hint)))
                     .desired_width(320.0)
             });
             if !locked && infer_ok && nav.tracked(ui.button(monitor_i18n::tr("dialog-infer"))).clicked() {
