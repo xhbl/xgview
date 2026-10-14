@@ -325,6 +325,10 @@ pub struct DiscoveryUi {
     /// First control of the window, so that a remote control can be handed the
     /// focus as the window opens rather than leaving it on the wall behind.
     pub focus_anchor: Option<egui::Id>,
+    /// The button that opened the window, to give it back its focus when the
+    /// window closes - the toolbar's plus, or one of the settings panel's
+    /// "Add devices" buttons.
+    pub from: Option<egui::Id>,
     /// The Synology port, as its text box shows it. `None` until that tab is
     /// first drawn, so the box opens on the configured port. Only digits are
     /// kept; [`SynologyConfig::port`] follows it while the text names a valid
@@ -591,20 +595,32 @@ pub fn add_devices_window(
     // dialog shut and the settings panel could be rearranged from under it.
     egui::Modal::new(egui::Id::new("xgview-add-devices")).show(ctx, |ui| {
         ui.set_width(620.0);
-        ui.label(
-            RichText::new(group_heading(
-                config,
-                config.active_index(),
-                "dialog-add-devices",
-                "dialog-add-devices-group",
-            ))
-            .heading(),
-        );
+        // The title row carries the way out, the way the layout picker's does:
+        // a cross at the far end, for a mouse or a finger. It is deliberately
+        // not registered with the navigation layer - a remote leaves the dialog
+        // with Back, and a second stop for the same thing would only be in the
+        // way of the tab strip below.
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(group_heading(
+                    config,
+                    config.active_index(),
+                    "dialog-add-devices",
+                    "dialog-add-devices-group",
+                ))
+                .heading(),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let close_button =
+                    icons::button(ui, Icon::Close, false, &monitor_i18n::tr("dialog-close"));
+                if close_button.clicked() {
+                    close = true;
+                }
+            });
+        });
         ui.add_space(theme::space::S);
 
-        if tab_strip(ui, state, nav) {
-            close = true;
-        }
+        tab_strip(ui, state, nav);
         ui.separator();
 
         // The body is one column: Up and Down walk its controls in the
@@ -654,9 +670,9 @@ pub fn add_devices_window(
 /// viewer arrow-keying across the strip sees the body follow, exactly as it did
 /// when a click selected one.
 ///
-/// The dialog's way out - its Close button - ends the same row, so the remote
-/// reaches it with the arrows. Returns `true` when it was pressed.
-fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) -> bool {
+/// The dialog's way out is not here: it is the cross in the title row above,
+/// which a remote reaches with Back rather than with the arrows.
+fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) {
     const TABS: [(Tab, &str); 5] = [
         (Tab::Onvif, "dialog-tab-onvif"),
         (Tab::Manual, "dialog-tab-manual"),
@@ -667,7 +683,6 @@ fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) -> bool 
 
     let mut ids = [egui::Id::NULL; TABS.len()];
     let mut focused = None;
-    let mut close = false;
 
     ui.horizontal(|ui| {
         nav.open("dialog-tabs");
@@ -692,18 +707,8 @@ fn tab_strip(ui: &mut egui::Ui, state: &mut DiscoveryUi, nav: &mut Nav) -> bool 
         let slot = TABS.iter().position(|(value, _)| *value == state.tab).unwrap_or(0);
         state.focus_anchor = Some(ids[slot]);
         nav.set_entry("dialog-tabs", ids[slot]);
-        // The way out, at the far end of the strip: a cross rather than the
-        // word, which stays as its tooltip - the only place it can still be
-        // read.
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let close_button = icons::button(ui, Icon::Close, false, &monitor_i18n::tr("dialog-close"));
-            if nav.tracked(close_button).clicked() {
-                close = true;
-            }
-        });
         nav.close();
     });
-    close
 }
 
 fn onvif_tab(

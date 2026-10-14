@@ -659,6 +659,9 @@ pub struct XgViewApp {
     /// focus lands on its first entry instead of walking the wall behind it.
     layout_picker_handoff: Handoff,
     layout_picker_anchor: Option<Id>,
+    /// The button that opened the layout picker, to give it back its focus when
+    /// the picker closes - the toolbar's or the settings panel's `…`.
+    layout_picker_from: Option<Id>,
     /// A scroll asked for by a direction press that had nowhere left to move the
     /// focus inside the settings body, in points.
     ///
@@ -956,6 +959,7 @@ impl XgViewApp {
             settings_handoff: Handoff::default(),
             layout_picker_handoff: Handoff::default(),
             layout_picker_anchor: None,
+            layout_picker_from: None,
             body_scroll: None,
             dialog_handoff: Handoff::default(),
             discovery,
@@ -1766,8 +1770,10 @@ impl XgViewApp {
     /// difference between a monitor and a television.
     fn chrome_visible(&mut self) -> bool {
         // An open panel owns the bars: taking away the bar of a panel the
-        // viewer just opened would strand it.
-        if self.show_settings || self.discovery.open {
+        // viewer just opened would strand it. The layout picker is a modal of
+        // its own and counts the same way - it is opened from the toolbar, and
+        // a bar that faded under it would take its own trigger away.
+        if self.show_settings || self.discovery.open || self.layout_picker {
             self.chrome.visible = true;
             self.chrome.hide_now = false;
             self.chrome.last_input = Instant::now();
@@ -2606,6 +2612,9 @@ impl XgViewApp {
         }
         if keys.devices && !dialog_open && !self.layout_picker {
             self.discovery.open = !self.discovery.open;
+            // Opened from the keyboard, so there is no button to hand the focus
+            // back to when it closes.
+            self.discovery.from = None;
         }
         if keys.fullscreen {
             let enabled = !self.fullscreen;
@@ -2703,8 +2712,10 @@ impl XgViewApp {
             if keys.back {
                 if self.layout_picker {
                     self.layout_picker = false;
+                    self.restore_focus = self.layout_picker_from.take();
                 } else if self.discovery.open {
                     self.discovery.open = false;
+                    self.restore_focus = self.discovery.from.take();
                 } else if self.show_settings {
                     self.show_settings = false;
                 } else {
@@ -2927,6 +2938,7 @@ impl XgViewApp {
             self.name(&more, "toolbar-layout-more");
             if more.clicked() {
                 self.layout_picker = !self.layout_picker;
+                self.layout_picker_from = self.layout_picker.then_some(more.id);
             }
 
             // Only while magnified, and only there: the arrow on a tile, Enter
@@ -3007,6 +3019,7 @@ impl XgViewApp {
                 self.name(&devices, "toolbar-add-devices");
                 if devices.clicked() {
                     self.discovery.open = !self.discovery.open;
+                    self.discovery.from = self.discovery.open.then_some(devices.id);
                 }
             });
         });
@@ -3264,6 +3277,7 @@ impl XgViewApp {
                 .tracked(ui.selectable_label(active || self.layout_picker, current.numeric_label().unwrap_or("…")));
             if more.clicked() {
                 self.layout_picker = !self.layout_picker;
+                self.layout_picker_from = self.layout_picker.then_some(more.id);
             }
         });
         ui.add_space(theme::space::S);
@@ -4014,12 +4028,14 @@ impl XgViewApp {
             if devices.clicked() {
                 self.discovery.open = true;
                 self.discovery.tab = Tab::Onvif;
+                self.discovery.from = Some(devices.id);
             }
             let manual = ui.button(monitor_i18n::tr("cameras-add-manually"));
             self.nav.item(&manual);
             if manual.clicked() {
                 self.discovery.open = true;
                 self.discovery.tab = Tab::Manual;
+                self.discovery.from = Some(manual.id);
             }
         });
         ui.add_space(theme::space::S);
@@ -5486,8 +5502,10 @@ impl XgViewApp {
         if let Some(layout) = chosen {
             self.set_layout(layout);
             self.layout_picker = false;
+            self.restore_focus = self.layout_picker_from.take();
         } else if close {
             self.layout_picker = false;
+            self.restore_focus = self.layout_picker_from.take();
         }
     }
 
@@ -5859,6 +5877,11 @@ impl eframe::App for XgViewApp {
             ) {
                 self.needs_sync = true;
                 self.mark_dirty();
+            }
+            // The window closed itself - its cross, or Back - so the button it
+            // was opened from takes the focus again.
+            if !self.discovery.open {
+                self.restore_focus = self.discovery.from.take();
             }
         }
 
