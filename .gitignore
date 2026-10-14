@@ -17,6 +17,7 @@
 
 # Local configuration
 /config.json
+/priv
 
 # Environment & secrets
 .env
