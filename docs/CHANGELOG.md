@@ -3,6 +3,68 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.4.30
+
+Changes since 1.4.12. **A Frigate or go2rtc camera can be watched over its
+WebSocket as well as its RTSP restream.** Each import captures both addresses,
+the connection switch can prefer either, and `AUTO` reaches for the WebSocket
+one when the RTSP port cannot be - the case of a port closed outside the LAN.
+
+### The same stream, two ways
+
+- **An import takes both of a camera's addresses.** Frigate and go2rtc serve
+  each stream twice: the RTSP restream, and an fMP4 stream over a WebSocket
+  (MSE). Both are captured now, and each carries its own login - the restream
+  account for RTSP, the server's own account for the WebSocket (Frigate's
+  session login, or a standalone go2rtc's `api:` one). A camera can therefore
+  reach its stream whichever account and port are open.
+- **The connection switch gains a WebSocket stop.** A camera with an MSE
+  address cycles `AUTO`, `RTSP` and `MSE` where it used to cycle `TCP` and
+  `UDP`; a camera on RTSP alone keeps the transport switch it had. The address
+  shown beside it follows the choice, so a camera on MSE reads out its
+  WebSocket url.
+- **`AUTO` prefers RTSP and falls back to the WebSocket.** RTSP is tried first
+  and, where it cannot be reached within the handshake, the MSE address is
+  pulled for that attempt instead of showing a reconnect screen - which is what
+  makes a camera watchable from outside the LAN, its RTSP port closed and its
+  WebSocket one open.
+- **The restream carries RTSP over TCP alone**, go2rtc answering every UDP
+  `SETUP` with `461`. The `UDP` stop is left off a Frigate or go2rtc camera for
+  that reason, and offered as before everywhere else.
+- **A camera's two streams are paired over both addresses at once.** The main
+  and sub streams of a Frigate or go2rtc camera are told apart by the
+  resolution each measures, read now over either protocol and in parallel, so a
+  closed RTSP port no longer costs a camera its sub stream; where nothing can
+  be measured, a camera with more than one stream is still given a sub in the
+  order the import listed them.
+- **A camera carried over a WebSocket decodes on the GPU.** An MSE path had
+  missed it: a plain-Baseline H.264 stream - `profile_idc` 66 with no
+  constraint flag - has no entry in the hardware decoder's profile table and
+  fell to the CPU. The flag is set where a stream needs it, on both paths.
+
+### Imported cameras are held read-only until detached
+
+- **An import's camera keeps its addresses read-only in the edit form.** The
+  RTSP and MSE addresses are a pair, and hand-editing one would leave the other
+  pointing at a different stream; the name stays editable, and a **Detach**
+  button hands the camera over. Detaching clears the mark alone - the
+  addresses, the credentials and the connection are kept, so a detached camera
+  still holds the MSE address its `AUTO` falls back to.
+- **The "infer sub stream" offer is drawn only where a vendor URL can match.** A
+  go2rtc or Frigate restream is a stream name rather than a camera's own
+  address, so the offer and its hint are left off there.
+
+### By hand, and on the tile
+
+- **A hand-typed camera may be a WebSocket one.** The manual entry form accepts
+  any stream scheme - `rtsp`, `rtsps`, an `http(s)` MJPEG url, and now
+  `ws`/`wss` - so a stream can be added without its import.
+- **A tile corner can name the connection and its address.** A new on-screen
+  item shows the stop the switch is on, then the masked url it pulls (`TCP
+  rtsp://…`, `AUTO rtsp://…`, `MSE wss://…`), and the "all stats" corner opens
+  with it. The mask is the one the settings row uses, so no password or stream
+  key reaches the picture.
+
 ## 1.4.12
 
 Changes since 1.4.6. **The system tab can leave the program and restart the
