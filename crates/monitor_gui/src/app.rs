@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use egui::{Align, Align2, CornerRadius, FontId, Id, Key, Layout, Modifiers, Order, Rect, RichText, Sense, vec2};
+use egui::{Align, Align2, CornerRadius, FontId, Id, Key, Layout, Modifiers, Rect, RichText, Sense, StrokeKind, vec2};
 #[cfg(not(target_os = "android"))]
 use egui_file_dialog::{DialogState, FileDialog, FileDialogLabels};
 use tokio::runtime::Handle;
@@ -563,6 +563,14 @@ fn layout_hint(layout: GridLayout) -> &'static str {
     }
 }
 
+/// The navigation scopes of the layout picker's three rows, top to bottom.
+///
+/// The picker lays its nine thumbnails out three to a row; each row is a scope
+/// of its own, and the vertical arrows cross between them at the same column.
+/// See the `Nav::new` call in [`XgViewApp::new`].
+const LAYOUT_PICKER_ROWS: [&str; 3] =
+    ["layout-picker-row-0", "layout-picker-row-1", "layout-picker-row-2"];
+
 /// Keyboard / DPAD keys consumed during one frame.
 #[derive(Debug, Clone, Copy, Default)]
 struct Keys {
@@ -988,7 +996,13 @@ impl XgViewApp {
                 ("settings-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("settings-body"))),
                 ("settings-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("settings-tabs"))),
                 ("toolbar", ScopeDef::new(Axis::Row)),
-                ("layout-picker", ScopeDef::new(Axis::Column)),
+                // The layout picker is a 3x3 grid of thumbnails: each row is a
+                // scope of its own, and Down / Up cross between them at the same
+                // column. The sideways arrows walk a row, so a press at either
+                // end is spent rather than wrapping.
+                ("layout-picker-row-0", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-1"))),
+                ("layout-picker-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-0")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-2"))),
+                ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1"))),
                 ("status", ScopeDef::new(Axis::Row)),
                 ("edit-body", ScopeDef::new(Axis::Column)),
                 ("confirm-body", ScopeDef::new(Axis::Column)),
@@ -1078,6 +1092,8 @@ impl XgViewApp {
             self.camera_edit_anchor
         } else if self.discovery.open {
             self.discovery.focus_anchor
+        } else if self.layout_picker {
+            self.layout_picker_anchor
         } else if self.reorder.is_some() {
             self.reorder_anchor
         } else if self.show_settings {
@@ -2583,8 +2599,8 @@ impl XgViewApp {
             || self.remove_confirm.is_some()
             || self.system_confirm.is_some()
             || self.passphrase.is_some();
-        // The layout picker is a lighter overlay, but it still owns the keys
-        // while it is up: opening a panel behind it would stack two of them.
+        // The layout picker is a modal of its own, and it owns the keys while
+        // it is up: opening a panel behind it would stack two of them.
         if keys.settings && !dialog_open && !self.layout_picker {
             self.show_settings = !self.show_settings;
         }
@@ -2595,19 +2611,25 @@ impl XgViewApp {
             let enabled = !self.fullscreen;
             self.set_fullscreen(ctx, enabled);
         }
-        if keys.page_prev {
-            self.turn_page(false);
-        }
-        if keys.page_next {
-            self.turn_page(true);
-        }
-        for (slot, pressed) in keys.layout.iter().enumerate() {
-            if *pressed {
-                // The digit is the viewport count; the last slot is `0`, which
-                // stands for the ten-cell layout. 12, 13 and 16 have no digit.
-                let digit = if slot == 9 { 0 } else { slot as u8 + 1 };
-                if let Some(layout) = GridLayout::for_digit(digit) {
-                    self.set_layout(layout);
+        // The picker is a modal: while it is up the wall's own keys - page
+        // turns and the layout digits - are spent, so a press cannot change the
+        // wall behind it. Back is answered below, where the panels are unwound.
+        if !self.layout_picker {
+            if keys.page_prev {
+                self.turn_page(false);
+            }
+            if keys.page_next {
+                self.turn_page(true);
+            }
+            for (slot, pressed) in keys.layout.iter().enumerate() {
+                if *pressed {
+                    // The digit is the viewport count; the last slot is `0`,
+                    // which stands for the ten-cell layout. 12, 13 and 16 have
+                    // no digit.
+                    let digit = if slot == 9 { 0 } else { slot as u8 + 1 };
+                    if let Some(layout) = GridLayout::for_digit(digit) {
+                        self.set_layout(layout);
+                    }
                 }
             }
         }
@@ -5367,60 +5389,104 @@ impl XgViewApp {
 
     /// The picker that offers the layouts with no button of their own.
     ///
-    /// A panel over the wall: the four square layouts have buttons, and this
-    /// holds the rest, in the order the document lists them. The toolbar button
-    /// that opens it shows the number of the layout in use, or an ellipsis.
+    /// A modal over the wall, the way "Add devices" is: it centres itself, its
+    /// backdrop swallows the presses that would otherwise land behind it, and
+    /// its own Close - or Back - is the only way out. The four square layouts
+    /// have buttons; this holds the rest, three to a row, each drawn as a
+    /// thumbnail of its own grid with the viewport count over it.
+    ///
+    /// A thumbnail is a control drawn by hand, the way the toolbar's icons are:
+    /// the rectangle is allocated with `Sense::click`, so it takes the focus and
+    /// the focus ring the rest of the interface draws, and the picture is
+    /// painted into it. The three rows are three scopes of the navigation
+    /// layer, and the vertical arrows cross between them at the same column.
     fn draw_layout_picker(&mut self, ctx: &egui::Context) {
         if !self.layout_picker {
             return;
         }
         let mut chosen: Option<GridLayout> = None;
-        egui::Area::new(Id::new("xgview-layout-picker"))
-            .order(Order::Foreground)
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(190.0);
-                    ui.label(RichText::new(monitor_i18n::tr("layout-picker-title")).strong());
-                    ui.separator();
-                    self.nav.open("layout-picker");
-                    self.layout_picker_anchor = None;
-                    for layout in GridLayout::EXTENDED {
-                        let selected = self.scheduler.layout() == layout;
-                        let (rect, response) = ui.allocate_exact_size(vec2(180.0, 38.0), Sense::click());
+        let mut close = false;
+
+        egui::Modal::new(Id::new("xgview-layout-picker")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(monitor_i18n::tr("layout-picker-title")).heading());
+                // The way out, at the far end of the title row: a cross rather
+                // than the word, which stays as its tooltip.
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let close_button =
+                        icons::button(ui, Icon::Close, false, &monitor_i18n::tr("dialog-close"));
+                    if self.nav.tracked(close_button).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.separator();
+
+            // Three to a row, each row a scope of the navigation layer: the
+            // sideways arrows walk a row and the vertical ones cross between
+            // them at the same column, so a remote reaches all nine.
+            self.layout_picker_anchor = None;
+            for (row, chunk) in GridLayout::EXTENDED.chunks(3).enumerate() {
+                let scope = LAYOUT_PICKER_ROWS[row];
+                ui.horizontal(|ui| {
+                    self.nav.open(scope);
+                    for layout in chunk {
+                        let selected = self.scheduler.layout() == *layout;
+                        let (rect, response) =
+                            ui.allocate_exact_size(vec2(108.0, 84.0), Sense::click());
                         if self.layout_picker_anchor.is_none() {
                             self.layout_picker_anchor = Some(response.id);
                         }
                         if ui.is_rect_visible(rect) {
                             let painter = ui.painter();
+                            // The two states the rest of the interface draws:
+                            // the layout in use carries the accent fill, and the
+                            // thumbnail the remote is on carries the focus ring.
+                            // Both come from the same `WidgetVisuals` a
+                            // `selectable_label` would use, so the fill and the
+                            // number match the toolbar's own layout buttons.
+                            let visuals = ui.style().interact_selectable(&response, selected);
+                            let corner = CornerRadius::same(theme::radius::S);
                             if selected || response.hovered() {
-                                painter.rect_filled(rect, CornerRadius::same(theme::radius::S), theme::FOCUS_FILL);
+                                painter.rect_filled(rect, corner, visuals.weak_bg_fill);
+                            }
+                            if visuals.bg_stroke.width > 0.0 {
+                                painter.rect_stroke(
+                                    rect,
+                                    corner,
+                                    visuals.bg_stroke,
+                                    StrokeKind::Inside,
+                                );
                             }
                             let thumb = Rect::from_min_size(
-                                rect.left_top() + vec2(4.0, 5.0),
-                                vec2(rect.height() - 10.0, rect.height() - 10.0),
+                                rect.left_top() + vec2(6.0, 6.0),
+                                vec2(rect.width() - 12.0, rect.height() - 30.0),
                             );
-                            grid::layout_thumbnail(painter, thumb, layout);
+                            grid::layout_thumbnail(painter, thumb, *layout);
                             painter.text(
-                                egui::pos2(rect.left() + rect.height() + 2.0, rect.center().y),
-                                Align2::LEFT_CENTER,
+                                egui::pos2(rect.center().x, rect.bottom() - 12.0),
+                                Align2::CENTER_CENTER,
                                 layout.label(),
                                 FontId::proportional(15.0),
-                                if selected { theme::FOCUS } else { theme::TEXT },
+                                visuals.text_color(),
                             );
                         }
                         let response = self.nav.tracked(response);
-                        self.name(&response, layout_hint(layout));
+                        self.name(&response, layout_hint(*layout));
                         if response.clicked() {
-                            chosen = Some(layout);
+                            chosen = Some(*layout);
                         }
                     }
                     self.nav.close();
                 });
-            });
+            }
+        });
 
         if let Some(layout) = chosen {
             self.set_layout(layout);
+            self.layout_picker = false;
+        } else if close {
             self.layout_picker = false;
         }
     }
@@ -6115,6 +6181,101 @@ mod tests {
         // Before the bars have been drawn once there is no band to press, and a
         // press anywhere is a press on the wall.
         assert!(!XgViewApp::in_a_bar_band(None, Pos2::new(640.0, 12.0)));
+    }
+
+    /// The layout picker's nine thumbnails are three rows of three, and the
+    /// arrows have to reach all of them: Left / Right walk a row, Up / Down
+    /// cross between the rows at the same column. This is the wiring the picker
+    /// draws against.
+    #[test]
+    fn the_layout_picker_walks_its_three_rows() {
+        let ids: Vec<Id> = (0..9).map(|slot| Id::new(("layout-picker", slot))).collect();
+        let mut nav = Nav::new(&[
+            ("layout-picker-row-0", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-1"))),
+            ("layout-picker-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-0")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-2"))),
+            ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1"))),
+        ]);
+        let ctx = egui::Context::default();
+        nav.begin();
+        for (row, scope) in LAYOUT_PICKER_ROWS.iter().enumerate() {
+            nav.open(scope);
+            for slot in row * 3..row * 3 + 3 {
+                nav.item_id(ids[slot]);
+            }
+            nav.close();
+        }
+        nav.finish(&ctx);
+
+        // Sideways walks the row and stops at its ends.
+        assert_eq!(nav.step(ids[0], Dir::Right), Some(ids[1]));
+        assert_eq!(nav.step(ids[1], Dir::Right), Some(ids[2]));
+        assert_eq!(nav.step(ids[2], Dir::Right), None, "the end of the row");
+        assert_eq!(nav.step(ids[0], Dir::Left), None);
+        // Down and Up cross between the rows, landing on the same column.
+        assert_eq!(nav.step(ids[1], Dir::Down), Some(ids[4]));
+        assert_eq!(nav.step(ids[4], Dir::Down), Some(ids[7]));
+        assert_eq!(nav.step(ids[7], Dir::Down), None, "the last row");
+        assert_eq!(nav.step(ids[4], Dir::Up), Some(ids[1]));
+        assert_eq!(nav.step(ids[1], Dir::Up), None, "the first row has no exit");
+        // The left and right columns keep their column too.
+        assert_eq!(nav.step(ids[2], Dir::Down), Some(ids[5]));
+        assert_eq!(nav.step(ids[0], Dir::Down), Some(ids[3]));
+    }
+
+    /// The picker's thumbnails are drawn inside an `egui::Modal`, and the
+    /// hand-off asks for the focus on the first of them. This reproduces that
+    /// shape headlessly: the focus has to land on a thumbnail and stay there,
+    /// or the arrows have nothing to walk.
+    #[test]
+    fn a_modal_thumbnail_keeps_the_focus_the_handoff_gave_it() {
+        let ctx = egui::Context::default();
+        let mut nav = Nav::new(&[
+            ("layout-picker-row-0", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("layout-picker-row-1"))),
+            ("layout-picker-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope("layout-picker-row-0")).exit(Dir::Down, Exit::Scope("layout-picker-row-2"))),
+            ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope("layout-picker-row-1"))),
+        ]);
+        let mut anchor: Option<Id> = None;
+        let mut focused_after: Option<Id> = None;
+
+        for frame in 0..3 {
+            nav.begin();
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::Modal::new(Id::new("xgview-layout-picker")).show(ctx, |ui| {
+                    ui.set_width(360.0);
+                    for (row, scope) in LAYOUT_PICKER_ROWS.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            nav.open(scope);
+                            for slot in row * 3..row * 3 + 3 {
+                                let (_, response) =
+                                    ui.allocate_exact_size(vec2(108.0, 84.0), Sense::click());
+                                if anchor.is_none() {
+                                    anchor = Some(response.id);
+                                }
+                                nav.tracked(response);
+                            }
+                            nav.close();
+                        });
+                    }
+                });
+                // The hand-off, as `update` does it: once, on the frame the
+                // picker appears.
+                if frame == 0 {
+                    if let Some(id) = anchor {
+                        ctx.memory_mut(|memory| memory.request_focus(id));
+                    }
+                }
+                focused_after = ctx.memory(|memory| memory.focused());
+            });
+            nav.finish(&ctx);
+        }
+
+        let focused = focused_after.expect("a thumbnail has the focus");
+        assert_eq!(Some(focused), anchor, "the focus stayed on the first thumbnail");
+        assert!(nav.owns(focused), "the focused thumbnail is on the navigation layer");
     }
 
     /// A printable key arrives as its own event *as well as* a key event, and

@@ -76,6 +76,14 @@ impl Dir {
 pub enum Exit {
     /// Into another scope: its entry control, or its first member.
     Scope(&'static str),
+    /// Into another scope, at the member in the same seat as the one being
+    /// left - the third member for the third, and so on.
+    ///
+    /// This is what a grid of equal rows wants: the layout picker is three rows
+    /// of three, and Down from the middle of one row has to land on the middle
+    /// of the next, not back at its left edge. A target with fewer members than
+    /// the seat falls back to its last one.
+    ScopeAt(&'static str),
 }
 
 /// A scope: its axis, the four ways out of it, and whether its members are
@@ -415,6 +423,11 @@ impl Nav {
                     .get(key)
                     .copied()
                     .or_else(|| self.prev_scopes.get(key).and_then(|members| members.first().copied())),
+                Exit::ScopeAt(key) => self.prev_scopes.get(key).and_then(|members| {
+                    // The same seat in the target, or its last member when the
+                    // target is shorter than the seat.
+                    members.get(slot.pos).or_else(|| members.last()).copied()
+                }),
             },
         };
 
@@ -502,6 +515,62 @@ mod tests {
         frame(&mut nav, &[a, b, c], &[x, y]);
 
         assert_eq!(nav.step(b, Dir::Down), Some(x));
+    }
+
+    /// A grid of equal rows: `ScopeAt` lands on the same seat in the next row,
+    /// which is what keeps a column under the viewer's finger.
+    #[test]
+    fn a_scope_at_exit_keeps_the_seat_across_rows() {
+        let ids: Vec<Id> = (0..9).map(|slot| Id::new(("grid", slot))).collect();
+        let mut nav = Nav::new(&[
+            ("row-0", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::ScopeAt("row-1"))),
+            ("row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("row-0")).exit(Dir::Down, Exit::ScopeAt("row-2"))),
+            ("row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("row-1"))),
+        ]);
+        let ctx = Context::default();
+        nav.begin();
+        for (row, scope) in ["row-0", "row-1", "row-2"].iter().enumerate() {
+            nav.open(scope);
+            for slot in row * 3..row * 3 + 3 {
+                nav.push(ids[slot], Kind::Plain);
+            }
+            nav.close();
+        }
+        nav.finish(&ctx);
+
+        assert_eq!(nav.step(ids[0], Dir::Down), Some(ids[3]), "left column");
+        assert_eq!(nav.step(ids[1], Dir::Down), Some(ids[4]), "middle column");
+        assert_eq!(nav.step(ids[2], Dir::Down), Some(ids[5]), "right column");
+        assert_eq!(nav.step(ids[5], Dir::Up), Some(ids[2]));
+        assert_eq!(nav.step(ids[7], Dir::Down), None, "the last row has no exit");
+    }
+
+    /// A `ScopeAt` into a shorter row falls back to its last member rather than
+    /// dropping the press.
+    #[test]
+    fn a_scope_at_exit_falls_back_to_the_last_member() {
+        let (a, b, c) = (Id::new("a"), Id::new("b"), Id::new("c"));
+        let (x, y) = (Id::new("x"), Id::new("y"));
+        let mut nav = Nav::new(&[
+            ("wide", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::ScopeAt("narrow"))),
+            ("narrow", ScopeDef::new(Axis::Row)),
+        ]);
+        let ctx = Context::default();
+        nav.begin();
+        nav.open("wide");
+        for id in [a, b, c] {
+            nav.push(id, Kind::Plain);
+        }
+        nav.close();
+        nav.open("narrow");
+        for id in [x, y] {
+            nav.push(id, Kind::Plain);
+        }
+        nav.close();
+        nav.finish(&ctx);
+
+        assert_eq!(nav.step(a, Dir::Down), Some(x), "the first seat exists");
+        assert_eq!(nav.step(c, Dir::Down), Some(y), "the third seat falls back to the last");
     }
 
     #[test]

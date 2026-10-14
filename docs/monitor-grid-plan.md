@@ -8,12 +8,12 @@ knows four square grids.*
 ## 1. Summary
 
 The wall currently offers four layouts, all square uniform grids: `1x1`,
-`2x2`, `3x3`, `4x4` (`crates/monitor_core/src/layout.rs`). The design document
-`docs/monitor-grid.docx` describes a family of 1–13 cell layouts in which most
-members are **not** square uniform grids: some are rectangular (2, 12), most are
-mixed grids of large and small cells (3, 5, 6, 7, 8, 10, 13). This plan upgrades
-the layout model from "N×N square grid" to "grid units + a table of cell
-rectangles", and adds the nine new layouts.
+`2x2`, `3x3`, `4x4` (`crates/monitor_core/src/layout.rs`). The target is a
+family of 1–13 cell layouts in which most members are **not** square uniform
+grids: some are rectangular (2, 12), most are mixed grids of large and small
+cells (3, 5, 6, 7, 8, 10, 13). This plan upgrades the layout model from "N×N
+square grid" to "grid units + a table of cell rectangles", and adds the nine
+new layouts.
 
 The nine new layouts are **extended layouts**, chosen from a pop-up picker; the
 four existing ones stay as direct buttons on the toolbar. Behavioural change:
@@ -87,14 +87,13 @@ Two groups. Serde string is the persisted identifier.
 | `N13` | `"13"` | 13 | 4×4 | `(0,0,2,2) (2,0,1,1) (3,0,1,1) (2,1,1,1) (3,1,1,1) (0,2,1,1) (1,2,1,1) (2,2,1,1) (3,2,1,1) (0,3,1,1) (1,3,1,1) (2,3,1,1) (3,3,1,1)` |
 
 All 13 variants become members of the enum; `ALL` grows to 13 (order: standard
-first, then extended by cell count — see §14). Cell lists are transcribed from
-the "统一实现" section of `docs/monitor-grid.docx` and independently verified
-against the overview table (each list tiles the grid exactly once, no gaps, no
-overlap).
+first, then extended by cell count — see §14). Cell lists are independently
+verified against the overview table (each list tiles the grid exactly once, no
+gaps, no overlap).
 
 Assignment order = the order channels fill the page. Large ("primary") cells are
-listed first, matching the document. Since the user will arrange cameras by
-hand, this order is only the initial pairing and may be re-tuned later.
+listed first. Since the user will arrange cameras by hand, this order is only
+the initial pairing and may be re-tuned later.
 
 ---
 
@@ -294,7 +293,7 @@ settings dismiss strip and the input overlay, `app.rs:5656,2018`), or
 `egui::Modal` (used by dialogs, `dialogs.rs:592`). Contents:
 
 * Title from a new key `layout-picker-title`.
-* Nine thumbnail buttons, one per extended layout, in the document's order
+* Nine thumbnail buttons, one per extended layout, in cell-count order
   (2, 3, 5, 6, 7, 8, 10, 12, 13). Each thumbnail draws its cell table scaled
   into a small box (reusing the §5 geometry on the thumbnail rect), with the
   number drawn overlaid — "graphical layout with numbers", per the requirement.
@@ -352,7 +351,7 @@ toolbar-layout-more = More layouts
 layout-picker-title = Layouts
 ```
 
-`langs/zh-CN.ftl` (after `:238`) — Chinese labels (`宫格 2` … `宫格 13`,
+`langs/zh-CN.ftl` (after `:238`) — the Chinese labels (`宫格 2` … `宫格 13`,
 `更多布局`, `布局`). Per existing convention, small-cased UI text and
 kebab-case keys.
 

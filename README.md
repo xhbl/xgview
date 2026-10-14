@@ -18,11 +18,15 @@ The same build answers to a keyboard and mouse, a living-room remote and a touch
 screen alike, so one binary fits a wall-mounted box, a desktop and a tablet in
 the hand.
 
-| UI interaction | Full screen grid |
-| --- | --- |
-| ![XGView UI](xgview_ui.jpg) | ![XGView full screen grid](xgview_fs.jpg) |
+![XGView UI](xgview_ui.jpg)
+*The wall with the settings panel open.*
 
----
+<br>
+
+![XGView full screen grid](xgview_fs.jpg)
+*multiple layouts with full screen, from 1 cell up to 16.*
+
+***
 
 ## Table of contents
 
@@ -55,7 +59,7 @@ the hand.
 - [License](#license)
 - [Contact](#contact)
 
----
+***
 
 ## Why XGView
 
@@ -76,39 +80,39 @@ the hand.
 
 ## Features
 
-| Area | What it does |
-| --- | --- |
-| Grid layouts | 1x1, 2x2, 3x3 and 4x4, switchable at runtime with the `1`-`4` keys or the toolbar |
-| Pagination | Channels beyond the grid's capacity are paged; swipe, `PageUp` / `PageDown` or the toolbar slides between pages |
-| Focus navigation | A 2 px cyan focus ring walks the tiles with the arrow keys or a TV remote's DPAD; the sideways arrows turn the page at the left and right edges, and the vertical ones stop at the top and bottom, where the wall hands the keys to the bars |
-| Temporary zoom | Double click, `DPAD_CENTER`, `Enter` or `Space` magnifies a viewport to 1x1; `Esc` / `BACK` restores the grid |
-| Stream switching | Every layout pulls the cheap sub stream (360P / 480P), the 1x1 grid included; only a magnified viewport switches to the main stream (1080P / 4K) |
-| Seamless transition | The last sub-stream frame is held until the main stream delivers its first keyframe - no black or green frames |
-| Suspend | Channels on a non-visible page are suspended to save bandwidth, CPU and decoder handles |
-| Reconnection | Exponential-backoff self-healing with a non-blocking "reconnecting…" overlay; the backoff shape and the handshake timeout are configurable and reach channels already running |
-| Decoding | H.264 and H.265 on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, VideoToolbox on macOS, `AMediaCodec` on Android) and on the CPU elsewhere - Android falling back to OpenH264 by itself for an H.264 stream its own decoder will not take; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW` |
-| Codecs | H.264, H.265 (HEVC) and MJPEG are decoded and displayed. H.265 uses the platform's decoder (VideoToolbox on macOS, `AMediaCodec` on Android) or FFmpeg on the desktop, on the GPU or the CPU. Android has no software HEVC, so a stream a device's own decoder will not take shows no picture - use its H.264 sub stream there |
-| Transports | RTSP over TCP (interleaved, the default) or UDP, chosen per camera; HTTP / HTTPS MJPEG (`multipart/x-mixed-replace`) cameras are supported too. A Frigate or go2rtc camera also carries an MSE (fMP4 over WebSocket) address, which the connection switch can prefer or fall back to when RTSP cannot be reached |
-| On-screen display | Each tile corner independently shows one of: none, name, number + name, stream, codec + rate, frame rate + decoder, size + shape, transport + url, or all statistics |
-| Power management | Keeps the machine awake and/or the screen on while the wall is up (`SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` + the desktop's D-Bus inhibit on Linux, `WakeLock` + `FLAG_KEEP_SCREEN_ON` on Android); both switches default on |
-| Blackout | Scheduled periods, per weekday, in which the wall blanks itself and parks every channel - sockets closed, decoders dropped; input brings it back for a chosen number of minutes |
-| Language | English, Chinese, or any language added as an external `.ftl` pack; a partial pack falls back to English key by key |
-| Toolbar | An on-screen bar for the layout, paging, full screen, settings and adding cameras; usable with a mouse, touch or a remote |
-| Discovery | ONVIF WS-Discovery multicast probe, cross-subnet unicast scan, and a TCP 554/80/8000 fallback probe, followed by `GetProfiles` / `GetStreamUri` |
-| Server import | Import every camera in one go from Synology Surveillance Station (`SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera`), Frigate (its API, each camera's main and sub stream paired by measured resolution) or a standalone go2rtc (`/api/streams`) |
-| Cameras | Add, edit, reorder and remove cameras; per-camera display aspect and a connection switch - `AUTO`/`RTSP`/`MSE` where a WebSocket address exists, `TCP`/`UDP` otherwise |
-| Groups | Named camera groups, each with its own cameras, grid layout and paging, switched from the settings; the same camera may sit in more than one |
-| Start on boot | A Windows `HKCU\...\Run` registry entry (or a scheduled task), an XDG autostart entry on Linux, a LaunchAgent on macOS, and an Android `BOOT_COMPLETED` receiver |
-| Configuration | Everything persisted to a cross-platform `config.json`, with export / import |
+| Area                | What it does                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Grid layouts        | 1x1, 2x2, 3x3 and 4x4, switchable at runtime with the `1`-`4` keys or the toolbar                                                                                                                                                                                                                                                                              |
+| Pagination          | Channels beyond the grid's capacity are paged; swipe, `PageUp` / `PageDown` or the toolbar slides between pages                                                                                                                                                                                                                                                |
+| Focus navigation    | A 2 px cyan focus ring walks the tiles with the arrow keys or a TV remote's DPAD; the sideways arrows turn the page at the left and right edges, and the vertical ones stop at the top and bottom, where the wall hands the keys to the bars                                                                                                                   |
+| Temporary zoom      | Double click, `DPAD_CENTER`, `Enter` or `Space` magnifies a viewport to 1x1; `Esc` / `BACK` restores the grid                                                                                                                                                                                                                                                  |
+| Stream switching    | Every layout pulls the cheap sub stream (360P / 480P), the 1x1 grid included; only a magnified viewport switches to the main stream (1080P / 4K)                                                                                                                                                                                                               |
+| Seamless transition | The last sub-stream frame is held until the main stream delivers its first keyframe - no black or green frames                                                                                                                                                                                                                                                 |
+| Suspend             | Channels on a non-visible page are suspended to save bandwidth, CPU and decoder handles                                                                                                                                                                                                                                                                        |
+| Reconnection        | Exponential-backoff self-healing with a non-blocking "reconnecting…" overlay; the backoff shape and the handshake timeout are configurable and reach channels already running                                                                                                                                                                                  |
+| Decoding            | H.264 and H.265 on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, VideoToolbox on macOS, `AMediaCodec` on Android) and on the CPU elsewhere - Android falling back to OpenH264 by itself for an H.264 stream its own decoder will not take; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW` |
+| Codecs              | H.264, H.265 (HEVC) and MJPEG are decoded and displayed. H.265 uses the platform's decoder (VideoToolbox on macOS, `AMediaCodec` on Android) or FFmpeg on the desktop, on the GPU or the CPU. Android has no software HEVC, so a stream a device's own decoder will not take shows no picture - use its H.264 sub stream there                                 |
+| Transports          | RTSP over TCP (interleaved, the default) or UDP, chosen per camera; HTTP / HTTPS MJPEG (`multipart/x-mixed-replace`) cameras are supported too. A Frigate or go2rtc camera also carries an MSE (fMP4 over WebSocket) address, which the connection switch can prefer or fall back to when RTSP cannot be reached                                               |
+| On-screen display   | Each tile corner independently shows one of: none, name, number + name, stream, codec + rate, frame rate + decoder, size + shape, transport + url, or all statistics                                                                                                                                                                                           |
+| Power management    | Keeps the machine awake and/or the screen on while the wall is up (`SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` + the desktop's D-Bus inhibit on Linux, `WakeLock` + `FLAG_KEEP_SCREEN_ON` on Android); both switches default on                                                                                             |
+| Blackout            | Scheduled periods, per weekday, in which the wall blanks itself and parks every channel - sockets closed, decoders dropped; input brings it back for a chosen number of minutes                                                                                                                                                                                |
+| Language            | English, Chinese, or any language added as an external `.ftl` pack; a partial pack falls back to English key by key                                                                                                                                                                                                                                            |
+| Toolbar             | An on-screen bar for the layout, paging, full screen, settings and adding cameras; usable with a mouse, touch or a remote                                                                                                                                                                                                                                      |
+| Discovery           | ONVIF WS-Discovery multicast probe, cross-subnet unicast scan, and a TCP 554/80/8000 fallback probe, followed by `GetProfiles` / `GetStreamUri`                                                                                                                                                                                                                |
+| Server import       | Import every camera in one go from Synology Surveillance Station (`SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera`), Frigate (its API, each camera's main and sub stream paired by measured resolution) or a standalone go2rtc (`/api/streams`)                                                                                                             |
+| Cameras             | Add, edit, reorder and remove cameras; per-camera display aspect and a connection switch - `AUTO`/`RTSP`/`MSE` where a WebSocket address exists, `TCP`/`UDP` otherwise                                                                                                                                                                                         |
+| Groups              | Named camera groups, each with its own cameras, grid layout and paging, switched from the settings; the same camera may sit in more than one                                                                                                                                                                                                                   |
+| Start on boot       | A Windows `HKCU\...\Run` registry entry (or a scheduled task), an XDG autostart entry on Linux, a LaunchAgent on macOS, and an Android `BOOT_COMPLETED` receiver                                                                                                                                                                                               |
+| Configuration       | Everything persisted to a cross-platform `config.json`, with export / import                                                                                                                                                                                                                                                                                   |
 
 ## Supported platforms
 
-| Platform | Typical device | Decoding |
-| --- | --- | --- |
-| **Android** (arm64-v8a) | TV box, phone, tablet | `AMediaCodec` - hardware, falling back to OpenH264 for H.264 |
-| **Windows** x64 | mini PC, kiosk, desktop | Direct3D 11 Video or CUDA - hardware, with a CPU fallback |
-| **Linux** x64 | desktop, mini PC | VAAPI or CUDA - hardware, with a CPU fallback |
-| **macOS** (universal) | desktop, laptop | VideoToolbox - hardware, with a CPU fallback |
+| Platform                | Typical device          | Decoding                                                     |
+| ----------------------- | ----------------------- | ------------------------------------------------------------ |
+| **Android** (arm64-v8a) | TV box, phone, tablet   | `AMediaCodec` - hardware, falling back to OpenH264 for H.264 |
+| **Windows** x64         | mini PC, kiosk, desktop | Direct3D 11 Video or CUDA - hardware, with a CPU fallback    |
+| **Linux** x64           | desktop, mini PC        | VAAPI or CUDA - hardware, with a CPU fallback                |
+| **macOS** (universal)   | desktop, laptop         | VideoToolbox - hardware, with a CPU fallback                 |
 
 Hardware decoding covers H.264 and H.265; MJPEG is always decoded on the CPU. It
 needs a GPU that offers VAAPI or CUDA, which a desktop with an NVIDIA, Intel or
@@ -129,7 +133,7 @@ camera is on.
 - **Android 8.1 or newer.** The APK declares `minSdkVersion 27`, so an older
   device refuses it with "there was a problem parsing the package" instead of
   installing it.
-- **A GPU with Vulkan 1.1, or OpenGL ES 3.2 / `GL_KHR_debug`.** XGView draws
+- **A GPU with Vulkan 1.1, or OpenGL ES 3.2 /** **`GL_KHR_debug`.** XGView draws
   through wgpu, which takes the **Vulkan** backend wherever the device offers one
   it can use. A device with **no Vulkan at all, or only Vulkan 1.0** (Adreno on
   Android 8.x) is sent to the **OpenGL ES** backend instead - and that is decided
@@ -161,30 +165,28 @@ A box that boots straight into the wall needs no desktop environment, but it doe
 need a display server and a session: the viewer draws through a window and has no
 mode that paints the display directly. On Debian, what that comes to:
 
-* **A display server** - Xorg or Wayland - and a *window manager*. Full screen,
+- **A display server** - Xorg or Wayland - and a *window manager*. Full screen,
   staying on top, and a second launch coming forward are all requests made to a
   window manager, and none of them happens without one. `matchbox-window-manager`,
   `openbox` or `i3` are a few megabytes; a kiosk compositor such as `cage` fills
   both roles at once.
-* **An automatic logon.** Xorg takes the display through logind and needs an
+- **An automatic logon.** Xorg takes the display through logind and needs an
   active session, so the arrangement is a logon on a virtual console that asks for
   no password. Running Xorg as root is a path its drivers no longer support.
-* **The viewer started from `~/.xinitrc`**, because nothing on such a box reads
+- **The viewer started from** **`~/.xinitrc`**, because nothing on such a box reads
   the XDG autostart entry:
-
   ```sh
   xset -dpms s off &                      # see the last point below
   exec xgview --fullscreen --supervise    # and it comes back if it dies
   ```
-
-* **Packages**, on top of the window manager itself. The window system:
+- **Packages**, on top of the window manager itself. The window system:
   `libx11-6 libxcb1 libxcursor1 libxrandr2 libxi6 libxkbcommon-x11-0` - `ldd
   xgview` will not name those, they are loaded as they are needed. Text:
   `fontconfig` and at least one face, `fonts-dejavu-core`. Renderer:
   `libvulkan1 mesa-vulkan-drivers`, or the GL fallback `libegl1 libgl1-mesa-dri`.
   Sessions: `libdrm2` and `systemd` for logind. The decoders need nothing extra -
   FFmpeg and libva travel in the package.
-* **The screen.** [Keep awake](#keep-awake) cannot help here: there is no screen
+- **The screen.** [Keep awake](#keep-awake) cannot help here: there is no screen
   saver and no power service to inhibit over the session bus, and a bare Xorg may
   not have one at all. The blanking is the X server's own DPMS, so it is turned off
   at the X level - the `xset -dpms s off` above, or `Option "DPMS" "false"` in
@@ -202,7 +204,7 @@ mode that paints the display directly. On Debian, what that comes to:
   Gatekeeper and refuses until it is allowed in *System Settings → Privacy &
   Security*, the app not carrying a Developer ID.
 
----
+***
 
 ## Getting started
 
@@ -228,12 +230,12 @@ out again.
 
 Everything is stored in one `config.json`:
 
-| Platform | Path |
-| --- | --- |
-| Windows | `%APPDATA%\xgview\config.json` |
+| Platform          | Path                                                                       |
+| ----------------- | -------------------------------------------------------------------------- |
+| Windows           | `%APPDATA%\xgview\config.json`                                             |
 | Linux (and macOS) | `$XDG_CONFIG_HOME/xgview/config.json`, else `~/.config/xgview/config.json` |
-| Android | the app's private data folder |
-| Any | set `XGVIEW_CONFIG_DIR` to override the folder, or pass `--config <PATH>` |
+| Android           | the app's private data folder                                              |
+| Any               | set `XGVIEW_CONFIG_DIR` to override the folder, or pass `--config <PATH>`  |
 
 The **About** tab exports and imports the file (on Android, export writes to
 `Download/xgview` and import opens the system file picker). On the desktop both
@@ -251,7 +253,7 @@ configuration - the one it replaces is kept beside it as `config.json.bak`, and 
 file that is not an XGView configuration is refused rather than adopted. A
 checkbox imports only the cameras and keeps your viewer settings.
 
----
+***
 
 ## Usage
 
@@ -290,16 +292,16 @@ or green frames. `Esc` / `BACK`, or another double click, returns to the grid.
 
 ### Keyboard and remote control
 
-| Key | Action |
-| --- | --- |
-| Arrow keys / DPAD | Move the focus between viewports (turns the page at the edges) |
-| `Enter` / `Space` / `DPAD_CENTER` | Magnify the focused viewport to 1x1, press again to return |
-| `Esc` / `Backspace` / `BACK` | Leave the magnified view |
-| `PageUp` / `PageDown` | Previous / next page |
-| `1` `2` `3` `4` | Select the 1x1 / 2x2 / 3x3 / 4x4 layout |
-| `F1` | Settings panel |
-| `F2` | Camera discovery / management window |
-| `F11` | Toggle full screen |
+| Key                               | Action                                                         |
+| --------------------------------- | -------------------------------------------------------------- |
+| Arrow keys / DPAD                 | Move the focus between viewports (turns the page at the edges) |
+| `Enter` / `Space` / `DPAD_CENTER` | Magnify the focused viewport to 1x1, press again to return     |
+| `Esc` / `Backspace` / `BACK`      | Leave the magnified view                                       |
+| `PageUp` / `PageDown`             | Previous / next page                                           |
+| `1` `2` `3` `4`                   | Select the 1x1 / 2x2 / 3x3 / 4x4 layout                        |
+| `F1`                              | Settings panel                                                 |
+| `F2`                              | Camera discovery / management window                           |
+| `F11`                             | Toggle full screen                                             |
 
 `BACK` is layered: it first leaves a magnified view, then closes a window, then
 closes the settings panel, then brings the bar back - and only a second press on
@@ -358,14 +360,14 @@ as a portable monitoring screen:
 
 `F1` opens a tabbed panel, navigable with the arrows and `Enter` on a remote:
 
-| Tab | What it holds |
-| --- | --- |
-| Display | Interface **language**, grid, the four OSD corners, full screen at start-up, staying on top in full screen, the Android navigation bar |
-| Cameras | The group strip, and the group on the wall: its camera list (add, edit, reorder, remove; display aspect and RTSP transport per camera), its name, Set as Default and Remove |
-| Streams | Reconnect timings (first retry, first-frame retry, max delay, handshake timeout, backoff factor / jitter / spread, attempts) and the hardware-decoding preference |
-| Blackout | The blank schedule: on/off, the periods (weekday, start, end), and how long the wall stays back after input |
-| System | Start on boot, one instance per configuration, **keep awake** (prevent sleep / keep the screen on) with the mechanism in use, the key list, and the Android boot helpers |
-| About | Version, author, decoder in use, config path, export / import |
+| Tab      | What it holds                                                                                                                                                               |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Display  | Interface **language**, grid, the four OSD corners, full screen at start-up, staying on top in full screen, the Android navigation bar                                      |
+| Cameras  | The group strip, and the group on the wall: its camera list (add, edit, reorder, remove; display aspect and RTSP transport per camera), its name, Set as Default and Remove |
+| Streams  | Reconnect timings (first retry, first-frame retry, max delay, handshake timeout, backoff factor / jitter / spread, attempts) and the hardware-decoding preference           |
+| Blackout | The blank schedule: on/off, the periods (weekday, start, end), and how long the wall stays back after input                                                                 |
+| System   | Start on boot, one instance per configuration, **keep awake** (prevent sleep / keep the screen on) with the mechanism in use, the key list, and the Android boot helpers    |
+| About    | Version, author, decoder in use, config path, export / import                                                                                                               |
 
 Every change is written to `config.json` as you make it, so there is no separate
 "save" step.
@@ -472,9 +474,10 @@ wall is up, so a display that would blank or a system that would sleep does not
 cut the streams. Both switches are on by default; keeping the screen on also
 keeps the system awake. The mechanism per platform is `SetThreadExecutionState`
 (Windows), `caffeinate` (macOS), `systemd-inhibit` + D-Bus (Linux) and `WakeLock`
-+ `FLAG_KEEP_SCREEN_ON` (Android), and is shown in the panel. The request is
-released when the viewer exits; see
-[docs/power-management-plan.md](docs/power-management-plan.md).
+
+- `FLAG_KEEP_SCREEN_ON` (Android), and is shown in the panel. The request is
+  released when the viewer exits; see
+  [docs/power-management-plan.md](docs/power-management-plan.md).
 
 ### Stay on top in full screen
 
@@ -539,11 +542,11 @@ activity from the background, and that broadcast is one, so the relaunch is
 aborted - silently, from the viewer's side - unless the app is whitelisted.
 Either of these, a one-time step on each device, is enough:
 
-* **Start over other apps** - grant the *Display over other apps* special
+- **Start over other apps** - grant the *Display over other apps* special
   permission (`SYSTEM_ALERT_WINDOW`, declared in the manifest). The settings
   panel's **System** tab has a button that opens the screen, and shows whether
   it is granted.
-* **Home app** - the manifest also offers XGView as a home app; the **System**
+- **Home app** - the manifest also offers XGView as a home app; the **System**
   tab has a button that opens the chooser. No permission is involved, at the
   cost of replacing the box's own launcher.
 
@@ -561,11 +564,11 @@ without having been asked to stop. The start-on-boot entry is registered this wa
 because a viewer that comes up at boot and dies an hour later has not really been
 started, on a machine nobody is watching.
 
-| the viewer exited with | then |
-| --- | --- |
-| `0` - asked to stop: the window was closed, or another instance holds the configuration | nothing; the supervisor ends too |
-| `2` - no renderer to be had on this machine | nothing; no restart would change that answer |
-| anything else - a crash, a panic, a kill | started again after 700 ms |
+| the viewer exited with                                                                  | then                                         |
+| --------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `0` - asked to stop: the window was closed, or another instance holds the configuration | nothing; the supervisor ends too             |
+| `2` - no renderer to be had on this machine                                             | nothing; no restart would change that answer |
+| anything else - a crash, a panic, a kill                                                | started again after 700 ms                   |
 
 Three restarts are allowed within ten minutes, after which the viewer is left down
 with the reason in the log. Those are Android's numbers, where the activity has
@@ -653,12 +656,12 @@ XGView.app/Contents/MacOS/xgview --print-schedule
 
 ### Troubleshooting
 
-- **A tile shows `Stream failed` with a reason.** The camera could not be
+- **A tile shows** **`Stream failed`** **with a reason.** The camera could not be
   reached or would not start a session. Check the URL and credentials in the
   **Cameras** tab, make sure the host is reachable from the machine running
   XGView, and try the other transport (UDP is often what fixes a stream that a
   relay or a NAT mangles over TCP).
-- **A camera stays on `waiting for video`.** The connection is up but no picture
+- **A camera stays on** **`waiting for video`.** The connection is up but no picture
   has arrived. Confirm the stream is H.264, H.265 or MJPEG - on Android an HEVC
   stream needs a device whose own decoder takes it, so use its H.264 sub stream
   if a tile stays blank.
@@ -692,13 +695,15 @@ XGView.app/Contents/MacOS/xgview --print-schedule
   log arrives in that console, and `--console` opens a console window for it
   when the viewer is started outside a shell.
 
----
+***
 
 ## License
+
 This project is licensed under the [MIT License](LICENSE). All code in this repository are free to use, modify, and distribute under the terms of this license.
 
----
+***
 
 ## Contact
-**E-mail**: [Send Email](mailto:newxhbl@hotmail.com?subject=[XGView]%20Inquiry)  
-**Issues**: [Open Issue](../../issues)  
+
+**E-mail**: [Send Email](mailto:newxhbl@hotmail.com?subject=\[XGView]%20Inquiry)\
+**Issues**: [Open Issue](../../issues)
