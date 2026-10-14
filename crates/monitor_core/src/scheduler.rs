@@ -75,13 +75,6 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    pub fn rows(&self) -> usize {
-        self.layout.rows()
-    }
-
-    pub fn cols(&self) -> usize {
-        self.layout.cols()
-    }
 
     /// Number of grid cells to draw.
     pub fn cells(&self) -> usize {

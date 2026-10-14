@@ -53,7 +53,7 @@ pub mod supervise;
 pub use error::{CoreError, Result};
 pub use h264::{AccessUnit, H264Depacketizer};
 pub use hevc::HevcDepacketizer;
-pub use layout::{Direction, GridLayout, NavigateOutcome, PageInfo};
+pub use layout::{Cell, Direction, GridLayout, NavigateOutcome, PageInfo};
 pub use model::{CameraSource, ConnectionState, StreamKind};
 pub use scheduler::{ChannelMode, ChannelPlan, Schedule, ScheduleChange, Scheduler};
 

@@ -67,17 +67,40 @@ pub fn page_cells(layout: GridLayout, page: usize, total: usize) -> Vec<Option<u
 }
 
 /// Rectangle of one grid cell inside `area`.
+///
+/// The layout divides `area` into `grid_cols() x grid_rows()` equal units with
+/// `gap` between neighbours; a cell covers its span of them, so a large cell of
+/// a mixed layout is drawn across every unit it merged. For the square layouts
+/// every span is one and this is the plain uniform grid it always was.
 pub fn tile_rect(area: Rect, layout: GridLayout, cell: usize, gap: f32) -> Rect {
-    let cols = layout.cols() as f32;
-    let rows = layout.rows() as f32;
-    let width = ((area.width() - gap * (cols - 1.0)) / cols).max(1.0);
-    let height = ((area.height() - gap * (rows - 1.0)) / rows).max(1.0);
-    let col = (cell % layout.cols()) as f32;
-    let row = (cell / layout.cols()) as f32;
+    let cell = layout.cells()[cell];
+    let cols = layout.grid_cols() as f32;
+    let rows = layout.grid_rows() as f32;
+    let unit_w = ((area.width() - gap * (cols - 1.0)) / cols).max(1.0);
+    let unit_h = ((area.height() - gap * (rows - 1.0)) / rows).max(1.0);
+    let col = cell.col as f32;
+    let row = cell.row as f32;
+    let span_x = cell.col_span as f32;
+    let span_y = cell.row_span as f32;
     Rect::from_min_size(
-        egui::pos2(area.left() + col * (width + gap), area.top() + row * (height + gap)),
-        vec2(width, height),
+        egui::pos2(area.left() + col * (unit_w + gap), area.top() + row * (unit_h + gap)),
+        vec2(unit_w * span_x + gap * (span_x - 1.0), unit_h * span_y + gap * (span_y - 1.0)),
     )
+}
+
+/// Paints a small picture of a layout: the wall's own grid geometry, shrunk
+/// into `rect`, one rectangle per viewport. Used by the layout picker.
+pub fn layout_thumbnail(painter: &egui::Painter, rect: Rect, layout: GridLayout) {
+    painter.rect_filled(rect, CornerRadius::ZERO, theme::CANVAS);
+    for cell in 0..layout.capacity() {
+        let cell_rect = tile_rect(rect.shrink(1.0), layout, cell, 1.0);
+        painter.rect_stroke(
+            cell_rect,
+            CornerRadius::ZERO,
+            Stroke::new(1.0_f32, theme::GRID_LINE),
+            StrokeKind::Inside,
+        );
+    }
 }
 
 /// Everything needed to paint one tile.
@@ -547,4 +570,36 @@ pub fn empty_state(ui: &mut Ui, area: Rect, message: &str, hint: &str) {
         FontId::proportional(13.0),
         theme::TEXT_DIM.gamma_multiply(0.75),
     );
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cells_of_every_layout_paint_inside_the_wall_without_overlap() {
+        let area = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(1920.0, 1080.0));
+        for layout in GridLayout::ALL {
+            let rects: Vec<Rect> = (0..layout.capacity())
+                .map(|cell| tile_rect(area, layout, cell, LINE))
+                .collect();
+            for (index, a) in rects.iter().enumerate() {
+                for b in &rects[index + 1..] {
+                    assert!(
+                        a.intersect(*b).area() < 0.01,
+                        "{layout:?}: cells {index} and a later one overlap"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_square_layout_is_still_the_uniform_grid() {
+        let area = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(1600.0, 900.0));
+        let rect = tile_rect(area, GridLayout::G2x2, 3, 0.0);
+        assert!((rect.width() - 800.0).abs() < 0.01);
+        assert!((rect.height() - 450.0).abs() < 0.01);
+        assert!((rect.left() - 800.0).abs() < 0.01);
+        assert!((rect.top() - 450.0).abs() < 0.01);
+    }
 }

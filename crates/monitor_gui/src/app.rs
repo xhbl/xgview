@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use egui::{Align, Id, Key, Layout, Modifiers, Rect, RichText, vec2};
+use egui::{Align, Align2, CornerRadius, FontId, Id, Key, Layout, Modifiers, Order, Rect, RichText, Sense, vec2};
 #[cfg(not(target_os = "android"))]
 use egui_file_dialog::{DialogState, FileDialog, FileDialogLabels};
 use tokio::runtime::Handle;
@@ -551,6 +551,15 @@ fn layout_hint(layout: GridLayout) -> &'static str {
         GridLayout::G2x2 => "toolbar-layout-2x2",
         GridLayout::G3x3 => "toolbar-layout-3x3",
         GridLayout::G4x4 => "toolbar-layout-4x4",
+        GridLayout::N2 => "toolbar-layout-2",
+        GridLayout::N3 => "toolbar-layout-3",
+        GridLayout::N5 => "toolbar-layout-5",
+        GridLayout::N6 => "toolbar-layout-6",
+        GridLayout::N7 => "toolbar-layout-7",
+        GridLayout::N8 => "toolbar-layout-8",
+        GridLayout::N10 => "toolbar-layout-10",
+        GridLayout::N12 => "toolbar-layout-12",
+        GridLayout::N13 => "toolbar-layout-13",
     }
 }
 
@@ -568,7 +577,7 @@ struct Keys {
     settings: bool,
     devices: bool,
     fullscreen: bool,
-    layout: [bool; 4],
+    layout: [bool; 10],
 }
 
 /// The viewer application.
@@ -628,6 +637,9 @@ pub struct XgViewApp {
     /// apply - rather than offered and ignored.
     decoder_selectable: bool,
     show_settings: bool,
+    /// Whether the layout picker is open: the panel that offers the layouts
+    /// that have no button of their own.
+    layout_picker: bool,
     /// Tab the settings panel is on.
     settings_tab: SettingsTab,
     /// First control of the settings panel, so the panel can be handed the
@@ -635,6 +647,10 @@ pub struct XgViewApp {
     settings_anchor: Option<Id>,
     /// The panel and the device window, watched for the frame they appear on.
     settings_handoff: Handoff,
+    /// The layout picker, watched for the frame it appears on so the remote's
+    /// focus lands on its first entry instead of walking the wall behind it.
+    layout_picker_handoff: Handoff,
+    layout_picker_anchor: Option<Id>,
     /// A scroll asked for by a direction press that had nowhere left to move the
     /// focus inside the settings body, in points.
     ///
@@ -926,9 +942,12 @@ impl XgViewApp {
             hardware_decoder: capabilities.hardware,
             decoder_selectable: capabilities.selectable,
             show_settings: false,
+            layout_picker: false,
             settings_tab: SettingsTab::default(),
             settings_anchor: None,
             settings_handoff: Handoff::default(),
+            layout_picker_handoff: Handoff::default(),
+            layout_picker_anchor: None,
             body_scroll: None,
             dialog_handoff: Handoff::default(),
             discovery,
@@ -969,6 +988,7 @@ impl XgViewApp {
                 ("settings-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("settings-body"))),
                 ("settings-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("settings-tabs"))),
                 ("toolbar", ScopeDef::new(Axis::Row)),
+                ("layout-picker", ScopeDef::new(Axis::Column)),
                 ("status", ScopeDef::new(Axis::Row)),
                 ("edit-body", ScopeDef::new(Axis::Column)),
                 ("confirm-body", ScopeDef::new(Axis::Column)),
@@ -2533,6 +2553,12 @@ impl XgViewApp {
                     input.consume_key(none, Key::Num2),
                     input.consume_key(none, Key::Num3),
                     input.consume_key(none, Key::Num4),
+                    input.consume_key(none, Key::Num5),
+                    input.consume_key(none, Key::Num6),
+                    input.consume_key(none, Key::Num7),
+                    input.consume_key(none, Key::Num8),
+                    input.consume_key(none, Key::Num9),
+                    input.consume_key(none, Key::Num0),
                 ];
             }
             keys
@@ -2557,10 +2583,12 @@ impl XgViewApp {
             || self.remove_confirm.is_some()
             || self.system_confirm.is_some()
             || self.passphrase.is_some();
-        if keys.settings && !dialog_open {
+        // The layout picker is a lighter overlay, but it still owns the keys
+        // while it is up: opening a panel behind it would stack two of them.
+        if keys.settings && !dialog_open && !self.layout_picker {
             self.show_settings = !self.show_settings;
         }
-        if keys.devices && !dialog_open {
+        if keys.devices && !dialog_open && !self.layout_picker {
             self.discovery.open = !self.discovery.open;
         }
         if keys.fullscreen {
@@ -2575,8 +2603,11 @@ impl XgViewApp {
         }
         for (slot, pressed) in keys.layout.iter().enumerate() {
             if *pressed {
-                if let Some(layout) = GridLayout::ALL.get(slot) {
-                    self.set_layout(*layout);
+                // The digit is the viewport count; the last slot is `0`, which
+                // stands for the ten-cell layout. 12, 13 and 16 have no digit.
+                let digit = if slot == 9 { 0 } else { slot as u8 + 1 };
+                if let Some(layout) = GridLayout::for_digit(digit) {
+                    self.set_layout(layout);
                 }
             }
         }
@@ -2648,7 +2679,9 @@ impl XgViewApp {
             // two: a panel opened over the wall closes, and otherwise the wall
             // takes the keys back.
             if keys.back {
-                if self.discovery.open {
+                if self.layout_picker {
+                    self.layout_picker = false;
+                } else if self.discovery.open {
                     self.discovery.open = false;
                 } else if self.show_settings {
                     self.show_settings = false;
@@ -2852,14 +2885,26 @@ impl XgViewApp {
 
             // Layout and page are the two things a viewer changes while
             // watching, so they stay on the bar whatever its width.
-            for layout in GridLayout::ALL {
-                let selected = self.scheduler.layout() == layout && !self.scheduler.is_zoomed();
+            let current = self.scheduler.layout();
+            for layout in GridLayout::STANDARD {
+                let selected = current == layout && !self.scheduler.is_zoomed();
                 let response = ui.selectable_label(selected, layout.label());
                 items.push((response.id, response.rect));
                 self.name(&response, layout_hint(layout));
                 if response.clicked() {
                     self.set_layout(layout);
                 }
+            }
+
+            // The layouts that have no button of their own live behind one
+            // button: it shows the number of the one in use, and an ellipsis
+            // while the wall is on a layout that has a button of its own.
+            let active = !current.is_standard() && !self.scheduler.is_zoomed();
+            let more = ui.selectable_label(active || self.layout_picker, current.numeric_label().unwrap_or("…"));
+            items.push((more.id, more.rect));
+            self.name(&more, "toolbar-layout-more");
+            if more.clicked() {
+                self.layout_picker = !self.layout_picker;
             }
 
             // Only while magnified, and only there: the arrow on a tile, Enter
@@ -3183,12 +3228,20 @@ impl XgViewApp {
 
         ui.label(RichText::new(monitor_i18n::tr("settings-grid")).strong());
         ui.horizontal_wrapped(|ui| {
-            for layout in GridLayout::ALL {
+            for layout in GridLayout::STANDARD {
                 let selected = self.scheduler.layout() == layout;
                 let response = self.nav.tracked(ui.selectable_label(selected, layout.label()));
                 if response.clicked() {
                     self.set_layout(layout);
                 }
+            }
+            let current = self.scheduler.layout();
+            let active = !current.is_standard();
+            let more = self
+                .nav
+                .tracked(ui.selectable_label(active || self.layout_picker, current.numeric_label().unwrap_or("…")));
+            if more.clicked() {
+                self.layout_picker = !self.layout_picker;
             }
         });
         ui.add_space(theme::space::S);
@@ -5312,6 +5365,66 @@ impl XgViewApp {
         }
     }
 
+    /// The picker that offers the layouts with no button of their own.
+    ///
+    /// A panel over the wall: the four square layouts have buttons, and this
+    /// holds the rest, in the order the document lists them. The toolbar button
+    /// that opens it shows the number of the layout in use, or an ellipsis.
+    fn draw_layout_picker(&mut self, ctx: &egui::Context) {
+        if !self.layout_picker {
+            return;
+        }
+        let mut chosen: Option<GridLayout> = None;
+        egui::Area::new(Id::new("xgview-layout-picker"))
+            .order(Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(190.0);
+                    ui.label(RichText::new(monitor_i18n::tr("layout-picker-title")).strong());
+                    ui.separator();
+                    self.nav.open("layout-picker");
+                    self.layout_picker_anchor = None;
+                    for layout in GridLayout::EXTENDED {
+                        let selected = self.scheduler.layout() == layout;
+                        let (rect, response) = ui.allocate_exact_size(vec2(180.0, 38.0), Sense::click());
+                        if self.layout_picker_anchor.is_none() {
+                            self.layout_picker_anchor = Some(response.id);
+                        }
+                        if ui.is_rect_visible(rect) {
+                            let painter = ui.painter();
+                            if selected || response.hovered() {
+                                painter.rect_filled(rect, CornerRadius::same(theme::radius::S), theme::FOCUS_FILL);
+                            }
+                            let thumb = Rect::from_min_size(
+                                rect.left_top() + vec2(4.0, 5.0),
+                                vec2(rect.height() - 10.0, rect.height() - 10.0),
+                            );
+                            grid::layout_thumbnail(painter, thumb, layout);
+                            painter.text(
+                                egui::pos2(rect.left() + rect.height() + 2.0, rect.center().y),
+                                Align2::LEFT_CENTER,
+                                layout.label(),
+                                FontId::proportional(15.0),
+                                if selected { theme::FOCUS } else { theme::TEXT },
+                            );
+                        }
+                        let response = self.nav.tracked(response);
+                        self.name(&response, layout_hint(layout));
+                        if response.clicked() {
+                            chosen = Some(layout);
+                        }
+                    }
+                    self.nav.close();
+                });
+            });
+
+        if let Some(layout) = chosen {
+            self.set_layout(layout);
+            self.layout_picker = false;
+        }
+    }
+
     fn draw_toast(&self, ctx: &egui::Context) {
         let Some(toast) = &self.toast else {
             return;
@@ -5694,6 +5807,7 @@ impl eframe::App for XgViewApp {
             self.mark_dirty();
         }
 
+        self.draw_layout_picker(ctx);
         self.draw_toast(ctx);
         self.draw_exit_hint(ctx);
         // After everything else, and on its own layer: the blank covers the
@@ -5708,6 +5822,11 @@ impl eframe::App for XgViewApp {
         // a viewer cannot see happening. See `Handoff`.
         if self.settings_handoff.entering(self.show_settings) {
             if let Some(id) = self.settings_anchor {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
+        if self.layout_picker_handoff.entering(self.layout_picker) {
+            if let Some(id) = self.layout_picker_anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
