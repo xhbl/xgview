@@ -3029,25 +3029,6 @@ impl XgViewApp {
                 }
             }
 
-            ui.separator();
-            let info = self.scheduler.page_info();
-            let previous = ui.add_enabled(info.has_previous(), egui::Button::new("◀"));
-            if info.has_previous() {
-                items.push((previous.id, previous.rect));
-                self.name(&previous, "toolbar-prev-page");
-            }
-            if previous.clicked() {
-                self.turn_page(false);
-            }
-
-            let next = ui.add_enabled(info.has_next(), egui::Button::new("▶"));
-            if info.has_next() {
-                items.push((next.id, next.rect));
-                self.name(&next, "toolbar-next-page");
-            }
-            if next.clicked() {
-                self.turn_page(true);
-            }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 self.orientation_button(ui, &mut items);
@@ -3112,6 +3093,47 @@ impl XgViewApp {
                 ui.label(RichText::new(monitor_i18n::tr(name)).color(theme::FOCUS));
             }
         });
+    }
+
+    fn portrait_page_buttons(&mut self, ui: &mut egui::Ui, area: Rect) {
+        let info = self.scheduler.page_info();
+        let r = 24.0;
+        let margin = 6.0;
+        let y = area.center().y;
+        let fill = egui::Color32::from_black_alpha(51);
+        let edge = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(140));
+        let glyph = egui::Stroke::new(2.0_f32, egui::Color32::from_white_alpha(230));
+        let d = r * 0.4;
+        let sides = [
+            (false, "portrait-prev-page", info.has_previous()),
+            (true, "portrait-next-page", info.has_next()),
+        ];
+        for (forward, id, has) in sides {
+            if !has {
+                continue;
+            }
+            let x = if forward { area.max.x - margin - r } else { area.min.x + margin + r };
+            let center = egui::pos2(x, y);
+            let rect = Rect::from_center_size(center, egui::Vec2::splat(r * 2.0));
+            let resp = ui.interact(rect, Id::new(id), egui::Sense::click());
+            let p = ui.painter();
+            p.circle_filled(center, r, fill);
+            p.circle_stroke(center, r, edge);
+            let sign = if forward { 1.0 } else { -1.0 };
+            let tip = egui::pos2(center.x + sign * d * 2.0 / 3.0, center.y);
+            let wing_x = center.x - sign * d / 3.0;
+            p.add(egui::Shape::line_segment(
+                [egui::pos2(wing_x, center.y - d), tip],
+                glyph,
+            ));
+            p.add(egui::Shape::line_segment(
+                [egui::pos2(wing_x, center.y + d), tip],
+                glyph,
+            ));
+            if resp.clicked() {
+                self.turn_page(forward);
+            }
+        }
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -6166,7 +6188,13 @@ impl eframe::App for XgViewApp {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::BACKGROUND))
-            .show(ctx, |ui| self.draw_grid(ui));
+            .show(ctx, |ui| {
+                let area = ui.available_rect_before_wrap();
+                self.draw_grid(ui);
+                if self.is_portrait() && self.chrome.visible {
+                    self.portrait_page_buttons(ui, area);
+                }
+            });
 
         if self.discovery.open {
             let handle = self.handle.clone();
