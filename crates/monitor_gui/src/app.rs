@@ -359,7 +359,11 @@ struct CameraEdit {
     id: String,
     draft: CameraDraft,
     /// The edit button that opened the window, to give it back its focus.
-    from: Id,
+    ///
+    /// `None` when the window was opened with a pointer: a press does not move
+    /// the focus anywhere else in this program, so it must not appear to move it
+    /// here either - the window closes and the ring stays where it was.
+    from: Option<Id>,
 }
 
 /// A camera the settings panel is asking about removing.
@@ -368,14 +372,20 @@ struct RemoveConfirm {
     id: String,
     name: String,
     /// The remove button that opened the window, to give it back its focus.
-    from: Id,
+    ///
+    /// `None` when the window was opened with a pointer - see
+    /// [`CameraEdit::from`].
+    from: Option<Id>,
 }
 
 /// A reboot the settings panel is asking confirmation for.
 #[derive(Debug)]
 struct SystemConfirm {
     /// The button that opened the window, to give it back its focus.
-    from: Id,
+    ///
+    /// `None` when the window was opened with a pointer - see
+    /// [`CameraEdit::from`].
+    from: Option<Id>,
 }
 
 /// What a passphrase prompt is for.
@@ -2381,13 +2391,13 @@ impl XgViewApp {
                 self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
             } else if let Some(confirm) = self.remove_confirm.take() {
                 self.remove_confirm_anchor = None;
-                self.restore_focus = Some(confirm.from);
+                self.restore_focus = confirm.from;
             } else if let Some(confirm) = self.system_confirm.take() {
                 self.system_confirm_anchor = None;
-                self.restore_focus = Some(confirm.from);
+                self.restore_focus = confirm.from;
             } else if let Some(edit) = self.camera_edit.take() {
                 self.camera_edit_anchor = None;
-                self.restore_focus = Some(edit.from);
+                self.restore_focus = edit.from;
             }
             return;
         }
@@ -2944,7 +2954,12 @@ impl XgViewApp {
             self.name(&more, "toolbar-layout-more");
             if more.clicked() {
                 self.layout_picker = !self.layout_picker;
-                self.layout_picker_from = self.layout_picker.then_some(more.id);
+                // Only for a press that came from the keyboard or a remote: a
+                // pointer does not move the focus anywhere else in this program,
+                // so it must not appear to move it here either.
+                self.layout_picker_from = (self.layout_picker
+                    && !more.clicked_by(egui::PointerButton::Primary))
+                .then_some(more.id);
             }
 
             // Only while magnified, and only there: the arrow on a tile, Enter
@@ -3025,7 +3040,12 @@ impl XgViewApp {
                 self.name(&devices, "toolbar-add-devices");
                 if devices.clicked() {
                     self.discovery.open = !self.discovery.open;
-                    self.discovery.from = self.discovery.open.then_some(devices.id);
+                    // Only for a press that came from the keyboard or a remote:
+                    // a pointer does not move the focus anywhere else in this
+                    // program, so it must not appear to move it here either.
+                    self.discovery.from = (self.discovery.open
+                        && !devices.clicked_by(egui::PointerButton::Primary))
+                    .then_some(devices.id);
                 }
             });
         });
@@ -3285,7 +3305,12 @@ impl XgViewApp {
             self.name(&more, "toolbar-layout-more");
             if more.clicked() {
                 self.layout_picker = !self.layout_picker;
-                self.layout_picker_from = self.layout_picker.then_some(more.id);
+                // Only for a press that came from the keyboard or a remote: a
+                // pointer does not move the focus anywhere else in this program,
+                // so it must not appear to move it here either.
+                self.layout_picker_from = (self.layout_picker
+                    && !more.clicked_by(egui::PointerButton::Primary))
+                .then_some(more.id);
             }
         });
         ui.add_space(theme::space::S);
@@ -3734,7 +3759,7 @@ impl XgViewApp {
         // a press beside a neighbour must not restart the machine on its own,
         // and it is drawn only where the process has the privilege to do it.
         let mut do_exit = false;
-        let mut ask_reboot: Option<Id> = None;
+        let mut ask_reboot: Option<Option<Id>> = None;
         ui.horizontal(|ui| {
             let exit_label = monitor_i18n::tr("action-exit");
             let exit_btn = self.nav.tracked(ui.button(exit_label));
@@ -3745,7 +3770,13 @@ impl XgViewApp {
                 let reboot_label = monitor_i18n::tr("action-reboot");
                 let reboot_btn = self.nav.tracked(ui.button(reboot_label));
                 if reboot_btn.clicked() {
-                    ask_reboot = Some(reboot_btn.id);
+                    // Only for a press that came from the keyboard or a remote:
+                    // a pointer does not move the focus anywhere else in this
+                    // program, so it must not appear to move it here either.
+                    ask_reboot = Some(
+                        (!reboot_btn.clicked_by(egui::PointerButton::Primary))
+                            .then_some(reboot_btn.id),
+                    );
                 }
             }
         });
@@ -4036,21 +4067,26 @@ impl XgViewApp {
             if devices.clicked() {
                 self.discovery.open = true;
                 self.discovery.tab = Tab::Onvif;
-                self.discovery.from = Some(devices.id);
+                // Only for a press that came from the keyboard or a remote: a
+                // pointer does not move the focus anywhere else in this program,
+                // so it must not appear to move it here either.
+                self.discovery.from =
+                    (!devices.clicked_by(egui::PointerButton::Primary)).then_some(devices.id);
             }
             let manual = ui.button(monitor_i18n::tr("cameras-add-manually"));
             self.nav.item(&manual);
             if manual.clicked() {
                 self.discovery.open = true;
                 self.discovery.tab = Tab::Manual;
-                self.discovery.from = Some(manual.id);
+                self.discovery.from =
+                    (!manual.clicked_by(egui::PointerButton::Primary)).then_some(manual.id);
             }
         });
         ui.add_space(theme::space::S);
 
         let mut toggle: Option<(usize, bool)> = None;
-        let mut ask_remove: Option<(String, String, Id)> = None;
-        let mut edit: Option<(String, Id)> = None;
+        let mut ask_remove: Option<(String, String, Option<Id>)> = None;
+        let mut edit: Option<(String, Option<Id>)> = None;
         let mut aspect_change: Option<(usize, TileAspect)> = None;
         let mut infer: Option<usize> = None;
         let mut connect_change: Option<usize> = None;
@@ -4120,10 +4156,18 @@ impl XgViewApp {
                     self.nav.item(&remove_button);
                     self.focus_names.insert(remove_button.id, "cameras-remove-name");
                     if remove_button.clicked() {
-                        ask_remove = Some((camera.id.clone(), camera.name.clone(), remove_button.id));
+                        // Only for a press that came from the keyboard or a
+                        // remote: a pointer does not move the focus anywhere else
+                        // in this program, so it must not appear to move it here
+                        // either.
+                        let from = (!remove_button.clicked_by(egui::PointerButton::Primary))
+                            .then_some(remove_button.id);
+                        ask_remove = Some((camera.id.clone(), camera.name.clone(), from));
                     }
                     if edit_button.clicked() {
-                        edit = Some((camera.id.clone(), edit_button.id));
+                        let from = (!edit_button.clicked_by(egui::PointerButton::Primary))
+                            .then_some(edit_button.id);
+                        edit = Some((camera.id.clone(), from));
                     }
                 });
             });
@@ -4580,8 +4624,10 @@ impl XgViewApp {
                     self.needs_sync = true;
                     self.camera_edit_anchor = None;
                     // The focus goes back to the button the window was opened
-                    // from, not to the first control of the panel.
-                    self.restore_focus = Some(from);
+                    // from, not to the first control of the panel - and only
+                    // when that button was reached with the keyboard or a
+                    // remote. See `CameraEdit::from`.
+                    self.restore_focus = from;
                     return true;
                 }
                 Err(error) => self.flash(error, ToastKind::Error),
@@ -4591,7 +4637,7 @@ impl XgViewApp {
             self.camera_edit = Some(CameraEdit { id, draft, from });
         } else {
             self.camera_edit_anchor = None;
-            self.restore_focus = Some(from);
+            self.restore_focus = from;
         }
         false
     }
@@ -4656,7 +4702,7 @@ impl XgViewApp {
             self.remove_confirm = Some(RemoveConfirm { id, name, from });
         } else {
             self.remove_confirm_anchor = None;
-            self.restore_focus = Some(from);
+            self.restore_focus = from;
         }
         false
     }
@@ -4721,7 +4767,7 @@ impl XgViewApp {
                     );
                     // The machine was not restarted, so the viewer is still
                     // here — give the button its focus back.
-                    self.restore_focus = Some(from);
+                    self.restore_focus = from;
                 }
             }
             return;
@@ -4730,7 +4776,7 @@ impl XgViewApp {
             self.system_confirm = Some(SystemConfirm { from });
         } else {
             self.system_confirm_anchor = None;
-            self.restore_focus = Some(from);
+            self.restore_focus = from;
         }
     }
 

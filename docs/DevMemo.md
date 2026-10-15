@@ -1464,7 +1464,7 @@ equally sized ones.
 
 ---
 
-## 18. A supervised viewer keeps the wall up
+## 22. A supervised viewer keeps the wall up
 
 *Landed 2026-10-13, in 1.4.12.*
 
@@ -1499,7 +1499,7 @@ the point of the mark.
 
 ---
 
-## 22. MSE: the same stream over a WebSocket, and the reason a channel decodes on the CPU
+## 23. MSE: the same stream over a WebSocket, and the reason a channel decodes on the CPU
 
 *Landed 2026-10-13, in the 1.4.x line.*
 
@@ -1567,6 +1567,42 @@ falls back to MSE, `Rtsp`/`Mse` force one), per camera, switched from the
 Cameras tab. An imported camera's addresses are read-only in the edit form
 (`imported`) until it is detached, so one half of a managed pair cannot be
 edited out of step with the other.
+
+---
+
+## 24. The focus ring is the remote's cursor, and a press does not move it
+
+*Landed 2026-10-14, in the 1.4.x line.*
+
+**What egui does, and therefore what it does not.** A widget is given the
+keyboard focus by the arrow and `Tab` walk at the end of a frame, by `Escape`
+clearing it, or by an explicit `request_focus` - and by nothing else. A pointer
+press does the opposite: a press outside the focused widget surrenders its focus
+(`context.rs`, `pointer_pressed_elsewhere`) and a press inside one grants
+nothing. The only widget in the library that takes the focus when it is clicked
+is `TextEdit`, which needs the caret. "Clicking a button does not focus it" is
+egui's default, not a rule of ours.
+
+**The rule here.** The ring is the remote's cursor: it is what the arrows walk
+from, and `Owner` - whether the keys belong to the wall or to the controls - is
+decided by whether anything holds it. A press is an action, not a placement, so
+it neither takes the ring nor hands it back. Capture is opted in only where a
+control's own model depends on it: the tab strips, the reorder arrows, and any
+text field.
+
+**Where a press does move it, and why.** A panel hands the ring to itself once,
+as it appears, whichever input opened it (`Handoff`): a modal that appears
+without the ring is unreachable to a remote. The wall is the other way round - a
+press on a tile moves the *tile* ring and gives the widget focus back, because a
+control that holds it keeps the bars up and the wall keys would not come back.
+
+**Handing it back.** Where a window remembers the button that opened it, it
+records it only for a press that came from the keyboard or a remote
+(`!response.clicked_by(PointerButton::Primary)`). A window opened with the
+pointer closes and the ring stays where it was; the frame's anchor puts it back
+when the panel behind is still open. Several places were written the other way
+round and had to be corrected, which is §14's lesson again: the `Id` is shared
+between uses, and so is the ring.
 
 
 
