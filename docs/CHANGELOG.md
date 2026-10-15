@@ -3,7 +3,7 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 1.4.38
+## 1.4.40
 
 Changes since 1.4.30. **The wall is no longer limited to square grids.** Nine
 mixed layouts - 2, 3, 5, 6, 7, 8, 10, 12 and 13 cells - join the four square
