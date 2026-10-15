@@ -2843,6 +2843,14 @@ impl XgViewApp {
                 // wall from it is Up, the mirror of the one that came down.
                 self.leave_controls(ctx);
             }
+            if keys.enter {
+                let focused = ctx.memory(|memory| memory.focused());
+                if focused == Some(Id::new("portrait-prev-page")) {
+                    self.turn_page(false);
+                } else if focused == Some(Id::new("portrait-next-page")) {
+                    self.turn_page(true);
+                }
+            }
             return;
         }
 
@@ -3029,6 +3037,23 @@ impl XgViewApp {
                 }
             }
 
+            let info = self.scheduler.page_info();
+            for (id_str, has) in [
+                ("portrait-prev-page", info.has_previous()),
+                ("portrait-next-page", info.has_next()),
+            ] {
+                if !has {
+                    continue;
+                }
+                if let Some(&(_, prev)) = items.last() {
+                    let gap = prev.width() * 0.4;
+                    let r = Rect::from_min_size(
+                        egui::pos2(prev.right() + gap, prev.top()),
+                        egui::vec2(prev.width(), prev.height()),
+                    );
+                    items.push((Id::new(id_str), r));
+                }
+            }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 self.orientation_button(ui, &mut items);
@@ -3115,10 +3140,16 @@ impl XgViewApp {
             let x = if forward { area.max.x - margin - r } else { area.min.x + margin + r };
             let center = egui::pos2(x, y);
             let rect = Rect::from_center_size(center, egui::Vec2::splat(r * 2.0));
-            let resp = ui.interact(rect, Id::new(id), egui::Sense::click());
+            let button_id = Id::new(id);
+            let resp = ui.interact(rect, button_id, egui::Sense::click());
+            let focused = ui.memory(|m| m.focused()) == Some(button_id);
             let p = ui.painter();
             p.circle_filled(center, r, fill);
-            p.circle_stroke(center, r, edge);
+            if focused {
+                p.circle_stroke(center, r, egui::Stroke::new(theme::FOCUS_WIDTH, theme::FOCUS));
+            } else {
+                p.circle_stroke(center, r, edge);
+            }
             let sign = if forward { 1.0 } else { -1.0 };
             let tip = egui::pos2(center.x + sign * d * 2.0 / 3.0, center.y);
             let wing_x = center.x - sign * d / 3.0;
