@@ -139,6 +139,20 @@ const CELLS_N13: &[Cell] = &[
     c(3, 3, 1, 1),
 ];
 
+/// 1 cell: a single full-width viewport. The smallest of the portrait set.
+const CELLS_P1: &[Cell] = &[c(0, 0, 1, 1)];
+/// 2 cells stacked in one column.
+const CELLS_P2: &[Cell] = &[c(0, 0, 1, 1), c(0, 1, 1, 1)];
+/// 3 cells stacked in one column.
+const CELLS_P3: &[Cell] = &[c(0, 0, 1, 1), c(0, 1, 1, 1), c(0, 2, 1, 1)];
+/// 4 cells stacked in one column.
+const CELLS_P4: &[Cell] = &[
+    c(0, 0, 1, 1),
+    c(0, 1, 1, 1),
+    c(0, 2, 1, 1),
+    c(0, 3, 1, 1),
+];
+
 /// Supported wall layouts.
 ///
 /// Four are the square, uniform grids the wall has always had - `1x1`, `2x2`,
@@ -173,6 +187,18 @@ pub enum GridLayout {
     N12,
     #[serde(rename = "13")]
     N13,
+    /// Portrait: one column, one row.
+    #[serde(rename = "p1")]
+    P1,
+    /// Portrait: one column, two rows.
+    #[serde(rename = "p2")]
+    P2,
+    /// Portrait: one column, three rows.
+    #[serde(rename = "p3")]
+    P3,
+    /// Portrait: one column, four rows.
+    #[serde(rename = "p4")]
+    P4,
 }
 
 impl Default for GridLayout {
@@ -216,6 +242,13 @@ impl GridLayout {
         GridLayout::N13,
     ];
 
+    /// The portrait layouts, offered as their own buttons while upright: one
+    /// column, one to four rows. Kept out of [`GridLayout::ALL`] so the
+    /// landscape cycle and the picker never walk into them; the wall switches
+    /// sets with the orientation.
+    pub const PORTRAIT: [GridLayout; 4] =
+        [GridLayout::P1, GridLayout::P2, GridLayout::P3, GridLayout::P4];
+
     /// The viewports of this layout, in the order channels fill them.
     pub fn cells(self) -> &'static [Cell] {
         match self {
@@ -232,6 +265,10 @@ impl GridLayout {
             GridLayout::N10 => CELLS_N10,
             GridLayout::N12 => CELLS_N12,
             GridLayout::N13 => CELLS_N13,
+            GridLayout::P1 => CELLS_P1,
+            GridLayout::P2 => CELLS_P2,
+            GridLayout::P3 => CELLS_P3,
+            GridLayout::P4 => CELLS_P4,
         }
     }
 
@@ -251,6 +288,7 @@ impl GridLayout {
             GridLayout::N10 => 4,
             GridLayout::N12 => 4,
             GridLayout::N13 => 4,
+            GridLayout::P1 | GridLayout::P2 | GridLayout::P3 | GridLayout::P4 => 1,
         }
     }
 
@@ -270,6 +308,10 @@ impl GridLayout {
             GridLayout::N10 => 4,
             GridLayout::N12 => 3,
             GridLayout::N13 => 4,
+            GridLayout::P1 => 1,
+            GridLayout::P2 => 2,
+            GridLayout::P3 => 3,
+            GridLayout::P4 => 4,
         }
     }
 
@@ -301,6 +343,10 @@ impl GridLayout {
             GridLayout::N10 => "10",
             GridLayout::N12 => "12",
             GridLayout::N13 => "13",
+            GridLayout::P1 => "1x1",
+            GridLayout::P2 => "1x2",
+            GridLayout::P3 => "1x3",
+            GridLayout::P4 => "1x4",
         }
     }
 
@@ -636,7 +682,7 @@ mod tests {
     /// transcribed table is right.
     #[test]
     fn every_layout_tiles_its_grid_exactly() {
-        for layout in GridLayout::ALL {
+        for layout in GridLayout::ALL.into_iter().chain(GridLayout::PORTRAIT) {
             let cols = layout.grid_cols();
             let rows = layout.grid_rows();
             let mut covered = vec![0u32; cols * rows];

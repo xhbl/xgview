@@ -37,6 +37,10 @@ pub enum Icon {
     Down,
     /// Close something: two strokes crossed.
     Close,
+    /// Turn upright: a tall viewport.
+    Portrait,
+    /// Turn on its side: a widescreen viewport.
+    Landscape,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -204,6 +208,17 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke) {
         Icon::Close => {
             painter.add(line(&[at(0.16, 0.16), at(0.84, 0.84)]));
             painter.add(line(&[at(0.84, 0.16), at(0.16, 0.84)]));
+        }
+        Icon::Portrait => {
+            // A tall viewport, 9:16 - the shape the wall takes once the button
+            // is pressed.
+            let body = Rect::from_min_max(at(0.247, 0.05), at(0.753, 0.95));
+            painter.rect_stroke(body, CornerRadius::same(1), stroke, StrokeKind::Inside);
+        }
+        Icon::Landscape => {
+            // A wide viewport, 16:9.
+            let body = Rect::from_min_max(at(0.05, 0.247), at(0.95, 0.753));
+            painter.rect_stroke(body, CornerRadius::same(1), stroke, StrokeKind::Inside);
         }
     }
 }

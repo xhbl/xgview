@@ -250,6 +250,10 @@ toolbar-layout-8 = Grid 8
 toolbar-layout-10 = Grid 10
 toolbar-layout-12 = Grid 12
 toolbar-layout-13 = Grid 13
+toolbar-layout-p1 = Grid 1 upright
+toolbar-layout-p2 = Grid 2 upright
+toolbar-layout-p3 = Grid 3 upright
+toolbar-layout-p4 = Grid 4 upright
 toolbar-layout-more = More layouts
 layout-picker-title = Layouts
 toolbar-back-grid = Back to the grid
@@ -265,10 +269,15 @@ toolbar-settings = Settings
 toolbar-settings-tip = Settings (F1)
 toolbar-add-devices = Add devices
 toolbar-add-devices-tip = Add devices (F2)
+toolbar-orientation-portrait = portrait
+toolbar-orientation-portrait-tip = switch to portrait
+toolbar-orientation-landscape = landscape
+toolbar-orientation-landscape-tip = switch to landscape
 
 ## Status bar
 status-live = { $live }/{ $total } live
 status-page = { $layout } · page { $page }/{ $count }
+status-page-plain = page { $page }/{ $count }
 status-zoom = 1x1 zoom · main stream
 status-focus = focus #{ $index }
 status-no-focus = no focus

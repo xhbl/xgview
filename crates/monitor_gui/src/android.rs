@@ -71,6 +71,29 @@ pub fn set_reserve_navigation_bar(reserve: bool) {
     RESERVE_SENT.store(wanted, Ordering::Relaxed);
 }
 
+/// The last orientation sent to the activity, so it is told only when it
+/// changes. `-1` until the first call.
+static ORIENTATION_SENT: AtomicI8 = AtomicI8::new(-1);
+
+/// Tells the activity which way the wall should stand: `true` for portrait,
+/// `false` for landscape. Only sent when it changes. Both honour the user's
+/// rotation lock; see `MainActivity.setOrientation`.
+pub fn set_orientation(portrait: bool) {
+    let wanted = portrait as i8;
+    if ORIENTATION_SENT.load(Ordering::Relaxed) == wanted {
+        return;
+    }
+    if call_void_bool("setOrientation", portrait) {
+        ORIENTATION_SENT.store(wanted, Ordering::Relaxed);
+    }
+}
+
+/// Whether the device can stand upright - it has a touch screen and is not a
+/// television. The wall offers no portrait mode where this is `false`.
+pub fn supports_portrait() -> bool {
+    call_bool("supportsPortrait")
+}
+
 /// Whether the activity was started by the boot receiver, as read from the
 /// launch intent's `com.xhbl.xgview.FROM_AUTOSTART` extra; see `BootReceiver`.
 pub fn from_autostart() -> bool {

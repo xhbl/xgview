@@ -11,6 +11,7 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.database.Cursor;
@@ -438,6 +439,43 @@ public class MainActivity extends NativeActivity {
             self.reserveNavigationBar = reserve;
             self.applySystemBars();
         });
+    }
+
+    /**
+     * Called from the native side when the viewer switches the way the wall
+     * stands: {@code true} for portrait, {@code false} for landscape.
+     *
+     * <p>Both are the {@code USER_} variants, so the user's rotation lock is
+     * honoured: locked means a fixed upright view, unlocked lets the device be
+     * turned over. The activity is not recreated - the manifest lists
+     * {@code orientation} among its config changes - so the wall simply
+     * re-lays-out on the resize.
+     */
+    public static void setOrientation(final boolean portrait) {
+        final MainActivity self = instance;
+        if (self == null) {
+            return;
+        }
+        self.runOnUiThread(() -> self.setRequestedOrientation(portrait
+                ? ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+                : ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE));
+    }
+
+    /**
+     * Whether this device can stand upright: it has a touch screen and is not a
+     * television. A television and a fixed-orientation panel have no portrait
+     * to turn to, so the wall offers no way to ask.
+     */
+    public static boolean supportsPortrait() {
+        final MainActivity self = instance;
+        if (self == null) {
+            return false;
+        }
+        final PackageManager packages = self.getPackageManager();
+        final boolean touch = packages.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN);
+        final boolean television = packages.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+                || packages.hasSystemFeature(PackageManager.FEATURE_TELEVISION);
+        return touch && !television;
     }
 
     // ------------------------------------------------------- graphics backend

@@ -19,7 +19,7 @@ use tokio::runtime::Handle;
 use monitor_core::autostart::{self, AutostartStatus};
 use monitor_core::power::{self, PowerStatus};
 use monitor_core::reboot;
-use monitor_core::config::AppConfig;
+use monitor_core::config::{AppConfig, Orientation};
 use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{infer_sub_stream, ConnectionState, OsdItem, StreamKind, TileAspect};
 use monitor_core::pipeline::{ChannelManager, StreamEvent};
@@ -570,6 +570,10 @@ fn layout_hint(layout: GridLayout) -> &'static str {
         GridLayout::N10 => "toolbar-layout-10",
         GridLayout::N12 => "toolbar-layout-12",
         GridLayout::N13 => "toolbar-layout-13",
+        GridLayout::P1 => "toolbar-layout-p1",
+        GridLayout::P2 => "toolbar-layout-p2",
+        GridLayout::P3 => "toolbar-layout-p3",
+        GridLayout::P4 => "toolbar-layout-p4",
     }
 }
 
@@ -845,6 +849,13 @@ pub struct XgViewApp {
     /// is read at the end of a frame and shown at the start of the next.
     focused_name: Option<&'static str>,
     from_autostart: bool,
+    /// Which way the wall stands. A device that cannot stand upright is kept
+    /// landscape whatever the configuration asks for.
+    orientation: Orientation,
+    /// Whether this device can stand upright at all: a touch screen that is not
+    /// a television. When false the orientation button is never drawn and the
+    /// wall stays landscape.
+    supports_portrait: bool,
     /// A supervisor is watching this process, so Back must not end the program:
     /// the wall is meant to stay up, and the only way out is the exit button.
     supervised: bool,
@@ -922,8 +933,21 @@ impl XgViewApp {
             "power management at start-up"
         );
         let discovery = DiscoveryUi::new(&config.discovery);
+        #[cfg(target_os = "android")]
+        let supports_portrait = crate::android::supports_portrait();
+        #[cfg(not(target_os = "android"))]
+        let supports_portrait = false;
+        // A remembered portrait is honoured only where the device can stand
+        // upright; anywhere else the wall starts landscape and stays there.
+        let orientation = if supports_portrait {
+            config.android_orientation
+        } else {
+            Orientation::Landscape
+        };
         let view = config.group();
-        let scheduler = Scheduler::new(view.layout, view.page, view.focus, config.enabled_count());
+        let start_layout =
+            if orientation.is_portrait() { view.portrait_layout } else { view.layout };
+        let scheduler = Scheduler::new(start_layout, view.page, view.focus, config.enabled_count());
         let manager = ChannelManager::spawn(
             &handle,
             config.reconnect.clone(),
@@ -1058,6 +1082,8 @@ impl XgViewApp {
             focus_names: HashMap::new(),
             focused_name: None,
             from_autostart,
+            orientation,
+            supports_portrait,
             supervised,
             time: 0.0,
         };
@@ -1160,8 +1186,15 @@ impl XgViewApp {
         let layout = self.scheduler.layout();
         let page = self.scheduler.page();
         let focus = self.scheduler.focus();
+        let portrait = self.orientation.is_portrait();
         let view = self.config.group_mut();
-        view.layout = layout;
+        // The grid is remembered per orientation; page and focus are shared and
+        // clamped to the current grid.
+        if portrait {
+            view.portrait_layout = layout;
+        } else {
+            view.layout = layout;
+        }
         view.page = page;
         view.focus = focus;
     }
@@ -1249,6 +1282,62 @@ impl XgViewApp {
         self.slide = Slide::default();
         self.needs_sync = true;
         self.mark_dirty();
+    }
+
+    /// Whether the wall stands upright. False whenever the device cannot.
+    fn is_portrait(&self) -> bool {
+        self.orientation.is_portrait()
+    }
+
+    /// Switches the wall between landscape and portrait.
+    ///
+    /// The grid of the orientation being left is parked first - through
+    /// [`Self::sync`], which writes the scheduler's layout back to the field of
+    /// the current orientation - so the other side's grid is not overwritten.
+    /// The grid of the orientation being entered is loaded next. Page and focus
+    /// are shared and are clamped to the new grid.
+    fn set_orientation(&mut self, portrait: bool) {
+        let wanted = if portrait && self.supports_portrait {
+            Orientation::Portrait
+        } else {
+            Orientation::Landscape
+        };
+        if self.orientation == wanted {
+            return;
+        }
+        self.needs_sync = true;
+        self.sync();
+        self.orientation = wanted;
+        let view = self.config.group().clone();
+        let layout = if wanted.is_portrait() { view.portrait_layout } else { view.layout };
+        self.scheduler.zoom_out();
+        self.scheduler.set_layout(layout);
+        self.slide = Slide::default();
+        // The settings panel and the layout picker are built for landscape.
+        self.show_settings = false;
+        self.layout_picker = false;
+        self.config.android_orientation = wanted;
+        self.needs_sync = true;
+        self.mark_dirty();
+    }
+
+    /// The orientation button, shared by both bars: the shape is the mode it
+    /// switches to. Drawn only where the device can stand upright.
+    fn orientation_button(&mut self, ui: &mut egui::Ui, items: &mut Vec<(Id, Rect)>) {
+        if !self.supports_portrait {
+            return;
+        }
+        let (icon, key, tip) = if self.is_portrait() {
+            (Icon::Landscape, "toolbar-orientation-landscape", "toolbar-orientation-landscape-tip")
+        } else {
+            (Icon::Portrait, "toolbar-orientation-portrait", "toolbar-orientation-portrait-tip")
+        };
+        let response = icons::button(ui, icon, false, &monitor_i18n::tr(tip));
+        items.push((response.id, response.rect));
+        self.name(&response, key);
+        if response.clicked() {
+            self.set_orientation(!self.is_portrait());
+        }
     }
 
     fn turn_page(&mut self, forward: bool) -> bool {
@@ -2619,7 +2708,7 @@ impl XgViewApp {
             || self.passphrase.is_some();
         // The layout picker is a modal of its own, and it owns the keys while
         // it is up: opening a panel behind it would stack two of them.
-        if keys.settings && !dialog_open && !self.layout_picker {
+        if keys.settings && !dialog_open && !self.layout_picker && !self.is_portrait() {
             self.show_settings = !self.show_settings;
         }
         if keys.devices && !dialog_open && !self.layout_picker {
@@ -2643,7 +2732,15 @@ impl XgViewApp {
                 self.turn_page(true);
             }
             for (slot, pressed) in keys.layout.iter().enumerate() {
-                if *pressed {
+                if !*pressed {
+                    continue;
+                }
+                if self.is_portrait() {
+                    // Upright, the digits pick the four stacked grids.
+                    if let Some(layout) = GridLayout::PORTRAIT.get(slot) {
+                        self.set_layout(*layout);
+                    }
+                } else {
                     // The digit is the viewport count; the last slot is `0`,
                     // which stands for the ten-cell layout. 12, 13 and 16 have
                     // no digit.
@@ -2901,7 +2998,127 @@ impl XgViewApp {
 
     // --------------------------------------------------------------- drawing
 
+    /// The toolbar as drawn while the wall stands upright: the four portrait
+    /// grids, paging, full screen and the orientation button - the few things a
+    /// narrow bar can hold. The settings, the add-devices button and the layout
+    /// picker are left out; their panels are built for landscape and do not fit.
+    fn portrait_toolbar(&mut self, ui: &mut egui::Ui) {
+        self.nav.open("toolbar");
+        let mut items: Vec<(Id, Rect)> = Vec::new();
+        ui.horizontal(|ui| {
+            let current = self.scheduler.layout();
+            for (slot, layout) in GridLayout::PORTRAIT.into_iter().enumerate() {
+                let selected = current == layout && !self.scheduler.is_zoomed();
+                let response = ui.selectable_label(selected, (slot + 1).to_string());
+                items.push((response.id, response.rect));
+                self.name(&response, layout_hint(layout));
+                if response.clicked() {
+                    self.set_layout(layout);
+                }
+            }
+
+            // While magnified, the one way back a touch screen has: a phone has
+            // no keyboard and no arrow, and a tap is what magnified it.
+            if self.scheduler.is_zoomed() {
+                let back =
+                    icons::button(ui, Icon::Grid, false, &monitor_i18n::tr("toolbar-back-grid-tip"));
+                items.push((back.id, back.rect));
+                self.name(&back, "toolbar-back-grid");
+                if back.clicked() {
+                    self.zoom_out();
+                }
+            }
+
+            ui.separator();
+            let info = self.scheduler.page_info();
+            let previous = ui.add_enabled(info.has_previous(), egui::Button::new("◀"));
+            if info.has_previous() {
+                items.push((previous.id, previous.rect));
+                self.name(&previous, "toolbar-prev-page");
+            }
+            if previous.clicked() {
+                self.turn_page(false);
+            }
+
+            let next = ui.add_enabled(info.has_next(), egui::Button::new("▶"));
+            if info.has_next() {
+                items.push((next.id, next.rect));
+                self.name(&next, "toolbar-next-page");
+            }
+            if next.clicked() {
+                self.turn_page(true);
+            }
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                self.orientation_button(ui, &mut items);
+                let fullscreen = icons::button(
+                    ui,
+                    if self.fullscreen { Icon::Collapse } else { Icon::Expand },
+                    self.fullscreen,
+                    &monitor_i18n::tr(if self.fullscreen {
+                        "toolbar-fullscreen-leave-tip"
+                    } else {
+                        "toolbar-fullscreen-enter-tip"
+                    }),
+                );
+                items.push((fullscreen.id, fullscreen.rect));
+                self.name(
+                    &fullscreen,
+                    if self.fullscreen { "toolbar-fullscreen-leave" } else { "toolbar-fullscreen-enter" },
+                );
+                if fullscreen.clicked() {
+                    let enabled = !self.fullscreen;
+                    self.set_fullscreen(ui.ctx(), enabled);
+                }
+            });
+        });
+        items.sort_by(|(_, left), (_, right)| left.center().x.total_cmp(&right.center().x));
+        for (id, _) in &items {
+            self.nav.item_id(*id);
+        }
+        self.nav.close();
+        self.toolbar_items = items;
+    }
+
+    /// The status bar as drawn while the wall stands upright: the group when
+    /// there is more than one, how many channels are live, the page, and the
+    /// name of the control the remote is on. The layout is left out - the
+    /// toolbar's own numbered buttons already say which grid is up.
+    fn portrait_status_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let info = self.scheduler.page_info();
+            if self.config.groups.len() > 1 {
+                ui.label(RichText::new(dialogs::group_name(
+                    &self.config,
+                    self.config.active_index(),
+                )));
+                ui.separator();
+            }
+            let live = self.channels.values().filter(|channel| channel.state.is_live()).count();
+            ui.label(
+                RichText::new(monitor_i18n::tr_args(
+                    "status-live",
+                    &[("live", live.into()), ("total", self.config.enabled_count().into())],
+                ))
+                .color(if live > 0 { theme::LIVE } else { theme::TEXT_DIM }),
+            );
+            ui.separator();
+            ui.label(monitor_i18n::tr_args(
+                "status-page-plain",
+                &[("page", (info.page + 1).into()), ("count", info.page_count.into())],
+            ));
+            if let Some(name) = self.focused_name {
+                ui.separator();
+                ui.label(RichText::new(monitor_i18n::tr(name)).color(theme::FOCUS));
+            }
+        });
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
+        if self.is_portrait() {
+            self.portrait_toolbar(ui);
+            return;
+        }
         // The row is laid out for a television. A phone in landscape has less
         // room than that, and wrapping would cost the grid a row, so the bar
         // gives up text size instead: at 1280 and above nothing changes, and
@@ -3008,6 +3225,7 @@ impl XgViewApp {
                         .small()
                         .color(theme::TEXT_DIM),
                 );
+                self.orientation_button(ui, &mut items);
                 let fullscreen = icons::button(
                     ui,
                     if self.fullscreen { Icon::Collapse } else { Icon::Expand },
@@ -3027,6 +3245,7 @@ impl XgViewApp {
                     let enabled = !self.fullscreen;
                     self.set_fullscreen(ui.ctx(), enabled);
                 }
+
 
                 let settings = icons::button(ui, Icon::Gear, self.show_settings, &monitor_i18n::tr("toolbar-settings-tip"));
                 items.push((settings.id, settings.rect));
@@ -3062,6 +3281,10 @@ impl XgViewApp {
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        if self.is_portrait() {
+            self.portrait_status_bar(ui);
+            return;
+        }
         ui.horizontal(|ui| {
             // The left half of the row comes and goes - the zoom label, and the
             // name of the control the remote is on - and egui derives a widget's
@@ -3982,8 +4205,13 @@ impl XgViewApp {
     fn park_group_view(&mut self) {
         let (layout, page, focus) =
             (self.scheduler.layout(), self.scheduler.page(), self.scheduler.focus());
+        let portrait = self.orientation.is_portrait();
         let group = self.config.group_mut();
-        group.layout = layout;
+        if portrait {
+            group.portrait_layout = layout;
+        } else {
+            group.layout = layout;
+        }
         group.page = page;
         group.focus = focus;
     }
@@ -3992,7 +4220,9 @@ impl XgViewApp {
     /// the next [`Self::sync`].
     fn load_group_view(&mut self) {
         let group = self.config.group().clone();
-        self.scheduler.set_layout(group.layout);
+        let layout =
+            if self.orientation.is_portrait() { group.portrait_layout } else { group.layout };
+        self.scheduler.set_layout(layout);
         self.scheduler.set_page(group.page);
         self.scheduler.set_focus(group.focus);
         self.needs_sync = true;
@@ -5653,6 +5883,17 @@ fn clock_field(nav: &mut crate::nav::Nav, ui: &mut egui::Ui, minutes: &mut u16) 
 
 impl eframe::App for XgViewApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Portrait is for watching: the settings panel and the layout picker are
+        // built for landscape and do not fit, so they are never up while the
+        // wall stands upright. Close them if the wall was turned with them open.
+        if self.is_portrait() {
+            self.show_settings = false;
+            self.layout_picker = false;
+        }
+        // Tell the activity which way to stand, once per change. A no-op on the
+        // other platforms, which have no orientation to ask for.
+        #[cfg(target_os = "android")]
+        crate::android::set_orientation(self.is_portrait());
         self.time = ctx.input(|input| input.time);
 
         // Settled before anything else is drawn: whether the wall is blank

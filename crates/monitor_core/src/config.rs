@@ -470,6 +470,28 @@ impl Blackout {
     }
 }
 
+/// Which way the window stands. Persisted so the wall comes back the way it was
+/// left, and used to pick between the landscape grid and the portrait one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Orientation {
+    Landscape,
+    Portrait,
+}
+
+impl Default for Orientation {
+    fn default() -> Self {
+        Orientation::Landscape
+    }
+}
+
+impl Orientation {
+    /// Whether the wall stands upright.
+    pub fn is_portrait(self) -> bool {
+        matches!(self, Orientation::Portrait)
+    }
+}
+
 /// One camera group: the name it goes by, and how the wall is gridded while it
 /// is the active one.
 ///
@@ -485,15 +507,25 @@ impl Blackout {
 pub struct Group {
     /// The viewer's own name for it. Empty is the default, drawn as "Group N".
     pub name: String,
-    /// The grid this group is shown in.
+    /// The grid this group is shown in, while the window is landscape.
     pub layout: GridLayout,
+    /// The grid this group is shown in, while the window is portrait. Kept
+    /// apart from `layout` so turning the device does not overwrite the grid
+    /// chosen for the other orientation. One column, one to four rows.
+    pub portrait_layout: GridLayout,
     pub page: usize,
     pub focus: Option<usize>,
 }
 
 impl Default for Group {
     fn default() -> Self {
-        Self { name: String::new(), layout: GridLayout::default(), page: 0, focus: None }
+        Self {
+            name: String::new(),
+            layout: GridLayout::default(),
+            portrait_layout: GridLayout::P3,
+            page: 0,
+            focus: None,
+        }
     }
 }
 
@@ -523,6 +555,10 @@ pub struct AppConfig {
     /// wall, instead of hiding it and drawing under it. Ignored on the other
     /// platforms, which have no such bar.
     pub reserve_navigation_bar: bool,
+    /// Which way the wall stands on Android, remembered across restarts. Ignored
+    /// on a device that cannot stand upright (a television), and on the other
+    /// platforms, which have no orientation to ask for.
+    pub android_orientation: Orientation,
     /// Keep the machine awake while the wall is up, so a system that sleeps
     /// does not cut the streams. See [`crate::power`] for what each platform
     /// does with it, and for the platforms where it is not available.
@@ -574,6 +610,7 @@ impl Default for AppConfig {
             always_on_top_fullscreen: false,
             single_instance: true,
             reserve_navigation_bar: false,
+            android_orientation: Orientation::default(),
             prevent_sleep: true,
             keep_screen_on: true,
             language: "auto".to_string(),
