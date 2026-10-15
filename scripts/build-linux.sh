@@ -628,12 +628,31 @@ run_container_build() {
     trap "'$DOCKER' rm -f '$container' >/dev/null 2>&1 || true" EXIT
     "$DOCKER" rm -f "$container" >/dev/null 2>&1 || true
 
+    # The out-of-tree module of `build.rs` is reached through `priv` at the
+    # repository root, and on this machine that is a junction to a tree outside
+    # the repository. Only the repository is mounted, so inside the container the
+    # junction is a symlink to a path that is not there, the module is not found
+    # and the package is built without it - quietly, the same way a public clone
+    # builds without it. Mounting the tree it points at over the junction keeps
+    # it reachable. A tree that lives within the repository needs nothing, and a
+    # public clone has none.
+    local priv_mount=()
+    if [[ -e "$REPO_ROOT/priv" ]]; then
+        local priv_target
+        priv_target="$(readlink -f "$REPO_ROOT/priv")"
+        if [[ "$priv_target" != "$REPO_ROOT"/* ]]; then
+            echo "==> Mounting the out-of-tree module tree at $priv_target"
+            priv_mount=(-v "$(docker_host_path "$priv_target"):/repo/priv:ro")
+        fi
+    fi
+
     echo "==> Building in container $container ($image), volume $volume"
     # The repository is read only: cargo writes to CARGO_TARGET_DIR under the
     # volume, never into the tree. CARGO_HOME is moved into the volume too, so
     # the crate cache outlives the container and a rerun does not refetch it.
     "$DOCKER" run --name "$container" \
         -v "$(docker_host_path "$REPO_ROOT"):/repo:ro" \
+        "${priv_mount[@]}" \
         -v "$volume:/work" \
         -e XGVIEW_BUILD_IN_CONTAINER=1 \
         -e XGVIEW_OUT_ROOT=/work/out \
@@ -662,6 +681,20 @@ if [[ -n "${XGVIEW_BUILD_IN_CONTAINER:-}" ]]; then
     mkdir -p "$OUT_ROOT"
     build_hwcodecs
     build_ffmpeg
+    # cargo decides whether a build script has to run again by comparing the
+    # mtimes of what it watches with the time of the last build, and a tree
+    # mounted in from elsewhere carries the mtimes of the filesystem it came
+    # from - here older than the build it is compared against. A module that has
+    # only just become visible therefore reads as unchanged, and the cached
+    # answer of the build script, from a run that could not find it, is kept.
+    # Dropping what was built of the crate whose script reads it makes the next
+    # answer come from the script rather than from the cache.
+    if [[ -e "$REPO_ROOT/priv" ]]; then
+        echo "==> Re-reading the out-of-tree module"
+        # The profile has to be named: without it the clean looks for the
+        # artifacts of a `dev` build, finds none, and reports "Removed 0 files".
+        cargo clean -p monitor_gui --release >/dev/null
+    fi
     build_cargo
     stage_package
     pack_package

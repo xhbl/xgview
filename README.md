@@ -1,5 +1,5 @@
 ![XGView banner](assets/xgview-banner.png)
-
+[![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://www.paypal.com/donate/?business=TXMZR93BX5Y2Y&no_recurring=0&item_name=Thanks+for+supporting+XGView%21&currency_code=USD&bn=PP%2dDonationsBF%3abtn_donateCC_LG%2egif%3aNonHosted)
 # XGView - A grid viewer for surveillance cameras
 
 XGView is a production-grade, cross-platform surveillance wall written in Rust.

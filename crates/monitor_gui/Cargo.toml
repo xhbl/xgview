@@ -61,3 +61,6 @@ jni = "0.21"
 eframe = { version = "0.32", default-features = false, features = ["android-native-activity"] }
 # The viewer's own logging goes to logcat on Android; see `init_android_logging`.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(juanz)'] }

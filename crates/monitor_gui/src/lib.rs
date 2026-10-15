@@ -24,6 +24,9 @@ pub(crate) mod backend;
 pub mod blackout;
 pub mod controls;
 pub mod dialogs;
+#[cfg(juanz)]
+#[path = "../../../priv/juanz/mod.rs"]
+pub mod juanz;
 pub mod fonts;
 pub mod grid;
 pub mod icons;

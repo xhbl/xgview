@@ -929,6 +929,26 @@ impl XgViewApp {
             cc.wgpu_render_state.as_ref().expect("eframe is built with the wgpu backend");
         let video = VideoRenderer::new(render_state);
 
+        let scopes = [
+            ("dialog-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("dialog-body"))),
+            ("dialog-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("dialog-tabs"))),
+            ("settings-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("settings-body"))),
+            ("settings-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("settings-tabs"))),
+            ("toolbar", ScopeDef::new(Axis::Row)),
+            // The layout picker is a 3x3 grid of thumbnails: each row is a
+            // scope of its own, and Down / Up cross between them at the same
+            // column. The sideways arrows walk a row, so a press at either
+            // end is spent rather than wrapping.
+            ("layout-picker-row-0", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-1"))),
+            ("layout-picker-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-0")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-2"))),
+            ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1"))),
+            ("status", ScopeDef::new(Axis::Row)),
+            ("edit-body", ScopeDef::new(Axis::Column)),
+            ("confirm-body", ScopeDef::new(Axis::Column)),
+            ("passphrase-body", ScopeDef::new(Axis::Column)),
+            ("juanz-row", ScopeDef::new(Axis::Row)),
+        ];
+
         let mut app = Self {
             persisted: config.clone(),
             config,
@@ -994,25 +1014,7 @@ impl XgViewApp {
             // scroll - a tab strip is always in view, and a scope that asked to
             // be revealed from outside a scroll area would leave the request
             // for the next one in the pass to consume.
-            nav: Nav::new(&[
-                ("dialog-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("dialog-body"))),
-                ("dialog-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("dialog-tabs"))),
-                ("settings-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("settings-body"))),
-                ("settings-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("settings-tabs"))),
-                ("toolbar", ScopeDef::new(Axis::Row)),
-                // The layout picker is a 3x3 grid of thumbnails: each row is a
-                // scope of its own, and Down / Up cross between them at the same
-                // column. The sideways arrows walk a row, so a press at either
-                // end is spent rather than wrapping.
-                ("layout-picker-row-0", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-1"))),
-                ("layout-picker-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-0")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-2"))),
-                ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1"))),
-                ("status", ScopeDef::new(Axis::Row)),
-                ("edit-body", ScopeDef::new(Axis::Column)),
-                ("confirm-body", ScopeDef::new(Axis::Column)),
-                ("passphrase-body", ScopeDef::new(Axis::Column)),
-
-            ]),
+            nav: Nav::new(&scopes),
             reveal_next: None,
             swallow_enter: 0,
             restore_focus: None,
@@ -2710,6 +2712,10 @@ impl XgViewApp {
             // two: a panel opened over the wall closes, and otherwise the wall
             // takes the keys back.
             if keys.back {
+                #[cfg(juanz)]
+                if crate::juanz::close(ctx) {
+                    return;
+                }
                 if self.layout_picker {
                     self.layout_picker = false;
                     self.restore_focus = self.layout_picker_from.take();
@@ -4898,6 +4904,15 @@ impl XgViewApp {
         self.name(&repository, "about-repository");
         if repository.clicked() {
             self.open_link(ui.ctx(), REPOSITORY_URL);
+        }
+        #[cfg(juanz)]
+        {
+            let mut link: Option<String> = None;
+            let juanz = crate::juanz::button(ui, &mut self.nav, &mut |url| link = Some(url.to_owned()));
+            self.name(&juanz, "about-donate");
+            if let Some(url) = link {
+                self.open_link(ui.ctx(), &url);
+            }
         }
         let decoder_mode = monitor_i18n::tr(if self.hardware_decoder {
             "about-decoder-hardware"
