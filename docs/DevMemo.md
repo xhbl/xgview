@@ -1604,6 +1604,17 @@ when the panel behind is still open. Several places were written the other way
 round and had to be corrected, which is §14's lesson again: the `Id` is shared
 between uses, and so is the ring.
 
+**A ring that is not ours to place: the file dialog.** It is drawn by a crate
+inside an egui window of its own, and nothing in it is ever registered under a
+scope here. The frame's cleanup - the one that lets a focus with no widget
+behind it go, so the accessibility tree does not panic on it - would therefore
+let the file name field's go on the very frame the dialog took it. Nothing
+focused is then exactly what the crate's type-to-search reads as "the viewer is
+typing at the list": a keystroke meant for the name becomes a search. The
+cleanup is held back from it while it is up, the way `panel_anchor` and the
+hand-offs are. Inside it the ring is the crate's, kept and given up by its own
+rules - an arrow key breaks out of the field and into the list, by design.
+
 
 
 

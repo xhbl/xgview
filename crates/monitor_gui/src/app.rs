@@ -6101,9 +6101,20 @@ impl eframe::App for XgViewApp {
         // accessibility tree is built from the widgets that *were* drawn: it
         // panics on a focus that is not among them. Let such a focus go here,
         // where this frame's controls are all known.
-        if let Some(focused) = ctx.memory(|memory| memory.focused()) {
-            if !self.nav.owns_now(focused) {
-                ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        //
+        // The file dialog is left out of it: it is drawn inside an egui window
+        // of its own, and nothing in it was ever drawn under a scope here. The
+        // file name field it opens on, and the search field a letter falls into
+        // when no field holds the focus, would each read as a focus with no
+        // widget and be dropped on the frame it was taken in - and neither
+        // could be typed into. While it is up it answers for the focus it
+        // holds, the way `panel_anchor` and the hand-offs above are held back
+        // from it.
+        if !self.file_dialog_open() {
+            if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+                if !self.nav.owns_now(focused) {
+                    ctx.memory_mut(|memory| memory.surrender_focus(focused));
+                }
             }
         }
 
