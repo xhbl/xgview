@@ -7,6 +7,9 @@
 //! interaction are decoupled: [`paint`] never mutates the application state, it
 //! only reports what the user did.
 
+use std::sync::Arc;
+
+use egui::epaint::{Mesh, Shape, TextShape, Vertex};
 use egui::{Align2, Color32, CornerRadius, FontId, Id, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, vec2};
 
 use monitor_core::model::{CameraSource, ConnectionState, Osd, OsdItem, StreamKind, TileAspect};
@@ -123,6 +126,9 @@ pub struct Tile<'a> {
     pub time: f64,
     /// How the picture is fitted into the tile.
     pub aspect: TileAspect,
+    /// Draw the picture rotated 90° clockwise. Used in portrait single-view
+    /// so a landscape feed fills the upright screen sideways.
+    pub rotated: bool,
 }
 
 /// Interaction reported by [`paint`].
@@ -233,7 +239,8 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
 
     // The on-screen display, in the corners the settings panel chose. It goes
     // over whatever the state left on the tile, so that a stream that failed
-    // still says which camera it is.
+    // still says which camera it is. When the picture is turned sideways the
+    // OSD corners trade places, but the text still lives on the whole tile.
     osd(&painter, body, tile);
 
     if tile.focused {
@@ -249,22 +256,35 @@ fn osd(painter: &egui::Painter, body: Rect, tile: &Tile<'_>) {
     let ppp = ctx.pixels_per_point();
     let screen_min = ctx.screen_rect().size().min_elem() * ppp;
     let metrics = OsdMetrics::of(body, ppp, screen_min);
-    for (item, align) in [
-        (tile.osd.top_left, Align2::LEFT_TOP),
-        (tile.osd.top_right, Align2::RIGHT_TOP),
-        (tile.osd.bottom_left, Align2::LEFT_BOTTOM),
-        (tile.osd.bottom_right, Align2::RIGHT_BOTTOM),
-    ] {
+    // A sideways picture turns its corners with it: a 90° clockwise turn
+    // maps left-top to right-top, right-top to right-bottom, and so on.
+    let corners = if tile.rotated {
+        [
+            (tile.osd.top_left, Align2::RIGHT_TOP),
+            (tile.osd.top_right, Align2::RIGHT_BOTTOM),
+            (tile.osd.bottom_left, Align2::LEFT_TOP),
+            (tile.osd.bottom_right, Align2::LEFT_BOTTOM),
+        ]
+    } else {
+        [
+            (tile.osd.top_left, Align2::LEFT_TOP),
+            (tile.osd.top_right, Align2::RIGHT_TOP),
+            (tile.osd.bottom_left, Align2::LEFT_BOTTOM),
+            (tile.osd.bottom_right, Align2::RIGHT_BOTTOM),
+        ]
+    };
+    for (item, align) in corners {
         let lines = osd_lines(item, tile);
         if !lines.is_empty() {
-            // A camera's name is what a viewer looks for first, while the
-            // measures around it are a detail: the two are not set at the same
-            // size.
             let scale = match item {
                 OsdItem::Name | OsdItem::NumberName => NAME_SCALE,
                 _ => MEASURE_SCALE,
             };
-            osd_corner(painter, body, align, tile.dim, &lines, &metrics, scale);
+            if tile.rotated {
+                osd_corner_rotated(painter, body, align, tile.dim, &lines, &metrics, scale);
+            } else {
+                osd_corner(painter, body, align, tile.dim, &lines, &metrics, scale);
+            }
         }
     }
 }
@@ -468,6 +488,102 @@ fn outlined_text(
     painter.text(pos, align, text, font, color);
 }
 
+/// [`outlined_text`] for a picture turned sideways: the text is rotated `angle`
+/// radians clockwise, drawn via [`TextShape`] because [`Painter::text`] does not
+/// expose the `angle` field.
+fn outlined_rotated_text(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    angle: f32,
+    text: &str,
+    font: FontId,
+    color: Color32,
+) {
+    let edge = Color32::from_black_alpha(190);
+    for offset in [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0), vec2(0.0, 1.0)] {
+        let galley = painter.layout_no_wrap(text.to_string(), font.clone(), edge);
+        painter.add(TextShape::new(pos + offset, galley, edge).with_angle(angle));
+    }
+    let galley = painter.layout_no_wrap(text.to_string(), font, color);
+    painter.add(TextShape::new(pos, galley, color).with_angle(angle));
+}
+
+/// [`osd_corner`] for a picture turned sideways. The text is rotated 90°
+/// clockwise and the lines stack horizontally instead of vertically. A
+/// rotated line at `pos` occupies `(pos.x - text_h, pos.y)` to
+/// `(pos.x, pos.y + text_w)` on screen — it reads top-to-bottom, extending
+/// left from `pos.x` and down from `pos.y`.
+fn osd_corner_rotated(
+    painter: &egui::Painter,
+    body: Rect,
+    align: Align2,
+    dim: bool,
+    lines: &[OsdLine],
+    m: &OsdMetrics,
+    scale: f32,
+) {
+    let size = m.font * scale;
+    let font = FontId::monospace(size);
+    let line = size * 1.25;
+    let pad = vec2(size * 0.35, size * 0.22);
+    let color = if dim { theme::TEXT.gamma_multiply(0.5) } else { theme::TEXT };
+    let left = matches!(align, Align2::LEFT_TOP | Align2::LEFT_BOTTOM);
+    let top = matches!(align, Align2::LEFT_TOP | Align2::RIGHT_TOP);
+    let corner = egui::pos2(
+        if left { body.left() + m.inset } else { body.right() - m.inset },
+        if top { body.top() + m.inset } else { body.bottom() - m.inset },
+    );
+
+    let dot_lead = if lines.iter().any(|line| line.dot.is_some()) { size * 1.15 } else { 0.0 };
+    let galleys: Vec<_> = lines
+        .iter()
+        .map(|entry| painter.layout_no_wrap(entry.text.clone(), font.clone(), color))
+        .collect();
+    let max_text_width = galleys.iter().map(|g| g.size().x).fold(0.0_f32, f32::max);
+
+    // Rotated 90° CW: the original block's width and height trade places.
+    let block_w = lines.len() as f32 * line;
+    let block_h = max_text_width + dot_lead;
+    let (x0, y0) = if left {
+        (corner.x, if top { corner.y } else { corner.y - block_h })
+    } else {
+        (corner.x - block_w, if top { corner.y } else { corner.y - block_h })
+    };
+    let block = Rect::from_min_size(egui::pos2(x0, y0), vec2(block_w, block_h));
+    let backdrop = if dim { theme::OSD_BACKDROP.gamma_multiply(0.5) } else { theme::OSD_BACKDROP };
+    painter.rect_filled(block.expand2(pad).intersect(body), CornerRadius::same(theme::radius::S), backdrop);
+
+    let angle = std::f32::consts::FRAC_PI_2;
+    for (row, entry) in lines.iter().enumerate() {
+        let text_w = galleys[row].size().x;
+        let text_h = galleys[row].size().y;
+
+        // Lines stack horizontally away from the corner.  A rotated line at
+        // `pos` extends left to `pos.x - text_h` and down to `pos.y + text_w`,
+        // so left corners offset by `text_h` to put the left edge at the corner.
+        let pos = if left {
+            egui::pos2(corner.x + row as f32 * line + text_h, if top { corner.y } else { corner.y - text_w })
+        } else {
+            egui::pos2(corner.x - row as f32 * line, if top { corner.y } else { corner.y - text_w })
+        };
+
+        // A leading dot sits between the corner and the text; the text shifts
+        // away from the corner to make room for it.
+        let pos = if entry.dot.is_some() {
+            egui::pos2(pos.x, pos.y + if top { dot_lead } else { -dot_lead })
+        } else {
+            pos
+        };
+        if let Some(dot) = entry.dot {
+            let dot_x = pos.x - text_h * 0.5;
+            let dot_y = if top { corner.y + dot_lead * 0.5 } else { corner.y - dot_lead * 0.5 };
+            painter.circle_filled(egui::pos2(dot_x, dot_y), (size * 0.3).max(2.0), dot);
+        }
+
+        outlined_rotated_text(painter, pos, angle, &entry.text, font.clone(), color);
+    }
+}
+
 /// Paints the newest decoded pictures of a live channel, or a placeholder while
 /// the first one is on its way.
 fn live_canvas(painter: &egui::Painter, rect: Rect, tile: &Tile<'_>, tier: Tier) {
@@ -482,13 +598,55 @@ fn live_canvas(painter: &egui::Painter, rect: Rect, tile: &Tile<'_>, tier: Tier)
     // [`fitted`] for the shapes, and why the default distorts nothing.
     let size = surface.size;
     if size.x > 0.0 && size.y > 0.0 {
-        let dest = fitted(size, rect, tile.aspect);
-        painter.image(
-            surface.id,
-            dest,
-            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        if tile.rotated {
+            rotated_canvas(painter, rect, size, tile.aspect, surface);
+        } else {
+            let dest = fitted(size, rect, tile.aspect);
+            painter.image(
+                surface.id,
+                dest,
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+    }
+}
+
+/// Draws the video rotated 90° clockwise. The source dimensions swap, a
+/// fixed aspect ratio inverts, and the four corners are mapped to a
+/// [`Mesh`] so the texture is sampled sideways without distorting it.
+fn rotated_canvas(painter: &egui::Painter, rect: Rect, source: Vec2, aspect: TileAspect, surface: VideoSurface) {
+    let dest = rotated_fitted(source, rect, aspect);
+    let mut mesh = Mesh::with_texture(surface.id);
+    mesh.vertices = vec![
+        Vertex { pos: dest.left_top(), uv: egui::pos2(0.0, 1.0), color: Color32::WHITE },
+        Vertex { pos: dest.right_top(), uv: egui::pos2(0.0, 0.0), color: Color32::WHITE },
+        Vertex { pos: dest.right_bottom(), uv: egui::pos2(1.0, 0.0), color: Color32::WHITE },
+        Vertex { pos: dest.left_bottom(), uv: egui::pos2(1.0, 1.0), color: Color32::WHITE },
+    ];
+    mesh.indices = vec![0, 1, 2, 0, 2, 3];
+    painter.add(Shape::Mesh(Arc::new(mesh)));
+}
+
+/// [`fitted`] for a picture turned sideways: the source width and height
+/// trade places, and a fixed ratio is inverted.
+fn rotated_fitted(source: Vec2, tile: Rect, aspect: TileAspect) -> Rect {
+    let rotated_source = vec2(source.y, source.x);
+    match aspect.ratio() {
+        Some(ratio) => {
+            let ratio = 1.0 / ratio;
+            let (width, height) = if tile.width() / tile.height() > ratio {
+                (tile.height() * ratio, tile.height())
+            } else {
+                (tile.width(), tile.width() / ratio)
+            };
+            Rect::from_center_size(tile.center(), vec2(width, height))
+        }
+        None if aspect == TileAspect::Stretch => tile,
+        None => {
+            let scale = (tile.width() / rotated_source.x).min(tile.height() / rotated_source.y);
+            Rect::from_center_size(tile.center(), rotated_source * scale)
+        }
     }
 }
 
