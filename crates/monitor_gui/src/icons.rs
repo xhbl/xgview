@@ -35,6 +35,10 @@ pub enum Icon {
     Up,
     /// Move something down a list: a chevron pointing down.
     Down,
+    /// Move something left: a chevron pointing left.
+    Left,
+    /// Move something right: a chevron pointing right.
+    Right,
     /// Close something: two strokes crossed.
     Close,
     /// Turn upright: a tall viewport.
@@ -206,6 +210,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke) {
         }
         Icon::Down => {
             painter.add(line(&[at(0.22, 0.38), at(0.50, 0.66), at(0.78, 0.38)]));
+        }
+        Icon::Left => {
+            painter.add(line(&[at(0.72, 0.06), at(0.28, 0.50), at(0.72, 0.94)]));
+        }
+        Icon::Right => {
+            painter.add(line(&[at(0.28, 0.06), at(0.72, 0.50), at(0.28, 0.94)]));
         }
         Icon::Close => {
             painter.add(line(&[at(0.16, 0.16), at(0.84, 0.84)]));

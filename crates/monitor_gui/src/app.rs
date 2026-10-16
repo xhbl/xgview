@@ -3336,7 +3336,14 @@ impl XgViewApp {
             let info = self.scheduler.page_info();
             let can_prev = self.can_advance(false);
             let can_next = self.can_advance(true);
-            let previous = ui.add_enabled(can_prev, egui::Button::new("◀"));
+            let previous = icons::button_sized(
+                ui,
+                Icon::Left,
+                false,
+                !can_prev,
+                &monitor_i18n::tr("toolbar-prev-page"),
+                30.0,
+            );
             self.page_prev_id = Some(previous.id);
             if can_prev {
                 items.push((previous.id, previous.rect));
@@ -3346,7 +3353,14 @@ impl XgViewApp {
                 self.advance(false, !previous.clicked_by(egui::PointerButton::Primary));
             }
             ui.label(monitor_i18n::tr_args("toolbar-page", &[("page", (info.page + 1).into()), ("count", info.page_count.into())]));
-            let next = ui.add_enabled(can_next, egui::Button::new("▶"));
+            let next = icons::button_sized(
+                ui,
+                Icon::Right,
+                false,
+                !can_next,
+                &monitor_i18n::tr("toolbar-next-page"),
+                30.0,
+            );
             self.page_next_id = Some(next.id);
             if can_next {
                 items.push((next.id, next.rect));
@@ -6618,6 +6632,18 @@ impl eframe::App for XgViewApp {
         // holds, the way `panel_anchor` and the hand-offs above are held back
         // from it.
         if !self.file_dialog_open() {
+            // Anything the nav layer does not own is dropped from the focus
+            // before the bounce runs: the bounce may place the focus on a
+            // button that was not in this frame's items - the page turned
+            // during the frame, so the items were collected for the old page -
+            // and it would be surrendered here if this ran after.  Next frame
+            // the button is in the items and the focus is kept.
+            if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+                if !self.nav.owns_now(focused) {
+                    ctx.memory_mut(|memory| memory.surrender_focus(focused));
+                }
+            }
+
             // Bounce the focus to the other page-turn button when a turn
             // reaches the edge. egui surrenders the focus from a widget the
             // moment it is drawn disabled, so by the time this runs the focus
@@ -6634,12 +6660,6 @@ impl eframe::App for XgViewApp {
                 };
                 if let Some(target) = target {
                     ctx.memory_mut(|memory| memory.request_focus(target));
-                }
-            }
-
-            if let Some(focused) = ctx.memory(|memory| memory.focused()) {
-                if !self.nav.owns_now(focused) {
-                    ctx.memory_mut(|memory| memory.surrender_focus(focused));
                 }
             }
         }
