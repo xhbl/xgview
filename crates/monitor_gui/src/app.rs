@@ -714,6 +714,14 @@ pub struct XgViewApp {
     /// The controls of the top bar with the rectangle each was drawn in, left to
     /// right, as of the last frame the bar was on screen.
     toolbar_items: Vec<(Id, Rect)>,
+    /// The page-turn buttons as of the last frame the bar was on screen, so the
+    /// focus can bounce from one to the other when a turn reaches the edge and
+    /// the button under the focus disappears.
+    page_prev_id: Option<Id>,
+    page_next_id: Option<Id>,
+    /// The direction of the last page turn this frame, so the frame-end focus
+    /// check can bounce to the other button when the turn reaches the edge.
+    last_turn: Option<bool>,
     /// The author control of the status bar, as of the last frame that bar was
     /// on screen - the one control below the wall, which the arrow off the
     /// bottom of the wall lands on.
@@ -1038,6 +1046,9 @@ impl XgViewApp {
                 bars: None,
             },
             toolbar_items: Vec::new(),
+            page_prev_id: None,
+            page_next_id: None,
+            last_turn: None,
             status_author: None,
             grid_focus_x: None,
             wall_seen: Instant::now(),
@@ -1340,7 +1351,7 @@ impl XgViewApp {
         }
     }
 
-    fn turn_page(&mut self, forward: bool) -> bool {
+    fn turn_page(&mut self, forward: bool, keyboard: bool) -> bool {
         let previous = self.scheduler.page();
         let changed = if forward { self.scheduler.next_page() } else { self.scheduler.prev_page() };
         if changed {
@@ -1350,6 +1361,9 @@ impl XgViewApp {
             self.slide.start(if forward { 1.0 } else { -1.0 }, Some(outgoing));
             self.needs_sync = true;
             self.mark_dirty();
+            if keyboard {
+                self.last_turn = Some(forward);
+            }
         }
         self.slide.drag = 0.0;
         changed
@@ -1384,11 +1398,11 @@ impl XgViewApp {
 
     /// Moves the wall one step the way a swipe or a page key asked for: the
     /// page turn on the grid, the channel step while magnified.
-    fn advance(&mut self, forward: bool) -> bool {
+    fn advance(&mut self, forward: bool, keyboard: bool) -> bool {
         if self.scheduler.is_zoomed() {
             self.step_zoom(forward)
         } else {
-            self.turn_page(forward)
+            self.turn_page(forward, keyboard)
         }
     }
 
@@ -2726,10 +2740,10 @@ impl XgViewApp {
         // wall behind it. Back is answered below, where the panels are unwound.
         if !self.layout_picker {
             if keys.page_prev {
-                self.turn_page(false);
+                self.turn_page(false, true);
             }
             if keys.page_next {
-                self.turn_page(true);
+                self.turn_page(true, true);
             }
             for (slot, pressed) in keys.layout.iter().enumerate() {
                 if !*pressed {
@@ -2846,9 +2860,9 @@ impl XgViewApp {
             if keys.enter {
                 let focused = ctx.memory(|memory| memory.focused());
                 if focused == Some(Id::new("portrait-prev-page")) {
-                    self.turn_page(false);
+                    self.turn_page(false, true);
                 } else if focused == Some(Id::new("portrait-next-page")) {
-                    self.turn_page(true);
+                    self.turn_page(true, true);
                 }
             }
             return;
@@ -3038,6 +3052,8 @@ impl XgViewApp {
             }
 
             let info = self.scheduler.page_info();
+            self.page_prev_id = Some(Id::new("portrait-prev-page"));
+            self.page_next_id = Some(Id::new("portrait-next-page"));
             for (id_str, has) in [
                 ("portrait-prev-page", info.has_previous()),
                 ("portrait-next-page", info.has_next()),
@@ -3162,7 +3178,7 @@ impl XgViewApp {
                 glyph,
             ));
             if resp.clicked() {
-                self.turn_page(forward);
+                self.turn_page(forward, !resp.clicked_by(egui::PointerButton::Primary));
             }
         }
     }
@@ -3247,21 +3263,23 @@ impl XgViewApp {
             ui.separator();
             let info = self.scheduler.page_info();
             let previous = ui.add_enabled(info.has_previous(), egui::Button::new("◀"));
+            self.page_prev_id = Some(previous.id);
             if info.has_previous() {
                 items.push((previous.id, previous.rect));
                 self.name(&previous, "toolbar-prev-page");
             }
             if previous.clicked() {
-                self.turn_page(false);
+                self.turn_page(false, !previous.clicked_by(egui::PointerButton::Primary));
             }
             ui.label(monitor_i18n::tr_args("toolbar-page", &[("page", (info.page + 1).into()), ("count", info.page_count.into())]));
             let next = ui.add_enabled(info.has_next(), egui::Button::new("▶"));
+            self.page_next_id = Some(next.id);
             if info.has_next() {
                 items.push((next.id, next.rect));
                 self.name(&next, "toolbar-next-page");
             }
             if next.clicked() {
-                self.turn_page(true);
+                self.turn_page(true, !next.clicked_by(egui::PointerButton::Primary));
             }
 
             // The right end of the row is the three things a viewer reaches for
@@ -5725,9 +5743,9 @@ impl XgViewApp {
             self.slide.dragging = false;
             let threshold = area.width() * 0.18;
             if self.slide.drag <= -threshold {
-                self.advance(true);
+                self.advance(true, false);
             } else if self.slide.drag >= threshold {
-                self.advance(false);
+                self.advance(false, false);
             }
         }
         if let Some(index) = actions.focus {
@@ -6411,6 +6429,25 @@ impl eframe::App for XgViewApp {
         // holds, the way `panel_anchor` and the hand-offs above are held back
         // from it.
         if !self.file_dialog_open() {
+            // Bounce the focus to the other page-turn button when a turn
+            // reaches the edge. egui surrenders the focus from a widget the
+            // moment it is drawn disabled, so by the time this runs the focus
+            // may already be gone - and the turn frame is the one that knows
+            // the direction. Request the other button directly.
+            if let Some(forward) = self.last_turn.take() {
+                let info = self.scheduler.page_info();
+                let target = if forward && !info.has_next() {
+                    self.page_prev_id.filter(|_| info.has_previous())
+                } else if !forward && !info.has_previous() {
+                    self.page_next_id.filter(|_| info.has_next())
+                } else {
+                    None
+                };
+                if let Some(target) = target {
+                    ctx.memory_mut(|memory| memory.request_focus(target));
+                }
+            }
+
             if let Some(focused) = ctx.memory(|memory| memory.focused()) {
                 if !self.nav.owns_now(focused) {
                     ctx.memory_mut(|memory| memory.surrender_focus(focused));
