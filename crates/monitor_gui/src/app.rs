@@ -3027,7 +3027,8 @@ impl XgViewApp {
     fn portrait_toolbar(&mut self, ui: &mut egui::Ui) {
         self.nav.open("toolbar");
         let mut items: Vec<(Id, Rect)> = Vec::new();
-        ui.horizontal(|ui| {
+        ui.horizontal_centered(|ui| {
+            ui.label(RichText::new("XGView").size(12.0).strong());
             let current = self.scheduler.layout();
             for (slot, layout) in GridLayout::PORTRAIT.into_iter().enumerate() {
                 let selected = current == layout && !self.scheduler.is_zoomed();
@@ -3214,7 +3215,7 @@ impl XgViewApp {
         // it was drawn in: the layer needs the order, but the wall needs the
         // geometry too, to know which control is above the tile it is leaving.
         let mut items: Vec<(Id, Rect)> = Vec::new();
-        ui.horizontal(|ui| {
+        ui.horizontal_centered(|ui| {
             ui.label(RichText::new(monitor_core::APP_DISPLAY_NAME).heading().strong());
             ui.separator();
 
