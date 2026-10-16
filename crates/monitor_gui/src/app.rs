@@ -62,8 +62,6 @@ const TOOLBAR_REFERENCE_WIDTH: f32 = 1280.0;
 /// Smallest the toolbar is allowed to shrink to, as a fraction of its text size.
 const TOOLBAR_MIN_SCALE: f32 = 0.6;
 
-/// How long the bars stay on screen in full screen after the last input.
-const CHROME_IDLE: Duration = Duration::from_millis(3500);
 
 /// How long the question the wall asks on the first Back stands.
 ///
@@ -1910,8 +1908,17 @@ impl XgViewApp {
     ///
     /// Outside full screen they always are - the window has a frame around it
     /// anyway, and the bars are where the controls live. In full screen they
-    /// fade once the wall has been left alone for [`CHROME_IDLE`], which is the
-    /// difference between a monitor and a television.
+    /// fade once the wall has been left alone for the configured idle time,
+    /// which is the difference between a monitor and a television.
+    fn chrome_idle(&self) -> Duration {
+        let secs = self.config.chrome_idle_secs;
+        if secs <= 0.0 {
+            Duration::MAX
+        } else {
+            Duration::from_secs_f32(secs)
+        }
+    }
+
     fn chrome_visible(&mut self) -> bool {
         // An open panel owns the bars: taking away the bar of a panel the
         // viewer just opened would strand it. The layout picker is a modal of
@@ -1955,7 +1962,7 @@ impl XgViewApp {
         if self.chrome.input_seen {
             self.chrome.last_input = Instant::now();
             self.chrome.visible = true;
-        } else if self.chrome.last_input.elapsed() >= CHROME_IDLE {
+        } else if self.chrome.last_input.elapsed() >= self.chrome_idle() {
             self.chrome.visible = false;
         }
         self.chrome.visible
@@ -3739,6 +3746,26 @@ impl XgViewApp {
                     .color(theme::TEXT_DIM),
             );
         }
+
+        ui.add_space(theme::space::S);
+        let idle = controls::slider(
+            &mut self.nav,
+            ui,
+            &mut self.config.chrome_idle_secs,
+            0.0..=10.0,
+            0.5,
+            "s",
+            &monitor_i18n::tr("settings-chrome-idle"),
+            3.5,
+        );
+        if idle.changed() {
+            dirty = true;
+        }
+        ui.label(
+            RichText::new(monitor_i18n::tr("settings-chrome-idle-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
 
         ui.add_space(theme::space::S);
         if self.settings_language(ui) {
@@ -5701,7 +5728,7 @@ impl XgViewApp {
                 // a cursor left standing on it is not part of.
                 focused: interactive
                     && *index == focus
-                    && (self.chrome.visible || self.wall_seen.elapsed() < CHROME_IDLE),
+                    && (self.chrome.visible || self.wall_seen.elapsed() < self.chrome_idle()),
                 interactive,
                 dim: !interactive,
                 osd: self.config.osd,

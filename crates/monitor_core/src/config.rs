@@ -529,6 +529,10 @@ impl Default for Group {
     }
 }
 
+fn default_chrome_idle_secs() -> f32 {
+    3.5
+}
+
 /// Persisted application configuration (`config.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -596,6 +600,10 @@ pub struct AppConfig {
     /// wherever they look.
     #[serde(default)]
     pub osd: Osd,
+    /// How long the interface shell — toolbar, status bar — stays visible after
+    /// the last input while full screen, in seconds.  Zero means it never hides.
+    #[serde(default = "default_chrome_idle_secs")]
+    pub chrome_idle_secs: f32,
     pub cameras: Vec<CameraSource>,
 }
 
@@ -623,6 +631,7 @@ impl Default for AppConfig {
             go2rtc: Go2rtcConfig::default(),
             blackout: Blackout::default(),
             osd: Osd::default(),
+            chrome_idle_secs: default_chrome_idle_secs(),
             cameras: Vec::new(),
         }
     }
