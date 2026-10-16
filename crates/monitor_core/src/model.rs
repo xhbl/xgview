@@ -280,7 +280,7 @@ pub enum OsdItem {
     /// The codec, and the rate the stream arrives at.
     ///
     /// The `alias` is what this was called while it showed the transport: the
-    /// enum is stored in `config.json` by variant name, and a corner saved as
+    /// enum is stored in `xgvconfig.json` by variant name, and a corner saved as
     /// `Link` has to keep working - an unknown variant would take the whole
     /// file, cameras included, down with it.
     #[serde(alias = "Link")]
@@ -967,7 +967,7 @@ mod tests {
         assert_eq!(TileAspect::Ratio1x1.ratio(), Some(1.0));
     }
 
-    /// The OSD enum is stored in `config.json` by variant name, so a corner
+    /// The OSD enum is stored in `xgvconfig.json` by variant name, so a corner
     /// saved before `Link` became `Codec` has to keep reading - an unknown
     /// variant fails the whole file, cameras and all. The write side is the new
     /// name, which is what makes the alias a one-way door rather than a second

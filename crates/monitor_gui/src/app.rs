@@ -37,8 +37,8 @@ use crate::video::{VideoRenderer, VideoSurface};
 use crate::window::{self, OnTop};
 use crate::RunOptions;
 
-/// Debounce applied before writing `config.json`.
-const SAVE_DEBOUNCE: Duration = Duration::from_millis(700);
+/// Debounce applied before writing the config file.
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// How long the wall stays off the top after a link is opened, so that the
 /// window the browser or the mail client opens comes up in front of it.

@@ -533,7 +533,7 @@ fn default_chrome_idle_secs() -> f32 {
     3.5
 }
 
-/// Persisted application configuration (`config.json`).
+/// Persisted application configuration (`xgvconfig.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -1368,7 +1368,7 @@ mod tests {
         assert_eq!(config.active_cameras().len(), 1);
     }
 
-    /// An older `config.json` written before the language field existed must
+    /// An older config file written before the language field existed must
     /// still load, and the interface must default to auto-detection rather
     /// than a language named by an empty string.
     #[test]
