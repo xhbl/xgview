@@ -41,6 +41,8 @@ pub enum Icon {
     Portrait,
     /// Turn on its side: a widescreen viewport.
     Landscape,
+    /// Adjust the picture fit: a frame with arrows pointing in and out.
+    AspectRatio,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -219,6 +221,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke) {
             // A wide viewport, 16:9.
             let body = Rect::from_min_max(at(0.05, 0.247), at(0.95, 0.753));
             painter.rect_stroke(body, CornerRadius::same(1), stroke, StrokeKind::Inside);
+        }
+        Icon::AspectRatio => {
+            painter.rect_stroke(Rect::from_min_max(at(0.05, 0.20), at(0.95, 0.80)), CornerRadius::same(1), stroke, StrokeKind::Inside);
+            painter.add(line(&[at(0.27, 0.52), at(0.27, 0.40), at(0.41, 0.40)]));
+            painter.add(line(&[at(0.73, 0.48), at(0.73, 0.60), at(0.59, 0.60)]));
         }
     }
 }

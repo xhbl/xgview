@@ -417,6 +417,11 @@ pub struct CameraSource {
     /// How this camera's picture is fitted into its tile on the wall.
     #[serde(default)]
     pub aspect: TileAspect,
+    /// How this camera's picture is fitted while the wall stands upright.
+    /// Independent from `aspect` so a camera can be stretched in landscape and
+    /// kept at its original ratio in portrait.
+    #[serde(default)]
+    pub portrait_aspect: TileAspect,
     /// ONVIF profile token of the main stream, kept for later re-negotiation.
     #[serde(default)]
     pub main_profile: Option<String>,
@@ -457,6 +462,7 @@ impl CameraSource {
             imported: false,
             transport: RtspTransport::default(),
             aspect: TileAspect::default(),
+            portrait_aspect: TileAspect::default(),
             main_profile: None,
             sub_profile: None,
             group: 0,

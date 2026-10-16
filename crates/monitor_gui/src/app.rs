@@ -676,6 +676,12 @@ pub struct XgViewApp {
     /// The button that opened the layout picker, to give it back its focus when
     /// the picker closes - the toolbar's or the settings panel's `…`.
     layout_picker_from: Option<Id>,
+    /// Whether the portrait aspect picker is open: the modal that lists the
+    /// cameras on the current page and lets the remote cycle each one's fit.
+    portrait_aspect_picker: bool,
+    portrait_aspect_picker_handoff: Handoff,
+    portrait_aspect_picker_anchor: Option<Id>,
+    portrait_aspect_picker_from: Option<Id>,
     /// A scroll asked for by a direction press that had nowhere left to move the
     /// focus inside the settings body, in points.
     ///
@@ -989,6 +995,7 @@ impl XgViewApp {
             ("confirm-body", ScopeDef::new(Axis::Column)),
             ("passphrase-body", ScopeDef::new(Axis::Column)),
             ("juanz-row", ScopeDef::new(Axis::Row)),
+            ("aspect-picker", ScopeDef::new(Axis::Column)),
         ];
 
         let mut app = Self {
@@ -1022,6 +1029,10 @@ impl XgViewApp {
             layout_picker_handoff: Handoff::default(),
             layout_picker_anchor: None,
             layout_picker_from: None,
+            portrait_aspect_picker: false,
+            portrait_aspect_picker_handoff: Handoff::default(),
+            portrait_aspect_picker_anchor: None,
+            portrait_aspect_picker_from: None,
             body_scroll: None,
             dialog_handoff: Handoff::default(),
             discovery,
@@ -1147,6 +1158,8 @@ impl XgViewApp {
             self.discovery.focus_anchor
         } else if self.layout_picker {
             self.layout_picker_anchor
+        } else if self.portrait_aspect_picker {
+            self.portrait_aspect_picker_anchor
         } else if self.reorder.is_some() {
             self.reorder_anchor
         } else if self.show_settings {
@@ -1327,6 +1340,7 @@ impl XgViewApp {
         // The settings panel and the layout picker are built for landscape.
         self.show_settings = false;
         self.layout_picker = false;
+        self.portrait_aspect_picker = false;
         self.config.android_orientation = wanted;
         self.needs_sync = true;
         self.mark_dirty();
@@ -1888,7 +1902,7 @@ impl XgViewApp {
         // viewer just opened would strand it. The layout picker is a modal of
         // its own and counts the same way - it is opened from the toolbar, and
         // a bar that faded under it would take its own trigger away.
-        if self.show_settings || self.discovery.open || self.layout_picker {
+        if self.show_settings || self.discovery.open || self.layout_picker || self.portrait_aspect_picker {
             self.chrome.visible = true;
             self.chrome.hide_now = false;
             self.chrome.last_input = Instant::now();
@@ -2722,10 +2736,10 @@ impl XgViewApp {
             || self.passphrase.is_some();
         // The layout picker is a modal of its own, and it owns the keys while
         // it is up: opening a panel behind it would stack two of them.
-        if keys.settings && !dialog_open && !self.layout_picker && !self.is_portrait() {
+        if keys.settings && !dialog_open && !self.layout_picker && !self.portrait_aspect_picker && !self.is_portrait() {
             self.show_settings = !self.show_settings;
         }
-        if keys.devices && !dialog_open && !self.layout_picker {
+        if keys.devices && !dialog_open && !self.layout_picker && !self.portrait_aspect_picker {
             self.discovery.open = !self.discovery.open;
             // Opened from the keyboard, so there is no button to hand the focus
             // back to when it closes.
@@ -2738,7 +2752,7 @@ impl XgViewApp {
         // The picker is a modal: while it is up the wall's own keys - page
         // turns and the layout digits - are spent, so a press cannot change the
         // wall behind it. Back is answered below, where the panels are unwound.
-        if !self.layout_picker {
+        if !self.layout_picker && !self.portrait_aspect_picker {
             if keys.page_prev {
                 self.turn_page(false, true);
             }
@@ -2840,6 +2854,9 @@ impl XgViewApp {
                 if self.layout_picker {
                     self.layout_picker = false;
                     self.restore_focus = self.layout_picker_from.take();
+                } else if self.portrait_aspect_picker {
+                    self.portrait_aspect_picker = false;
+                    self.restore_focus = self.portrait_aspect_picker_from.take();
                 } else if self.discovery.open {
                     self.discovery.open = false;
                     self.restore_focus = self.discovery.from.take();
@@ -3092,6 +3109,20 @@ impl XgViewApp {
                 if fullscreen.clicked() {
                     let enabled = !self.fullscreen;
                     self.set_fullscreen(ui.ctx(), enabled);
+                }
+                let aspect = icons::button(
+                    ui,
+                    Icon::AspectRatio,
+                    self.portrait_aspect_picker,
+                    &monitor_i18n::tr("toolbar-portrait-aspect-tip"),
+                );
+                items.push((aspect.id, aspect.rect));
+                self.name(&aspect, "toolbar-portrait-aspect");
+                if aspect.clicked() {
+                    self.portrait_aspect_picker = !self.portrait_aspect_picker;
+                    self.portrait_aspect_picker_from =
+                        (!aspect.clicked_by(egui::PointerButton::Primary))
+                            .then_some(aspect.id);
                 }
             });
         });
@@ -5653,7 +5684,7 @@ impl XgViewApp {
                 time: self.time,
                 aspect: index
                     .and_then(|index| cameras.get(index))
-                    .map(|camera| camera.aspect)
+                    .map(|camera| if self.is_portrait() { camera.portrait_aspect } else { camera.aspect })
                     .unwrap_or_default(),
             };
             let response = grid::paint(ui, rect, &tile);
@@ -5871,6 +5902,79 @@ impl XgViewApp {
         } else if close {
             self.layout_picker = false;
             self.restore_focus = self.layout_picker_from.take();
+        }
+    }
+
+    /// The modal that lists the cameras on the current portrait page and lets
+    /// the remote cycle each one's picture fit. A row per camera: its number,
+    /// its name, and the aspect it is drawn at - a press on the row turns the
+    /// aspect to the next of the five.
+    fn draw_portrait_aspect_picker(&mut self, ctx: &egui::Context) {
+        if !self.portrait_aspect_picker {
+            return;
+        }
+        let mut close = false;
+        let mut aspect_change: Option<(usize, TileAspect)> = None;
+
+        egui::Modal::new(Id::new("xgview-portrait-aspect-picker")).show(ctx, |ui| {
+            ui.set_width(300.0);
+            self.portrait_aspect_picker_anchor = None;
+            self.nav.open("aspect-picker");
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(monitor_i18n::tr("portrait-aspect-picker-title")).heading());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let close_button =
+                        icons::button(ui, Icon::Close, false, &monitor_i18n::tr("dialog-close"));
+                    let close_resp = self.nav.tracked(close_button);
+                    self.portrait_aspect_picker_anchor = Some(close_resp.id);
+                    if close_resp.clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.separator();
+
+            let layout = self.scheduler.layout();
+            let page = self.scheduler.page();
+            let total = self.config.enabled_count();
+            let cells = grid::page_cells(layout, page, total);
+
+            for cell in cells.iter() {
+                let Some(index) = cell else { continue };
+                let Some(camera) = self.config.cameras.get(*index) else { continue };
+                let name = camera.short_label(18);
+                let aspect = camera.portrait_aspect;
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}.", *index + 1));
+                    ui.label(name);
+                    let btn = ui
+                        .small_button(
+                            RichText::new(monitor_i18n::tr(aspect.label()))
+                                .small()
+                                .color(theme::ACCENT),
+                        )
+                        .on_hover_text(monitor_i18n::tr("cameras-aspect-tip"));
+                    let btn = self.nav.tracked(btn);
+
+                    self.name(&btn, "portrait-aspect-entry");
+                    if btn.clicked() {
+                        aspect_change = Some((*index, aspect.next()));
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            self.nav.close();
+        });
+
+        if let Some((index, aspect)) = aspect_change {
+            if let Some(camera) = self.config.cameras.get_mut(index) {
+                camera.portrait_aspect = aspect;
+            }
+            self.mark_dirty();
+        }
+        if close {
+            self.portrait_aspect_picker = false;
+            self.restore_focus = self.portrait_aspect_picker_from.take();
         }
     }
 
@@ -6279,6 +6383,7 @@ impl eframe::App for XgViewApp {
         }
 
         self.draw_layout_picker(ctx);
+        self.draw_portrait_aspect_picker(ctx);
         self.draw_toast(ctx);
         self.draw_exit_hint(ctx);
         // After everything else, and on its own layer: the blank covers the
@@ -6298,6 +6403,11 @@ impl eframe::App for XgViewApp {
         }
         if self.layout_picker_handoff.entering(self.layout_picker) {
             if let Some(id) = self.layout_picker_anchor {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
+        if self.portrait_aspect_picker_handoff.entering(self.portrait_aspect_picker) {
+            if let Some(id) = self.portrait_aspect_picker_anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
