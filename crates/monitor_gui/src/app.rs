@@ -5926,13 +5926,25 @@ impl XgViewApp {
                     let close_button =
                         icons::button(ui, Icon::Close, false, &monitor_i18n::tr("dialog-close"));
                     let close_resp = self.nav.tracked(close_button);
-                    self.portrait_aspect_picker_anchor = Some(close_resp.id);
                     if close_resp.clicked() {
                         close = true;
                     }
                 });
             });
             ui.separator();
+            let hint = ui.label(
+                RichText::new(monitor_i18n::tr("portrait-aspect-picker-hint"))
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+            let hint_focus = ui.interact(
+                hint.rect,
+                hint.id.with("focus"),
+                egui::Sense::focusable_noninteractive(),
+            );
+            self.nav.item(&hint_focus);
+            self.portrait_aspect_picker_anchor = Some(hint_focus.id);
+            ui.add_space(theme::space::M);
 
             let layout = self.scheduler.layout();
             let page = self.scheduler.page();

@@ -251,6 +251,7 @@ toolbar-layout-13 = 宫格 13
 toolbar-layout-more = 更多布局
 layout-picker-title = 布局
 portrait-aspect-picker-title = 画面比例
+portrait-aspect-picker-hint = 此画面比例设置仅应用于竖屏，与横屏设置相互独立。
 toolbar-portrait-aspect-tip = 调整各摄像头画面比例
 toolbar-back-grid = 返回宫格
 toolbar-back-grid-tip = 返回宫格（Esc / 返回）

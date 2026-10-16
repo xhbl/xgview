@@ -257,6 +257,7 @@ toolbar-layout-p4 = Grid 4 upright
 toolbar-layout-more = More layouts
 layout-picker-title = Layouts
 portrait-aspect-picker-title = Picture fit
+portrait-aspect-picker-hint = These settings apply only to portrait and are independent of landscape.
 toolbar-portrait-aspect-tip = Adjust the picture fit for each camera
 toolbar-back-grid = Back to the grid
 toolbar-back-grid-tip = Back to the grid (Esc / Back)
