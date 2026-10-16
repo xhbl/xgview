@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 use crate::layout::GridLayout;
-use crate::model::{CameraSource, ConnectionMode, Osd};
+use crate::model::{CameraSource, ConnectionMode, CombinedInfo, Osd, OsdItem};
 use crate::{APP_NAME, CONFIG_FILE_NAME};
 
 /// Version of the configuration schema written to disk.
@@ -533,6 +533,15 @@ fn default_chrome_idle_secs() -> f32 {
     3.5
 }
 
+fn default_combined_info() -> CombinedInfo {
+    [
+        vec![OsdItem::Codec, OsdItem::Fps, OsdItem::Format],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ]
+}
+
 /// Persisted application configuration (`xgvconfig.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -600,6 +609,11 @@ pub struct AppConfig {
     /// wherever they look.
     #[serde(default)]
     pub osd: Osd,
+    /// The four combined-info slots: each is an ordered list of atomic
+    /// [`OsdItem`]s stacked in one corner when a corner is set to
+    /// `Combined1` … `Combined4`.
+    #[serde(default = "default_combined_info")]
+    pub combined_info: CombinedInfo,
     /// How long the interface shell — toolbar, status bar — stays visible after
     /// the last input while full screen, in seconds.  Zero means it never hides.
     #[serde(default = "default_chrome_idle_secs")]
@@ -631,6 +645,7 @@ impl Default for AppConfig {
             go2rtc: Go2rtcConfig::default(),
             blackout: Blackout::default(),
             osd: Osd::default(),
+            combined_info: default_combined_info(),
             chrome_idle_secs: default_chrome_idle_secs(),
             cameras: Vec::new(),
         }

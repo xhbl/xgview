@@ -264,8 +264,8 @@ impl TileAspect {
 ///
 /// The list is ordered, and the settings panel walks a corner through it: what
 /// a viewer wants in a corner changes with the wall in front of them, and a
-/// remote has no room for a list of eight. The last entry is the three measured
-/// lines stacked together, for a corner with room to spare.
+/// remote has no room for a list of eight. The combined entries stack several
+/// atomic items in one corner, for a corner with room to spare.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OsdItem {
     /// Nothing at all.
@@ -292,14 +292,25 @@ pub enum OsdItem {
     /// The connection the channel pulls over and the masked address it pulls -
     /// `AUTO rtsp://…`, `MSE wss://…`, `TCP rtsp://…`.
     Transport,
-    /// [`OsdItem::Codec`], [`OsdItem::Fps`], [`OsdItem::Format`] and
-    /// [`OsdItem::Transport`], one per line.
-    Detail,
+    /// The local date and time as `yyyy-mm-dd hh:mm:ss`.
+    DateTime,
+    /// The items the viewer picked for combined slot 1, stacked one per line.
+    #[serde(alias = "Detail")]
+    Combined1,
+    /// The items the viewer picked for combined slot 2, stacked one per line.
+    Combined2,
+    /// The items the viewer picked for combined slot 3, stacked one per line.
+    Combined3,
+    /// The items the viewer picked for combined slot 4, stacked one per line.
+    Combined4,
 }
+
+/// The four combined-info slots, each an ordered list of atomic [`OsdItem`]s.
+pub type CombinedInfo = [Vec<OsdItem>; 4];
 
 impl OsdItem {
     /// Every item, in the order the settings button walks them.
-    pub const ALL: [OsdItem; 9] = [
+    pub const ALL: [OsdItem; 13] = [
         OsdItem::Off,
         OsdItem::Name,
         OsdItem::NumberName,
@@ -308,13 +319,66 @@ impl OsdItem {
         OsdItem::Fps,
         OsdItem::Format,
         OsdItem::Transport,
-        OsdItem::Detail,
+        OsdItem::DateTime,
+        OsdItem::Combined1,
+        OsdItem::Combined2,
+        OsdItem::Combined3,
+        OsdItem::Combined4,
     ];
 
-    /// The item a press on the settings button selects next.
-    pub fn next(self) -> Self {
-        let index = Self::ALL.iter().position(|item| *item == self).unwrap_or(0);
-        Self::ALL[(index + 1) % Self::ALL.len()]
+    /// The atomic items that can appear inside a combined-info slot.
+    pub const ATOMIC: [OsdItem; 8] = [
+        OsdItem::Name,
+        OsdItem::NumberName,
+        OsdItem::Stream,
+        OsdItem::Codec,
+        OsdItem::Fps,
+        OsdItem::Format,
+        OsdItem::Transport,
+        OsdItem::DateTime,
+    ];
+
+    /// The combined slot number (0-based) if this is a `CombinedN` variant.
+    pub fn combined_slot(self) -> Option<usize> {
+        match self {
+            OsdItem::Combined1 => Some(0),
+            OsdItem::Combined2 => Some(1),
+            OsdItem::Combined3 => Some(2),
+            OsdItem::Combined4 => Some(3),
+            _ => None,
+        }
+    }
+
+    /// The `CombinedN` variant for slot `index` (0-based).
+    pub fn combined(index: usize) -> OsdItem {
+        match index {
+            0 => OsdItem::Combined1,
+            1 => OsdItem::Combined2,
+            2 => OsdItem::Combined3,
+            _ => OsdItem::Combined4,
+        }
+    }
+
+    /// The items the settings cycle button offers, skipping combined slots
+    /// that are empty so a viewer never lands on a corner that shows nothing.
+    pub fn cycle_options(combined: &CombinedInfo) -> Vec<OsdItem> {
+        let mut opts = vec![
+            OsdItem::Off,
+            OsdItem::Name,
+            OsdItem::NumberName,
+            OsdItem::Stream,
+            OsdItem::Codec,
+            OsdItem::Fps,
+            OsdItem::Format,
+            OsdItem::Transport,
+            OsdItem::DateTime,
+        ];
+        for index in 0..4 {
+            if !combined[index].is_empty() {
+                opts.push(OsdItem::combined(index));
+            }
+        }
+        opts
     }
 
     /// What the settings button says, and the only name the item has.
@@ -328,7 +392,11 @@ impl OsdItem {
             OsdItem::Fps => "osd-fps",
             OsdItem::Format => "osd-format",
             OsdItem::Transport => "osd-transport",
-            OsdItem::Detail => "osd-detail",
+            OsdItem::DateTime => "osd-date-time",
+            OsdItem::Combined1 => "osd-combined-1",
+            OsdItem::Combined2 => "osd-combined-2",
+            OsdItem::Combined3 => "osd-combined-3",
+            OsdItem::Combined4 => "osd-combined-4",
         }
     }
 }
@@ -977,6 +1045,18 @@ mod tests {
         let item: OsdItem = serde_json::from_str("\"Link\"").expect("a corner saved earlier");
         assert_eq!(item, OsdItem::Codec);
         assert_eq!(serde_json::to_string(&OsdItem::Codec).expect("written"), "\"Codec\"");
+    }
+
+    /// A corner saved as `Detail` before the combined-info rewrite has to keep
+    /// reading as `Combined1`, which is the slot that carries the same stack.
+    #[test]
+    fn a_corner_saved_as_detail_still_reads() {
+        let item: OsdItem = serde_json::from_str("\"Detail\"").expect("a corner saved earlier");
+        assert_eq!(item, OsdItem::Combined1);
+        assert_eq!(
+            serde_json::to_string(&OsdItem::Combined1).expect("written"),
+            "\"Combined1\""
+        );
     }
 
     /// An edit form writes back only the fields it shows.

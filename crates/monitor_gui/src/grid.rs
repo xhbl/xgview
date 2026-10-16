@@ -123,6 +123,8 @@ pub struct Tile<'a> {
     pub dim: bool,
     /// What each corner of the tile shows.
     pub osd: Osd,
+    /// The four combined-info slots, each an ordered list of atomic items.
+    pub combined: [&'a [OsdItem]; 4],
     pub time: f64,
     /// How the picture is fitted into the tile.
     pub aspect: TileAspect,
@@ -397,7 +399,29 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
         OsdItem::Fps => vec![fps()],
         OsdItem::Format => vec![format()],
         OsdItem::Transport => vec![transport()],
-        OsdItem::Detail => vec![transport(), codec(), fps(), format()],
+        OsdItem::DateTime => {
+            let Some(now) = monitor_core::blackout::local_now() else {
+                return Vec::new();
+            };
+            vec![OsdLine {
+                dot: None,
+                text: format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    now.year, now.month, now.day, now.hour, now.minute, now.second
+                ),
+            }]
+        }
+        OsdItem::Combined1 | OsdItem::Combined2 | OsdItem::Combined3 | OsdItem::Combined4 => {
+            let slot = item.combined_slot().unwrap();
+            let mut lines = Vec::new();
+            for &atom in tile.combined[slot] {
+                if atom.combined_slot().is_some() || atom == OsdItem::Off {
+                    continue;
+                }
+                lines.extend(osd_lines(atom, tile));
+            }
+            lines
+        }
     }
 }
 

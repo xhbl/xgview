@@ -680,6 +680,12 @@ pub struct XgViewApp {
     portrait_aspect_picker_handoff: Handoff,
     portrait_aspect_picker_anchor: Option<Id>,
     portrait_aspect_picker_from: Option<Id>,
+    /// Whether the combined-info editor is open, and which slot (0-3) it edits.
+    combined_info_picker: bool,
+    combined_info_picker_slot: usize,
+    combined_info_picker_handoff: Handoff,
+    combined_info_picker_anchor: Option<Id>,
+    combined_info_picker_from: Option<Id>,
     /// A scroll asked for by a direction press that had nowhere left to move the
     /// focus inside the settings body, in points.
     ///
@@ -1031,6 +1037,11 @@ impl XgViewApp {
             portrait_aspect_picker_handoff: Handoff::default(),
             portrait_aspect_picker_anchor: None,
             portrait_aspect_picker_from: None,
+            combined_info_picker: false,
+            combined_info_picker_slot: 0,
+            combined_info_picker_handoff: Handoff::default(),
+            combined_info_picker_anchor: None,
+            combined_info_picker_from: None,
             body_scroll: None,
             dialog_handoff: Handoff::default(),
             discovery,
@@ -1158,6 +1169,8 @@ impl XgViewApp {
             self.layout_picker_anchor
         } else if self.portrait_aspect_picker {
             self.portrait_aspect_picker_anchor
+        } else if self.combined_info_picker {
+            self.combined_info_picker_anchor
         } else if self.reorder.is_some() {
             self.reorder_anchor
         } else if self.show_settings {
@@ -1357,6 +1370,7 @@ impl XgViewApp {
         self.show_settings = false;
         self.layout_picker = false;
         self.portrait_aspect_picker = false;
+        self.combined_info_picker = false;
         self.config.android_orientation = wanted;
         self.needs_sync = true;
         self.mark_dirty();
@@ -1944,7 +1958,7 @@ impl XgViewApp {
         // viewer just opened would strand it. The layout picker is a modal of
         // its own and counts the same way - it is opened from the toolbar, and
         // a bar that faded under it would take its own trigger away.
-        if self.show_settings || self.discovery.open || self.layout_picker || self.portrait_aspect_picker {
+        if self.show_settings || self.discovery.open || self.layout_picker || self.portrait_aspect_picker || self.combined_info_picker {
             self.chrome.visible = true;
             self.chrome.hide_now = false;
             self.chrome.last_input = Instant::now();
@@ -2341,6 +2355,7 @@ impl XgViewApp {
     ///
     /// egui hands a nested row the full width and lays its widgets out from the
     /// left, so a row that wants to be centred measures itself and pads its
+
     /// left side. The button labels are the only thing that decides the width:
     /// button padding is the theme's, and a label wider than the minimum size
     /// is the usual case here.
@@ -2492,6 +2507,105 @@ impl XgViewApp {
     /// it runs on the very events read here, which is why they are *not* taken
     /// out of the queue in that case. The wall is not made of widgets, so it
     /// answers the same keys itself.
+    /// Keyboard handler for the combined-info picker modal.  Called from
+    /// `handle_keys` so the arrows are consumed before the nav layer or the
+    /// wall can act on them.
+    fn handle_combined_info_keys(&mut self, ctx: &egui::Context) {
+        let none = Modifiers::NONE;
+        let back = ctx.input_mut(|input| {
+            input.consume_key(none, Key::Escape)
+                || input.consume_key(none, Key::BrowserBack)
+                || input.consume_key(none, Key::Backspace)
+        });
+        if back {
+            self.combined_info_picker = false;
+            self.restore_focus = self.combined_info_picker_from.take();
+            return;
+        }
+
+        let slot = self.combined_info_picker_slot;
+        let mut selected = self.config.combined_info[slot].clone();
+        let focus_id = Id::new("xgview-combined-info-focus");
+        let (mut focus_col, mut focus_idx): (usize, usize) =
+            ctx.data(|d| d.get_temp(focus_id).unwrap_or((0, 0)));
+
+        let available: Vec<OsdItem> = OsdItem::ATOMIC
+            .iter()
+            .filter(|atom| !selected.contains(atom))
+            .copied()
+            .collect();
+
+        if focus_col == 0 && available.is_empty() && !selected.is_empty() {
+            focus_col = 1;
+            focus_idx = 0;
+        }
+        if focus_col == 1 && selected.is_empty() && !available.is_empty() {
+            focus_col = 0;
+            focus_idx = 0;
+        }
+        let col_len = if focus_col == 0 { available.len() } else { selected.len() };
+        if focus_idx >= col_len {
+            focus_idx = col_len.saturating_sub(1);
+        }
+
+        let (up, down, left, right, activate) = ctx.input_mut(|i| (
+            i.consume_key(none, Key::ArrowUp),
+            i.consume_key(none, Key::ArrowDown),
+            i.consume_key(none, Key::ArrowLeft),
+            i.consume_key(none, Key::ArrowRight),
+            i.consume_key(none, Key::Enter) || i.consume_key(none, Key::Space),
+        ));
+
+        let mut changed = false;
+        if up && focus_idx > 0 {
+            focus_idx -= 1;
+        }
+        if down {
+            let len = if focus_col == 0 { available.len() } else { selected.len() };
+            if focus_idx + 1 < len {
+                focus_idx += 1;
+            }
+        }
+        if left && focus_col == 1 && !available.is_empty() {
+            focus_col = 0;
+            focus_idx = focus_idx.min(available.len() - 1);
+        }
+        if right && focus_col == 0 && !selected.is_empty() {
+            focus_col = 1;
+            focus_idx = focus_idx.min(selected.len() - 1);
+        }
+        if activate {
+            if focus_col == 0 && focus_idx < available.len() {
+                let atom = available[focus_idx];
+                selected.push(atom);
+                changed = true;
+                if available.len() > 1 {
+                    if focus_idx >= available.len() - 1 {
+                        focus_idx = available.len() - 2;
+                    }
+                } else {
+                    focus_col = 1;
+                    focus_idx = selected.len() - 1;
+                }
+            } else if focus_col == 1 && focus_idx < selected.len() {
+                selected.remove(focus_idx);
+                changed = true;
+                if selected.is_empty() {
+                    focus_col = 0;
+                    focus_idx = focus_idx.min(available.len().saturating_sub(1));
+                } else if focus_idx >= selected.len() {
+                    focus_idx = selected.len() - 1;
+                }
+            }
+        }
+
+        ctx.data_mut(|d| d.insert_temp(focus_id, (focus_col, focus_idx)));
+        if changed {
+            self.config.combined_info[slot] = selected;
+            self.mark_dirty();
+        }
+    }
+
     fn handle_keys(&mut self, ctx: &egui::Context) {
         // The file dialog owns the keyboard while it is up. Its own keybindings
         // and egui's focus walk are how a viewer moves around it, and the arrows
@@ -2503,6 +2617,15 @@ impl XgViewApp {
         // `file_dialog_open` read here would find still in the queue and hand to
         // the wall - closing the panel the dialog was opened from.
         if self.file_dialog_keys {
+            return;
+        }
+
+        // The combined-info picker handles its own keyboard: arrows move the
+        // selection within and between columns, Enter moves an item, Back
+        // closes.  All consumed here so the rest of `handle_keys` — the wall,
+        // the nav walk — does not also act on them.
+        if self.combined_info_picker {
+            self.handle_combined_info_keys(ctx);
             return;
         }
 
@@ -2778,10 +2901,10 @@ impl XgViewApp {
             || self.passphrase.is_some();
         // The layout picker is a modal of its own, and it owns the keys while
         // it is up: opening a panel behind it would stack two of them.
-        if keys.settings && !dialog_open && !self.layout_picker && !self.portrait_aspect_picker && !self.is_portrait() {
+        if keys.settings && !dialog_open && !self.layout_picker && !self.portrait_aspect_picker && !self.combined_info_picker && !self.is_portrait() {
             self.show_settings = !self.show_settings;
         }
-        if keys.devices && !dialog_open && !self.layout_picker && !self.portrait_aspect_picker {
+        if keys.devices && !dialog_open && !self.layout_picker && !self.portrait_aspect_picker && !self.combined_info_picker {
             self.discovery.open = !self.discovery.open;
             // Opened from the keyboard, so there is no button to hand the focus
             // back to when it closes.
@@ -2794,7 +2917,7 @@ impl XgViewApp {
         // The picker is a modal: while it is up the wall's own keys - page
         // turns and the layout digits - are spent, so a press cannot change the
         // wall behind it. Back is answered below, where the panels are unwound.
-        if !self.layout_picker && !self.portrait_aspect_picker {
+        if !self.layout_picker && !self.portrait_aspect_picker && !self.combined_info_picker {
             if keys.page_prev {
                 self.advance(false, true);
             }
@@ -3713,13 +3836,14 @@ impl XgViewApp {
             ("corner-bottom-left", &mut self.config.osd.bottom_left),
             ("corner-bottom-right", &mut self.config.osd.bottom_right),
         ];
+        let cycle_opts = OsdItem::cycle_options(&self.config.combined_info);
         for (corner, item) in corners {
             ui.horizontal(|ui| {
                 ui.label(monitor_i18n::tr(corner));
                 let button = controls::cycle_button(
                     &mut self.nav,
                     ui,
-                    &OsdItem::ALL,
+                    &cycle_opts,
                     item,
                     |choice| monitor_i18n::tr(choice.label()),
                 );
@@ -3729,6 +3853,27 @@ impl XgViewApp {
                 }
             });
         }
+        ui.add_space(theme::space::S);
+        ui.horizontal(|ui| {
+            ui.label(monitor_i18n::tr("settings-combined-info"));
+            for slot in 0..4 {
+                let label = monitor_i18n::tr_args(
+                    "settings-combined-info-slot",
+                    &[("n", (slot + 1).to_string().into())],
+                );
+                let response = self.nav.tracked(ui.button(label));
+                self.name(&response, "combined-info-button");
+                if response.clicked() {
+                    self.combined_info_picker = true;
+                    self.combined_info_picker_slot = slot;
+                    self.combined_info_picker_from =
+                        (!response.clicked_by(egui::PointerButton::Primary)).then_some(response.id);
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(Id::new("xgview-combined-info-focus"), (0usize, 0usize))
+                    });
+                }
+            }
+        });
         ui.add_space(theme::space::S);
         let mut fullscreen = self.fullscreen;
         let full = self.nav.tracked(ui.checkbox(&mut fullscreen, monitor_i18n::tr("settings-fullscreen")));
@@ -5762,6 +5907,12 @@ impl XgViewApp {
                 interactive,
                 dim: !interactive,
                 osd: self.config.osd,
+                combined: [
+                    &self.config.combined_info[0],
+                    &self.config.combined_info[1],
+                    &self.config.combined_info[2],
+                    &self.config.combined_info[3],
+                ],
                 time: self.time,
                 aspect: index
                     .and_then(|index| cameras.get(index))
@@ -6073,6 +6224,137 @@ impl XgViewApp {
         if close {
             self.portrait_aspect_picker = false;
             self.restore_focus = self.portrait_aspect_picker_from.take();
+        }
+    }
+
+    /// The modal that lets the viewer pick which atomic items a combined-info
+    /// slot stacks.  Two columns: available items on the left, selected items
+    /// on the right.  Keyboard is handled in `handle_combined_info_keys`;
+    /// this method only draws the UI and handles mouse clicks.
+    fn draw_combined_info_picker(&mut self, ctx: &egui::Context) {
+        if !self.combined_info_picker {
+            return;
+        }
+        let slot = self.combined_info_picker_slot;
+        let mut selected: Vec<OsdItem> = self.config.combined_info[slot].clone();
+        let mut close = false;
+        let mut changed = false;
+        let mut click_add: Option<usize> = None;
+
+        let focus_id = Id::new("xgview-combined-info-focus");
+        let (mut focus_col, mut focus_idx): (usize, usize) =
+            ctx.data(|d| d.get_temp(focus_id).unwrap_or((0, 0)));
+
+        egui::Modal::new(Id::new("xgview-combined-info-picker")).show(ctx, |ui| {
+            ui.set_width(420.0);
+
+            self.nav.open("combined-info-picker");
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(
+                        monitor_i18n::tr_args(
+                            "combined-info-title",
+                            &[("n", (slot + 1).to_string().into())],
+                        ),
+                    )
+                    .strong(),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let close_btn =
+                        icons::button(ui, Icon::Close, false, &monitor_i18n::tr("dialog-close"));
+                    let close_resp = self.nav.tracked(close_btn);
+                    if close_resp.clicked() {
+                        close = true;
+                    }
+                });
+            });
+            let sep = ui.separator();
+            let anchor = ui.interact(
+                sep.rect,
+                sep.id.with("anchor"),
+                egui::Sense::focusable_noninteractive(),
+            );
+            self.nav.item(&anchor);
+            self.combined_info_picker_anchor = Some(anchor.id);
+            ui.add_space(4.0);
+
+            let available: Vec<OsdItem> = OsdItem::ATOMIC
+                .iter()
+                .filter(|atom| !selected.contains(atom))
+                .copied()
+                .collect();
+
+
+            let mut click_remove: Option<usize> = None;
+
+            ui.columns(2, |columns| {
+                columns[0].spacing_mut().item_spacing.y = 2.0;
+                columns[0].label(
+                    RichText::new(monitor_i18n::tr("combined-info-available")).small().strong(),
+                );
+                for (i, atom) in available.iter().enumerate() {
+                    let is_focused = focus_col == 0 && focus_idx == i;
+                    let response = columns[0].selectable_label(
+                        is_focused,
+                        RichText::new(monitor_i18n::tr(atom.label())).small(),
+                    );
+                    if response.clicked() {
+                        click_add = Some(i);
+                    }
+                }
+
+                columns[1].spacing_mut().item_spacing.y = 2.0;
+                columns[1].label(
+                    RichText::new(monitor_i18n::tr("combined-info-selected")).small().strong(),
+                );
+                for (i, atom) in selected.iter().enumerate() {
+                    let is_focused = focus_col == 1 && focus_idx == i;
+                    let response = columns[1].selectable_label(
+                        is_focused,
+                        RichText::new(monitor_i18n::tr(atom.label())).small(),
+                    );
+                    if response.clicked() {
+                        click_remove = Some(i);
+                    }
+                }
+            });
+
+            if let Some(i) = click_add {
+                let atom = available[i];
+                selected.push(atom);
+                changed = true;
+                if available.len() > 1 {
+                    focus_col = 0;
+                    focus_idx = i.min(available.len() - 2);
+                } else {
+                    focus_col = 1;
+                    focus_idx = selected.len() - 1;
+                }
+            }
+            if let Some(i) = click_remove {
+                selected.remove(i);
+                changed = true;
+                if selected.is_empty() {
+                    focus_col = 0;
+                    focus_idx = i.min(available.len().saturating_sub(1));
+                } else {
+                    focus_col = 1;
+                    focus_idx = i.min(selected.len() - 1);
+                }
+            }
+
+            self.nav.close();
+        });
+
+        if changed {
+            ctx.data_mut(|d| d.insert_temp(focus_id, (focus_col, focus_idx)));
+            self.config.combined_info[slot] = selected;
+            self.mark_dirty();
+        }
+        if close {
+            self.combined_info_picker = false;
+            self.restore_focus = self.combined_info_picker_from.take();
         }
     }
 
@@ -6482,6 +6764,7 @@ impl eframe::App for XgViewApp {
 
         self.draw_layout_picker(ctx);
         self.draw_portrait_aspect_picker(ctx);
+        self.draw_combined_info_picker(ctx);
         self.draw_toast(ctx);
         self.draw_exit_hint(ctx);
         // After everything else, and on its own layer: the blank covers the
@@ -6506,6 +6789,11 @@ impl eframe::App for XgViewApp {
         }
         if self.portrait_aspect_picker_handoff.entering(self.portrait_aspect_picker) {
             if let Some(id) = self.portrait_aspect_picker_anchor {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
+        if self.combined_info_picker_handoff.entering(self.combined_info_picker) {
+            if let Some(id) = self.combined_info_picker_anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
