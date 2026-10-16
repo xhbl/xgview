@@ -5808,7 +5808,11 @@ impl XgViewApp {
                     "wall-empty-title",
                     "wall-empty-title-group",
                 ),
-                &monitor_i18n::tr("wall-empty-hint"),
+                &monitor_i18n::tr(if self.is_portrait() {
+                    "wall-empty-hint-portrait"
+                } else {
+                    "wall-empty-hint"
+                }),
             );
             return;
         }

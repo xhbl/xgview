@@ -291,6 +291,7 @@ status-no-focus = no focus
 wall-empty-title = No camera configured
 wall-empty-title-group = { wall-empty-title } ({ $group })
 wall-empty-hint = Click "+" or press F2 to scan for network cameras or manually add one
+wall-empty-hint-portrait = Switch to landscape to add a camera
 exit-hint = Press BACK again to quit
 
 ## Toasts

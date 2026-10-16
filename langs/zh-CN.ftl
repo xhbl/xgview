@@ -280,6 +280,7 @@ status-no-focus = 无焦点
 wall-empty-title = 未配置摄像头
 wall-empty-title-group = { wall-empty-title } ({ $group })
 wall-empty-hint = 点击 "+" 或按 F2 扫描网络摄像头或手动添加
+wall-empty-hint-portrait = 请切换到横屏模式添加摄像头
 exit-hint = 再按一次返回退出
 
 ## 提示
