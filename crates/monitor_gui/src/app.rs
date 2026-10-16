@@ -3077,18 +3077,6 @@ impl XgViewApp {
                 }
             }
 
-            // While magnified, the one way back a touch screen has: a phone has
-            // no keyboard and no arrow, and a tap is what magnified it.
-            if self.scheduler.is_zoomed() {
-                let back =
-                    icons::button(ui, Icon::Grid, false, &monitor_i18n::tr("toolbar-back-grid-tip"));
-                items.push((back.id, back.rect));
-                self.name(&back, "toolbar-back-grid");
-                if back.clicked() {
-                    self.zoom_out();
-                }
-            }
-
 
             self.page_prev_id = Some(Id::new("portrait-prev-page"));
             self.page_next_id = Some(Id::new("portrait-next-page"));
@@ -3130,19 +3118,33 @@ impl XgViewApp {
                     let enabled = !self.fullscreen;
                     self.set_fullscreen(ui.ctx(), enabled);
                 }
-                let aspect = icons::button(
-                    ui,
-                    Icon::AspectRatio,
-                    self.portrait_aspect_picker,
-                    &monitor_i18n::tr("toolbar-portrait-aspect-tip"),
-                );
-                items.push((aspect.id, aspect.rect));
-                self.name(&aspect, "toolbar-portrait-aspect");
-                if aspect.clicked() {
-                    self.portrait_aspect_picker = !self.portrait_aspect_picker;
-                    self.portrait_aspect_picker_from =
-                        (!aspect.clicked_by(egui::PointerButton::Primary))
-                            .then_some(aspect.id);
+                if self.scheduler.is_zoomed() {
+                    let back = icons::button(
+                        ui,
+                        Icon::Grid,
+                        false,
+                        &monitor_i18n::tr("toolbar-back-grid-tip"),
+                    );
+                    items.push((back.id, back.rect));
+                    self.name(&back, "toolbar-back-grid");
+                    if back.clicked() {
+                        self.zoom_out();
+                    }
+                } else {
+                    let aspect = icons::button(
+                        ui,
+                        Icon::AspectRatio,
+                        self.portrait_aspect_picker,
+                        &monitor_i18n::tr("toolbar-portrait-aspect-tip"),
+                    );
+                    items.push((aspect.id, aspect.rect));
+                    self.name(&aspect, "toolbar-portrait-aspect");
+                    if aspect.clicked() {
+                        self.portrait_aspect_picker = !self.portrait_aspect_picker;
+                        self.portrait_aspect_picker_from =
+                            (!aspect.clicked_by(egui::PointerButton::Primary))
+                                .then_some(aspect.id);
+                    }
                 }
             });
         });
