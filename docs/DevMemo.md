@@ -1616,5 +1616,47 @@ hand-offs are. Inside it the ring is the crate's, kept and given up by its own
 rules - an arrow key breaks out of the field and into the list, by design.
 
 
+## 25. Two activities, so the wall comes up already turned
+
+*Landed 2026-10-16, in the 1.4.51 line.*
+
+**The problem.** Android fixes an activity's window orientation from the
+manifest's `android:screenOrientation` at creation time - before `onCreate`,
+before any code runs. Whatever the manifest says is what the first frame is
+drawn into. Calling `setRequestedOrientation` from `onCreate` changes it
+afterwards, and the change is visible: the wall comes up one way and turns
+to the other. A remembered portrait started landscape and rotated; a
+remembered landscape, under `unspecified`, started portrait (the phone's
+natural direction) and rotated. No single manifest value avoids both,
+because the manifest is static and the preference is not.
+
+**The fix.** A transparent `LauncherActivity` is the entry point. It reads
+`config.json` - the same file the native side will read a moment later -
+and starts the matching fixed-orientation activity: `MainActivity`
+(`userLandscape`) or `MainActivityPortrait` (`userPortrait`), then finishes.
+The window the native thread draws into was created with the right
+orientation from the manifest, so there is no rotation to see.
+
+**Why two classes, not an alias.** `activity-alias` does not support
+`android:screenOrientation` - only `<activity>` does. `MainActivityPortrait`
+is an empty subclass of `MainActivity`; the `private static native` methods
+are declared on `MainActivity` and resolved through that class by JNI, so
+the subclass needs no declarations of its own. `instance` is
+`static volatile MainActivity`, and a `MainActivityPortrait` is a
+`MainActivity` by inheritance, so the static callbacks the native side
+finds through `FindClass("com/xhbl/xgview/MainActivity")` keep working
+unchanged.
+
+**What the launcher does not do.** It does not load the native library or
+start the native thread - that is `MainActivity.onCreate`'s job, via
+`NativeActivity.super.onCreate()`. It does not decide the backend
+(`applyVulkanGate` stays on `MainActivity`, before `super.onCreate` there).
+It does not handle orientation changes at runtime - those still go through
+`setRequestedOrientation` on the current activity, which works fine once
+the wall is up. The launcher only runs on cold start; the boot receiver's
+`getLaunchIntentForPackage` finds it through the `LAUNCHER` category it
+carries in the manifest.
+
+
 
 

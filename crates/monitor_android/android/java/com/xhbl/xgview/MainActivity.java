@@ -40,6 +40,7 @@ import android.view.inputmethod.InputMethodManager;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -159,6 +160,7 @@ public class MainActivity extends NativeActivity {
         // choose its backend, and the choice has to be made before the renderer
         // exists. Anything after super.onCreate races the native thread.
         applyVulkanGate();
+
         super.onCreate(savedInstanceState);
         instance = this;
         applySystemBars();
@@ -512,6 +514,7 @@ public class MainActivity extends NativeActivity {
     private static final long RESTART_WINDOW_MS = 10 * 60 * 1000L;
 
     /**
+
      * Marks the launch for the GL backend when the device's Vulkan is too old
      * to keep a device, and drops a marker left by an attempt made in an
      * environment this one no longer is.

@@ -83,32 +83,21 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 
-        <!-- Landscape, either way up. `landscape` pins the activity to one
-             direction and ignores the sensor, so a phone mounted the other way
-             round - or turned 180 degrees - keeps a wall that is upside down.
-             `userLandscape` allows both landscape directions and follows the
-             device sensor, while still respecting the user's rotation lock;
-             portrait is not allowed either way. Available since API 18, and
-             `minSdk` here is 27.
-
-             The activity is not recreated when the display turns: `orientation`
-             and `screenSize` are in `configChanges` above. That matters because
-             the native side owns a winit event loop, and winit refuses to
-             create a second one; the insets are re-read instead, which is what
-             puts the reserved navigation bar strip back on the right side. -->
+        <!-- The transparent entry point. It reads the remembered orientation
+             from config.json and starts the matching fixed-orientation
+             activity below, then finishes. This is what keeps the wall from
+             coming up one way and turning to the other: Android fixes the
+             window orientation from the manifest at creation time, before any
+             code runs, so the only way to start already turned is to have two
+             activities - one landscape, one portrait - and pick the right one
+             before any native rendering begins. -->
         <activity
-            android:name=".MainActivity"
+            android:name=".LauncherActivity"
             android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
             android:launchMode="singleTask"
-            android:resizeableActivity="false"
-            android:screenOrientation="userLandscape"
             android:windowSoftInputMode="stateAlwaysHidden">
-
-            <!-- Entry point of the native library. Must match `[lib] name`. -->
-            <meta-data
-                android:name="android.app.lib_name"
-                android:value="monitor_android" />
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -131,6 +120,48 @@
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+        </activity>
+
+        <!-- The wall, landscape. `userLandscape` allows both landscape
+             directions and follows the device sensor, while still respecting
+             the user's rotation lock; portrait is not allowed either way.
+
+             The activity is not recreated when the display turns: `orientation`
+             and `screenSize` are in `configChanges` above. That matters because
+             the native side owns a winit event loop, and winit refuses to
+             create a second one; the insets are re-read instead, which is what
+             puts the reserved navigation bar strip back on the right side. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false"
+            android:screenOrientation="userLandscape"
+            android:windowSoftInputMode="stateAlwaysHidden">
+
+            <!-- Entry point of the native library. Must match `[lib] name`. -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="monitor_android" />
+        </activity>
+
+        <!-- The wall, portrait. The same MainActivity class with a
+             portrait-fixed orientation, so the window comes up already
+             turned. Launched by LauncherActivity when the remembered
+             orientation is portrait. -->
+        <activity
+            android:name=".MainActivityPortrait"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false"
+            android:screenOrientation="userPortrait"
+            android:windowSoftInputMode="stateAlwaysHidden">
+
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="monitor_android" />
         </activity>
 
         <!-- Relaunches the activity after the device booted. See
