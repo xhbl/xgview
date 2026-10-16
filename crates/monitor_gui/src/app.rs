@@ -1420,6 +1420,21 @@ impl XgViewApp {
         }
     }
 
+    /// Whether the page-turn buttons have a step to take.  Magnified, the
+    /// boundary is the channel list; on the grid it is the page count.
+    fn can_advance(&self, forward: bool) -> bool {
+        if let Some(zoom) = self.scheduler.zoom() {
+            if forward {
+                zoom + 1 < self.scheduler.channel_count()
+            } else {
+                zoom > 0
+            }
+        } else {
+            let info = self.scheduler.page_info();
+            if forward { info.has_next() } else { info.has_previous() }
+        }
+    }
+
     /// Steps the magnified viewport to the previous or next channel, with the
     /// slide a page turn uses.
     ///
@@ -2754,10 +2769,10 @@ impl XgViewApp {
         // wall behind it. Back is answered below, where the panels are unwound.
         if !self.layout_picker && !self.portrait_aspect_picker {
             if keys.page_prev {
-                self.turn_page(false, true);
+                self.advance(false, true);
             }
             if keys.page_next {
-                self.turn_page(true, true);
+                self.advance(true, true);
             }
             for (slot, pressed) in keys.layout.iter().enumerate() {
                 if !*pressed {
@@ -2877,9 +2892,9 @@ impl XgViewApp {
             if keys.enter {
                 let focused = ctx.memory(|memory| memory.focused());
                 if focused == Some(Id::new("portrait-prev-page")) {
-                    self.turn_page(false, true);
+                    self.advance(false, true);
                 } else if focused == Some(Id::new("portrait-next-page")) {
-                    self.turn_page(true, true);
+                    self.advance(true, true);
                 }
             }
             return;
@@ -2905,13 +2920,18 @@ impl XgViewApp {
         if self.scheduler.is_zoomed() {
             // A magnified viewport is one channel, not a grid: Right and Left
             // are the next and previous channel in channel order, and Up and
-            // Down have no grid to walk - they do nothing here rather than
-            // moving by a row and reaching the bars. See `step_zoom`.
+            // Down have no grid to walk, so they go straight to the bars.
             if keys.left {
                 self.step_zoom(false);
             }
             if keys.right {
                 self.step_zoom(true);
+            }
+            if keys.down {
+                self.hand_off(ctx, Bar::Status);
+            }
+            if keys.up {
+                self.hand_off(ctx, Bar::Toolbar);
             }
         } else {
             if keys.left {
@@ -3069,12 +3089,12 @@ impl XgViewApp {
                 }
             }
 
-            let info = self.scheduler.page_info();
+
             self.page_prev_id = Some(Id::new("portrait-prev-page"));
             self.page_next_id = Some(Id::new("portrait-next-page"));
             for (id_str, has) in [
-                ("portrait-prev-page", info.has_previous()),
-                ("portrait-next-page", info.has_next()),
+                ("portrait-prev-page", self.can_advance(false)),
+                ("portrait-next-page", self.can_advance(true)),
             ] {
                 if !has {
                     continue;
@@ -3169,7 +3189,7 @@ impl XgViewApp {
     }
 
     fn portrait_page_buttons(&mut self, ui: &mut egui::Ui, area: Rect) {
-        let info = self.scheduler.page_info();
+
         let r = 24.0;
         let margin = 6.0;
         let y = area.center().y;
@@ -3178,8 +3198,8 @@ impl XgViewApp {
         let glyph = egui::Stroke::new(2.0_f32, egui::Color32::from_white_alpha(230));
         let d = r * 0.4;
         let sides = [
-            (false, "portrait-prev-page", info.has_previous()),
-            (true, "portrait-next-page", info.has_next()),
+            (false, "portrait-prev-page", self.can_advance(false)),
+            (true, "portrait-next-page", self.can_advance(true)),
         ];
         for (forward, id, has) in sides {
             if !has {
@@ -3210,7 +3230,7 @@ impl XgViewApp {
                 glyph,
             ));
             if resp.clicked() {
-                self.turn_page(forward, !resp.clicked_by(egui::PointerButton::Primary));
+                self.advance(forward, !resp.clicked_by(egui::PointerButton::Primary));
             }
         }
     }
@@ -3294,24 +3314,26 @@ impl XgViewApp {
 
             ui.separator();
             let info = self.scheduler.page_info();
-            let previous = ui.add_enabled(info.has_previous(), egui::Button::new("◀"));
+            let can_prev = self.can_advance(false);
+            let can_next = self.can_advance(true);
+            let previous = ui.add_enabled(can_prev, egui::Button::new("◀"));
             self.page_prev_id = Some(previous.id);
-            if info.has_previous() {
+            if can_prev {
                 items.push((previous.id, previous.rect));
                 self.name(&previous, "toolbar-prev-page");
             }
             if previous.clicked() {
-                self.turn_page(false, !previous.clicked_by(egui::PointerButton::Primary));
+                self.advance(false, !previous.clicked_by(egui::PointerButton::Primary));
             }
             ui.label(monitor_i18n::tr_args("toolbar-page", &[("page", (info.page + 1).into()), ("count", info.page_count.into())]));
-            let next = ui.add_enabled(info.has_next(), egui::Button::new("▶"));
+            let next = ui.add_enabled(can_next, egui::Button::new("▶"));
             self.page_next_id = Some(next.id);
-            if info.has_next() {
+            if can_next {
                 items.push((next.id, next.rect));
                 self.name(&next, "toolbar-next-page");
             }
             if next.clicked() {
-                self.turn_page(true, !next.clicked_by(egui::PointerButton::Primary));
+                self.advance(true, !next.clicked_by(egui::PointerButton::Primary));
             }
 
             // The right end of the row is the three things a viewer reaches for
@@ -5686,6 +5708,7 @@ impl XgViewApp {
                     .and_then(|index| cameras.get(index))
                     .map(|camera| if self.is_portrait() { camera.portrait_aspect } else { camera.aspect })
                     .unwrap_or_default(),
+                rotated: self.is_portrait() && self.scheduler.is_zoomed(),
             };
             let response = grid::paint(ui, rect, &tile);
             if interactive {
