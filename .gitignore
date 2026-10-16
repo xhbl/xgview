@@ -44,3 +44,4 @@ Desktop.ini
 # Testing & profiling
 *.profraw
 tarpaulin-report.html
+.merkle-snapshot.json

@@ -57,7 +57,7 @@ const LIVE_REPAINT: Duration = Duration::from_millis(33);
 /// landscape is narrower, and the row has to stay one row - a second one would
 /// push the grid down, and the grid is what the viewer is for. Below this the
 /// bar's text is scaled down until it fits.
-const TOOLBAR_REFERENCE_WIDTH: f32 = 1280.0;
+const TOOLBAR_REFERENCE_WIDTH: f32 = 960.0;
 
 /// Smallest the toolbar is allowed to shrink to, as a fraction of its text size.
 const TOOLBAR_MIN_SCALE: f32 = 0.6;
@@ -1309,6 +1309,24 @@ impl XgViewApp {
     /// Whether the wall stands upright. False whenever the device cannot.
     fn is_portrait(&self) -> bool {
         self.orientation.is_portrait()
+    }
+
+    /// Scales a bar's text and spacing down on a screen narrower than the
+    /// reference width. The larger screen dimension is used so portrait and
+    /// landscape on the same device share the same scale.
+    fn scale_bar(ui: &mut egui::Ui) {
+        let size = ui.ctx().screen_rect().size();
+        let width = size.x.max(size.y);
+        let scale = (width / TOOLBAR_REFERENCE_WIDTH).clamp(TOOLBAR_MIN_SCALE, 1.0);
+        if scale < 1.0 {
+            let style = ui.style_mut();
+            for font in style.text_styles.values_mut() {
+                font.size *= scale;
+            }
+            style.spacing.button_padding.x *= scale;
+            style.spacing.interact_size.x *= scale;
+            style.spacing.item_spacing.x = (style.spacing.item_spacing.x * scale).max(2.0);
+        }
     }
 
     /// Switches the wall between landscape and portrait.
@@ -3069,10 +3087,11 @@ impl XgViewApp {
     /// narrow bar can hold. The settings, the add-devices button and the layout
     /// picker are left out; their panels are built for landscape and do not fit.
     fn portrait_toolbar(&mut self, ui: &mut egui::Ui) {
+        Self::scale_bar(ui);
         self.nav.open("toolbar");
         let mut items: Vec<(Id, Rect)> = Vec::new();
         ui.horizontal_centered(|ui| {
-            ui.label(RichText::new("XGView").size(12.0).strong());
+            ui.label(RichText::new(monitor_core::APP_DISPLAY_NAME).heading().strong());
             let current = self.scheduler.layout();
             for (slot, layout) in GridLayout::PORTRAIT.into_iter().enumerate() {
                 let selected = current == layout && !self.scheduler.is_zoomed();
@@ -3168,6 +3187,7 @@ impl XgViewApp {
     /// name of the control the remote is on. The layout is left out - the
     /// toolbar's own numbered buttons already say which grid is up.
     fn portrait_status_bar(&mut self, ui: &mut egui::Ui) {
+        Self::scale_bar(ui);
         ui.horizontal(|ui| {
             let info = self.scheduler.page_info();
             if self.config.groups.len() > 1 {
@@ -3251,19 +3271,10 @@ impl XgViewApp {
         }
         // The row is laid out for a television. A phone in landscape has less
         // room than that, and wrapping would cost the grid a row, so the bar
-        // gives up text size instead: at 1280 and above nothing changes, and
-        // below it the labels, the buttons' padding and the gaps shrink
-        // together, down to the floor where they stop being readable.
-        let scale = (ui.available_width() / TOOLBAR_REFERENCE_WIDTH).clamp(TOOLBAR_MIN_SCALE, 1.0);
-        if scale < 1.0 {
-            let style = ui.style_mut();
-            for font in style.text_styles.values_mut() {
-                font.size *= scale;
-            }
-            style.spacing.button_padding.x *= scale;
-            style.spacing.interact_size.x *= scale;
-            style.spacing.item_spacing.x = (style.spacing.item_spacing.x * scale).max(2.0);
-        }
+        // gives up text size instead: at the reference width and above nothing
+        // changes, and below it the labels, the buttons' padding and the gaps
+        // shrink together, down to the floor where they stop being readable.
+        Self::scale_bar(ui);
         // The bar is one row of the navigation layer: the arrows move by
         // declaration from here on, one control per press. The controls are
         // registered after they are drawn rather than as they are, in the
@@ -3419,6 +3430,9 @@ impl XgViewApp {
             self.portrait_status_bar(ui);
             return;
         }
+        // The status bar shares the toolbar's scale so the two rows read at the
+        // same size on a phone in landscape, where the bar shrinks to fit.
+        Self::scale_bar(ui);
         ui.horizontal(|ui| {
             // The left half of the row comes and goes - the zoom label, and the
             // name of the control the remote is on - and egui derives a widget's
