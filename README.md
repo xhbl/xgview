@@ -24,12 +24,15 @@ paging beyond that. No cloud, no account, MIT licensed.
 
 **Download:** [latest release](../../releases/latest)
 
-| Platform | File |
-| --- | --- |
+| Platform                           | File                                                                                                                |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | Android / Android TV (arm64, 8.1+) | [`xgview-1.4.70-android-arm64-v8a.apk`](../../releases/download/xgview-v1.4.70/xgview-1.4.70-android-arm64-v8a.apk) |
-| Windows x64 | [`xgview-1.4.70-windows-x86_64.zip`](../../releases/download/xgview-v1.4.70/xgview-1.4.70-windows-x86_64.zip) |
-| Linux x64 | [`xgview-1.4.70-linux-x86_64.tar.gz`](../../releases/download/xgview-v1.4.70/xgview-1.4.70-linux-x86_64.tar.gz) |
-| macOS (universal) | [`xgview-1.4.70-macos-universal.zip`](../../releases/download/xgview-v1.4.70/xgview-1.4.70-macos-universal.zip) |
+| Windows x64                        | [`xgview-1.4.70-windows-x86_64.zip`](../../releases/download/xgview-v1.4.70/xgview-1.4.70-windows-x86_64.zip)       |
+| Linux x64                          | [`xgview-1.4.70-linux-x86_64.tar.gz`](../../releases/download/xgview-v1.4.70/xgview-1.4.70-linux-x86_64.tar.gz)     |
+| macOS (universal)                  | [`xgview-1.4.70-macos-universal.zip`](../../releases/download/xgview-v1.4.70/xgview-1.4.70-macos-universal.zip)     |
+
+**Note: This is a personal project, shared as-is, with no warranty.** It was developed with **AI assistance** under my direction and testing; please review the code before using
+it in sensitive setups.
 
 ![XGView UI](xgview_ui.jpg)
 *The wall with the settings panel open.*
@@ -232,6 +235,11 @@ mode that paints the display directly. On Debian, what that comes to:
   not have one at all. The blanking is the X server's own DPMS, so it is turned off
   at the X level - the `xset -dpms s off` above, or `Option "DPMS" "false"` in
   `xorg.conf`. Sleep itself is still inhibited the usual way, through logind.
+
+A step-by-step walkthrough for Debian 13 - from a minimal install to a
+full-screen wall under systemd, plus Docker for Frigate and Home Assistant - is
+in [docs/DEBIAN-KIOSK.md](docs/DEBIAN-KIOSK.md), with a one-shot
+[`scripts/debian-kiosk.sh`](scripts/debian-kiosk.sh) for the setup itself.
 
 ### macOS: what the device needs
 
