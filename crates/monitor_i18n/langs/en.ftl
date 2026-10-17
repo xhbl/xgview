@@ -52,7 +52,7 @@ corner-bottom-right = Bottom right
 
 ## Settings / System
 settings-startup = Start-up
-settings-autostart = Start with the system boot
+settings-autostart = Start at system boot
 settings-single-instance = Run one instance per configuration
 settings-autostart-unsupported = start-on-boot is not supported on this platform
 settings-mechanism = mechanism: { $name }
@@ -66,21 +66,21 @@ settings-keys = Keys
 key-move-focus = move focus
 key-enter = OK / select / zoom
 key-back = back / cancel
-key-grid = toggle grid layer
+key-grid = switch layout
 key-page = previous / next
 key-settings = settings
 key-add-devices = add devices
 key-fullscreen = full screen
-settings-actions = actions
+settings-actions = Actions
 
 ## Settings / Blackout
 settings-blackout = Blackout
-settings-blackout-hint = During these scheduled hours, the display wall goes fully dark and all cameras stop capturing: sockets are closed and decoding is halted to conserve resources. This state does not constitute system standby or sleep.
+settings-blackout-hint = During these scheduled hours, the display wall goes fully dark and the viewer stops pulling every camera stream: connections are closed and decoding is halted to save resources. The cameras themselves and any recording are unaffected. This is not system standby or sleep.
 settings-blackout-on = Blackout during selected schedules
 settings-blackout-off = Blackout is switched off.
-settings-blackout-resume = Blackout again after
-settings-blackout-minutes =  min
-settings-blackout-resume-hint = Specifies the standby timeout (minutes) for the wall to return back to blackout after being activated. Set to 0 to stay active until the schedules end.
+settings-blackout-resume = Return to blackout after
+settings-blackout-minutes = { " " }min
+settings-blackout-resume-hint = Minutes of inactivity before the wall returns to blackout after being woken. Set to 0 to stay active until the schedule ends.
 settings-blackout-active = Blackout until { $until }.
 settings-blackout-idle = No schedule is in force now.
 settings-blackout-empty = No schedules yet: the wall never blacks itself out.
@@ -94,7 +94,11 @@ settings-group-add = Add Group…
 settings-group-new = New Group
 settings-group-remove = Remove this group
 settings-group-default-set = Set as Default Group
-settings-group-remove-confirm = Remove "{ $name }" and its { $count } camera(s)?
+settings-group-remove-confirm =
+    Remove "{ $name }" and its { $count ->
+        [one] { $count } camera
+       *[other] { $count } cameras
+    }?
 settings-group-remove-yes = Remove
 settings-group-remove-no = Keep
 settings-blackout-to = to
@@ -109,13 +113,13 @@ settings-day-sat = Sat
 settings-day-sun = Sun
 
 ## Settings / Streams
-streams-hint = The multi grid pulls the sub stream and the zoom-in viewport pulls the main stream.
+streams-hint = Multi-camera grids pull the sub stream; the zoomed-in view pulls the main stream.
 settings-reconnect = Reconnect
 streams-first-retry = first retry after
 streams-first-frame-retry = first frame retry after
 streams-then-at-most = then at most
 streams-handshake-timeout = handshake timeout
-streams-change-note = Reconnection changes reach channels already running, at their next retry
+streams-change-note = Reconnection changes reach channels already running, at their next retry.
 streams-backoff = Backoff shape
 streams-factor = factor
 streams-jitter = jitter
@@ -158,13 +162,13 @@ remove-title = Remove "{ $name }"?
 remove-hint = It leaves the wall and the configuration; the camera itself is untouched.
 action-keep = Keep
 action-remove = Remove
-action-cancel = cancel
-action-exit = exit
-action-reboot = reboot
+action-cancel = Cancel
+action-exit = Exit
+action-reboot = Reboot
 
 ## Reboot confirmation
-reboot-confirm-title = reboot the system?
-reboot-confirm-hint = the machine restarts now; unsaved work elsewhere is lost.
+reboot-confirm-title = Reboot the system?
+reboot-confirm-hint = The machine restarts now; unsaved work elsewhere is lost.
 
 ## About
 about-description = A grid viewer for surveillance cameras
@@ -193,7 +197,7 @@ about-import-hint-android = Export saves a config.age to Download/xgview, sealed
 
 ## Passphrase prompt
 prompt-seal-title = Seal the configuration
-prompt-seal-hint = The export is written sealed with a passphrase, so the file is of no use to anyone who finds it. The passphrase is asked for twice and kept nowhere: without it, the file cannot be opened again.
+prompt-seal-hint = The export is written sealed with a passphrase, so the file is of no use to anyone who finds it. You'll be asked for the passphrase twice, and it is kept nowhere: without it, the file cannot be opened again.
 prompt-open-title = This configuration is sealed
 prompt-open-hint = Enter the passphrase it was sealed with.
 prompt-passphrase = Passphrase
@@ -258,10 +262,10 @@ toolbar-layout-8 = Grid 8
 toolbar-layout-10 = Grid 10
 toolbar-layout-12 = Grid 12
 toolbar-layout-13 = Grid 13
-toolbar-layout-p1 = Grid 1 upright
-toolbar-layout-p2 = Grid 2 upright
-toolbar-layout-p3 = Grid 3 upright
-toolbar-layout-p4 = Grid 4 upright
+toolbar-layout-p1 = Grid 1 (portrait)
+toolbar-layout-p2 = Grid 2 (portrait)
+toolbar-layout-p3 = Grid 3 (portrait)
+toolbar-layout-p4 = Grid 4 (portrait)
 toolbar-layout-more = More layouts
 layout-picker-title = Layouts
 portrait-aspect-picker-title = Picture fit
@@ -271,7 +275,7 @@ toolbar-back-grid = Back to the grid
 toolbar-back-grid-tip = Back to the grid (Esc / Back)
 toolbar-prev-page = Previous page
 toolbar-next-page = Next page
-toolbar-page = page { $page } / { $count }
+toolbar-page = page { $page }/{ $count }
 toolbar-fullscreen-enter = Full screen
 toolbar-fullscreen-leave = Leave full screen
 toolbar-fullscreen-enter-tip = Full screen (F11)
@@ -307,7 +311,7 @@ toast-autostart-failed = start-on-boot: { $error }
 toast-reboot-failed = cannot reboot: { $error }
 toast-decoding-gpu = channels reopening, the GPU decodes where it can
 toast-decoding-cpu = channels reopening on the CPU
-toast-no-sub = no sub stream pattern recognised
+toast-no-sub = no sub stream pattern recognized
 toast-reorder = Reorder: Up / Down to move · Confirm to apply · Back to cancel
 toast-config-save-failed = cannot save { $path }: { $error }
 toast-config-exported = configuration exported to { $path }
@@ -339,9 +343,24 @@ toast-synology-found =
 toast-synology-failed = Synology: { $error }
 toast-frigate-failed = Frigate: { $error }
 toast-go2rtc-failed = go2rtc: { $error }
-toast-frigate-found = { $count } camera(s) in Frigate - pick them in the dialog
-toast-go2rtc-found = { $count } stream(s) in go2rtc - pick them in the dialog
-toast-discovery-found = { $devices } ONVIF device(s), { $ports } open port(s)
+toast-frigate-found =
+    { $count ->
+        [one] { $count } camera in Frigate - pick it in the dialog
+       *[other] { $count } cameras in Frigate - pick them in the dialog
+    }
+toast-go2rtc-found =
+    { $count ->
+        [one] { $count } stream in go2rtc - pick it in the dialog
+       *[other] { $count } streams in go2rtc - pick them in the dialog
+    }
+toast-discovery-found =
+    { $devices ->
+        [one] { $devices } ONVIF device
+       *[other] { $devices } ONVIF devices
+    }, { $ports ->
+        [one] { $ports } open port
+       *[other] { $ports } open ports
+    }
 toast-discovery-failed = discovery failed: { $error }
 status-copyright = © { $years }
 status-decoder = decoder: { $backend }
@@ -357,6 +376,7 @@ android-overlay-name = Display over other apps settings
 android-overlay-yes = allowed
 android-overlay-no = not allowed
 android-adb-hint = Or, from a computer with adb:{ $nl }adb shell appops set com.xhbl.xgview SYSTEM_ALERT_WINDOW allow
+
 ## Enum labels (returned by core, translated by the UI)
 stream-kind-main = Main stream
 stream-kind-sub = Sub stream
@@ -382,7 +402,7 @@ aspect-16x9 = 16:9
 aspect-4x3 = 4:3
 aspect-1x1 = 1:1
 aspect-short-original = orig
-aspect-short-stretch = fill
+aspect-short-stretch = stretch
 aspect-short-16x9 = 16:9
 aspect-short-4x3 = 4:3
 aspect-short-1x1 = 1:1
@@ -390,9 +410,9 @@ osd-off = None
 osd-name = Name
 osd-number-name = Number + name
 osd-stream = live-dot + stream
-osd-codec = Codec + rate
+osd-codec = Codec + bitrate
 osd-fps = Decoder + fps
-osd-format = Size + shape
+osd-format = Resolution + aspect ratio
 osd-transport = Transport + url
 osd-date-time = Date + time
 osd-combined-1 = Combined info 1
@@ -437,11 +457,15 @@ dialog-multicast-probe = Multicast probe (local subnet)
 dialog-unicast-probe = Unicast probe over the ranges below (VLAN / cross subnet)
 dialog-ip-ranges-hint = one per line, e.g. 192.168.1.1-254 or 10.0.0.0/24
 dialog-ip-ranges = IP ranges
-dialog-target-count = { $count } target address(es)
+dialog-target-count =
+    { $count ->
+        [one] { $count } target address
+       *[other] { $count } target addresses
+    }
 dialog-tcp-fallback = TCP fallback scan
 dialog-tcp-ports = TCP ports
 dialog-probe-timeout = probe timeout
-dialog-concurrent-probes =  concurrent probes
+dialog-concurrent-probes = concurrent probes
 dialog-onvif-credentials = ONVIF credentials (used by GetProfiles / GetStreamUri)
 dialog-user = User
 dialog-password = Password
@@ -483,9 +507,20 @@ dialog-sub-tag = w/sub
 dialog-already-added = already added, settings differ
 dialog-updated-msg = updated { $name }
 dialog-added-msg = added { $name }
-dialog-discovery-finished = discovery finished: { $devices } ONVIF device(s), { $ports } open port(s)
+dialog-discovery-finished =
+    discovery finished: { $devices ->
+        [one] { $devices } ONVIF device
+       *[other] { $devices } ONVIF devices
+    }, { $ports ->
+        [one] { $ports } open port
+       *[other] { $ports } open ports
+    }
 dialog-imported = imported { $name } ({ $address })
-dialog-synology-count = { $count } camera(s) on Surveillance Station - pick the ones to add
+dialog-synology-count =
+    { $count ->
+        [one] { $count } camera on Surveillance Station - pick the one to add
+       *[other] { $count } cameras on Surveillance Station - pick the ones to add
+    }
 dialog-frigate-hint = Frigate's API: reads the cameras it defines, pairing each one's main and sub stream by measured resolution, and lists the go2rtc streams no camera references.
 dialog-go2rtc-hint = go2rtc's HTTP API: lists the streams it serves; each one is added on its own.
 dialog-frigate-credentials = Frigate credentials (used by /api/login and /api/config)
@@ -509,8 +544,19 @@ dialog-contacting-server = contacting the server…
 dialog-frigate-cameras = Cameras in Frigate ({ $count })
 dialog-frigate-streams = Other go2rtc streams ({ $count })
 dialog-go2rtc-streams = Streams ({ $count })
-dialog-frigate-count = { $count } camera(s) in Frigate, { $extra } other stream(s) - pick the ones to add
-dialog-go2rtc-count = { $count } stream(s) - pick the ones to add
+dialog-frigate-count =
+    { $count ->
+        [one] { $count } camera
+       *[other] { $count } cameras
+    } in Frigate, { $extra ->
+        [one] { $extra } other stream
+       *[other] { $extra } other streams
+    } - pick the ones to add
+dialog-go2rtc-count =
+    { $count ->
+        [one] { $count } stream - pick the one to add
+       *[other] { $count } streams - pick the ones to add
+    }
 dialog-starting = starting…
 dialog-stream-url-required = a stream url is required
 dialog-url-must-start = the url must start with rtsp://, rtsps://, http://, https://, ws:// or wss://

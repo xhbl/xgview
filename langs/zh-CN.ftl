@@ -64,7 +64,7 @@ settings-keys = 按键
 key-move-focus = 移动焦点
 key-enter = 确认 / 选择 / 缩放
 key-back = 返回 / 取消
-key-grid = 切换宫格
+key-grid = 切换布局
 key-page = 上一页 / 下一页
 key-settings = 设置
 key-add-devices = 添加设备
@@ -73,15 +73,15 @@ settings-actions = 操作
 
 ## 设置 / 黑屏
 settings-blackout = 黑屏
-settings-blackout-hint = 在这些时段内，监控墙变黑且摄像头全面停止采集：套接字全部断开，数据解码停止，以节省系统资源。此状态不属于系统待机或睡眠。
+settings-blackout-hint = 在这些时段内，监控墙变黑，本程序停止拉取所有摄像头的码流：连接全部断开，解码停止，以节省系统资源。摄像头本身及其录像不受影响。此状态不属于系统待机或睡眠。
 settings-blackout-on = 在选择的时段黑屏
 settings-blackout-off = 黑屏已关闭。
 settings-blackout-resume = 再次黑屏于
-settings-blackout-minutes =  分钟
+settings-blackout-minutes = 分钟
 settings-blackout-resume-hint = 设定监控墙被激活后重新进入黑屏状态所需的等待时间（分钟）。设置为 0 表示保持激活持续到时段结束。
 settings-blackout-active = 黑屏至 { $until }。
 settings-blackout-idle = 当前没有生效的时段。
-settings-blackout-empty = 暂无时段：画面不会自动黑屏。
+settings-blackout-empty = 暂无时段：监控墙不会自动黑屏。
 settings-blackout-enabled = 该时段是否生效
 settings-blackout-days = 星期
 settings-group-name = 组名
@@ -121,9 +121,9 @@ streams-spread = 错峰
 streams-attempts = 尝试次数（0 = 无限）
 settings-decoding = 解码
 streams-prefer-hardware = 优先硬件解码
-streams-summary-fixed = 解码交给平台处理：能硬解的走硬解，平台收不下的流由其自行回落，因此无需切换。
+streams-summary-fixed = 解码交给平台处理：能硬解的走硬解，平台无法处理的流由其自行回落，因此无需切换。
 streams-summary-available = 若设备支持该视频流的硬件解码，则由 GPU 解码；其余情况均由 CPU 解码。每个画面均会显示当前所使用的解码方式。
-streams-summary-software = 当前此处未集成硬件解码器：无论此项如何设置，均由 CPU 进行软件解码。
+streams-summary-software = 当前构建未集成硬件解码器：无论此项如何设置，均由 CPU 进行软件解码。
 
 ## 摄像头
 cameras-confirm-order = 确认顺序
@@ -133,7 +133,7 @@ cameras-sub-derived = 辅流：推断
 cameras-sub-set = 辅流：已设
 cameras-infer-sub = 推断辅流
 cameras-connect-tip = 此摄像头的连接方式，点击切换到下一档：AUTO 优先 RTSP、连不上转 MSE；RTSP 与 MSE 各自强制一种。
-cameras-transport-tip = 此摄像头的 RTSP 传输方式。UDP 可绕过损坏 TCP 交叉帧的中继。
+cameras-transport-tip = 此摄像头的 RTSP 传输方式。UDP 可绕过破坏 RTSP over TCP 交织帧的中继。
 cameras-remove-tip = 移除此摄像头
 cameras-edit-tip = 编辑此摄像头
 cameras-edit-name = 编辑摄像头
@@ -153,7 +153,7 @@ camera-edit-detach = 脱离导入
 
 ## 移除确认
 remove-title = 移除“{ $name }”？
-remove-hint = 它将离开大屏和配置；摄像头本身不受影响。
+remove-hint = 它将离开监控墙和配置；摄像头本身不受影响。
 action-keep = 保留
 action-remove = 移除
 action-cancel = 取消
@@ -165,7 +165,7 @@ reboot-confirm-title = 重启系统？
 reboot-confirm-hint = 机器将立即重启，其他未保存的工作会丢失。
 
 ## 关于
-about-description = 监控摄像头网格查看器
+about-description = 监控摄像头宫格查看器
 about-title = { $app }：{ $description }
 about-version-by = v{ $version } 作者
 about-copyright = · © { $years }
@@ -256,6 +256,10 @@ toolbar-layout-8 = 宫格 8
 toolbar-layout-10 = 宫格 10
 toolbar-layout-12 = 宫格 12
 toolbar-layout-13 = 宫格 13
+toolbar-layout-p1 = 竖屏宫格 1
+toolbar-layout-p2 = 竖屏宫格 2
+toolbar-layout-p3 = 竖屏宫格 3
+toolbar-layout-p4 = 竖屏宫格 4
 toolbar-layout-more = 更多布局
 layout-picker-title = 布局
 portrait-aspect-picker-title = 画面比例
@@ -265,7 +269,7 @@ toolbar-back-grid = 返回宫格
 toolbar-back-grid-tip = 返回宫格（Esc / 返回）
 toolbar-prev-page = 上一页
 toolbar-next-page = 下一页
-toolbar-page = 第 { $page } / { $count } 页
+toolbar-page = 第 { $page }/{ $count } 页
 toolbar-fullscreen-enter = 全屏
 toolbar-fullscreen-leave = 退出全屏
 toolbar-fullscreen-enter-tip = 全屏（F11）
@@ -274,18 +278,23 @@ toolbar-settings = 设置
 toolbar-settings-tip = 设置（F1）
 toolbar-add-devices = 添加设备
 toolbar-add-devices-tip = 添加设备（F2）
+toolbar-orientation-portrait = 竖屏
+toolbar-orientation-portrait-tip = 切换到竖屏
+toolbar-orientation-landscape = 横屏
+toolbar-orientation-landscape-tip = 切换到横屏
 
 ## 状态栏
 status-live = { $live }/{ $total } 在线
 status-page = { $layout } · 第 { $page }/{ $count } 页
+status-page-plain = 第 { $page }/{ $count } 页
 status-zoom = 1x1 放大 · 主码流
 status-focus = 焦点 #{ $index }
 status-no-focus = 无焦点
 
-## 大屏与退出
+## 监控墙与退出
 wall-empty-title = 未配置摄像头
 wall-empty-title-group = { wall-empty-title } ({ $group })
-wall-empty-hint = 点击 "+" 或按 F2 扫描网络摄像头或手动添加
+wall-empty-hint = 点击“+”或按 F2 扫描网络摄像头或手动添加
 wall-empty-hint-portrait = 请切换到横屏模式添加摄像头
 exit-hint = 再按一次返回退出
 
@@ -296,7 +305,7 @@ toast-autostart-failed = 开机自启：{ $error }
 toast-reboot-failed = 无法重启：{ $error }
 toast-decoding-gpu = 通道重开，GPU 尽力解码
 toast-decoding-cpu = 通道在 CPU 上重开
-toast-no-sub = 未识别辅码流模式
+toast-no-sub = 未识别出辅码流地址规则
 toast-reorder = 重排：上 / 下移动 · 确认应用 · 返回取消
 toast-config-save-failed = 无法保存 { $path }：{ $error }
 toast-config-exported = 配置已导出到 { $path }
@@ -324,7 +333,7 @@ status-copyright = © { $years }
 status-decoder = 解码器：{ $backend }
 
 ## Android 开机自启
-android-boot-hint = Android 除非系统允许，否则拒绝从开机广播启动应用。以下任一在设备上设置一次即可。
+android-boot-hint = Android 除非系统允许，否则拒绝从开机广播启动应用。以下任一项在设备上设置一次即可。
 android-home-button = 主屏应用…
 android-home-name = 主屏应用设置
 android-home-yes = XGView 是主屏应用
@@ -360,7 +369,7 @@ aspect-16x9 = 16:9
 aspect-4x3 = 4:3
 aspect-1x1 = 1:1
 aspect-short-original = 原始
-aspect-short-stretch = 填满
+aspect-short-stretch = 拉伸
 aspect-short-16x9 = 16:9
 aspect-short-4x3 = 4:3
 aspect-short-1x1 = 1:1
@@ -396,7 +405,7 @@ grid-stream-failed = 码流失败
 
 grid-suspended = 已挂起
 grid-switching-to = 切换到 { $stream }…
-grid-holding-last = 保留上一 { $tag } 帧
+grid-holding-last = 保留上一{ $tag }码流帧
 grid-waiting-video = 等待画面
 
 ## 添加设备对话框
@@ -419,7 +428,7 @@ dialog-target-count = { $count } 个目标地址
 dialog-tcp-fallback = TCP 回退扫描
 dialog-tcp-ports = TCP 端口
 dialog-probe-timeout = 探测超时
-dialog-concurrent-probes =  并发探测数
+dialog-concurrent-probes = 并发探测数
 dialog-onvif-credentials = ONVIF 凭据（用于 GetProfiles / GetStreamUri）
 dialog-user = 用户
 dialog-password = 密码
@@ -464,8 +473,8 @@ dialog-added-msg = 已添加 { $name }
 dialog-discovery-finished = 发现完成：{ $devices } 个 ONVIF 设备，{ $ports } 个开放端口
 dialog-imported = 已导入 { $name }（{ $address }）
 dialog-synology-count = Surveillance Station 上 { $count } 个摄像头——选择要添加的
-dialog-frigate-hint = 走 Frigate 的 API：读取它定义的摄像头，按实测分辨率配对主/辅码流，并列出没有被任何摄像头引用的 go2rtc 流。
-dialog-go2rtc-hint = 走 go2rtc 的 HTTP API：列出它提供的流，每一条单独添加。
+dialog-frigate-hint = 通过 Frigate 的 API：读取它定义的摄像头，按实测分辨率配对主/辅码流，并列出没有被任何摄像头引用的 go2rtc 流。
+dialog-go2rtc-hint = 通过 go2rtc 的 HTTP API：列出它提供的流，每一条单独添加。
 dialog-frigate-credentials = Frigate 账号（用于 /api/login 与 /api/config）
 dialog-go2rtc-credentials = go2rtc API 账号（用于 /api/streams）
 dialog-rtsp-credentials = 转流账号（用于转流地址）
