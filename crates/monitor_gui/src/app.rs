@@ -7182,7 +7182,7 @@ mod tests {
                     for (row, scope) in LAYOUT_PICKER_ROWS.iter().enumerate() {
                         ui.horizontal(|ui| {
                             nav.open(scope);
-                            for slot in row * 3..row * 3 + 3 {
+                            for _ in row * 3..row * 3 + 3 {
                                 let (_, response) =
                                     ui.allocate_exact_size(vec2(108.0, 84.0), Sense::click());
                                 if anchor.is_none() {

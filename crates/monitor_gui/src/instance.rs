@@ -256,7 +256,7 @@ mod platform {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix, not(target_os = "android")))]
 mod tests {
     use std::path::PathBuf;
 
@@ -276,7 +276,6 @@ mod tests {
     /// One test rather than three because the claim is held in a process-wide
     /// static - two of these running side by side would be reading each other's
     /// socket.
-    #[cfg(all(unix, not(target_os = "android")))]
     #[test]
     fn a_claim_is_per_configuration_and_carries_the_ask() {
         let wall = scratch("wall.json");
