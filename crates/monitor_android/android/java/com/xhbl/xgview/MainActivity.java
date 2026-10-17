@@ -956,7 +956,7 @@ public class MainActivity extends NativeActivity {
     //
     // The About tab's export and import. Android has no file dialog of the
     // desktop kind, so the export goes to a fixed place any file manager can
-    // reach - Download/xgview/config.age - while the import is handed to the
+    // reach - Download/xgview/xgvconfig.seal - while the import is handed to the
     // system's own document picker. The picker is not a preference: from
     // Android 11 a plain path into shared storage is closed to an app for any
     // file it did not create itself, which is exactly the case for a
@@ -966,10 +966,10 @@ public class MainActivity extends NativeActivity {
     private static final String EXPORT_FOLDER = "Download/xgview";
 
     // The sealed configuration's own type. It cannot be `text/plain`: the
-    // Downloads provider appends the extension a MIME type maps to, so a
-    // `config.age` written as text/plain lands on the device as
-    // `config.age.txt`. This one maps to nothing and the name is left alone.
-    private static final String SEALED_MIME_TYPE = "application/vnd.xgview.age";
+    // Downloads provider appends the extension a MIME type maps to, so an
+    // `xgvconfig.seal` written as text/plain lands on the device as
+    // `xgvconfig.seal.txt`. This one maps to nothing and the name is left alone.
+    private static final String SEALED_MIME_TYPE = "application/vnd.xgview.seal";
 
     /** Request code for the storage permission Android 9 needs to write there. */
     private static final int REQUEST_WRITE_STORAGE = 0x5847;

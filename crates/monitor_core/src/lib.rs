@@ -120,4 +120,4 @@ pub const CONFIG_FILE_NAME: &str = "xgvconfig.json";
 /// Different from [`CONFIG_FILE_NAME`] on purpose: the file this machine reads
 /// back is JSON in clear, while an export is sealed with a passphrase - see
 /// [`sealed`] - and the two are not interchangeable.
-pub const EXPORT_FILE_NAME: &str = "xgvconfig.age";
+pub const EXPORT_FILE_NAME: &str = "xgvconfig.seal";

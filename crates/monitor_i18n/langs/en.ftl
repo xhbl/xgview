@@ -193,7 +193,7 @@ about-import-name = Import configuration
 about-only-cameras = Only import the cameras
 about-only-cameras-name = Only import the cameras
 about-import-hint = Importing overwrites your current configuration. Check the box to import the cameras and their groups only, keeping your viewer settings. The export is sealed with a passphrase unless you untick the box beside it.
-about-import-hint-android = Export saves a config.age to Download/xgview, sealed with a passphrase unless you untick the box beside it. Import opens the system file picker. { about-import-hint }
+about-import-hint-android = Export saves an xgvconfig.seal to Download/xgview, sealed with a passphrase unless you untick the box beside it. Import opens the system file picker. { about-import-hint }
 
 ## Passphrase prompt
 prompt-seal-title = Seal the configuration
@@ -206,6 +206,7 @@ prompt-reveal = Show the passphrase
 prompt-passphrase-empty = Enter a passphrase
 prompt-passphrase-mismatch = The two entries are not the same
 prompt-passphrase-wrong = That passphrase did not open it — try again
+prompt-open-working = Opening the configuration…
 prompt-seal-action = Export
 prompt-open-action = Open
 
@@ -316,6 +317,7 @@ toast-reorder = Reorder: Up / Down to move · Confirm to apply · Back to cancel
 toast-config-save-failed = cannot save { $path }: { $error }
 toast-config-exported = configuration exported to { $path }
 toast-export-failed = cannot export: { $error }
+toast-export-interrupted = the export did not finish
 toast-export-needs-storage = export needs the storage permission - grant it, then export again
 toast-imported =
     imported { $count ->

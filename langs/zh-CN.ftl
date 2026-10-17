@@ -187,7 +187,7 @@ about-import-name = 导入配置
 about-only-cameras = 仅导入摄像头
 about-only-cameras-name = 仅导入摄像头
 about-import-hint = 导入会覆盖当前配置。勾选此框仅导入摄像头及其分组，保留本查看器自身的设置。导出默认用口令加密后写入，取消旁边的勾选则明文导出。
-about-import-hint-android = 导出会将 config.age 保存到 Download/xgview，默认用口令加密，取消勾选则明文导出。导入会打开系统文件选择器。{ about-import-hint }
+about-import-hint-android = 导出会将 xgvconfig.seal 保存到 Download/xgview，默认用口令加密，取消勾选则明文导出。导入会打开系统文件选择器。{ about-import-hint }
 
 ## 口令
 prompt-seal-title = 加密配置
@@ -200,6 +200,7 @@ prompt-reveal = 显示口令
 prompt-passphrase-empty = 请输入口令
 prompt-passphrase-mismatch = 两次输入的口令不一致
 prompt-passphrase-wrong = 口令无法打开此文件——请重试
+prompt-open-working = 正在打开配置…
 prompt-seal-action = 导出
 prompt-open-action = 打开
 
@@ -310,6 +311,7 @@ toast-reorder = 重排：上 / 下移动 · 确认应用 · 返回取消
 toast-config-save-failed = 无法保存 { $path }：{ $error }
 toast-config-exported = 配置已导出到 { $path }
 toast-export-failed = 无法导出：{ $error }
+toast-export-interrupted = 导出未能完成
 toast-export-needs-storage = 导出需要存储权限——授权后再导出一次
 toast-imported = 已从 { $path } 导入 { $count } 个摄像头
 toast-imported-document = 已从所选文件导入 { $count } 个摄像头

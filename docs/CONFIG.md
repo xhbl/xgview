@@ -41,14 +41,16 @@ The viewer persists everything to one JSON file, created on first launch:
 - The About tab can **export** and **import** the configuration; "Only import
   the cameras" keeps the viewer's own settings, and takes the cameras and the
   groups they belong to from the file.
-- An **export is sealed** with a passphrase before it is written - an `age`
-  document, `config.age`, whole-file rather than only the credentials - because
-  the copy is the one that travels between machines. The passphrase is asked for
-  twice and kept nowhere. A box beside the export button writes the JSON in clear
-  instead, as `config.json`, for a file that is going no further than a machine
-  you trust; like the "Only import the cameras" box, it lasts for the session and
-  is not saved. **Import reads either form**: a sealed file asks for
-  its passphrase, and an older `config.json` in clear is read as it always was.
+- An **export is sealed** with a passphrase before it is written - the document
+  is `config.seal`, whole-file rather than only the credentials, encrypted with
+  XChaCha20-Poly1305 under a key stretched from the passphrase by
+  PBKDF2-HMAC-SHA256 - because the copy is the one that travels between machines.
+  The passphrase is asked for twice and kept nowhere. A box beside the export
+  button writes the JSON in clear instead, as `config.json`, for a file that is
+  going no further than a machine you trust; like the "Only import the cameras"
+  box, it lasts for the session and is not saved. **Import reads either form**: a
+  sealed file asks for its passphrase, and a `config.json` in clear is read as it
+  always was.
 - An **import keeps what it replaces**: the configuration it supersedes is left
   beside it as `config.json.bak` before the new one is adopted, and a JSON
   document that is not an XGView configuration is refused rather than read as an

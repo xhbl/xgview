@@ -412,6 +412,9 @@ struct Passphrase {
     reveal: bool,
     /// Why the last attempt did not go through, drawn in place.
     error: Option<String>,
+    /// Whether the passphrase is being stretched right now, on a thread of its
+    /// own. The window stays up and its buttons go away until the answer is in.
+    working: bool,
     /// The sealed document an import is opening, and where it came from.
     sealed: Option<String>,
     /// The file the document came from, where the platform names one - the
@@ -428,6 +431,7 @@ impl Passphrase {
             again: String::new(),
             reveal: false,
             error: None,
+            working: false,
             sealed: None,
             origin: None,
         }
@@ -441,6 +445,7 @@ impl Passphrase {
             again: String::new(),
             reveal: false,
             error: None,
+            working: false,
             sealed: Some(sealed),
             origin,
         }
@@ -466,6 +471,42 @@ impl Passphrase {
             SealJob::Import => "prompt-open-action",
         })
     }
+}
+
+/// Where a sealed export is written once its text is in.
+#[derive(Debug)]
+enum ExportTarget {
+    /// The desktop: the file its dialog chose.
+    #[cfg(not(target_os = "android"))]
+    File(PathBuf),
+    /// Android: the name to write into the public `Download/xgview` folder.
+    #[cfg(target_os = "android")]
+    Download(&'static str),
+}
+
+/// A passphrase being stretched, or a sealed document being opened, on a thread
+/// of its own.
+///
+/// Stretching one is hundreds of thousands of rounds of arithmetic: nothing on
+/// this side of a second on the desktop, and the better part of one on a
+/// television - and the wall has to keep drawing while it runs, because a frame
+/// that does not is an application the system is entitled to call dead. So it
+/// happens away from the render loop and the answer is taken by
+/// [`XgViewApp::poll_sealing`], one job at a time: the prompt that starts one
+/// stays up until it has been answered.
+#[derive(Debug)]
+enum Sealing {
+    /// A sealed document being opened for the prompt that is up for it.
+    Open {
+        result: Receiver<Result<AppConfig, ()>>,
+        origin: Option<PathBuf>,
+    },
+    /// The configuration being sealed for an export, which is written out as
+    /// soon as the text is in.
+    Export {
+        result: Receiver<Result<String, String>>,
+        target: ExportTarget,
+    },
 }
 
 /// What the file dialog is open for, while it is.
@@ -494,7 +535,7 @@ fn new_file_dialog() -> FileDialog {
     let configurations = monitor_i18n::tr("file-dialog-filter-config");
     FileDialog::new()
         .labels(file_dialog_labels())
-        .add_file_filter_extensions(&configurations, vec!["age", "json"])
+        .add_file_filter_extensions(&configurations, vec!["seal", "json"])
         .default_file_filter(&configurations)
         .default_size([760.0, 480.0])
         .min_size([520.0, 340.0])
@@ -785,6 +826,8 @@ pub struct XgViewApp {
     passphrase: Option<Passphrase>,
     /// First control of the prompt, to hand it the focus as it opens.
     passphrase_anchor: Option<Id>,
+    /// The seal or open running on a thread of its own, if any. See [`Sealing`].
+    sealing: Option<Sealing>,
     /// Watches the prompt for the frame it appears on.
     passphrase_handoff: Handoff,
     /// The Android start-on-boot state - whether the app may draw over other
@@ -1087,6 +1130,7 @@ impl XgViewApp {
             encrypt_export: true,
             passphrase: None,
             passphrase_anchor: None,
+            sealing: None,
             passphrase_handoff: Handoff::default(),
             #[cfg(target_os = "android")]
             android_boot: (false, false),
@@ -1660,7 +1704,7 @@ impl XgViewApp {
         match &job {
             FileJob::Export(passphrase) => {
                 // The name says which of the two the file is: the sealed export
-                // carries an `.age` and the one written in clear a `.json`, and
+                // carries a `.seal` and the one written in clear a `.json`, and
                 // both are what the dialog's filter accepts.
                 self.file_dialog.config_mut().default_file_name = if passphrase.is_some() {
                     monitor_core::EXPORT_FILE_NAME
@@ -2660,7 +2704,10 @@ impl XgViewApp {
         // it, whatever inside it has the focus. A field's caret must not hold it
         // open - Back on the first field would otherwise hand the focus back to
         // that same field, and the window could never be left.
-        if (self.passphrase.is_some()
+        // A prompt whose passphrase is being stretched is the exception: it is
+        // the one thing on this side of the answer that cannot be backed out of,
+        // because the answer would then have nowhere to go.
+        if ((self.passphrase.as_ref().is_some_and(|prompt| !prompt.working))
             || self.camera_edit.is_some()
             || self.remove_confirm.is_some()
             || self.system_confirm.is_some())
@@ -5356,7 +5403,6 @@ impl XgViewApp {
         let Some(mut prompt) = self.passphrase.take() else {
             return false;
         };
-        let mut changed = false;
         let mut confirm = false;
         let mut leave = false;
 
@@ -5408,17 +5454,28 @@ impl XgViewApp {
             }
 
             ui.add_space(theme::space::M);
-            let action = prompt.action();
-            let cancel_label = monitor_i18n::tr("cancel");
-            ui.horizontal(|ui| {
-                ui.add_space(Self::center_offset(ui, &[&action, &cancel_label]));
-                if self.nav.tracked(ui.button(action)).clicked() {
-                    confirm = true;
-                }
-                if self.nav.tracked(ui.button(cancel_label)).clicked() {
-                    leave = true;
-                }
-            });
+            if prompt.working {
+                // The passphrase is being stretched away from this thread: the
+                // window stays up and says so, and its two buttons are gone,
+                // because there is nothing to press until the answer is in.
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.add_space(theme::space::S);
+                    ui.label(monitor_i18n::tr("prompt-open-working"));
+                });
+            } else {
+                let action = prompt.action();
+                let cancel_label = monitor_i18n::tr("cancel");
+                ui.horizontal(|ui| {
+                    ui.add_space(Self::center_offset(ui, &[&action, &cancel_label]));
+                    if self.nav.tracked(ui.button(action)).clicked() {
+                        confirm = true;
+                    }
+                    if self.nav.tracked(ui.button(cancel_label)).clicked() {
+                        leave = true;
+                    }
+                });
+            }
             self.nav.close();
         });
 
@@ -5437,20 +5494,13 @@ impl XgViewApp {
                     }
                 }
                 SealJob::Import => {
+                    // Handed to a thread of its own, because stretching the
+                    // passphrase is the better part of a second of arithmetic:
+                    // what comes of it is taken by `poll_sealing`, and the
+                    // prompt waits for it with its buttons gone.
                     let data = prompt.sealed.clone().unwrap_or_default();
-                    match monitor_core::sealed::open(&data, &prompt.first) {
-                        Ok(imported) => {
-                            let count = self.apply_import_config(imported);
-                            self.say_imported(count, prompt.origin.clone());
-                            changed = true;
-                            leave = true;
-                        }
-                        // A wrong passphrase and a damaged file read the same
-                        // way, and it is the passphrase that is worth another
-                        // try: the entry stays, the window stays, and one more
-                        // attempt is one more field's worth of typing.
-                        Err(_) => prompt.error = Some(monitor_i18n::tr("prompt-passphrase-wrong")),
-                    }
+                    self.spawn_open(data, prompt.first.clone(), prompt.origin.clone());
+                    prompt.working = true;
                 }
             }
         }
@@ -5460,7 +5510,9 @@ impl XgViewApp {
         } else {
             self.passphrase = Some(prompt);
         }
-        changed
+        // Nothing here changes the configuration any more: what an opened file
+        // becomes is settled by `poll_sealing`, on the frame the answer arrives.
+        false
     }
 
     /// What the program is, where its configuration lives, and the export /
@@ -5614,16 +5666,30 @@ impl XgViewApp {
     /// viewer has already chosen.
     ///
     /// Choosing it is the dialog [`Self::ask_for_file`] opens on another thread;
-    /// this is what happens once its answer is in.
+    /// this is what happens once its answer is in. Sealing is handed to a thread
+    /// of its own and the file is written when the text is in - see
+    /// [`Self::poll_sealing`] - while the JSON, which costs nothing to produce,
+    /// goes out from here.
     #[cfg(not(target_os = "android"))]
     fn export_to(&mut self, path: &Path, passphrase: Option<&str>) {
-        let written = match self.exported_text(passphrase) {
-            Ok(written) => written,
-            Err(error) => {
-                self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]), ToastKind::Error);
-                return;
+        match passphrase {
+            Some(passphrase) => {
+                self.spawn_seal(passphrase.to_owned(), ExportTarget::File(path.to_path_buf()))
             }
-        };
+            None => match self.config.to_json() {
+                Ok(written) => self.write_export_to(path, &written),
+                Err(error) => self.flash(
+                    monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]),
+                    ToastKind::Error,
+                ),
+            },
+        }
+    }
+
+    /// Writes what an export came to into the file the dialog chose, and says
+    /// where it went.
+    #[cfg(not(target_os = "android"))]
+    fn write_export_to(&mut self, path: &Path, written: &str) {
         match std::fs::write(path, written.as_bytes()) {
             Ok(()) => self.flash(
                 monitor_i18n::tr_args(
@@ -5636,27 +5702,11 @@ impl XgViewApp {
         }
     }
 
-    /// The configuration as it goes into an export: sealed under `passphrase`,
-    /// or the JSON in clear when there is none.
-    ///
-    /// One place for the two, because the desktop writes the text to a file the
-    /// dialog chose and Android hands it to the activity's `MediaStore`, and
-    /// neither should be deciding what an export is.
-    fn exported_text(&self, passphrase: Option<&str>) -> Result<String, String> {
-        match passphrase {
-            Some(passphrase) => monitor_core::sealed::seal(&self.config, passphrase)
-                .map_err(|error| error.to_string()),
-            None => self.config.to_json().map_err(|error| error.to_string()),
-        }
-    }
-
     /// Writes the configuration out into the public `Download/xgview` folder:
     /// sealed with `passphrase`, or the JSON in clear when there is none.
     ///
-    /// The write is the activity's - `MediaStore` from Android 10 on, a plain
-    /// file into the public Downloads folder before that - because a
-    /// `NativeActivity` has no storage of its own the viewer can reach. See
-    /// `MainActivity.writeDownloadFile`.
+    /// The sealing itself is handed to a thread of its own, and the write
+    /// follows it there; see [`Self::poll_sealing`].
     #[cfg(target_os = "android")]
     fn export_config(&mut self, passphrase: Option<&str>) {
         // The name says which of the two the file is, as it does for the
@@ -5666,14 +5716,30 @@ impl XgViewApp {
         } else {
             monitor_core::CONFIG_FILE_NAME
         };
-        let written = match self.exported_text(passphrase) {
-            Ok(written) => written,
-            Err(error) => {
-                self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]), ToastKind::Error);
-                return;
+        match passphrase {
+            Some(passphrase) => {
+                self.spawn_seal(passphrase.to_owned(), ExportTarget::Download(name))
             }
-        };
-        match crate::android::write_download(name, &written) {
+            None => match self.config.to_json() {
+                Ok(written) => self.write_download_export(name, &written),
+                Err(error) => self.flash(
+                    monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]),
+                    ToastKind::Error,
+                ),
+            },
+        }
+    }
+
+    /// Writes what an export came to into the public `Download/xgview` folder
+    /// under `name`.
+    ///
+    /// The write is the activity's - `MediaStore` from Android 10 on, a plain
+    /// file into the public Downloads folder before that - because a
+    /// `NativeActivity` has no storage of its own the viewer can reach. See
+    /// `MainActivity.writeDownloadFile`.
+    #[cfg(target_os = "android")]
+    fn write_download_export(&mut self, name: &str, written: &str) {
+        match crate::android::write_download(name, written) {
             Ok(crate::android::ExportOutcome::Written(path)) => self.flash(
                 monitor_i18n::tr_args("toast-config-exported", &[("path", path.into())]),
                 ToastKind::Info,
@@ -5818,6 +5884,97 @@ impl XgViewApp {
             Some(crate::android::Picked::Failed(error)) => {
                 self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error)
             }
+        }
+    }
+
+    /// Hands a sealed document and a passphrase to a thread of its own.
+    ///
+    /// Nothing waits for it: stretching a passphrase is hundreds of thousands of
+    /// rounds, and the render loop has a wall to draw. What comes back is taken
+    /// by [`Self::poll_sealing`] on a later frame.
+    fn spawn_open(&mut self, data: String, passphrase: String, origin: Option<PathBuf>) {
+        let (sender, result) = unbounded();
+        std::thread::spawn(move || {
+            // A wrong passphrase and a damaged document are one answer here, as
+            // they are inside `sealed::open`: neither says anything the other
+            // does not, and the prompt has one thing to say about both.
+            let _ = sender.send(monitor_core::sealed::open(&data, &passphrase).map_err(|_| ()));
+        });
+        self.sealing = Some(Sealing::Open { result, origin });
+        self.mark_dirty();
+    }
+
+    /// Hands an export's passphrase to a thread of its own, with where the text
+    /// it comes to is to be written.
+    fn spawn_seal(&mut self, passphrase: String, target: ExportTarget) {
+        let (sender, result) = unbounded();
+        let config = self.config.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(
+                monitor_core::sealed::seal(&config, &passphrase).map_err(|error| error.to_string()),
+            );
+        });
+        self.sealing = Some(Sealing::Export { result, target });
+        self.mark_dirty();
+    }
+
+    /// Takes what a sealing thread has come to, if it has.
+    ///
+    /// Run once a frame with the other answers the background jobs leave behind.
+    /// The thread is left to finish by itself when the job is over - what it
+    /// holds is a document and a passphrase, and there is nothing to gain by
+    /// stopping it half way.
+    fn poll_sealing(&mut self) {
+        use crossbeam_channel::TryRecvError;
+
+        let Some(sealing) = self.sealing.take() else {
+            return;
+        };
+        match sealing {
+            Sealing::Open { result, origin } => match result.try_recv() {
+                Ok(Ok(config)) => {
+                    let count = self.apply_import_config(config);
+                    self.say_imported(count, origin);
+                    self.passphrase = None;
+                    self.passphrase_anchor = None;
+                    self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
+                    self.mark_dirty();
+                }
+                // A wrong passphrase and a damaged document read the same way,
+                // and it is the passphrase that is worth another try: the entry
+                // stays, the window stays with this said under it, and a second
+                // attempt is a second field's worth of typing.
+                Ok(Err(())) | Err(TryRecvError::Disconnected) => {
+                    if let Some(prompt) = self.passphrase.as_mut() {
+                        prompt.working = false;
+                        prompt.error = Some(monitor_i18n::tr("prompt-passphrase-wrong"));
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    self.sealing = Some(Sealing::Open { result, origin });
+                }
+            },
+            Sealing::Export { result, target } => match result.try_recv() {
+                Ok(Ok(written)) => match target {
+                    #[cfg(not(target_os = "android"))]
+                    ExportTarget::File(path) => self.write_export_to(&path, &written),
+                    #[cfg(target_os = "android")]
+                    ExportTarget::Download(name) => self.write_download_export(name, &written),
+                },
+                Ok(Err(error)) => self.flash(
+                    monitor_i18n::tr_args("toast-export-failed", &[("error", error.into())]),
+                    ToastKind::Error,
+                ),
+                // The thread is gone without an answer, which the seal itself
+                // has no way of doing. The file is not written, and that is what
+                // is said about it.
+                Err(TryRecvError::Disconnected) => {
+                    self.flash(monitor_i18n::tr("toast-export-interrupted"), ToastKind::Error)
+                }
+                Err(TryRecvError::Empty) => {
+                    self.sealing = Some(Sealing::Export { result, target });
+                }
+            },
         }
     }
 
@@ -6521,6 +6678,12 @@ impl eframe::App for XgViewApp {
         self.chrome.input_seen = self.viewer_active(ctx);
 
         self.poll_events();
+        self.poll_sealing();
+        // An answer comes back with the wall drawn a frame or two after it was
+        // asked for, so the frame it lands in has to come on its own.
+        if self.sealing.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         // The navigation layer starts its frame here: the layout it collects
         // while the widgets are drawn below becomes the one the next frame's
         // arrows read. The keys handed out just above used the previous one.
