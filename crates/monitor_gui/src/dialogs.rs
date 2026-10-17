@@ -577,6 +577,85 @@ pub fn start_go2rtc(handle: &Handle, events: &Sender<BackgroundEvent>, config: G
     });
 }
 
+/// Height of a dialog's title bar: the close cross plus 1px above and below it.
+/// The bar is this tall whether or not the dialog has a cross, so that every
+/// dialog's title sits at the same height.
+pub const CLOSE_SIDE: f32 = 28.0;
+const TITLE_EDGE: f32 = 1.0;
+pub const TITLE_BAR_H: f32 = CLOSE_SIDE + 2.0 * TITLE_EDGE;
+/// Gap between the dialog's left border and the title text.
+const TITLE_INSET: f32 = 4.0;
+/// Nudge of the title text, to correct the glyphs' optical centre (+ is down).
+const TITLE_DY: f32 = 0.0;
+
+/// What [`title_bar`] hands back.
+pub struct TitleBar {
+    /// The close cross, when the dialog has one. Whether it joins the
+    /// navigation layer is left to the caller.
+    pub close: Option<egui::Response>,
+    /// The 1px rule under the bar, for a caller that anchors the focus on it.
+    pub rule: egui::Rect,
+}
+
+/// Draws a dialog's title bar - the heading, an optional close cross and the
+/// rule under them - flush to the dialog's border.
+///
+/// Must be the first thing drawn in an `egui::Modal` (after `set_width`): the
+/// modal's frame keeps a margin around its content, and the bar is painted out
+/// into that margin so that the cross sits 1px from the border, and the rule
+/// runs from border to border.
+pub fn title_bar(ui: &mut egui::Ui, title: &str, closable: bool, close_tip: &str) -> TitleBar {
+    let margin = ui.style().spacing.menu_margin;
+    let (ml, mr, mt) = (f32::from(margin.left), f32::from(margin.right), f32::from(margin.top));
+    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+    let origin = ui.cursor().min;
+    let width = ui.available_width();
+
+    // The bar starts at the frame's own corner, not at the content's.
+    let bar = egui::Rect::from_min_size(
+        egui::pos2(origin.x - ml, origin.y - mt),
+        egui::vec2(width + ml + mr, TITLE_BAR_H),
+    );
+    // The content already starts `mt` below the frame's top; reserve the rest.
+    ui.allocate_exact_size(
+        egui::vec2(width, TITLE_BAR_H + stroke.width - mt),
+        egui::Sense::hover(),
+    );
+
+    let right = if closable { bar.right() - TITLE_BAR_H } else { bar.right() };
+    let text_rect = egui::Rect::from_min_max(
+        egui::pos2(bar.left() + TITLE_INSET, bar.top() + TITLE_DY),
+        egui::pos2(right, bar.bottom() + TITLE_DY),
+    );
+    let mut text_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(text_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    text_ui.add(egui::Label::new(RichText::new(title).heading()).truncate());
+
+    let close = closable.then(|| {
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(
+                bar.right() - TITLE_EDGE - CLOSE_SIDE,
+                bar.top() + TITLE_EDGE,
+            ),
+            egui::vec2(CLOSE_SIDE, CLOSE_SIDE),
+        );
+        let mut button_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+        // A hovered or focused button grows by 1px; here that would put it
+        // against the border and the rule.
+        let widgets = &mut button_ui.visuals_mut().widgets;
+        widgets.hovered.expansion = 0.0;
+        widgets.active.expansion = 0.0;
+        icons::button_sized(&mut button_ui, Icon::Close, false, false, close_tip, CLOSE_SIDE)
+    });
+
+    let rule = egui::Rect::from_min_size(egui::pos2(bar.left(), bar.bottom()), egui::vec2(bar.width(), stroke.width));
+    ui.painter().rect_filled(rule, 0.0, stroke.color);
+    TitleBar { close, rule }
+}
+
 /// Draws the "Add devices" dialog. Returns `true` when the configuration changed.
 pub fn add_devices_window(
     ctx: &egui::Context,
@@ -600,25 +679,20 @@ pub fn add_devices_window(
         // not registered with the navigation layer - a remote leaves the dialog
         // with Back, and a second stop for the same thing would only be in the
         // way of the tab strip below.
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(group_heading(
-                    config,
-                    config.active_index(),
-                    "dialog-add-devices",
-                    "dialog-add-devices-group",
-                ))
-                .heading(),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let close_button =
-                    icons::button(ui, Icon::Close, false, &monitor_i18n::tr("dialog-close"));
-                if close_button.clicked() {
-                    close = true;
-                }
-            });
-        });
-        ui.add_space(theme::space::S);
+        let bar = title_bar(
+            ui,
+            &group_heading(
+                config,
+                config.active_index(),
+                "dialog-add-devices",
+                "dialog-add-devices-group",
+            ),
+            true,
+            &monitor_i18n::tr("dialog-close"),
+        );
+        if bar.close.is_some_and(|close_button| close_button.clicked()) {
+            close = true;
+        }
 
         tab_strip(ui, state, nav);
         ui.separator();

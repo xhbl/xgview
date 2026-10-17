@@ -5126,8 +5126,7 @@ impl XgViewApp {
         // own buttons (or Back) - a press on the backdrop does nothing.
         egui::Modal::new(Id::new("xgview-edit-camera")).show(ctx, |ui| {
             ui.set_width(560.0);
-            ui.label(RichText::new(title).heading());
-            ui.add_space(theme::space::S);
+            dialogs::title_bar(ui, &title, false, "");
             self.nav.open("edit-body");
             let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft, camera);
             // The dialog opens on the first control of the form.
@@ -5224,7 +5223,12 @@ impl XgViewApp {
             // panel behind then takes away from them.
             self.nav.open("confirm-body");
             ui.set_width(380.0);
-            ui.label(RichText::new(monitor_i18n::tr_args("remove-title", &[("name", name.clone().into())])).heading());
+            dialogs::title_bar(
+                ui,
+                &monitor_i18n::tr_args("remove-title", &[("name", name.clone().into())]),
+                false,
+                "",
+            );
             ui.label(
                 RichText::new(monitor_i18n::tr("remove-hint"))
                     .small()
@@ -5281,7 +5285,7 @@ impl XgViewApp {
         egui::Modal::new(Id::new("xgview-system-confirm")).show(ctx, |ui| {
             self.nav.open("confirm-body");
             ui.set_width(380.0);
-            ui.label(RichText::new(monitor_i18n::tr("reboot-confirm-title")).heading());
+            dialogs::title_bar(ui, &monitor_i18n::tr("reboot-confirm-title"), false, "");
             ui.label(
                 RichText::new(monitor_i18n::tr("reboot-confirm-hint"))
                     .small()
@@ -5361,7 +5365,7 @@ impl XgViewApp {
         egui::Modal::new(Id::new("xgview-passphrase")).show(ctx, |ui| {
             self.nav.open("passphrase-body");
             ui.set_width(440.0);
-            ui.label(RichText::new(prompt.title()).heading());
+            dialogs::title_bar(ui, &prompt.title(), false, "");
             ui.label(RichText::new(prompt.hint()).small().color(theme::TEXT_DIM));
             ui.add_space(theme::space::S);
 
@@ -6058,19 +6062,19 @@ impl XgViewApp {
 
         egui::Modal::new(Id::new("xgview-layout-picker")).show(ctx, |ui| {
             ui.set_width(360.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(monitor_i18n::tr("layout-picker-title")).heading());
-                // The way out, at the far end of the title row: a cross rather
-                // than the word, which stays as its tooltip.
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let close_button =
-                        icons::button(ui, Icon::Close, false, &monitor_i18n::tr("dialog-close"));
-                    if self.nav.tracked(close_button).clicked() {
-                        close = true;
-                    }
-                });
-            });
-            ui.separator();
+            // The way out, at the far end of the title bar: a cross rather
+            // than the word, which stays as its tooltip.
+            let bar = dialogs::title_bar(
+                ui,
+                &monitor_i18n::tr("layout-picker-title"),
+                true,
+                &monitor_i18n::tr("dialog-close"),
+            );
+            if let Some(close_button) = bar.close {
+                if self.nav.tracked(close_button).clicked() {
+                    close = true;
+                }
+            }
 
             // Three to a row, each row a scope of the navigation layer: the
             // sideways arrows walk a row and the vertical ones cross between
@@ -6157,18 +6161,17 @@ impl XgViewApp {
             ui.set_width(300.0);
             self.portrait_aspect_picker_anchor = None;
             self.nav.open("aspect-picker");
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(monitor_i18n::tr("portrait-aspect-picker-title")).heading());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let close_button =
-                        icons::button(ui, Icon::Close, false, &monitor_i18n::tr("dialog-close"));
-                    let close_resp = self.nav.tracked(close_button);
-                    if close_resp.clicked() {
-                        close = true;
-                    }
-                });
-            });
-            ui.separator();
+            let bar = dialogs::title_bar(
+                ui,
+                &monitor_i18n::tr("portrait-aspect-picker-title"),
+                true,
+                &monitor_i18n::tr("dialog-close"),
+            );
+            if let Some(close_button) = bar.close {
+                if self.nav.tracked(close_button).clicked() {
+                    close = true;
+                }
+            }
             let hint = ui.label(
                 RichText::new(monitor_i18n::tr("portrait-aspect-picker-hint"))
                     .small()
@@ -6250,29 +6253,22 @@ impl XgViewApp {
 
             self.nav.open("combined-info-picker");
 
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(
-                        monitor_i18n::tr_args(
-                            "combined-info-title",
-                            &[("n", (slot + 1).to_string().into())],
-                        ),
-                    )
-                    .strong(),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let close_btn =
-                        icons::button(ui, Icon::Close, false, &monitor_i18n::tr("dialog-close"));
-                    let close_resp = self.nav.tracked(close_btn);
-                    if close_resp.clicked() {
-                        close = true;
-                    }
-                });
-            });
-            let sep = ui.separator();
+            let bar = dialogs::title_bar(
+                ui,
+                &monitor_i18n::tr_args("combined-info-title", &[("n", (slot + 1).to_string().into())]),
+                true,
+                &monitor_i18n::tr("dialog-close"),
+            );
+            if let Some(close_btn) = bar.close {
+                if self.nav.tracked(close_btn).clicked() {
+                    close = true;
+                }
+            }
+            // The rule is the dialog's first stop; the bar's own rule runs to
+            // the border, so the focus ring is kept inside the content.
             let anchor = ui.interact(
-                sep.rect,
-                sep.id.with("anchor"),
+                bar.rule.shrink2(vec2(f32::from(ui.style().spacing.menu_margin.left), 0.0)),
+                ui.id().with("title-anchor"),
                 egui::Sense::focusable_noninteractive(),
             );
             self.nav.item(&anchor);
