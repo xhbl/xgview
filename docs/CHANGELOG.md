@@ -3,6 +3,91 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.4.70
+
+Changes since 1.4.40. **The wall can be stood upright.** A phone or a tablet
+carried around rather than mounted gets a portrait layout of its own - its own
+grids, its own picture fit per camera, an on-screen display that turns with the
+video, and a wall that comes back the way it was left. A configuration carried
+between machines is sealed far more cheaply than before, with a key schedule
+small enough for the embedded players that import it.
+
+### A portrait wall
+
+- **An orientation button on the toolbar.** Where the device can stand upright -
+  a phone or a tablet, not a television, which has no upright - the toolbar turns
+  the wall on its side and back. The settings panel and the layout picker are
+  landscape shapes: an empty upright wall says to turn back rather than offering
+  to add a camera, and the orientation button is the way to them and back.
+- **A grid, a page and a focus of its own.** Upright the wall is one column of
+  one to four rows, chosen with the digit keys `1`-`4` or the toolbar's numbered
+  buttons. It is held apart from the landscape grid, and per group, so turning
+  the device never overwrites what was chosen for the other way up.
+- **The picture fit is per camera and per orientation.** The picture-fit button
+  on the upright bar lists the cameras on the page with the fit each is drawn at
+  - original, stretch, 16:9, 4:3 or 1:1 - and a press moves it on. A camera can
+  be stretched in landscape and kept at its own ratio upright, the two choices
+  not touching.
+- **The on-screen display turns with the video**, so a rotated picture keeps its
+  text reading left to right, and the page arrows float at the left and right
+  screen edges, which a narrow bar has no room for. They follow the keys as well
+  as a press, on the same page-and-channel step the landscape arrows take, so a
+  magnified tile turns the channel there too.
+- **The wall comes up already turned.** The orientation is remembered and the
+  launcher starts the matching activity, so the wall does not appear landscape
+  and rotate after it has drawn.
+- **The picture-fit and back-grid buttons swap places while zoomed**, so the
+  button that leaves the magnified tile stays in the same spot either way up.
+
+### Combined on-screen items, and a clock
+
+- **Four combined slots.** A tile corner can now stack the items you pick in one
+  of four **combined** slots beside the single items it already offered, the
+  first of them shipping with codec, fps and format. The chosen items are drawn
+  in the order they are listed, and any left empty are skipped rather than shown
+  blank.
+- **A date-time item** joins the list, so a corner can read out the date and the
+  time.
+
+### Sealing a configuration without the memory
+
+- **PBKDF2-HMAC-SHA256 under XChaCha20-Poly1305.** The passphrase-sealed export
+  stretched its key with scrypt before, which at the parameters it needed asked
+  for around a gigabyte of memory - more than an embedded player has to spare,
+  and enough to drive it into swap and freeze the wall. The key schedule now
+  costs about a megabyte, and the seal is written as `xgv-seal/v1:`.
+- **Sealing and opening happen off the UI thread**, so a configuration no longer
+  blocks the wall while it is encrypted or decrypted - the stall that had been
+  ending the viewer with an ANR on Android.
+- **A clear `xgvconfig.json` is still read on import**; age-sealed files are no
+  longer recognised.
+
+### The configuration file has a name of its own
+
+- **`config.json` is `xgvconfig.json` now**, and a sealed export
+  `xgvconfig.seal`, so the file names the program it belongs to. An existing
+  `config.json` is not migrated.
+- **A change is written sooner**, the debounce ahead of a save shortened.
+
+### Smaller changes and fixes
+
+- **How long the bars stay in full screen is a setting.** The **Display** tab
+  holds the idle timeout before the toolbar and the status bar fade; `0` keeps
+  them up for good, where they had hidden under any timeout.
+- **The bars scale together in both orientations**, and the landscape page
+  arrows are chevron buttons now, as the upright ones are.
+- **The portrait aspect picker reads the camera through its group.** It had
+  reached into the file's camera array with the cell index, which counts only the
+  enabled cameras of the group in use, so it could show - and set - the fit of
+  the wrong camera; the lookup goes through the group's slot map now.
+- **The dialogs share one title bar**, so the windows opened from the wall frame
+  the same way.
+- **The file dialog keeps the focus it takes**, so a file name can be typed and
+  the list's quick search no longer steals the keys; the focus ring itself is
+  left out of the way of a pointer's click.
+- **Wording and plurals** across the language packs are tidied, and the test
+  targets no longer emit warnings.
+
 ## 1.4.40
 
 Changes since 1.4.30. **The wall is no longer limited to square grids.** Nine
