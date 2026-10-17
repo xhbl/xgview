@@ -31,8 +31,8 @@ The viewer persists everything to one JSON file, created on first launch:
 
 | Platform | Path |
 | --- | --- |
-| Windows | `%APPDATA%\xgview\config.json` |
-| Linux | `$XDG_CONFIG_HOME/xgview/config.json` (or `~/.config/xgview/config.json`) |
+| Windows | `%APPDATA%\xgview\xgvconfig.json` |
+| Linux | `$XDG_CONFIG_HOME/xgview/xgvconfig.json` (or `~/.config/xgview/xgvconfig.json`) |
 | Android | the app private files directory (supplied by the entry point) |
 
 - `XGVIEW_CONFIG_DIR` overrides the directory entirely (portable / USB stick
@@ -42,28 +42,43 @@ The viewer persists everything to one JSON file, created on first launch:
   the cameras" keeps the viewer's own settings, and takes the cameras and the
   groups they belong to from the file.
 - An **export is sealed** with a passphrase before it is written - the document
-  is `config.seal`, whole-file rather than only the credentials, encrypted with
+  is `xgvconfig.seal`, whole-file rather than only the credentials, encrypted with
   XChaCha20-Poly1305 under a key stretched from the passphrase by
   PBKDF2-HMAC-SHA256 - because the copy is the one that travels between machines.
   The passphrase is asked for twice and kept nowhere. A box beside the export
-  button writes the JSON in clear instead, as `config.json`, for a file that is
+  button writes the JSON in clear instead, as `xgvconfig.json`, for a file that is
   going no further than a machine you trust; like the "Only import the cameras"
   box, it lasts for the session and is not saved. **Import reads either form**: a
-  sealed file asks for its passphrase, and a `config.json` in clear is read as it
-  always was.
+  sealed file asks for its passphrase, and a `xgvconfig.json` in clear is read as
+  it always was. Only the clear form is accepted - a file sealed by an earlier
+  version is not recognised, and neither form is interchangeable with the other.
 - An **import keeps what it replaces**: the configuration it supersedes is left
-  beside it as `config.json.bak` before the new one is adopted, and a JSON
+  beside it as `xgvconfig.json.bak` before the new one is adopted, and a JSON
   document that is not an XGView configuration is refused rather than read as an
   empty one.
+- The **format marker** is `xgv-seal/v1:` at the head of the base64 body: a
+  sealed document names its own version, so a later change to the key derivation
+  or the cipher can be told apart from this one rather than read as a wrong
+  passphrase.
+- Sealing and opening run on a **worker thread**, not on the UI thread: the key
+  derivation is deliberately slow (200 000 PBKDF2 rounds), and on an embedded
+  device that is long enough to look like a hang.
 - On Unix the file this machine keeps for itself is written readable by its owner
   alone (`0600`); it stays in clear because the viewer reads it at boot, with
   nobody there to type anything.
 - The wall's **camera groups** are part of the same file: a `groups` array, each
-  entry holding a name, a grid, a page and the focused tile, plus `active_group`,
-  and every camera entry records the group it belongs to. A file written before
-  groups has its layout folded into the first group rather than reset.
+  entry holding a name, a grid of its own for each orientation, a page and the
+  focused tile, plus `active_group`, and every camera entry records the group it
+  belongs to. A file written before groups has its layout folded into the first
+  group rather than reset.
+- **Anything a device can stand in two ways needs is kept twice**: a group's
+  `layout` and its `portrait_layout`, a camera's `aspect` and its
+  `portrait_aspect`, and the orientation itself in `android_orientation`. Turning
+  the device therefore overwrites neither way's choices, and the fields a device
+  cannot use - portrait on a desktop or a television - are ignored rather than
+  refused.
 - Adding a field is backwards compatible: `AppConfig` is `#[serde(default)]`, so
-  an older `config.json` simply takes the default for anything it lacks. The
+  an older `xgvconfig.json` simply takes the default for anything it lacks. The
   same file is shared by every platform.
 
 ## 3. Build and run (Windows / Linux / macOS)
@@ -272,8 +287,14 @@ The Gradle project lives at `android/` and holds no sources of its own:
 `crates/monitor_android/android/`, the native library from
 `android-build/jniLibs/`, and the language packs from `langs/` as APK assets -
 nothing is copied by hand. `minSdk` is 27, and the manifest declares
-`INTERNET`, `RECEIVE_BOOT_COMPLETED` and the NativeActivity whose
-`android.app.lib_name` matches the `monitor_android` crate.
+`INTERNET`, `RECEIVE_BOOT_COMPLETED` and three activities: a transparent
+`LauncherActivity` that is the entry point, and the `MainActivity` /
+`MainActivityPortrait` pair it starts - the same native activity under a
+landscape and a portrait `screenOrientation`, so the wall comes up already
+turned rather than rotating after it appears. `LauncherActivity` reads the
+remembered orientation out of `xgvconfig.json` before anything native runs;
+each of the pair carries the `android.app.lib_name` metadata that matches the
+`monitor_android` crate.
 
 ### Deploy
 
@@ -320,7 +341,7 @@ Copy-Item D:\secure\xgview-signing\* .\android\
 
 **Why it matters.** A release APK signed with a different key cannot upgrade an
 installed one in place: Android refuses the install, and the only route is to
-uninstall (losing the app's stored `config.json`) and install afresh. Keep an
+uninstall (losing the app's stored `xgvconfig.json`) and install afresh. Keep an
 offline backup of both files, out of the repository, for as long as a signed
 release is in use.
 
@@ -334,7 +355,7 @@ They are generated, and are ignored by `.gitignore`:
 | `android-build/` | `cargo-ndk` output (`jniLibs/`) |
 | `android/build/`, `android/app/build/`, `android/.gradle/` | Gradle output |
 | `android/local.properties` | not used: `build-android.ps1` finds the SDK/JDK/NDK through environment variables |
-| `config.json` (at the repository root) | a local configuration, if one was put there |
+| `xgvconfig.json` (at the repository root) | a local configuration, if one was put there |
 
 The Android toolchain itself is an installation, not a file to copy: see §9 for
 where its paths are read from.

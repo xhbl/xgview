@@ -1,0 +1,172 @@
+name: Bug report
+description: Report a problem with XGView so it can be fixed. Fill in as much as you can.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill this out — the details below let us skip
+        a lot of back-and-forth. Most fields have a one-line hint in grey; hover the
+        question mark on the right for more. Logs are the single most useful thing
+        you can attach.
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: Issue type
+      description: What best describes what you saw?
+      options:
+        - Crash / app closes on its own
+        - ANR / freeze / UI not responding
+        - Decode problem (black screen, garbled frames, stutter)
+        - Connection problem (camera won't load, keeps reconnecting)
+        - UI / display / layout problem
+        - Config import / export problem
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the symptom and what you expected instead.
+      placeholder: |
+        The grid went black on camera 3 after about 30 seconds, while the other
+        three kept playing. I expected all four to stay live.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of steps that triggers it again.
+      placeholder: |
+        1. Open XGView with a 2x2 grid of 4 cameras
+        2. Zoom into camera 3
+        3. Wait ~30s
+        4. Screen goes black
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device model
+      description: The hardware you run XGView on. Be specific — "Android TV" alone is too vague.
+      placeholder: "e.g. Nvidia Shield TV 2019, Xiaomi Mi Box S 2nd gen, Pixel 7, Raspberry Pi 5, generic x86 mini PC"
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS / system version
+      description: The operating system and version on that device.
+      placeholder: "e.g. Android TV 11, Android 14, Windows 11 23H2, Ubuntu 22.04, macOS 14.4"
+    validations:
+      required: true
+
+  - type: input
+    id: xgview-version
+    attributes:
+      label: XGView version
+      description: Find it in Settings → About → Version.
+      placeholder: "e.g. 1.4.69"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform class
+      description: Which kind of device is this? Used to route the report.
+      options:
+        - Android TV / TV box (remote control)
+        - Android phone or tablet (touch)
+        - Windows desktop
+        - Linux desktop / kiosk
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: decoder
+    attributes:
+      label: Decoder
+      description: Hardware (HW) or software (SW) decode. Shown in the status bar and Settings → Streams.
+      options:
+        - HW (hardware decoder)
+        - SW (software decoder)
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: orientation
+    attributes:
+      label: Orientation when it happened
+      description: Was the wall in landscape or portrait?
+      options:
+        - Landscape
+        - Portrait
+        - Both / switched during the issue
+        - Not relevant
+    validations:
+      required: false
+
+  - type: textarea
+    id: camera-info
+    attributes:
+      label: Camera / stream info
+      description: Anything about the camera(s) involved. Optional but helps a lot for decode and connection issues.
+      placeholder: |
+        Brand/model: Hikvision DS-2CD2046G2
+        Protocol: RTSP (or ONVIF / Frigate / Synology SS / go2rtc)
+        Stream: sub stream (or main stream)
+        URL if you can share it: rtsp://...
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Paste the relevant log lines, or drag a log file here. How to get them:
+        - **Android**: `adb logcat -s xgview` from a computer with ADB set up.
+        - **Desktop**: run with `RUST_LOG=xgview=debug` set, or pass `--console` on Windows to open a log window.
+        Trim to the last ~100 lines around the problem if you can.
+      placeholder: |
+        Paste log output here. If it's long, attach the file instead by dragging it into this box.
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots / screen recording
+      description: Drag images or a short screen recording into this box. Optional.
+      placeholder: Drag files here to attach.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      description: A quick sanity check so we can act on this fast.
+      options:
+        - label: I have checked the README troubleshooting section and existing issues for this problem.
+          required: true
+        - label: I can reproduce this on the latest released version (or have noted that I cannot update).
+          required: false
+        - label: I have attached logs or explained why I cannot.
+          required: false

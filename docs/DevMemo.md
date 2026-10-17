@@ -1631,7 +1631,7 @@ natural direction) and rotated. No single manifest value avoids both,
 because the manifest is static and the preference is not.
 
 **The fix.** A transparent `LauncherActivity` is the entry point. It reads
-`config.json` - the same file the native side will read a moment later -
+`xgvconfig.json` - the same file the native side will read a moment later -
 and starts the matching fixed-orientation activity: `MainActivity`
 (`userLandscape`) or `MainActivityPortrait` (`userPortrait`), then finishes.
 The window the native thread draws into was created with the right
@@ -1656,6 +1656,166 @@ It does not handle orientation changes at runtime - those still go through
 the wall is up. The launcher only runs on cold start; the boot receiver's
 `getLaunchIntentForPackage` finds it through the `LAUNCHER` category it
 carries in the manifest.
+
+**A launcher that reads the wrong name.** It reads the remembered orientation
+out of the same file the native side writes. When the configuration files were
+renamed (§28), the name was changed in Rust and in the launcher's comment but
+not in the launcher's own `File` - it still looked for `config.json`, found
+nothing, and answered "landscape" every time. The two-activity scheme worked;
+what it was reading simply was not there. A name that appears in Java and in
+Rust is a name that has to be changed in both.
+
+
+## 26. Upright is a second wall, not the first one turned
+
+*Landed 2026-10-16, in the 1.4.x line.*
+
+**Why a second layout set.** A 16:9 wall on a phone held upright is four thin
+strips with the picture shrunk into the middle of each. Landscape grids divide
+the width; a phone stood up wants rows. So the portrait layouts are their own
+set - `1x1`, `1x2`, `1x3`, `1x4`, one column - and they are kept out of
+`GridLayout::ALL` entirely (`GridLayout::PORTRAIT` is a list of its own).
+Anything that walks `ALL` - the density cycle, the layout picker, the digit
+keys for landscape - would otherwise step into a one-column grid it cannot
+draw sensibly in a wide window, and the surest way to keep them apart is to
+never put them in the same list. The wall switches sets when the orientation
+changes; in portrait the digit keys `1`-`4` pick the stacked grids directly.
+
+**The state, doubled.** Turning the device to look at the same cameras another
+way must not throw away the way you had them the first time, so the two
+orientations keep their arrangement separately: a group holds a `layout` and a
+`portrait_layout`, a camera holds an `aspect` and a `portrait_aspect`, and the
+orientation itself is `android_orientation`. `set_orientation` parks the grid
+being left through `sync()` before loading the one being entered, so neither
+overwrites the other. Page and focus stay shared and are clamped to whatever
+grid is now in force - a page number means "the second screenful", and both
+ways of stacking have a second screenful.
+
+**Where it is offered.** Only where the device can plausibly stand upright:
+a touchscreen, and not a television (`android::supports_portrait`). Without
+that the orientation button is not drawn at all, and `F1` is likewise inert
+while upright - a room without a touchscreen has no reason to be vertical, and
+offering the toggle there would only be a way to get into a layout with no way
+out. The setting panel and the layout picker are landscape constructs and are
+closed on the way in rather than removed from portrait.
+
+**What turns with it.** The OSD rotates a quarter turn with the picture, but
+only where it would otherwise be unreadable: portrait *and* zoomed, which is
+the single-camera full-screen view, where the video itself is turned to fill a
+tall window. On a grid tile the text stays level and is simply re-laid for a
+narrower box. The camera's `portrait_aspect` is what lets a 16:9 sensor be
+letterboxed the other way round when the tile is tall, and it is chosen per
+camera through a picker of its own - the same crossing of the wall's cells
+against the file's cameras as everywhere else (§29).
+
+
+## 27. A corner that holds a stack: the combined OSD slots
+
+*Landed 2026-10-16, in the 1.4.x line.*
+
+**The problem.** A tile's corner showed one thing. `Detail`, the item that
+stacked several - codec, rate, size - had been added for exactly this, and it
+was one fixed stack in one label. A second corner wanted the same idea with
+different contents, and there was no second one to have.
+
+**Four slots, one variant each.** `Detail` became `Combined1` and three
+siblings join it: `Combined1`-`Combined4`, each standing for a list of atomic
+items the viewer picked. The old name is kept as a `serde` alias on
+`Combined1`, because the enum is written by variant name and a configuration
+saved as `Detail` has to keep opening - an unknown variant would take the
+whole document, cameras included, down with it (`from_json` refuses the lot).
+`OsdItem` is now thirteen: `Off`, the seven single items, `DateTime`, and the
+four slots. `DateTime` is new as well, a `yyyy-mm-dd hh:mm:ss` clock, and it is
+atomic like the rest.
+
+**What a slot may hold.** `OsdItem::ATOMIC` is the eight items that can sit
+*inside* a slot - the combined variants are deliberately not in it, so a slot
+cannot hold a slot. The lists live in `combined_info`, four `Vec<OsdItem>`,
+slot 1 defaulting to `[Codec, Fps, Format]` - the old `Detail` stack, so an
+upgraded configuration shows what it used to.
+
+**Why the settings button skips empty ones.** A corner is walked through by a
+single cycle button, and `cycle_options` builds its list from the slots that
+are not empty. A slot the viewer has never filled is not offered, so the
+button cannot come to rest on a corner that shows nothing - an item that
+exists only to be blank is a step the viewer has to walk past every time.
+
+
+## 28. Sealing a configuration: arithmetic, not memory
+
+*Landed 2026-10-16, in the 1.4.x line.*
+
+**Why the old scheme had to go.** The exported copy was an [age](https://age-encryption.org)
+file behind a passphrase, and age's scrypt stretch is memory-hard by design:
+every attempt asks for a large fixed slice of memory before it can even fail.
+That is deliberate - it is what makes an offline guess expensive - but it is
+memory the smallest machines simply do not have to spare, and a television box
+asked for it does not run slow so much as grind: a swap storm, with the wall
+stopped while it swaps. An export that hangs the viewer is not an export.
+
+**What replaced it.** PBKDF2-HMAC-SHA256, two hundred thousand rounds, over
+the passphrase, and the key it yields put over the document by
+XChaCha20-Poly1305. PBKDF2 is arithmetic and a hash of state - it asks for no
+memory to speak of, which is exactly what the smallest machine can afford; the
+cost in guesses-per-second is what is given up, and the round count is written
+into the document so raising it later leaves what is already out there
+readable. The 24-byte nonce is what makes a fresh random one safe with no
+counter behind it, and it is why `XChaCha20` rather than the 12-byte
+`ChaCha20` of the same crate.
+
+**The format.** `xgv-seal/v1:` then base64 of the frame - the round count as
+four big-endian bytes, a fresh 16-byte salt, the 24-byte nonce, then the
+ciphertext with its Poly1305 tag. Nothing in the frame is trusted before the
+key exists: it is read before the passphrase is stretched, so every length it
+names is checked, and a round count of zero or above `MAX_ROUNDS` is refused
+there and then. Four million rounds is not a number this program writes; a
+document asking for it is asking for an attempt that outlasts the viewer, and
+reading it is not a way to find out whether the passphrase was right.
+
+**On a thread of its own.** Two hundred thousand rounds is hundreds of
+milliseconds, and the render loop has a wall to draw; `spawn_seal` and
+`spawn_open` hand the document and the passphrase to a thread of their own and
+`poll_sealing` takes what comes back on a later frame. A wrong passphrase and
+a damaged file come back as the one answer they are - the authentication
+refusing - because nothing distinguishes them that does not amount to
+weakening it.
+
+**The names.** The stored file is `xgvconfig.json` and a travelling copy is
+`xgvconfig.seal`; both carry the application's name so a stray one is
+identifiable as this program's. The rename is what found the launcher reading
+the old name (§25). Only the clear JSON is read on import - a document sealed
+by an earlier version is not recognised and not migrated, and the two forms
+are not interchangeable.
+
+
+## 29. A channel index is a place on the wall, not a place in the file
+
+*Landed 2026-10-16, in the 1.4.x line.*
+
+**The shape of the confusion.** `AppConfig::active_cameras()` returns the
+enabled cameras of the active group, cloned out as a list. Everything above it
+- the scheduler's channel indices, the cells a page hands out, the number a
+dialog numbers its rows by - counts positions *in that list*. The file's
+`cameras` array is indexed by *slot*: the position an entry occupies among all
+cameras, disabled ones and other groups included. The two numbers agree only
+while the wall is on the first group and nothing before the camera in question
+is disabled. They are the same integer type, they are frequently both `0`, and
+they are not the same thing.
+
+**Where it showed.** The portrait aspect picker took `grid::page_cells()`'s
+cell index, which is a wall position, and read `config.cameras[cell]` with it.
+On the built-in group with nothing disabled that is the right entry, so the
+bug hid: the dialog listed the built-in group's cameras and the group in
+front of the viewer looked like the one being ignored. On a later group, or
+behind a disabled camera, it edited the wrong camera's aspect.
+
+**The crossing, named.** `AppConfig::active_slots()` returns where those
+cameras sit in the file, in the same order, and it is the one place the two
+numberings are converted. A dialog that turns a wall position back into an
+entry goes through it - `cameras_list` had always done so, the picker had not.
+The regression test pins the case that hid the bug: a disabled camera between
+two enabled ones, on the first group, where the two numberings disagree most
+quietly.
 
 
 

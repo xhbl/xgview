@@ -84,7 +84,7 @@
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 
         <!-- The transparent entry point. It reads the remembered orientation
-             from config.json and starts the matching fixed-orientation
+             from xgvconfig.json and starts the matching fixed-orientation
              activity below, then finishes. This is what keeps the wall from
              coming up one way and turning to the other: Android fixes the
              window orientation from the manifest at creation time, before any

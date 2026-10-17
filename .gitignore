@@ -16,7 +16,7 @@
 /android/keystore.properties
 
 # Local configuration
-/config.json
+/xgvconfig.json
 /priv
 
 # Environment & secrets

@@ -213,7 +213,7 @@ else {
 Write-Host ''
 Write-Step 'Done'
 Write-Host "    binary : $targetExe"
-Write-Host "    config : $configRoot\config.json"
+Write-Host "    config : $configRoot\xgvconfig.json"
 if (-not $NoAutostart) {
     if ($TaskScheduler) {
         Write-Host "    boot   : scheduled task '$TaskName' (remove with: Unregister-ScheduledTask -TaskName $TaskName)"

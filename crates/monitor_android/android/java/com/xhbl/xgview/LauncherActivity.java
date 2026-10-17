@@ -20,7 +20,7 @@ import java.nio.charset.StandardCharsets;
  * always produces a visible rotation. To come up already turned the right way,
  * two fixed-orientation activities are declared in the manifest - one
  * landscape, one portrait - and this launcher reads the remembered preference
- * from {@code config.json} and starts the matching one. It has no UI and
+ * from {@code xgvconfig.json} and starts the matching one. It has no UI and
  * finishes at once, so the only thing the viewer sees is the wall in the right
  * orientation.
  */
@@ -57,7 +57,7 @@ public class LauncherActivity extends Activity {
         if (!touch || television) {
             return false;
         }
-        final File config = new File(new File(getFilesDir(), "xgview"), "config.json");
+        final File config = new File(new File(getFilesDir(), "xgview"), "xgvconfig.json");
         if (!config.isFile()) {
             return false;
         }
