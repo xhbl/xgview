@@ -6347,10 +6347,17 @@ impl XgViewApp {
             let page = self.scheduler.page();
             let total = self.config.enabled_count();
             let cells = grid::page_cells(layout, page, total);
+            // A cell names a place on the wall, which is a place in the active
+            // group's enabled cameras and not in the file: reading the number
+            // straight out of `cameras` is how this dialog came to list the
+            // built-in group's cameras on any wall. The slot is what the file
+            // is indexed by, so the two are crossed through `active_slots`.
+            let slots = self.config.active_slots();
 
             for cell in cells.iter() {
                 let Some(index) = cell else { continue };
-                let Some(camera) = self.config.cameras.get(*index) else { continue };
+                let Some(slot) = slots.get(*index).copied() else { continue };
+                let Some(camera) = self.config.cameras.get(slot) else { continue };
                 let name = camera.short_label(18);
                 let aspect = camera.portrait_aspect;
                 ui.horizontal(|ui| {
@@ -6367,7 +6374,7 @@ impl XgViewApp {
 
                     self.name(&btn, "portrait-aspect-entry");
                     if btn.clicked() {
-                        aspect_change = Some((*index, aspect.next()));
+                        aspect_change = Some((slot, aspect.next()));
                     }
                 });
                 ui.add_space(4.0);
@@ -6375,8 +6382,8 @@ impl XgViewApp {
             self.nav.close();
         });
 
-        if let Some((index, aspect)) = aspect_change {
-            if let Some(camera) = self.config.cameras.get_mut(index) {
+        if let Some((slot, aspect)) = aspect_change {
+            if let Some(camera) = self.config.cameras.get_mut(slot) {
                 camera.portrait_aspect = aspect;
             }
             self.mark_dirty();

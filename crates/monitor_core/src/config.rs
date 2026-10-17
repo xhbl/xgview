@@ -817,6 +817,20 @@ impl AppConfig {
             .collect()
     }
 
+    /// Where the cameras of [`AppConfig::active_cameras`] sit in the file, in
+    /// the same order. A channel index is a position in that list and not in
+    /// the file: the two agree only while the wall is on the first group and
+    /// every camera before the one meant is enabled, so anything that turns a
+    /// channel index back into an entry reads it through here.
+    pub fn active_slots(&self) -> Vec<usize> {
+        self.cameras
+            .iter()
+            .enumerate()
+            .filter(|(_, camera)| camera.enabled && self.in_active_group(camera))
+            .map(|(slot, _)| slot)
+            .collect()
+    }
+
     pub fn enabled_count(&self) -> usize {
         self.cameras
             .iter()
@@ -1247,6 +1261,40 @@ mod tests {
 
         config.active_group = 0;
         assert_eq!(config.active_cameras()[0].name, "door");
+    }
+
+    /// A place on the wall is a place in the active group's enabled cameras,
+    /// not a place in the file, and the two agree only while the wall is on the
+    /// first group and every camera before the one meant is enabled. Reading a
+    /// cell index straight out of `cameras` is what once made the portrait
+    /// aspect picker list the built-in group's cameras whatever wall was up;
+    /// `active_slots` is the crossing that fixes it.
+    #[test]
+    fn a_place_on_the_wall_is_a_slot_in_the_file() {
+        let mut config = AppConfig::default();
+        config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
+        let mut shed = CameraSource::new("shed", "rtsp://10.0.0.2/live");
+        shed.enabled = false;
+        config.upsert_camera(shed);
+        config.upsert_camera(CameraSource::new("gate", "rtsp://10.0.0.3/live"));
+        let night = config.add_group("Night".to_string());
+        config.active_group = night;
+        config.upsert_camera(CameraSource::new("yard", "rtsp://10.0.0.4/live"));
+        config.active_group = 0;
+
+        // The wall is door then gate. Gate is the second place on it but the
+        // third entry in the file: the disabled shed sits between them, and a
+        // file index of 1 would name it instead.
+        assert_eq!(config.active_cameras().iter().map(|camera| camera.name.as_str()).collect::<Vec<_>>(), vec!["door", "gate"]);
+        assert_eq!(config.active_slots(), vec![0, 2]);
+        assert_eq!(config.cameras[1].name, "shed");
+        assert!(!config.cameras[1].enabled);
+
+        // Another wall is its own list again: the only place on it is the
+        // fourth entry in the file, and nothing ahead of it belongs there.
+        config.active_group = night;
+        assert_eq!(config.active_slots(), vec![3]);
+        assert_eq!(config.active_cameras()[0].name, "yard");
     }
 
     /// The same camera may sit in two groups, one entry each: adding it to a
