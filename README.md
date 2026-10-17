@@ -233,6 +233,11 @@ mode that paints the display directly. On Debian, what that comes to:
   at the X level - the `xset -dpms s off` above, or `Option "DPMS" "false"` in
   `xorg.conf`. Sleep itself is still inhibited the usual way, through logind.
 
+A step-by-step walkthrough for Debian 13 - from a minimal install to a
+full-screen wall under systemd, plus Docker for Frigate and Home Assistant - is
+in [docs/DEBIAN-KIOSK.md](docs/DEBIAN-KIOSK.md), with a one-shot
+[`scripts/debian-kiosk.sh`](scripts/debian-kiosk.sh) for the setup itself.
+
 ### macOS: what the device needs
 
 - **macOS 11 (Big Sur) or newer**, on Intel or Apple silicon: the download is one
