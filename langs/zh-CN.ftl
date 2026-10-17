@@ -321,6 +321,7 @@ toast-started-autostart = XGView v{ $version } 已自动启动（{ $decoder } �
 toast-started-autostart-supervised = XGView v{ $version } 已自动启动，受监督（{ $decoder } 解码器）
 toast-started-supervised = XGView v{ $version } 受监督启动（{ $decoder } 解码器）
 toast-started = XGView v{ $version } — { $decoder } 解码器
+toast-software-renderer = 未找到硬件渲染器，正在使用软件渲染，帧率会很低
 toast-camera-added = 已添加 { $name }
 toast-camera-import-failed = { $name }：{ $error }
 toast-synology-found = 在 Surveillance Station 上找到 { $count } 个摄像头

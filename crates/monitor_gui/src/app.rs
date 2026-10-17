@@ -1022,6 +1022,11 @@ impl XgViewApp {
         // state the plane uploads go through.
         let render_state =
             cc.wgpu_render_state.as_ref().expect("eframe is built with the wgpu backend");
+        // The Windows selector falls back to WARP rather than leaving the
+        // machine unable to draw (see `select_adapter`), and the wall says so:
+        // a frame rate that low would otherwise be taken for the cameras'.
+        #[cfg(windows)]
+        let software_renderer = render_state.adapter.get_info().device_type == wgpu::DeviceType::Cpu;
         let video = VideoRenderer::new(render_state);
 
         let scopes = [
@@ -1182,6 +1187,10 @@ impl XgViewApp {
             ),
         };
         app.flash(message, ToastKind::Info);
+        #[cfg(windows)]
+        if software_renderer {
+            app.flash(monitor_i18n::tr("toast-software-renderer"), ToastKind::Error);
+        }
         app
     }
 

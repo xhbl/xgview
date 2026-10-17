@@ -111,6 +111,119 @@ pub(crate) const WINDOWED_SIZE: [f32; 2] = [1280.0, 720.0];
 /// is the activity's, and its size is not this program's to set.
 pub(crate) const FULLSCREEN_ON_THE_BUILDER: bool = !cfg!(target_os = "android");
 
+/// The adapter the renderer draws with on Windows, chosen here rather than
+/// left to wgpu's own request.
+///
+/// wgpu asks for an adapter it can present with and gives up when it finds
+/// none; a Windows machine whose display adapter offers no Direct3D 12 driver
+/// at all - a virtual machine's SVGA adapter, which stops at Direct3D 11 - is
+/// one such machine, and a viewer that would otherwise run was left unable to
+/// start. The selector below takes the best adapter that can present to the
+/// window, and WARP when every real adapter has been passed over. That is
+/// slow, but it draws, and the app says so in a toast.
+///
+/// The other platforms keep eframe's own choice: Android has its fallback in
+/// `run_android`, macOS has Metal alone, and Linux reaches a working software
+/// Vulkan without being told to.
+#[cfg(windows)]
+fn wgpu_options() -> egui_wgpu::WgpuConfiguration {
+    let mut setup = egui_wgpu::WgpuSetupCreateNew::default();
+    setup.native_adapter_selector = Some(std::sync::Arc::new(select_adapter));
+    egui_wgpu::WgpuConfiguration {
+        wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(setup),
+        ..Default::default()
+    }
+}
+
+/// Picks the adapter to draw with: the best one that can present to the window,
+/// and WARP when nothing else can. See [`wgpu_options`].
+#[cfg(windows)]
+fn select_adapter(
+    adapters: &[wgpu::Adapter],
+    surface: Option<&wgpu::Surface<'_>>,
+) -> Result<wgpu::Adapter, String> {
+    /// Whether a GL adapter is a machine's emulated one rather than a real
+    /// GPU's driver.
+    ///
+    /// OpenGL cannot report a device type, so wgpu infers one from the renderer
+    /// string - and lands on `Other` both for a discrete card and for a virtual
+    /// machine's adapter. The names below are the emulated ones: the adapters
+    /// of VMware, VirtualBox and Parallels, Windows' basic renderers, and the
+    /// software rasterisers. Any other GL renderer is taken for a real GPU.
+    fn gl_is_emulated(info: &wgpu::AdapterInfo) -> bool {
+        const EMULATED: [&str; 8] = [
+            "svga",
+            "vbox",
+            "virtualbox",
+            "parallels",
+            "microsoft basic",
+            "llvmpipe",
+            "swiftshader",
+            "mesa offscreen",
+        ];
+        if info.device_type == wgpu::DeviceType::Cpu {
+            return true;
+        }
+        let name = info.name.to_ascii_lowercase();
+        EMULATED.iter().any(|marker| name.contains(marker))
+    }
+
+    /// Higher wins. An emulated GL adapter sits below a software adapter on a
+    /// native backend: on Windows, a virtual machine's GL adapter created and
+    /// drew nothing at all, where WARP on Direct3D 12 showed the wall. A real
+    /// GPU's GL adapter keeps the place its device type earns it, so a machine
+    /// that only has Direct3D 11 still draws on its GPU rather than on WARP.
+    fn rank(info: &wgpu::AdapterInfo) -> u8 {
+        if info.backend == wgpu::Backend::Gl && gl_is_emulated(info) {
+            return 0;
+        }
+        match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => 5,
+            wgpu::DeviceType::IntegratedGpu => 4,
+            wgpu::DeviceType::VirtualGpu => 3,
+            wgpu::DeviceType::Other => 2,
+            wgpu::DeviceType::Cpu => 1,
+        }
+    }
+
+    /// A native backend outranks GL when the rest of the key is even, GL being
+    /// a translation layer on Windows rather than the driver's own API.
+    fn backend_rank(backend: wgpu::Backend) -> u8 {
+        match backend {
+            wgpu::Backend::Gl => 0,
+            _ => 1,
+        }
+    }
+
+    let chosen = adapters
+        .iter()
+        .filter(|adapter| surface.map_or(true, |surface| adapter.is_surface_supported(surface)))
+        .max_by_key(|adapter| {
+            let info = adapter.get_info();
+            (rank(&info), backend_rank(info.backend))
+        })
+        .ok_or_else(|| "no adapter can present to this window".to_owned())?
+        .clone();
+
+    let info = chosen.get_info();
+    if info.device_type == wgpu::DeviceType::Cpu {
+        tracing::warn!(
+            target: "xgview",
+            adapter = %info.name,
+            backend = ?info.backend,
+            "no hardware renderer to be had; drawing on a software adapter"
+        );
+    } else {
+        tracing::info!(
+            target: "xgview",
+            adapter = %info.name,
+            backend = ?info.backend,
+            "drawing"
+        );
+    }
+    Ok(chosen)
+}
+
 /// Window options for the targets that run eframe: the desktop and Android.
 ///
 /// Full screen is asked for on the `ViewportBuilder`, and the windowed size is
@@ -156,6 +269,8 @@ fn native_options(starts_fullscreen: bool) -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport,
         vsync: true,
+        #[cfg(windows)]
+        wgpu_options: wgpu_options(),
         ..Default::default()
     }
 }

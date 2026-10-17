@@ -335,6 +335,7 @@ toast-started-autostart = XGView v{ $version } started automatically ({ $decoder
 toast-started-autostart-supervised = XGView v{ $version } started automatically, supervised ({ $decoder } decoder)
 toast-started-supervised = XGView v{ $version } started supervised ({ $decoder } decoder)
 toast-started = XGView v{ $version } — { $decoder } decoder
+toast-software-renderer = no hardware renderer found — drawing in software, expect a low frame rate
 toast-camera-added = added { $name }
 toast-camera-import-failed = { $name }: { $error }
 toast-synology-found =
