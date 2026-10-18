@@ -18,7 +18,7 @@ close = 关闭
 settings = 设置
 settings-language = 语言
 settings-language-auto = 自动（跟随系统）
-settings-language-hint = 界面语言。将 .ftl 文件放入可执行文件旁的 langs 文件夹（或配置目录下），新语言即会出现在此处。
+settings-language-hint = 界面语言。将 .ftl 文件放入可执行文件旁的 langs 文件夹或配置目录即可新增语言。
 settings-tab-display = 显示
 settings-tab-cameras = 摄像头
 settings-tab-streams = 流
@@ -134,7 +134,7 @@ cameras-sub-set = 辅流：已设
 cameras-infer-sub = 推断辅流
 cameras-connect-tip = 此摄像头的连接方式，点击切换到下一档：AUTO 优先 RTSP、连不上转 MSE；RTSP 与 MSE 各自强制一种。
 cameras-transport-tip = 此摄像头的 RTSP 传输方式。UDP 可绕过破坏 RTSP over TCP 交织帧的中继。
-cameras-stream-tip = 此格拉取哪路码流。墙面每格默认拉辅流，这里可把单独看重的这一格固定为主码流。点击在两档间切换；放大到 1x1 时不论此设置都拉主码流。
+cameras-stream-tip = 此格拉取哪路码流。点击在辅流/主码流间切换；放大到 1x1 时一律拉主码流。
 cameras-remove-tip = 移除此摄像头
 cameras-edit-tip = 编辑此摄像头
 cameras-edit-name = 编辑摄像头
@@ -188,7 +188,7 @@ about-import-name = 导入配置
 about-only-cameras = 仅导入摄像头
 about-only-cameras-name = 仅导入摄像头
 about-import-hint = 导入会覆盖当前配置。勾选此框仅导入摄像头及其分组，保留本查看器自身的设置。导出默认用口令加密后写入，取消旁边的勾选则明文导出。
-about-import-hint-android = 导出会将 xgvconfig.seal 保存到 Download/xgview，默认用口令加密，取消勾选则明文导出。导入会打开系统文件选择器。{ about-import-hint }
+about-import-hint-android = 导出会保存到 Download/xgview：勾选口令加密时为 xgvconfig.seal，取消勾选则明文导出为 xgvconfig.json。导入会打开系统文件选择器。{ about-import-hint }
 
 ## 口令
 prompt-seal-title = 加密配置

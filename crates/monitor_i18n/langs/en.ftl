@@ -20,7 +20,7 @@ close = Close
 settings = Settings
 settings-language = Language
 settings-language-auto = Automatic (follow system)
-settings-language-hint = Interface language. A new language appears here as soon as its .ftl file is added to the langs folder next to the executable (or under the configuration directory).
+settings-language-hint = Interface language. Drop a .ftl file into the langs folder beside the executable, or into the configuration folder, to add one.
 settings-tab-display = Display
 settings-tab-cameras = Cameras
 settings-tab-streams = Streams
@@ -140,7 +140,7 @@ cameras-sub-set = sub: set
 cameras-infer-sub = infer sub
 cameras-connect-tip = How this camera is reached. A press moves on to the next: AUTO tries RTSP and falls back to MSE, RTSP and MSE force one.
 cameras-transport-tip = RTSP transport for this camera. UDP bypasses a relay that damages the TCP interleaved framing.
-cameras-stream-tip = Which stream this tile pulls. The wall pulls the sub stream on every tile; this pins the one the viewer singled out to its main stream. A press swaps them, and magnifying a tile pulls the main stream whatever this says.
+cameras-stream-tip = Which stream this tile pulls. A press swaps sub and main; magnifying pulls main regardless.
 cameras-remove-tip = Remove this camera
 cameras-edit-tip = Edit this camera
 cameras-edit-name = Edit camera
@@ -194,7 +194,7 @@ about-import-name = Import configuration
 about-only-cameras = Only import the cameras
 about-only-cameras-name = Only import the cameras
 about-import-hint = Importing overwrites your current configuration. Check the box to import the cameras and their groups only, keeping your viewer settings. The export is sealed with a passphrase unless you untick the box beside it.
-about-import-hint-android = Export saves an xgvconfig.seal to Download/xgview, sealed with a passphrase unless you untick the box beside it. Import opens the system file picker. { about-import-hint }
+about-import-hint-android = Export saves into Download/xgview: xgvconfig.seal sealed with a passphrase, or xgvconfig.json in clear when you untick the box beside it. Import opens the system file picker. { about-import-hint }
 
 ## Passphrase prompt
 prompt-seal-title = Seal the configuration
