@@ -1620,17 +1620,44 @@ in the 1.4.x line.* It used to be drawn whenever the bars were on screen, and
 for the bars' idle time after they went; that is a cursor standing on a wall
 nobody is watching it on, and on a fresh start it is one standing there before
 the viewer has touched anything. The reading is now the viewer's own input:
-`ring_seen: Option<Instant>` is armed by `any_input` - the same reading the bars
-take - and the ring is drawn within `RING_IDLE` = 10 s of it, so it comes back
-with the first input, goes ten seconds later, and starts out `None`, which is
-what keeps a fresh run's wall free of a cursor.
+`ring_seen: Option<Instant>` is armed by `ring_keys` (and by a click on a tile)
+and the ring is drawn within `RING_IDLE` = 8 s of it, so it comes back with the
+first key that walks it or a click on a tile, goes eight seconds later, and starts
+out `None`, which is what keeps a fresh run's wall free of a cursor.
+
+**What arms it is what can place it.** `ring_keys` - not the bars' reading, and not
+"any input": a cursor is placed by a key that walks it (the arrows, Back, the F1/F2
+that carry it into the bars, and Enter or Space **while the wall owns the keys** -
+on a control they activate the control, which is how a remote presses a page
+button) and by a click that lands on a tile, and by nothing else. The pointer's
+other actions place nothing: a press alone is the start of a page turn, a release
+is the tail of one already answered, a movement crosses the wall, a wheel scrolls
+a body. **A page turn is never one of
+them, whichever way it is made** - the page keys, the toolbar's page arrows and a
+swipe all move the picture rather than the ring, and that is what makes the three
+of them behave alike. **Anything that moves the wall's cursor while the viewer is
+not aiming takes down a ring that is showing** - `ring_follows_cursor`, which
+compares the page *and* the focused channel: a page turned re-places the focus
+into the new page, a layout that shrinks under the focus re-places it the same way
+(a 4x4's ninth channel is the third one in a 2x2), and switching a camera off
+clamps it. The one frame it leaves alone is the one that aimed, since an arrow
+walking off the edge of the wall turns the page itself and the ring follows it in.
+A view change does re-place the focus as a side effect
+(`normalize` keeps it on the visible page), but that is the page moving under the
+cursor, not the viewer aiming at a tile - and aiming is the whole of what the ring
+is for.
 
 **Its clock is its own, and the bars meet it at the two ends of their life.** The
 ring does not follow `chrome_idle_secs`: that is the viewer's setting for how long
 the bars stand in full screen, and a cursor that faded with them would leave the
 wall unaimed halfway through a press. `ring_standing` therefore reads the ring's
 own ten seconds, and `ring_follows_bars` is all the bars do to it - arm it as they
-appear, take it with them as they go, and leave it alone in between.
+appear, take it with them as they go, and leave it alone in between. **The state
+it compares against has to be read as the frame begins, not where the bars are
+drawn**: entering full screen takes them away in `handle_keys`, before anything
+is drawn, so a `was` read at the drawing already reports them gone and the
+transition is missed - which is how the ring came to stand on a picture with no
+bars for ten seconds after F11.
 
 **Why not a gate on `chrome.visible`.** Written that way first, and it does not
 survive the wall: the wall's own keys are deliberately not a request for the bars

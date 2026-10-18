@@ -115,7 +115,7 @@ it in sensitive setups.
 | Grid layouts        | 1x1, 2x2, 3x3 and 4x4 as direct buttons, plus nine mixed layouts (2, 3, 5, 6, 7, 8, 10, 12, 13 cells) behind a graphical picker; switchable at runtime with the digit keys or the toolbar. Held upright, the four stacked grids (1x1 to 1x4) stand in their place                                                                                                                |
 | Portrait            | Where the device can stand upright - a phone or a tablet, not a television - the wall turns: four stacked grids, the on-screen display rotated with the video, a picture fit of its own per camera, and the page arrows floated at the screen edges. The settings panel is reached in landscape, and the choice is remembered across restarts - the wall comes up already turned |
 | Pagination          | Channels beyond the grid's capacity are paged; swipe, `PageUp` / `PageDown` or the toolbar slides between pages                                                                                                                                                                                                                                                                  |
-| Focus navigation    | A 2 px cyan focus ring walks the tiles with the arrow keys or a TV remote's DPAD; the sideways arrows turn the page at the left and right edges, and the vertical ones stop at the top and bottom, where the wall hands the keys to the bars. It is the remote's cursor: a press of the mouse or a finger does not move it, and it is drawn only while the wall is being operated - the first input brings it back and it goes again ten seconds later, on its own clock rather than the bars'. The two meet only at the ends of the bars' life: the ring is taken down as they hide and brought back as they appear, and a wall driven in full screen with the bars away keeps its ring |
+| Focus navigation    | A 2 px cyan focus ring walks the tiles with the arrow keys or a TV remote's DPAD; the sideways arrows turn the page at the left and right edges, and the vertical ones stop at the top and bottom, where the wall hands the keys to the bars. It is the remote's cursor: a press of the mouse or a finger does not move it, and it is drawn only while that cursor is being handled - a key that walks it, or a click on a tile, brings it back and it goes again eight seconds later, on its own clock rather than the bars'. A page turn is never one of those: the page keys, the toolbar's page arrows and a swipe all move the picture rather than the ring, so all three behave alike - and a page turn, like a layout that moves the cursor under the viewer, takes a ring that is showing down with it. The bars are the other thing it has to do with: it is taken down as they hide and brought back as they appear, and a wall driven in full screen with the bars away keeps its ring |
 | Temporary zoom      | Double click, `DPAD_CENTER`, `Enter` or `Space` magnifies a viewport to 1x1; `Esc` / `BACK` restores the grid                                                                                                                                                                                                                                                                    |
 | Stream switching    | Every layout pulls the cheap sub stream (360P / 480P), the 1x1 grid included; a tile can be pinned to its main stream (1080P / 4K) from its row in Cameras, for the camera worth watching closely while the wall stays a wall - and a magnified viewport always pulls the main stream |
 | Seamless transition | The frame a tile was showing is held until the new stream delivers its first keyframe - no black or green frames                                                                                                                                                                                                                                                                 |
@@ -332,9 +332,11 @@ reason when a connection cannot be established. The bars fade out while you watc
 and come back as soon as you move a mouse, a finger or the remote; how many idle
 seconds they wait before going, in full screen, is set on the **Display** tab,
 where `0` keeps them up for good. The 2 px focus ring that marks the tile the
-remote is on has an idle of its own rather than the bars': it comes back with the
-first key or press and goes again after ten seconds without one, so a wall nobody
-is operating shows the picture alone.
+remote is on has an idle of its own rather than the bars': it comes back with a
+key that walks it or a click on a tile, and goes again after eight seconds
+without one. A page turn - or a layout that moves the cursor under you - never
+brings it back and takes one that is showing down, so a wall nobody is aiming at
+shows the picture alone.
 
 ### Grid layouts and paging
 
@@ -432,9 +434,14 @@ reachable through the five DPAD keys - up, down, left, right and center - plus
   points. The ring is the remote's cursor rather than the pointer's: a click or
   a tap on a control is an action and does not move it, so a wall that was
   touched once does not take the arrows away from where the remote left them.
-  It is also drawn only while the wall is being operated: the first input brings
-  it up, ten seconds without one takes it down (its own clock, not the bars'
-  timeout), and a wall nobody has touched yet - a fresh start - has none at all.
+  It is also drawn only while that cursor is being handled: the arrows, `Back` and
+  the keys that open the bars bring it up, `Enter` and `Space` while the wall is
+  what they act on, a click on a tile places it, eight seconds without any of that
+  takes it down (its own clock, not the bars' timeout), and a wall nobody has
+  touched yet - a fresh start - has none at all. **Anything that moves the cursor
+  while you are not aiming at it takes it down**: the page keys, the toolbar's
+  page arrows and a swipe change the picture rather than the ring - all three
+  behave alike - and so does a layout that re-places the focus under you.
   The bars are the only connection the two have, and it is at the ends of their
   life: the ring goes down with them as they hide and comes back with them as
   they appear - and, with the bars away in full screen, a wall still being driven

@@ -80,7 +80,7 @@ const EXIT_WINDOW: Duration = Duration::from_secs(2);
 /// nowhere else: they arm the ring as they appear and take it with them as they
 /// go, and a wall driven with the bars away keeps the ring it is aimed with. See
 /// [`XgViewApp::ring_follows_bars`].
-const RING_IDLE: Duration = Duration::from_secs(10);
+const RING_IDLE: Duration = Duration::from_secs(8);
 
 /// Width of the settings side panel, and the narrowest it may be dragged to.
 ///
@@ -798,6 +798,16 @@ pub struct XgViewApp {
     /// run shows the picture, not a cursor standing on it. See
     /// [`XgViewApp::ring_shown`].
     ring_seen: Option<Instant>,
+    /// Whether this frame aimed at the wall's cursor - a key that walks it, or a
+    /// click on a tile.
+    ///
+    /// A change of the wall's cursor - the page or the focused channel - without
+    /// the viewer aiming takes that ring down, because the wall moved it under
+    /// them and the ring would be standing on the wrong tile. The one case that
+    /// is not that is an arrow walking off the edge of the wall, which is aiming
+    /// and turns the page itself - so the cursor is compared against this. See
+    /// [`XgViewApp::ring_follows_cursor`].
+    ring_aimed: bool,
     /// Who answered the last frame's direction presses.
     owner: Owner,
     /// Explicit directional navigation for the windows that opted into it.
@@ -1135,6 +1145,7 @@ impl XgViewApp {
             status_author: None,
             grid_focus_x: None,
             ring_seen: None,
+            ring_aimed: false,
             // The "Add devices" window, the settings panel and the top bar are
             // on this layer: each is a row (of tabs, or of controls) over a
             // column, which is the shape egui's walk handles worst. The wall
@@ -1942,9 +1953,6 @@ impl XgViewApp {
     /// anything that keeps the control reachable keeps the bars - which the
     /// control it is part of cannot be drawn without. See
     /// [`Self::chrome_visible`].
-    ///
-    /// It is also what arms the focus ring: every key, press and movement the
-    /// bars answer to arms the ring as well. See [`Self::ring_shown`].
     fn any_input(input: &egui::InputState) -> bool {
         input.pointer.any_down()
             || input.events.iter().any(|event| match event {
@@ -1956,6 +1964,32 @@ impl XgViewApp {
                 | egui::Event::PointerGone => false,
                 _ => true,
             })
+    }
+
+    /// Whether the keys read this frame walk the focus ring, which is what arms
+    /// it.
+    ///
+    /// The arrows walk it - wherever it is, on the wall or on a control - and so
+    /// do Back and the F1/F2 that open the bars and carry it into them. Enter and
+    /// Space count only while the **wall** owns the keys (`wall_owns`): on the
+    /// wall they act on what the ring is on, while on a control they activate the
+    /// control - which is how a remote page button gets pressed, and that is a
+    /// page turn rather than an aim. The **page keys and the layout digits are
+    /// left out on purpose**: they change what the wall is showing, not where the
+    /// ring is standing, and that is also what a swipe and the toolbar's page
+    /// arrows do, so all three ways of turning a page behave alike. See
+    /// [`Self::ring_follows_cursor`], which takes a ring that is already showing
+    /// down when the wall moves its own cursor - a page turned, or a layout that
+    /// re-places the focus.
+    fn ring_keys(keys: &Keys, wall_owns: bool) -> bool {
+        keys.left
+            || keys.right
+            || keys.up
+            || keys.down
+            || (keys.enter && wall_owns)
+            || keys.back
+            || keys.settings
+            || keys.devices
     }
 
     /// Keys that act on the wall and nowhere else.
@@ -2030,11 +2064,11 @@ impl XgViewApp {
 
     /// Whether the focus ring is drawn this frame.
     ///
-    /// Its own clock, and only its own: armed by the viewer's input - see
-    /// [`Self::any_input`] - and off until the viewer makes one, which is what
-    /// keeps a fresh run's wall free of a cursor. The bars have no say here; what
-    /// they do to the ring they do at the moment they come and go. See
-    /// [`Self::ring_follows_bars`].
+    /// Its own clock, and only its own: armed by the keys that walk it - see
+    /// [`Self::ring_keys`] - and by a click that lands on a tile, and off until
+    /// the viewer makes one, which is what keeps a fresh run's wall free of a
+    /// cursor. The bars have no say here; what they do to the ring they do at
+    /// the moment they come and go. See [`Self::ring_follows_bars`].
     fn ring_shown(&self) -> bool {
         Self::ring_standing(self.ring_seen, Instant::now())
     }
@@ -2054,6 +2088,13 @@ impl XgViewApp {
     /// has nothing that could bring them back, and a ring that asked whether the
     /// bars were up before it drew itself would never draw at all in the one
     /// case it exists for. Read as a gate, `chrome.visible` did exactly that.
+    ///
+    /// `was` is whether the bars were up as the frame *began*, and the other
+    /// side of the comparison has to be the state the frame *ends* in: the bars
+    /// are taken away by a key before anything is drawn (`handle_keys`) and by
+    /// the toolbar's button or the Display tab's checkbox while the frame is
+    /// being drawn, so a state read in the middle of the frame misses the
+    /// second, and one read at the start of the next frame misses both.
     fn ring_follows_bars(seen: Option<Instant>, bars: bool, was: bool, now: Instant) -> Option<Instant> {
         match (bars, was) {
             // The bars coming up: the ring comes back with them.
@@ -2062,6 +2103,33 @@ impl XgViewApp {
             (false, true) => None,
             // Either of them on its own: the ring keeps its own clock.
             _ => seen,
+        }
+    }
+
+    /// What a change of the wall's cursor does to the ring: it takes one that is
+    /// showing down.
+    ///
+    /// The cursor is the page together with the focused channel, and a change of
+    /// either without the viewer aiming at it leaves the ring standing on the
+    /// wrong tile: a page turned this frame re-places the focus into the new page
+    /// (`Scheduler::normalize` keeps it on the visible one), and a layout that
+    /// shrinks under the focus does the same - a 4x4's ninth channel is the third
+    /// one in a 2x2 - as does a camera switched off, which clamps it. A cursor
+    /// pointing at the wrong place is worse than no cursor, and the next aim
+    /// lights it where it now stands. A frame that **aimed** is the exception: an
+    /// arrow walking off the edge of the wall turns the page itself, and that is
+    /// the viewer walking the cursor, so the ring follows it. See
+    /// [`Self::ring_keys`].
+    fn ring_follows_cursor(
+        seen: Option<Instant>,
+        cursor: (usize, Option<usize>),
+        was: (usize, Option<usize>),
+        aimed: bool,
+    ) -> Option<Instant> {
+        if cursor != was && !aimed {
+            None
+        } else {
+            seen
         }
     }
 
@@ -2994,6 +3062,14 @@ impl XgViewApp {
             }
             keys
         });
+
+        // The focus ring is armed here, before any of these keys is acted on:
+        // what arms it is the keys that walk it, whatever else they end up
+        // doing. See `ring_keys`.
+        if Self::ring_keys(&keys, self.owner == Owner::Grid) {
+            self.ring_seen = Some(Instant::now());
+            self.ring_aimed = true;
+        }
 
         // The reorder mode owns Back: it drops the arrangement and nothing
         // else, so a press that means "never mind" cannot also close the panel
@@ -6269,6 +6345,12 @@ impl XgViewApp {
                 self.needs_sync = true;
                 self.mark_dirty();
             }
+            // A click on a tile is the pointer's way of placing the ring, and the
+            // only one it has: a drag turns the page without aiming at anything,
+            // and a movement places nothing. So this is where a pointer arms it.
+            // See `ring_keys`.
+            self.ring_seen = Some(Instant::now());
+            self.ring_aimed = true;
         }
         if let Some(index) = actions.zoom {
             self.zoom_to(index);
@@ -6688,6 +6770,20 @@ impl eframe::App for XgViewApp {
         // other platforms, which have no orientation to ask for.
         #[cfg(target_os = "android")]
         crate::android::set_orientation(self.is_portrait());
+        // Whether the bars were up as the last frame left them, read before
+        // anything this frame can move them. The focus ring compares it with
+        // what the frame leaves behind, at the end of the frame: full screen is
+        // entered from a key, from the toolbar's own button and from the Display
+        // tab's checkbox alike, and the last two do it while the frame is being
+        // drawn. See `ring_follows_bars`.
+        let bars_was_up = self.chrome.visible;
+        // The wall's cursor as the last frame left it, read with it: the ring is
+        // taken down when it moves without the viewer aiming - a page turned this
+        // frame, a layout that shrinks under the focus, or an arrow that walked
+        // off the edge of the wall (which is aiming, so that one keeps it). See
+        // `ring_follows_cursor`.
+        let cursor_was = (self.scheduler.page(), self.scheduler.focus());
+        self.ring_aimed = false;
         self.time = ctx.input(|input| input.time);
 
         // Settled before anything else is drawn: whether the wall is blank
@@ -6761,12 +6857,6 @@ impl eframe::App for XgViewApp {
         // a viewer was there. What counts as asking for them is the whole of
         // `viewer_active`.
         self.chrome.input_seen = self.viewer_active(ctx);
-        // The focus ring is armed by the same reading as the bars, and by all
-        // of it: the ring is the cursor of whatever the remote is on, and
-        // anything the viewer does is them reaching for it.
-        if ctx.input(Self::any_input) {
-            self.ring_seen = Some(Instant::now());
-        }
 
         self.poll_events();
         self.poll_sealing();
@@ -6886,11 +6976,6 @@ impl eframe::App for XgViewApp {
         // brings them back in is one of the frames that has to claim it.
         let bands_hidden = !self.chrome.visible;
         let bars = self.chrome_visible();
-        // The focus ring's only connection with the bars, read where the bars'
-        // state is decided: they arm it as they appear and take it with them as
-        // they go, and apart from those two moments the ring is on its own
-        // clock. See `ring_follows_bars`.
-        self.ring_seen = Self::ring_follows_bars(self.ring_seen, bars, !bands_hidden, Instant::now());
         if bars {
             let toolbar = egui::TopBottomPanel::top("xgview-toolbar").show(ctx, |ui| self.toolbar(ui));
             let status = egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| self.status_bar(ui));
@@ -7264,6 +7349,28 @@ impl eframe::App for XgViewApp {
             }
         }
 
+        // The focus ring's connection with the bars, read at the end of the
+        // frame and against the state the frame began in. Both halves matter:
+        // full screen is entered from a key (in `handle_keys`, before anything is
+        // drawn) as well as from the toolbar's own button and the Display tab's
+        // checkbox (while the frame is being drawn, after the bars have been
+        // asked for), so only reading it here sees every way they can come and
+        // go. A toggle made during the drawing would otherwise be missed twice
+        // over - the drawing already saw the old state, and the state read at
+        // the start of the next frame has it gone already. One frame of delay,
+        // and only for the frame the ring is drawn in. See `ring_follows_bars`.
+        self.ring_seen = Self::ring_follows_bars(self.ring_seen, self.chrome.visible, bars_was_up, Instant::now());
+        // And the wall moving its own cursor takes down a ring that is showing:
+        // a page turned by a key, a button pressed by a remote or a pointer, or a
+        // swipe, and a layout that re-places the focus under the viewer, all land
+        // here.
+        self.ring_seen = Self::ring_follows_cursor(
+            self.ring_seen,
+            (self.scheduler.page(), self.scheduler.focus()),
+            cursor_was,
+            self.ring_aimed,
+        );
+
         let animation = self.needs_animation();
         ctx.request_repaint_after(if animation { LIVE_REPAINT } else { Duration::from_millis(500) });
 
@@ -7378,19 +7485,25 @@ mod tests {
 
     /// The ring is a cursor for a wall that is being operated. It is off until
     /// the viewer makes an input the first time - a fresh run shows the picture,
-    /// not a cursor standing on it - and it stands for ten seconds after one, on
-    /// its own clock rather than the bars'.
+    /// not a cursor standing on it - and it stands for [`RING_IDLE`] after one,
+    /// on its own clock rather than the bars'.
     #[test]
     fn the_ring_stands_after_an_input_and_no_longer() {
         let now = Instant::now();
         assert!(!XgViewApp::ring_standing(None, now), "nothing has been touched yet");
         // An input a moment ago: the ring stands.
         assert!(XgViewApp::ring_standing(Some(now - Duration::from_secs(1)), now));
-        assert!(XgViewApp::ring_standing(Some(now - Duration::from_millis(9_900)), now));
-        // Ten seconds - its own clock, whatever the bars' idle is set to - and
+        assert!(
+            XgViewApp::ring_standing(Some(now - RING_IDLE + Duration::from_millis(100)), now),
+            "a moment inside the idle"
+        );
+        // The idle itself - its own clock, whatever the bars' is set to - and
         // after it: gone.
-        assert!(!XgViewApp::ring_standing(Some(now - RING_IDLE), now));
-        assert!(!XgViewApp::ring_standing(Some(now - Duration::from_secs(11)), now));
+        assert!(!XgViewApp::ring_standing(Some(now - RING_IDLE), now), "the idle itself");
+        assert!(
+            !XgViewApp::ring_standing(Some(now - RING_IDLE - Duration::from_secs(1)), now),
+            "and after it"
+        );
     }
 
     /// The bars are the ring's only connection, and it is at the two ends of
@@ -7418,68 +7531,64 @@ mod tests {
         assert_eq!(follows(None, false, false, now), None, "the bars were away and stay away");
     }
 
-    /// What arms the ring is a key or a press, and nothing the system does: a
-    /// window being focused or resized under the viewer is not the viewer
-    /// reaching for the cursor. The mouse moving counts here the same way it
-    /// does for the bars - the ring shares their reading.
+    /// What arms the ring is a key that walks it, and never a key that changes
+    /// what the wall shows: a page turn and a layout choice are the same class as
+    /// a swipe and the toolbar's page arrows - they move the picture, not the
+    /// ring - so all three ways of turning a page behave alike. The pointer arms
+    /// it with the one action that places it, a click on a tile, which is tested
+    /// where that click is handled (`paint_view`).
     #[test]
-    fn a_key_or_a_press_arms_the_ring() {
-        /// One frame of a program with `events` in it, and whether it was
-        /// answered as input. A context of its own each time: a pointer left down
-        /// by the case before would answer for the next one.
-        fn armed_by(events: Vec<egui::Event>) -> bool {
-            let ctx = egui::Context::default();
-            let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0))),
-                events,
-                ..Default::default()
-            };
-            let mut armed = false;
-            let _ = ctx.run(input, |ctx| armed = ctx.input(XgViewApp::any_input));
-            armed
-        }
-
-        assert!(armed_by(vec![press(Key::ArrowRight)]), "a key the wall acts on");
-        assert!(armed_by(vec![press(Key::F11)]), "a key that opens a bar");
-        assert!(
-            armed_by(vec![egui::Event::PointerButton {
-                pos: Pos2::new(640.0, 360.0),
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: Modifiers::NONE,
-            }]),
-            "a press on the picture"
-        );
-        assert!(
-            armed_by(vec![egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Point,
-                delta: egui::vec2(0.0, -40.0),
-                modifiers: Modifiers::NONE,
-            }]),
-            "the wheel"
-        );
-        assert!(armed_by(vec![egui::Event::MouseMoved(vec2(1.0, 1.0))]), "the mouse moving");
-        // The tail of a press that has already counted arms nothing, and nor
-        // does the system moving the window about.
-        let released = egui::Event::Key {
-            key: Key::ArrowRight,
-            physical_key: None,
-            pressed: false,
-            repeat: false,
-            modifiers: Modifiers::NONE,
+    fn the_cursor_keys_arm_the_ring_and_the_view_keys_do_not() {
+        let keys = |set: fn(&mut Keys), wall_owns: bool| {
+            let mut keys = Keys::default();
+            set(&mut keys);
+            XgViewApp::ring_keys(&keys, wall_owns)
         };
-        assert!(!armed_by(vec![released]), "a key coming back up");
-        assert!(
-            !armed_by(vec![egui::Event::PointerButton {
-                pos: Pos2::new(640.0, 360.0),
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: Modifiers::NONE,
-            }]),
-            "a button coming back up"
-        );
-        assert!(!armed_by(vec![egui::Event::WindowFocused(true)]), "the window being focused");
-        assert!(!armed_by(vec![]), "an empty frame");
+        let armed = |set: fn(&mut Keys)| keys(set, true);
+        let on_a_control = |set: fn(&mut Keys)| keys(set, false);
+
+        assert!(armed(|k| k.left = true), "the arrows walk it");
+        assert!(armed(|k| k.right = true));
+        assert!(armed(|k| k.up = true));
+        assert!(armed(|k| k.down = true));
+        assert!(armed(|k| k.enter = true), "on the wall, Enter acts on what it is on");
+        assert!(armed(|k| k.back = true), "Back unwinds to where it was");
+        assert!(armed(|k| k.settings = true), "F1 opens the bars and carries it in");
+        assert!(armed(|k| k.devices = true), "F2 likewise");
+
+        // Enter on a control activates the control instead - which is how a
+        // remote presses a page button, and that is a page turn rather than an
+        // aim. The arrows walk the ring there as much as anywhere.
+        assert!(!on_a_control(|k| k.enter = true), "Enter on a control activates the control");
+        assert!(on_a_control(|k| k.left = true), "the arrows walk it there too");
+
+        assert!(!armed(|k| k.page_prev = true), "a page turn moves the picture, not the ring");
+        assert!(!armed(|k| k.page_next = true), "a page turn moves the picture, not the ring");
+        assert!(!armed(|k| k.layout[2] = true), "so does a layout choice");
+        assert!(!armed(|k| k.fullscreen = true), "and full screen takes it away with the bars");
+        assert!(!armed(|_| {}), "nothing pressed arms nothing");
+    }
+
+    /// A change of the wall's cursor takes down a ring that is showing, whichever
+    /// way it was moved and whether or not the frame aimed: a page turned, a
+    /// layout that re-places the focus under the viewer, or a camera switched off
+    /// that clamps it. The one frame it leaves alone is the one that aimed, since
+    /// an arrow walking off the edge of the wall turns the page itself and the
+    /// ring follows it in.
+    #[test]
+    fn a_cursor_moved_for_the_viewer_takes_the_ring_down() {
+        let now = Instant::now();
+        let showing = Some(now - Duration::from_secs(1));
+        let follows = XgViewApp::ring_follows_cursor;
+        let cursor = (0, Some(3));
+
+        assert_eq!(follows(showing, (1, Some(0)), cursor, false), None, "the page turned");
+        assert_eq!(follows(showing, (0, Some(2)), cursor, false), None, "the layout re-placed the focus");
+        assert_eq!(follows(showing, (0, None), cursor, false), None, "the focus was clamped away");
+        assert_eq!(follows(None, (1, Some(0)), cursor, false), None, "nothing showing to take down");
+        assert_eq!(follows(showing, (1, Some(0)), cursor, true), showing, "an arrow walked off the edge");
+        assert_eq!(follows(showing, cursor, cursor, false), showing, "no move, no change");
+        assert_eq!(follows(showing, (0, Some(2)), cursor, true), showing, "an aim keeps it wherever it went");
     }
 
     /// The layout picker's nine thumbnails are three rows of three, and the
