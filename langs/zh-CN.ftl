@@ -107,7 +107,7 @@ settings-day-sat = 周六
 settings-day-sun = 周日
 
 ## 设置 / 流
-streams-hint = 多画面宫格拉取辅码流，放大视口拉取主码流。
+streams-hint = 多画面宫格拉取辅码流，放大视口拉取主码流；可在摄像头列表中把某一路固定为主码流。
 settings-reconnect = 重连
 streams-first-retry = 首次重试于
 streams-first-frame-retry = 首帧重试于
@@ -134,6 +134,7 @@ cameras-sub-set = 辅流：已设
 cameras-infer-sub = 推断辅流
 cameras-connect-tip = 此摄像头的连接方式，点击切换到下一档：AUTO 优先 RTSP、连不上转 MSE；RTSP 与 MSE 各自强制一种。
 cameras-transport-tip = 此摄像头的 RTSP 传输方式。UDP 可绕过破坏 RTSP over TCP 交织帧的中继。
+cameras-stream-tip = 此格拉取哪路码流。墙面每格默认拉辅流，这里可把单独看重的这一格固定为主码流。点击在两档间切换；放大到 1x1 时不论此设置都拉主码流。
 cameras-remove-tip = 移除此摄像头
 cameras-edit-tip = 编辑此摄像头
 cameras-edit-name = 编辑摄像头

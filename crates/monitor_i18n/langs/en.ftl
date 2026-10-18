@@ -113,7 +113,7 @@ settings-day-sat = Sat
 settings-day-sun = Sun
 
 ## Settings / Streams
-streams-hint = Multi-camera grids pull the sub stream; the zoomed-in view pulls the main stream.
+streams-hint = Multi-camera grids pull the sub stream; the zoomed-in view pulls the main stream. A camera can be pinned to its main stream from its row in Cameras.
 settings-reconnect = Reconnect
 streams-first-retry = first retry after
 streams-first-frame-retry = first frame retry after
@@ -140,6 +140,7 @@ cameras-sub-set = sub: set
 cameras-infer-sub = infer sub
 cameras-connect-tip = How this camera is reached. A press moves on to the next: AUTO tries RTSP and falls back to MSE, RTSP and MSE force one.
 cameras-transport-tip = RTSP transport for this camera. UDP bypasses a relay that damages the TCP interleaved framing.
+cameras-stream-tip = Which stream this tile pulls. The wall pulls the sub stream on every tile; this pins the one the viewer singled out to its main stream. A press swaps them, and magnifying a tile pulls the main stream whatever this says.
 cameras-remove-tip = Remove this camera
 cameras-edit-tip = Edit this camera
 cameras-edit-name = Edit camera

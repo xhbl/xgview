@@ -17,7 +17,8 @@ paging beyond that. No cloud, no account, MIT licensed.
   WebSocket streams directly.
 - **Cheap on the network and the CPU.** The grid pulls sub streams and
   suspends the pages you are not looking at - sockets and decoders alike; only
-  a magnified tile pulls its main stream.
+  a magnified tile pulls its main stream, or one pinned to it from the Cameras
+  tab.
 - **Built to stay up.** Cameras reconnect on their own with configurable
   backoff, the wall can start at boot and run supervised, and a schedule can
   blank the screen and park every channel at night.
@@ -89,8 +90,10 @@ it in sensitive setups.
   the machine can be held awake, and the wall can start at boot - a box in a
   closet keeps showing pictures for weeks without anyone touching it.
 - **Cheap on bandwidth and CPU.** The grid pulls each camera's cheap sub stream;
-  only a magnified camera switches to the main stream; channels on a page you are
-  not looking at are suspended, sockets and decoders alike.
+  only a magnified camera switches to the main stream - or a camera pinned to it
+  from its row in the Cameras tab, for a tile watched closely while the wall stays
+  a wall; channels on a page you are not looking at are suspended, sockets and
+  decoders alike.
 - **Remote-first and touch-first.** Everything from navigation to the settings
   panel is reachable with five DPAD keys, a finger or a mouse - no keyboard
   required.
@@ -114,8 +117,8 @@ it in sensitive setups.
 | Pagination          | Channels beyond the grid's capacity are paged; swipe, `PageUp` / `PageDown` or the toolbar slides between pages                                                                                                                                                                                                                                                                  |
 | Focus navigation    | A 2 px cyan focus ring walks the tiles with the arrow keys or a TV remote's DPAD; the sideways arrows turn the page at the left and right edges, and the vertical ones stop at the top and bottom, where the wall hands the keys to the bars. It is the remote's cursor: a press of the mouse or a finger does not move it, and it is drawn only while the wall is being operated - the first input brings it back and it goes again ten seconds later, on its own clock rather than the bars'. The two meet only at the ends of the bars' life: the ring is taken down as they hide and brought back as they appear, and a wall driven in full screen with the bars away keeps its ring |
 | Temporary zoom      | Double click, `DPAD_CENTER`, `Enter` or `Space` magnifies a viewport to 1x1; `Esc` / `BACK` restores the grid                                                                                                                                                                                                                                                                    |
-| Stream switching    | Every layout pulls the cheap sub stream (360P / 480P), the 1x1 grid included; only a magnified viewport switches to the main stream (1080P / 4K)                                                                                                                                                                                                                                 |
-| Seamless transition | The last sub-stream frame is held until the main stream delivers its first keyframe - no black or green frames                                                                                                                                                                                                                                                                   |
+| Stream switching    | Every layout pulls the cheap sub stream (360P / 480P), the 1x1 grid included; a tile can be pinned to its main stream (1080P / 4K) from its row in Cameras, for the camera worth watching closely while the wall stays a wall - and a magnified viewport always pulls the main stream |
+| Seamless transition | The frame a tile was showing is held until the new stream delivers its first keyframe - no black or green frames                                                                                                                                                                                                                                                                 |
 | Suspend             | Channels on a non-visible page are suspended to save bandwidth, CPU and decoder handles                                                                                                                                                                                                                                                                                          |
 | Reconnection        | Exponential-backoff self-healing with a non-blocking "reconnecting…" overlay; the backoff shape and the handshake timeout are configurable and reach channels already running                                                                                                                                                                                                    |
 | Decoding            | H.264 and H.265 on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, VideoToolbox on macOS, `AMediaCodec` on Android) and on the CPU elsewhere - Android falling back to OpenH264 by itself for an H.264 stream its own decoder will not take; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW`                   |
@@ -128,7 +131,7 @@ it in sensitive setups.
 | Toolbar             | An on-screen bar for the layout, paging, full screen, settings and adding cameras, plus the orientation switch where the device can stand upright; usable with a mouse, touch or a remote                                                                                                                                                                                        |
 | Discovery           | ONVIF WS-Discovery multicast probe, cross-subnet unicast scan, and a TCP 554/80/8000 fallback probe, followed by `GetProfiles` / `GetStreamUri`                                                                                                                                                                                                                                  |
 | Server import       | Import every camera in one go from Synology Surveillance Station (`SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera`), Frigate (its API, each camera's main and sub stream paired by measured resolution) or a standalone go2rtc (`/api/streams`)                                                                                                                               |
-| Cameras             | Add, edit, reorder and remove cameras; a per-camera display aspect, held separately for landscape and portrait, and a connection switch - `AUTO`/`RTSP`/`MSE` where a WebSocket address exists, `TCP`/`UDP` otherwise                                                                                                                                                            |
+| Cameras             | Add, edit, reorder and remove cameras; a per-camera display aspect, held separately for landscape and portrait, a connection switch - `AUTO`/`RTSP`/`MSE` where a WebSocket address exists, `TCP`/`UDP` otherwise - and a stream switch that pins that camera's tile to its main stream |
 | Groups              | Named camera groups, each with its own cameras, a grid and paging of its own per orientation, switched from the settings; the same camera may sit in more than one                                                                                                                                                                                                               |
 | Start on boot       | A Windows `HKCU\...\Run` registry entry (or a scheduled task), an XDG autostart entry on Linux, a LaunchAgent on macOS, and an Android `BOOT_COMPLETED` receiver                                                                                                                                                                                                                 |
 | Configuration       | Everything persisted to a cross-platform `xgvconfig.json`, with a passphrase-sealed export and an import that reads either form                                                                                                                                                                                                                                                  |
@@ -328,7 +331,10 @@ camera stalls, `suspended` when it is on another page, or `Stream failed` with t
 reason when a connection cannot be established. The bars fade out while you watch
 and come back as soon as you move a mouse, a finger or the remote; how many idle
 seconds they wait before going, in full screen, is set on the **Display** tab,
-where `0` keeps them up for good.
+where `0` keeps them up for good. The 2 px focus ring that marks the tile the
+remote is on has an idle of its own rather than the bars': it comes back with the
+first key or press and goes again after ten seconds without one, so a wall nobody
+is operating shows the picture alone.
 
 ### Grid layouts and paging
 
@@ -384,10 +390,11 @@ camera, paging and full screen work either way.
 ### Zooming a camera
 
 Magnify the focused tile to fill the screen with a double click (or a double tap
-on a touch screen), `Enter`, `Space` or `DPAD_CENTER`. The magnified camera
-switches from its sub stream to its main stream, while the last sub-stream frame
-stays on screen until the main picture arrives - so the transition shows no black
-or green frames. `Esc` / `BACK`, or another double click, returns to the grid.
+on a touch screen), `Enter`, `Space` or `DPAD_CENTER`. The magnified camera pulls
+its main stream - the one a tile pinned to `● Main` was pulling already - and the
+frame the tile was showing stays on screen until the main picture arrives, so the
+transition shows no black or green frames. `Esc` / `BACK`, or another double
+click, returns to the grid.
 
 ### Keyboard and remote control
 
@@ -474,7 +481,7 @@ as a portable monitoring screen:
 | Tab      | What it holds                                                                                                                                                                                                        |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Display  | Interface **language**, grid, the four OSD corners and the items behind the combined ones, full screen at start-up, how long the bars stay in full screen, staying on top in full screen, the Android navigation bar |
-| Cameras  | The group strip, and the group on the wall: its camera list (add, edit, reorder, remove; a display aspect for each orientation, and the RTSP transport per camera), its name, Set as Default and Remove              |
+| Cameras  | The group strip, and the group on the wall: its camera list (add, edit, reorder, remove; a display aspect for each orientation, the stream each tile pulls and the RTSP transport per camera), its name, Set as Default and Remove |
 | Streams  | Reconnect timings (first retry, first-frame retry, max delay, handshake timeout, backoff factor / jitter / spread, attempts) and the hardware-decoding preference                                                    |
 | Blackout | The blank schedule: on/off, the periods (weekday, start, end), and how long the wall stays back after input                                                                                                          |
 | System   | Start on boot, one instance per configuration, **keep awake** (prevent sleep / keep the screen on) with the mechanism in use, the key list, and the Android boot helpers                                             |
@@ -532,18 +539,24 @@ Press `F2` to open the *add devices* window, which has five pages:
    cameras prefer, as on the Frigate tab.
 
 Cameras are listed in the **Cameras** tab, where they can be renamed, reordered,
-disabled, and given a display aspect (original, stretch, 16:9, 4:3 or 1:1) and a
-connection per camera. The connection is one button that cycles the stops the
-camera offers: `AUTO` / `RTSP` / `MSE` when an MSE address is present (a press
-moves on to the next), or `TCP` / `UDP` for an RTSP camera without one. `AUTO`
-tries RTSP first and falls back to the MSE address when RTSP cannot be reached -
-the case of an RTSP port that is closed outside the LAN. The address shown
-beside the button is the one the camera currently pulls. A camera an import
-brought in keeps its addresses and credentials read-only in the edit form - the
-import manages them - until it is detached, after which both halves of a pair
-(RTSP and MSE, each with its own login) can be edited by hand; the name is
-editable throughout. A camera is added to the group the wall is on - the dialog's
-title names it; see [Camera groups](#camera-groups).
+disabled, and given a display aspect (original, stretch, 16:9, 4:3 or 1:1), a
+stream and a connection per camera. The connection is one button that cycles the
+stops the camera offers: `AUTO` / `RTSP` / `MSE` when an MSE address is present (a
+press moves on to the next), or `TCP` / `UDP` for an RTSP camera without one.
+`AUTO` tries RTSP first and falls back to the MSE address when RTSP cannot be
+reached - the case of an RTSP port that is closed outside the LAN. The address
+shown beside the button is the one the camera currently pulls. The stream is a
+second button, reading `● Sub` or `● Main` - the same tag the tile's corner shows
+- and a press swaps the two: every grid tile pulls the sub stream, and a camera
+pinned to `● Main` pulls its main stream in the grid instead, for the tile worth
+watching closely while the wall stays a wall. It is drawn only where the camera
+has a second address to pull, and magnifying a tile pulls the main stream
+whichever way its pin is set. A camera an import brought in keeps its addresses
+and credentials read-only in the edit form - the import manages them - until it
+is detached, after which both halves of a pair (RTSP and MSE, each with its own
+login) can be edited by hand; the name is editable throughout. A camera is added
+to the group the wall is on - the dialog's title names it; see
+[Camera groups](#camera-groups).
 
 ### Camera groups
 
@@ -772,11 +785,13 @@ XGView.app/Contents/MacOS/xgview --print-schedule
   relay or a NAT mangles over TCP).
 - **A camera stays on** **`waiting for video`.** The connection is up but no picture
   has arrived. Confirm the stream is H.264, H.265 or MJPEG - on Android an HEVC
-  stream needs a device whose own decoder takes it, so use its H.264 sub stream
-  if a tile stays blank.
+  stream needs a device whose own decoder takes it, so leave that tile's stream
+  switch on `● Sub` and use a camera whose sub stream is H.264 if a tile stays
+  blank.
 - **The picture freezes and jumps.** A software decode of a high-resolution
   stream can fall behind the camera. Leave hardware decoding on, and prefer the
-  sub stream for the grid.
+  sub stream for the grid - a tile pinned to `● Main` pulls the one stream that
+  will not keep up.
 - **Nothing answers the network scan.** Some cameras ignore WS-Discovery on a
   different subnet. Add the range explicitly in the scan settings, or add the
   RTSP URL by hand on the **Manual** page.

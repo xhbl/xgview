@@ -2391,6 +2391,7 @@ mod tests {
             origin: CameraOrigin::Manual,
             imported: false,
             transport: RtspTransport::default(),
+            stream: None,
             aspect: TileAspect::default(),
             portrait_aspect: TileAspect::default(),
             main_profile: None,

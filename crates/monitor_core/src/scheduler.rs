@@ -450,6 +450,13 @@ impl Scheduler {
         // not mean the viewer is studying it. Only a magnification does - the
         // viewport a double click or the remote put full screen - and that one
         // switches to the main stream.
+        //
+        // A tile the viewer pinned to a stream in the settings is the exception
+        // and pulls it, in a grid: the wall is where a camera is watched while
+        // everything else is on screen too, and a camera can be worth its main
+        // stream from there - see `CameraSource::grid_stream`. A magnification
+        // is above all of that: it is the viewer asking for the close look, and
+        // it pulls the main stream whatever a tile was pinned to.
         let main_stream = zoom.is_some();
         let plans = cameras
             .iter()
@@ -461,7 +468,7 @@ impl Scheduler {
                     // socket stays open and no decoder stays running.
                     ChannelMode::Suspend
                 } else if live.contains(&index) {
-                    ChannelMode::Decode(if main_stream { StreamKind::Main } else { StreamKind::Sub })
+                    ChannelMode::Decode(if main_stream { StreamKind::Main } else { camera.grid_stream() })
                 } else {
                     ChannelMode::Suspend
                 };
@@ -616,6 +623,63 @@ mod tests {
         let schedule = scheduler.schedule(&cameras);
         assert_eq!(schedule.live().count(), 1);
         assert_eq!(schedule.mode_of(0), ChannelMode::Decode(StreamKind::Sub));
+    }
+
+    /// A tile the viewer pinned to the main stream pulls it in a grid, and the
+    /// pin does not reach past a magnification: the viewer who magnifies a tile
+    /// has asked for the close look whichever stream the tile was showing.
+    #[test]
+    fn a_pinned_tile_pulls_its_stream_in_the_grid_and_not_when_magnified() {
+        let mut cameras = cameras(4);
+        cameras[1].rtsp_sub = Some("rtsp://10.0.0.1/sub".to_string());
+        cameras[1].advance_stream();
+        assert_eq!(cameras[1].stream, Some(StreamKind::Main), "pinned to the main stream");
+
+        let mut scheduler = Scheduler::new(GridLayout::G2x2, 0, Some(0), cameras.len());
+        let schedule = scheduler.schedule(&cameras);
+        assert_eq!(schedule.mode_of(0), ChannelMode::Decode(StreamKind::Sub), "the wall's own rule");
+        assert_eq!(schedule.mode_of(1), ChannelMode::Decode(StreamKind::Main), "the pinned tile");
+
+        // Magnified, the close look pulls the main stream whichever stream the
+        // tile was pinned to: the pin does not reach past it.
+        scheduler.set_focus(Some(1));
+        assert!(scheduler.zoom_in());
+        cameras[1].advance_stream();
+        assert_eq!(cameras[1].stream, None, "the pin is cleared rather than kept at sub");
+        let schedule = scheduler.schedule(&cameras);
+        assert_eq!(schedule.mode_of(1), ChannelMode::Decode(StreamKind::Main), "magnified");
+    }
+
+    /// A press on the switch moves between the two stops of the pair, and the
+    /// pin comes back to the wall's default rather than to a `sub` written down:
+    /// what every other camera says by having nothing there.
+    #[test]
+    fn the_stream_switch_has_two_stops() {
+        let mut camera = CameraSource::new("door", "rtsp://10.0.0.1/live").with_sub("rtsp://10.0.0.1/sub");
+        assert_eq!(camera.grid_stream(), StreamKind::Sub, "the wall's rule");
+        assert!(camera.has_sub());
+
+        camera.advance_stream();
+        assert_eq!(camera.grid_stream(), StreamKind::Main);
+        camera.advance_stream();
+        assert_eq!(camera.grid_stream(), StreamKind::Sub, "back to the default");
+        assert_eq!(camera.stream, None, "the pin is not kept where it says nothing");
+
+        // A pin written down by hand is a stop like any other.
+        camera.stream = Some(StreamKind::Sub);
+        camera.advance_stream();
+        assert_eq!(camera.grid_stream(), StreamKind::Main);
+    }
+
+    /// The switch is drawn where there is something to switch: a camera with no
+    /// sub address of its own pulls the same url on both of its stops.
+    #[test]
+    fn a_camera_with_one_address_has_no_stream_to_switch() {
+        let camera = CameraSource::new("solo", "rtsp://10.0.0.1/live");
+        assert!(!camera.has_sub());
+        let mut mse = CameraSource::new("web", "ws://10.0.0.2/api/ws");
+        mse.mse_sub = Some("ws://10.0.0.2/api/ws?src=sub".to_string());
+        assert!(mse.has_sub(), "the sub address may be the MSE one");
     }
 
     #[test]

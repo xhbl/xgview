@@ -482,6 +482,18 @@ pub struct CameraSource {
     /// that a device whose TCP relay damages the stream can be singled out.
     #[serde(default)]
     pub transport: RtspTransport,
+    /// The stream this camera's tile pulls in a grid, where the viewer pinned
+    /// one.
+    ///
+    /// `None` is the wall's own rule and what every camera has by default: a
+    /// grid pulls the cheap sub stream - the 1x1 layout included - and the only
+    /// thing that ever asks for the main stream is a magnification. A pin is for
+    /// the tile a viewer singled out while the wall stays a wall, and it is
+    /// cleared rather than kept at `sub`, so a configuration does not carry a
+    /// value that says what every other camera already says by having none.
+    /// See [`CameraSource::grid_stream`] and [`CameraSource::advance_stream`].
+    #[serde(default)]
+    pub stream: Option<StreamKind>,
     /// How this camera's picture is fitted into its tile on the wall.
     #[serde(default)]
     pub aspect: TileAspect,
@@ -529,6 +541,7 @@ impl CameraSource {
             origin: CameraOrigin::Manual,
             imported: false,
             transport: RtspTransport::default(),
+            stream: None,
             aspect: TileAspect::default(),
             portrait_aspect: TileAspect::default(),
             main_profile: None,
@@ -742,6 +755,31 @@ impl CameraSource {
             }
             ConnectionStop::Mse => self.connect = ConnectionMode::Mse,
         }
+    }
+
+    /// The stream this camera's tile pulls in a grid: the pin the viewer set,
+    /// or the sub stream the wall pulls on every other tile.
+    pub fn grid_stream(&self) -> StreamKind {
+        self.stream.unwrap_or(StreamKind::Sub)
+    }
+
+    /// Whether this camera has a second stream of its own to pull.
+    ///
+    /// Without one the stream switch has nothing to switch: both of its stops
+    /// name the same address, so it is left off the row.
+    pub fn has_sub(&self) -> bool {
+        self.rtsp_sub.is_some() || self.mse_sub.is_some()
+    }
+
+    /// Moves the tile's stream switch on to its other stop, as a press on the
+    /// row's button does: the sub stream the wall pulls by default, and the main
+    /// stream the viewer pinned. Coming back to the default clears the pin, so
+    /// the configuration keeps only the tiles that were singled out.
+    pub fn advance_stream(&mut self) {
+        self.stream = match self.grid_stream() {
+            StreamKind::Main => None,
+            StreamKind::Sub => Some(StreamKind::Main),
+        };
     }
 
     /// `host:port` string used inside the UI.

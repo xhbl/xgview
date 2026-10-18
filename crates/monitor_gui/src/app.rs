@@ -4747,6 +4747,7 @@ impl XgViewApp {
         let mut aspect_change: Option<(usize, TileAspect)> = None;
         let mut infer: Option<usize> = None;
         let mut connect_change: Option<usize> = None;
+        let mut stream_change: Option<usize> = None;
         // Only the group the selector chose. The slot is a position in the whole
         // list, which is what the actions below write back through.
         let active = self.config.active_group;
@@ -4783,6 +4784,26 @@ impl XgViewApp {
                     self.nav.item(&infer_button);
                     if infer_button.clicked() {
                         infer = Some(slot);
+                    }
+                }
+                // The stream switch: a press moves this tile between the sub
+                // stream the wall pulls on every other one and the main stream
+                // the viewer pinned it to. It reads the tag the tile's corner
+                // reads - see `grid`'s stream item - under the same dot, so the
+                // row and the picture say the same thing, and it is drawn only
+                // where there is a second address to pull: with one address both
+                // of its stops are the same stream.
+                if camera.has_sub() {
+                    let stream_button = ui
+                        .small_button(
+                            RichText::new(format!("● {}", monitor_i18n::tr(camera.grid_stream().tag())))
+                                .small()
+                                .color(theme::ACCENT),
+                        )
+                        .on_hover_text(monitor_i18n::tr("cameras-stream-tip"));
+                    self.nav.item(&stream_button);
+                    if stream_button.clicked() {
+                        stream_change = Some(slot);
                     }
                 }
                 // The connection switch: a press moves the camera on to the next
@@ -4904,6 +4925,16 @@ impl XgViewApp {
             }
             // The connection is part of the schedule plan, so the channel is
             // reopened with the new one on the next sync.
+            self.needs_sync = true;
+            dirty = true;
+        }
+        if let Some(slot) = stream_change {
+            if let Some(camera) = self.config.cameras.get_mut(slot) {
+                camera.advance_stream();
+            }
+            // The stream a tile pulls is part of the plan in the same way, so the
+            // channel re-targets on the next sync - and holds its last frame
+            // until the new stream delivers one; see `ScheduleChange`.
             self.needs_sync = true;
             dirty = true;
         }

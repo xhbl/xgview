@@ -292,6 +292,7 @@ impl SynologyClient {
             origin: CameraOrigin::Synology,
             imported: true,
             transport: RtspTransport::default(),
+            stream: None,
             aspect: TileAspect::default(),
             portrait_aspect: TileAspect::default(),
             main_profile: None,
