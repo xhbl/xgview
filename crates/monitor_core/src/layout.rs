@@ -545,7 +545,7 @@ fn neighbour(layout: GridLayout, cell: usize, dir: Direction, visible: usize) ->
             continue;
         }
         // Keep the first of equals, so a tie falls to the lower cell index.
-        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+        if best.map_or(true, |(best_distance, _)| distance < best_distance) {
             best = Some((distance, index));
         }
     }

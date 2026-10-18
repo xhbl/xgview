@@ -250,7 +250,7 @@ impl VideoRenderer {
             return;
         }
 
-        if self.channels.get(&index).is_none_or(|channel| channel.size != size) {
+        if self.channels.get(&index).map_or(true, |channel| channel.size != size) {
             self.rebuild(index, size);
         }
         let Some(channel) = self.channels.get_mut(&index) else {
