@@ -1870,5 +1870,70 @@ two enabled ones, on the first group, where the two numberings disagree most
 quietly.
 
 
+## 30. Pushing the magnified picture in: a window, not a second stream
+
+*Landed 2026-10-18, in the 1.4.x line.*
+
+**What it is.** The magnified viewport is one camera filling the screen, and
+reading a detail off it means showing *less* of that picture over the same area.
+So the tile shows a **window** onto the source, and shows that window whole:
+`PictureZoom` is the window's scale and its centre in the picture's own
+coordinates, `grid.rs` turns it into the source rectangle the tile samples, and
+everything else - the decoding, the streams, the layout, the letterboxing that
+placed the picture in the tile - carries on untouched. The scale is therefore a
+measure of what is *not* being shown, and pushing in costs one texture lookup
+rather than a reconnect. That is what makes this worth having at all: the
+magnified view is already pulling the main stream, so the detail the viewer came
+for is already in the texture.
+
+**Two ways to draw a window.** The plain canvas hands the window to
+`painter.image` as its uv rectangle. The turned canvas - which is what the upright
+magnified view draws with - samples four corners through a mesh of its own, and
+the window there has to be turned with the picture: what is further down the
+picture lies further along the texture, and what is further left lies further
+down it. The whole window is exactly the four literals that canvas was written
+with, which is how a picture nobody has pushed in is drawn as it always was
+(`a_turned_window_is_sampled_where_the_picture_puts_it`).
+
+**What egui does with a second finger, and why the drag had to be taken away.**
+`egui-winit` names the first touch the mouse pointer and pushes each finger as its
+own `Event::Touch`, so a pinch arrives twice over: as the fingers, which is
+`InputState::multi_touch()`, and as a pointer being dragged across the picture.
+Both are wanted - the drag is how the picture is moved - but never both at once.
+A drag with two fingers down would step the magnified viewport to the next channel
+under them, and a drag *after* the picture has been pushed in is the picture
+moving rather than the channel changing. `draw_grid` therefore drops what the tile
+reports as a drag in both of those cases and reads the pointer's own movement
+instead - `pointer.delta()`, and only from a press whose `press_origin` is on the
+wall, so a drag that began on a bar stays the bar's. The channel after this one is
+still reached from the toolbar's arrows or the page keys, which step a magnified
+viewport already.
+
+**Two things about the reading itself.** `MultiTouchInfo::zoom_delta` is a
+per-frame ratio and not a total, so the frames are multiplied in; and the first
+frame of a gesture measures nothing, because `TouchState` forgets the previous
+values when the number of fingers changes and takes the current one for both - so
+the ratio there is exactly 1 and the window stays where it is. The aim is
+`center_pos`, the fingers' middle, which is what the picture is pushed in about:
+the frame after a gesture in which the fingers merely moved leaves the window
+exactly where it was. A trackpad has no fingers to count and sends zoom events
+instead - a mouse's ctrl-wheel arrives as the same factor - aimed at the pointer.
+
+**When the window is given up.** It belongs to the viewport rather than to the
+channel, and a viewport is a new one every time: magnifying, stepping to the next
+channel and coming back to the grid each set `PictureZoom::FULL`, because part of
+one picture means nothing on the next. The ends are the picture's own - the scale
+never goes below whole, never past `PICTURE_ZOOM_MAX` (eight, which is where a sub
+stream stops being a picture), and the window never leaves the picture, because
+there is nothing outside it to show. The ring is left out of all of it: a pan
+moves neither the page nor the focus, so `ring_follows_cursor` has nothing to take
+down, and neither a pinch nor a drag is an aim (§24).
+
+**Not to be confused with the pinch that is not here.** A pinch on the *grid* -
+two fingers over a tile to magnify it - was written first and taken out again:
+magnifying is what the double press is for, and the gesture the viewer wanted in
+the magnified view was this one.
+
+
 
 

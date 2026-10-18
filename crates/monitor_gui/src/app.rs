@@ -28,7 +28,7 @@ use monitor_core::{CameraSource, Direction};
 
 use crate::dialogs::{self, BackgroundEvent, CameraDraft, DiscoveryUi, Tab};
 use crate::fonts;
-use crate::grid::{self, Tile, TileActions};
+use crate::grid::{self, PictureZoom, Tile, TileActions};
 use crate::icons::{self, Icon};
 use crate::controls;
 use crate::nav::{Axis, Dir, Exit, Kind, Nav, ScopeDef};
@@ -808,6 +808,14 @@ pub struct XgViewApp {
     /// and turns the page itself - so the cursor is compared against this. See
     /// [`XgViewApp::ring_follows_cursor`].
     ring_aimed: bool,
+    /// What the magnified viewport shows of its picture: the whole of it, or the
+    /// window a pinch and a drag have left it at.
+    ///
+    /// It belongs to the viewport rather than to the channel, and it is reset
+    /// wherever the viewport becomes another one - a magnify, a step to the next
+    /// channel, or the way back to the grid - because a window is a part of one
+    /// picture and means nothing on the next. See [`PictureZoom`].
+    picture_zoom: PictureZoom,
     /// Who answered the last frame's direction presses.
     owner: Owner,
     /// Explicit directional navigation for the windows that opted into it.
@@ -1146,6 +1154,7 @@ impl XgViewApp {
             grid_focus_x: None,
             ring_seen: None,
             ring_aimed: false,
+            picture_zoom: PictureZoom::FULL,
             // The "Add devices" window, the settings panel and the top bar are
             // on this layer: each is a row (of tabs, or of controls) over a
             // column, which is the shape egui's walk handles worst. The wall
@@ -1562,6 +1571,10 @@ impl XgViewApp {
         }
         let outgoing = PageView { layout: GridLayout::G1x1, cells: vec![Some(current)] };
         self.slide.start(if forward { 1.0 } else { -1.0 }, Some(outgoing));
+        // The channel that slides in comes up whole, the way a magnify does: the
+        // window was the last camera's, and a part of it is not a part of this
+        // one.
+        self.picture_zoom = PictureZoom::FULL;
         self.needs_sync = true;
         self.mark_dirty();
         true
@@ -1641,6 +1654,9 @@ impl XgViewApp {
 
     fn zoom_in(&mut self) {
         if self.scheduler.zoom_in() {
+            // The viewport comes up whole: the window the last one was left at is
+            // a part of another picture, and there is none of this one to keep.
+            self.picture_zoom = PictureZoom::FULL;
             self.needs_sync = true;
             self.mark_dirty();
         }
@@ -6185,6 +6201,34 @@ impl XgViewApp {
         Some(PageView { layout, cells: grid::page_cells(layout, page, total) })
     }
 
+    /// Where the magnified viewport's picture is drawn this frame, if it has one.
+    ///
+    /// The one cell a magnified viewport has, through the same rectangle the
+    /// wall draws it with - the layout, the line the grid leaves, the slide the
+    /// page is drawn at - and the size of the picture the channel is showing. It
+    /// is what a pinch and a drag are measured against, because both are aimed
+    /// where the fingers are and the fingers are over this rectangle.
+    ///
+    /// A channel whose first picture has not arrived has no rectangle: what the
+    /// tile shows meanwhile is a waiting icon, and an icon is nothing to push in.
+    fn magnified_area(
+        &self,
+        cameras: &[CameraSource],
+        view: &PageView,
+        wall: Rect,
+        dx: f32,
+    ) -> Option<Rect> {
+        let index = self.scheduler.zoom()?;
+        let cell = view.cells.iter().position(|slot| *slot == Some(index))?;
+        let rect = grid::tile_rect(wall.translate(vec2(dx, 0.0)), view.layout, cell, grid::LINE);
+        let camera = cameras.get(index)?;
+        let size = self.textures.get(&index)?.surface.size;
+        let aspect = if self.is_portrait() { camera.portrait_aspect } else { camera.aspect };
+        // Upright, the magnified picture is the one drawn sideways - the same
+        // answer the tile is drawn with. See `paint_view`.
+        Some(grid::picture_area(size, rect, aspect, self.is_portrait()))
+    }
+
     fn paint_view(
         &self,
         ui: &mut egui::Ui,
@@ -6237,6 +6281,12 @@ impl XgViewApp {
                     .map(|camera| if self.is_portrait() { camera.portrait_aspect } else { camera.aspect })
                     .unwrap_or_default(),
                 rotated: self.is_portrait() && self.scheduler.is_zoomed(),
+                // The magnified viewport is the one picture that can be pushed
+                // in - it is the whole wall while it stands - and it is the only
+                // tile that carries the window. Nothing else is zoomable, so
+                // nothing else is given one.
+                picture_zoom: (index.is_some() && *index == self.scheduler.zoom())
+                    .then_some(self.picture_zoom),
             };
             let response = grid::paint(ui, rect, &tile);
             if interactive {
@@ -6317,7 +6367,54 @@ impl XgViewApp {
         }
 
         let dx = self.slide.offset * area.width() + self.slide.drag;
-        let actions = self.paint_view(ui, wall, &cameras, &view, dx, true, 2);
+        // What the magnified viewport shows of its picture, read and moved before
+        // the tiles are drawn, so that this frame draws the window the gesture
+        // has just left it at rather than the one before it. The gestures are the
+        // frame's own input: while the magnification stands there is one picture
+        // over the whole wall, and no tile beside it to catch a drag as one. See
+        // `PictureZoom`.
+        let pinched = ui.ctx().input(pinch_frame);
+        // The fingers are the wall's on the same terms as the keys: while
+        // something else owns them - a panel, a window, or the black - a gesture
+        // made over the wall is the panel's to answer, and the picture keeps the
+        // window it has. See `handle_keys`, which runs on the same answer.
+        if self.scheduler.is_zoomed() && !self.blackout_on && self.owner == Owner::Grid {
+            if let Some(dest) = self.magnified_area(&cameras, &view, wall, dx) {
+                // A pinch pushes the picture in about where it is aimed; a drag
+                // moves it. The two are one gesture or the other, never both: a
+                // pinch is the fingers, and the pointer follows the first of
+                // them.
+                if let Some((delta, at)) = pinched.filter(|(_, at)| area.contains(*at)) {
+                    self.picture_zoom = self.picture_zoom.zoomed(delta, at, dest);
+                } else if self.picture_zoom.magnified() {
+                    if let Some(delta) = ui.ctx().input(|input| drag_frame(input, area)) {
+                        self.picture_zoom = self.picture_zoom.panned(delta, dest);
+                    }
+                }
+            }
+        } else if !self.scheduler.is_zoomed() {
+            // A wall that is not magnified has no picture to push in, and the
+            // window a camera was left at belongs to that camera: whichever one
+            // is magnified next comes up whole.
+            self.picture_zoom = PictureZoom::FULL;
+        }
+
+        let mut actions = self.paint_view(ui, wall, &cameras, &view, dx, true, 2);
+
+        // A drag on the magnified picture is the picture moving, not the page:
+        // the wall has one picture on it and nowhere to turn to, and the channel
+        // after it is reached from the toolbar's arrows or the page keys, which
+        // step a magnified viewport already. A pinch is not a drag either, from
+        // the frame the second finger lands: the pointer follows the first one,
+        // and letting this through would turn a page under the fingers. See
+        // `step_zoom`.
+        if self.scheduler.is_zoomed() && (pinched.is_some() || self.picture_zoom.magnified()) {
+            self.slide.dragging = false;
+            self.slide.drag = 0.0;
+            actions.drag_started = false;
+            actions.drag_delta = 0.0;
+            actions.drag_stopped = false;
+        }
 
         if actions.drag_started {
             self.slide.dragging = true;
@@ -7398,6 +7495,42 @@ fn sub_is_derived(camera: &CameraSource, sub: &str) -> bool {
         && sub == monitor_core::model::infer_sub_stream(&camera.rtsp_main).unwrap_or_default()
 }
 
+/// This frame's pinch, as the devices reported it: how far the fingers spread
+/// since the frame before - a ratio, `1.0` for unchanged - and where they are, in
+/// screen points.
+///
+/// A touch screen counts its own fingers and says where their middle is; a
+/// trackpad has no fingers to count and sends zoom events instead (a mouse's
+/// ctrl-wheel arrives as the same factor), aimed where the pointer is. Both are
+/// read here, so that a gesture has one answer rather than two, and neither is
+/// taken out of the queue - what the frame holds is what the devices sent.
+fn pinch_frame(input: &egui::InputState) -> Option<(f32, egui::Pos2)> {
+    if let Some(touch) = input.multi_touch() {
+        return Some((touch.zoom_delta, touch.center_pos));
+    }
+    let delta = input.zoom_delta();
+    if delta == 1.0 {
+        return None;
+    }
+    input.pointer.hover_pos().map(|at| (delta, at))
+}
+
+/// How far the magnified picture was dragged this frame, in points, if it was.
+///
+/// The pointer's own movement, rather than a tile's drag: a magnified viewport is
+/// one picture over the whole wall, and there is nothing beside it to catch a
+/// drag as one. A gesture made with two fingers is not a drag of its own - the
+/// pointer follows the first of them - and a press that began on a bar belongs to
+/// the bar, which is why where it began is what decides.
+fn drag_frame(input: &egui::InputState, area: Rect) -> Option<egui::Vec2> {
+    let delta = input.pointer.delta();
+    if delta == egui::Vec2::ZERO || input.multi_touch().is_some() {
+        return None;
+    }
+    let origin = input.pointer.press_origin()?;
+    area.contains(origin).then_some(delta)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7711,6 +7844,135 @@ mod tests {
             assert!(!XgViewApp::wall_event(bars(), true, &at(360.0)), "{phase:?} on the wall");
             assert!(XgViewApp::wall_event(bars(), true, &at(12.0)), "{phase:?} in the toolbar band");
         }
+    }
+
+    /// The magnified picture's pinch arrives from two kinds of device: fingers
+    /// that are counted and spread, and a trackpad's zoom events, which have no
+    /// fingers in them at all. Both are read here, and the ratio is what the rest
+    /// of the wall pushes the picture in by.
+    #[test]
+    fn a_pinch_is_read_from_the_fingers_and_from_a_trackpad() {
+        let touch = |phase, id, x| egui::Event::Touch {
+            device_id: egui::TouchDeviceId(0),
+            id: egui::TouchId(id),
+            phase,
+            pos: pos2(x, 300.0),
+            force: None,
+        };
+        let frame = |ctx: &egui::Context, events: Vec<egui::Event>| {
+            let _ = ctx.run(egui::RawInput { events, ..Default::default() }, |_| {});
+        };
+        let read = |ctx: &egui::Context| ctx.input(pinch_frame);
+
+        // Two fingers land. The frame that places the pointer is the one before
+        // the gesture can be measured, because the touch state reads where the
+        // pointer was as the frame opened.
+        let ctx = egui::Context::default();
+        frame(
+            &ctx,
+            vec![
+                touch(egui::TouchPhase::Start, 0, 400.0),
+                touch(egui::TouchPhase::Start, 1, 600.0),
+                egui::Event::PointerMoved(pos2(400.0, 300.0)),
+            ],
+        );
+        assert!(read(&ctx).is_none(), "one frame is not a gesture");
+        // The first frame of it measures nothing - it is the distance the rest
+        // are measured against - and the two fingers' middle is where it is
+        // aimed, which is the point the picture is pushed in about.
+        frame(
+            &ctx,
+            vec![touch(egui::TouchPhase::Move, 0, 300.0), touch(egui::TouchPhase::Move, 1, 700.0)],
+        );
+        let (delta, at) = read(&ctx).expect("two fingers are a pinch");
+        assert!((delta - 1.0).abs() < 0.01, "nothing to compare with yet: {delta}");
+        assert_eq!(at, pos2(500.0, 300.0), "aimed between the fingers");
+        // 200 points apart and then 250: half of the fingers' travel is the mean
+        // distance from their middle.
+        frame(
+            &ctx,
+            vec![touch(egui::TouchPhase::Move, 0, 250.0), touch(egui::TouchPhase::Move, 1, 750.0)],
+        );
+        let (delta, at) = read(&ctx).expect("still spreading is still a pinch");
+        assert!((delta - 1.25).abs() < 0.01, "the frames' ratio: {delta}");
+        assert_eq!(at, pos2(500.0, 300.0), "and it is still aimed there");
+        // With the fingers gone there is no gesture to read.
+        frame(
+            &ctx,
+            vec![touch(egui::TouchPhase::End, 0, 250.0), touch(egui::TouchPhase::End, 1, 750.0)],
+        );
+        frame(&ctx, vec![egui::Event::PointerMoved(pos2(500.0, 300.0))]);
+        assert!(read(&ctx).is_none(), "a frame with no fingers is not a gesture");
+
+        // A trackpad sends no fingers: the zoom event is the gesture, aimed
+        // where the pointer is.
+        let ctx = egui::Context::default();
+        frame(&ctx, vec![egui::Event::PointerMoved(pos2(120.0, 400.0)), egui::Event::Zoom(1.2)]);
+        let (delta, at) = read(&ctx).expect("a zoom event is a pinch");
+        assert!((delta - 1.2).abs() < 0.01, "the event's own factor: {delta}");
+        assert_eq!(at, pos2(120.0, 400.0), "aimed at the pointer");
+    }
+
+    /// Moving the magnified picture is the pointer's own movement, and only from
+    /// a press that began on the wall: a press that began on a bar belongs to the
+    /// bar, and two fingers are a pinch - the pointer follows the first of them,
+    /// so what it reports is not a drag with which to move the picture.
+    #[test]
+    fn only_a_press_that_began_on_the_wall_drags_the_picture() {
+        let area = Rect::from_min_size(pos2(0.0, 40.0), vec2(1280.0, 640.0));
+        let frame = |ctx: &egui::Context, events: Vec<egui::Event>| {
+            let _ = ctx.run(egui::RawInput { events, ..Default::default() }, |_| {});
+        };
+        let read = |ctx: &egui::Context| ctx.input(|input| drag_frame(input, area));
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+
+        let ctx = egui::Context::default();
+        frame(&ctx, vec![egui::Event::PointerMoved(pos2(640.0, 360.0))]);
+        frame(&ctx, vec![button(pos2(640.0, 360.0), true)]);
+        frame(&ctx, vec![egui::Event::PointerMoved(pos2(650.0, 360.0))]);
+        assert_eq!(read(&ctx), Some(vec2(10.0, 0.0)), "the press is on the wall");
+        frame(&ctx, vec![egui::Event::PointerMoved(pos2(640.0, 380.0))]);
+        assert_eq!(read(&ctx), Some(vec2(-10.0, 20.0)), "and it keeps dragging");
+        frame(&ctx, vec![button(pos2(640.0, 380.0), false)]);
+        frame(&ctx, vec![egui::Event::PointerMoved(pos2(700.0, 380.0))]);
+        assert_eq!(read(&ctx), None, "a released pointer drags nothing");
+
+        // A press that began on a bar, and moved over the wall, is the bar's.
+        frame(&ctx, vec![button(pos2(640.0, 10.0), true)]);
+        frame(&ctx, vec![egui::Event::PointerMoved(pos2(700.0, 360.0))]);
+        assert_eq!(read(&ctx), None, "the press began in the toolbar band");
+        frame(&ctx, vec![button(pos2(700.0, 360.0), false)]);
+
+        // And a picture with two fingers on it is being pushed in, not moved:
+        // the pointer follows the first finger, and the first finger is one of
+        // them.
+        let ctx = egui::Context::default();
+        let touch = |phase, id, x| egui::Event::Touch {
+            device_id: egui::TouchDeviceId(0),
+            id: egui::TouchId(id),
+            phase,
+            pos: pos2(x, 300.0),
+            force: None,
+        };
+        frame(
+            &ctx,
+            vec![
+                touch(egui::TouchPhase::Start, 0, 400.0),
+                touch(egui::TouchPhase::Start, 1, 600.0),
+                egui::Event::PointerMoved(pos2(400.0, 300.0)),
+            ],
+        );
+        frame(
+            &ctx,
+            vec![touch(egui::TouchPhase::Move, 0, 410.0), touch(egui::TouchPhase::Move, 1, 590.0)],
+        );
+        frame(&ctx, vec![button(pos2(400.0, 300.0), true), egui::Event::PointerMoved(pos2(500.0, 350.0))]);
+        assert_eq!(read(&ctx), None, "a pinch is not a drag");
     }
 
     /// The keys that reach the menus are exactly the ones that are not the

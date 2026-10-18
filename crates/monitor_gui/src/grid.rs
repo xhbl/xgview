@@ -131,6 +131,89 @@ pub struct Tile<'a> {
     /// Draw the picture rotated 90° clockwise. Used in portrait single-view
     /// so a landscape feed fills the upright screen sideways.
     pub rotated: bool,
+    /// What the tile shows of its picture, where it is the magnified one.
+    ///
+    /// Every other tile shows all of it. See [`PictureZoom`].
+    pub picture_zoom: Option<PictureZoom>,
+}
+
+/// What the tile shows of its picture, where it is the magnified one.
+///
+/// The magnified view is one camera drawn into one tile, and inspecting a detail
+/// of it means showing *less* of the picture over the same area rather than
+/// growing the tile: the tile shows a window onto the source, and it shows that
+/// window whole. `1.0` is the picture the tile has always shown - the same
+/// texture, the same rectangle, the same letterboxing - and pushing in only
+/// moves the window and shrinks it. So the scale is a measure of what is *not*
+/// shown: there is no second texture, no re-layout, and nothing to do on the
+/// streams behind it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PictureZoom {
+    /// How much of the source is shown: `1.0` is all of it, `2.0` is half its
+    /// width and half its height.
+    pub scale: f32,
+    /// Centre of the window, in the picture's own coordinates, both axes `0..1`:
+    /// `0.5` is the middle of the picture.
+    pub center: Vec2,
+}
+
+/// The most the picture may be pushed in.
+///
+/// A sub stream magnified eight times is a handful of source pixels stretched
+/// over the screen, and a trackpad's own wheel travels a long way in one
+/// gesture: past this the picture is only blur, and the limit is what keeps a
+/// gesture from reaching it by accident.
+pub const PICTURE_ZOOM_MAX: f32 = 8.0;
+
+impl PictureZoom {
+    /// The whole picture, which is how a magnified view starts and what a
+    /// magnified viewport goes back to.
+    pub const FULL: Self = Self { scale: 1.0, center: Vec2::new(0.5, 0.5) };
+
+    /// Whether the picture has been pushed in at all.
+    pub fn magnified(self) -> bool {
+        self.scale > 1.0
+    }
+
+    /// The source window this shows, in the picture's own coordinates.
+    pub fn window(self) -> Rect {
+        Rect::from_center_size(self.center.to_pos2(), Vec2::splat(1.0 / self.scale))
+    }
+
+    /// The window a pinch asked for: the picture spread by `delta` about `at`.
+    ///
+    /// `at` is where the fingers are, and `dest` where the picture is drawn, so
+    /// that the point of the picture under them stays under them: the gesture
+    /// zooms towards what it is aimed at rather than towards the middle of the
+    /// tile. A `delta` of exactly `1.0` leaves the window where it is - a frame
+    /// in which the fingers only moved - and the window is kept inside the
+    /// picture, because there is nothing outside it to show.
+    pub fn zoomed(self, delta: f32, at: egui::Pos2, dest: Rect) -> Self {
+        let scale = (self.scale * delta).clamp(1.0, PICTURE_ZOOM_MAX);
+        let window = self.window();
+        // Where the aim falls in the picture as it is now, through where it
+        // falls in the tile: a gesture made past the edge of the picture is
+        // aimed at the edge of it.
+        let aim = ((at - dest.min) / dest.size()).clamp(Vec2::ZERO, Vec2::splat(1.0));
+        let under = window.min.to_vec2() + aim * window.size();
+        let half = Vec2::splat(0.5 / scale);
+        let center = (under + (Vec2::splat(0.5) - aim) / scale).clamp(half, Vec2::splat(1.0) - half);
+        Self { scale, center }
+    }
+
+    /// The window a drag asked for: the picture follows the hands.
+    ///
+    /// `delta` is how far the pointer moved this frame and `dest` where the
+    /// picture is drawn, so the window moves by the same distance *of the
+    /// picture* rather than of the tile - at a magnification, a short drag
+    /// crosses a lot of picture. Both ends of it are a stop, like the ends of a
+    /// magnified viewport's channel step.
+    pub fn panned(self, delta: Vec2, dest: Rect) -> Self {
+        let scale = self.scale;
+        let half = Vec2::splat(0.5 / scale);
+        let center = (self.center - delta / (dest.size() * scale)).clamp(half, Vec2::splat(1.0) - half);
+        Self { scale, center }
+    }
 }
 
 /// Interaction reported by [`paint`].
@@ -619,37 +702,73 @@ fn live_canvas(painter: &egui::Painter, rect: Rect, tile: &Tile<'_>, tier: Tier)
     };
 
     // Where the picture lands depends on the tile's display mode: see
-    // [`fitted`] for the shapes, and why the default distorts nothing.
+    // [`fitted`] for the shapes, and why the default distorts nothing. What of
+    // the picture is shown depends on whether this is the magnified view and how
+    // far it has been pushed in: every other tile shows it whole.
     let size = surface.size;
     if size.x > 0.0 && size.y > 0.0 {
+        let whole = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        let window = tile.picture_zoom.map_or(whole, PictureZoom::window);
+        let dest = picture_area(size, rect, tile.aspect, tile.rotated);
         if tile.rotated {
-            rotated_canvas(painter, rect, size, tile.aspect, surface);
+            turned_canvas(painter, dest, window, surface);
         } else {
-            let dest = fitted(size, rect, tile.aspect);
-            painter.image(
-                surface.id,
-                dest,
-                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            painter.image(surface.id, dest, window, Color32::WHITE);
         }
     }
 }
 
-/// Draws the video rotated 90° clockwise. The source dimensions swap, a
-/// fixed aspect ratio inverts, and the four corners are mapped to a
-/// [`Mesh`] so the texture is sampled sideways without distorting it.
-fn rotated_canvas(painter: &egui::Painter, rect: Rect, source: Vec2, aspect: TileAspect, surface: VideoSurface) {
-    let dest = rotated_fitted(source, rect, aspect);
+/// Draws the video rotated 90° clockwise. The source dimensions swap, a fixed
+/// aspect ratio inverts, and the four corners are mapped to a [`Mesh`] so the
+/// texture is sampled sideways without distorting it. `dest` is where the
+/// picture was placed by [`picture_area`], and `window` the part of the source
+/// the tile shows - all of it, unless the magnified view has been pushed in.
+fn turned_canvas(painter: &egui::Painter, dest: Rect, window: Rect, surface: VideoSurface) {
+    let uv = turned_corners(window);
     let mut mesh = Mesh::with_texture(surface.id);
     mesh.vertices = vec![
-        Vertex { pos: dest.left_top(), uv: egui::pos2(0.0, 1.0), color: Color32::WHITE },
-        Vertex { pos: dest.right_top(), uv: egui::pos2(0.0, 0.0), color: Color32::WHITE },
-        Vertex { pos: dest.right_bottom(), uv: egui::pos2(1.0, 0.0), color: Color32::WHITE },
-        Vertex { pos: dest.left_bottom(), uv: egui::pos2(1.0, 1.0), color: Color32::WHITE },
+        Vertex { pos: dest.left_top(), uv: uv[0], color: Color32::WHITE },
+        Vertex { pos: dest.right_top(), uv: uv[1], color: Color32::WHITE },
+        Vertex { pos: dest.right_bottom(), uv: uv[2], color: Color32::WHITE },
+        Vertex { pos: dest.left_bottom(), uv: uv[3], color: Color32::WHITE },
     ];
     mesh.indices = vec![0, 1, 2, 0, 2, 3];
     painter.add(Shape::Mesh(Arc::new(mesh)));
+}
+
+/// The texture coordinates the turned canvas puts on the four corners of a
+/// source window, in its order: left-top, right-top, right-bottom, left-bottom.
+///
+/// A picture drawn sideways is sampled sideways - what the tile shows of the
+/// source runs along the texture the other way - so its window turns with it:
+/// the part of the picture that is further down lies further along the texture,
+/// and the part further left lies further down it. The whole window is what that
+/// canvas was written with, so a picture nobody has pushed in is drawn exactly
+/// as it was before there was a window at all.
+fn turned_corners(window: Rect) -> [egui::Pos2; 4] {
+    let min = window.min;
+    let max = window.max;
+    [
+        egui::pos2(min.y, 1.0 - min.x),
+        egui::pos2(min.y, 1.0 - max.x),
+        egui::pos2(max.y, 1.0 - max.x),
+        egui::pos2(max.y, 1.0 - min.x),
+    ]
+}
+
+/// Where a picture lands inside a tile: [`fitted`] or [`rotated_fitted`], by
+/// whether the picture is drawn sideways.
+///
+/// The tile's own rectangle, the picture's size and the display mode it is fitted
+/// by are all it needs, and it is what the painting and a gesture that pushes the
+/// picture in both measure against - the gesture because it is aimed where the
+/// fingers are, and the fingers are over this rectangle.
+pub fn picture_area(size: Vec2, tile: Rect, aspect: TileAspect, rotated: bool) -> Rect {
+    if rotated {
+        rotated_fitted(size, tile, aspect)
+    } else {
+        fitted(size, tile, aspect)
+    }
 }
 
 /// [`fitted`] for a picture turned sideways: the source width and height
@@ -783,5 +902,101 @@ mod tests {
         assert!((rect.height() - 450.0).abs() < 0.01);
         assert!((rect.left() - 800.0).abs() < 0.01);
         assert!((rect.top() - 450.0).abs() < 0.01);
+    }
+
+    /// Pushing the picture in is aimed: what the fingers are over stays under
+    /// them, so the detail they went for is the detail they get.
+    #[test]
+    fn a_pinch_keeps_what_it_is_aimed_at_under_the_fingers() {
+        let dest = Rect::from_min_size(egui::pos2(100.0, 50.0), vec2(800.0, 450.0));
+        let at = egui::pos2(dest.left() + dest.width() * 0.75, dest.center().y);
+        let zoomed = PictureZoom::FULL.zoomed(2.0, at, dest);
+        assert!((zoomed.scale - 2.0).abs() < 0.001, "{}", zoomed.scale);
+        // The window is half the picture each way, and its left edge is `0.625
+        // - 0.25`, which leaves the picture's own three quarters under the hands.
+        let window = zoomed.window();
+        assert!((window.left() - 0.375).abs() < 0.001, "{}", window.left());
+        assert!((window.width() - 0.5).abs() < 0.001);
+        // The one property that matters: read through the window, the hands are
+        // over the same part of the picture as they were before the pinch.
+        let under = |zoom: PictureZoom| {
+            let window = zoom.window();
+            window.min + ((at - dest.min) / dest.size()) * window.size()
+        };
+        assert!(
+            (under(zoomed) - under(PictureZoom::FULL)).length() < 0.001,
+            "the aim moved: {:?} to {:?}",
+            under(PictureZoom::FULL),
+            under(zoomed)
+        );
+        assert!((zoomed.center.y - 0.5).abs() < 0.001, "the aim was level with the middle");
+    }
+
+    /// The window's edges are the picture's edges, and there is nowhere past
+    /// them to go: a drag asks for more of the picture and is given the edge.
+    #[test]
+    fn the_window_never_leaves_the_picture() {
+        let dest = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(800.0, 400.0));
+        let middle = PictureZoom::FULL.zoomed(4.0, dest.center(), dest);
+        assert!((middle.window().left() - 0.375).abs() < 0.001, "a quarter either side of the middle");
+        // At four times the window is a quarter of the picture, and a drag
+        // crosses that much picture per `800 * 4` points: a tile and a half of
+        // dragging puts the left edge of the window on the left edge of the
+        // picture, and stops there.
+        let dragged = middle.panned(vec2(1200.0, 0.0), dest);
+        let window = dragged.window();
+        assert!(window.left().abs() < 0.001, "{}", window.left());
+        assert!((window.right() - 0.25).abs() < 0.001, "{}", window.right());
+        // And a drag the other way is the right and bottom edges just the same.
+        let back = dragged.panned(vec2(-9999.0, -9999.0), dest);
+        let window = back.window();
+        assert!((window.right() - 1.0).abs() < 0.001, "{}", window.right());
+        assert!((window.bottom() - 1.0).abs() < 0.001, "{}", window.bottom());
+    }
+
+    /// Closing the fingers gives the whole picture back and centres it, and
+    /// opening them stops at the limit rather than keeping on.
+    #[test]
+    fn a_pinch_stops_at_the_whole_picture_and_at_the_limit() {
+        let dest = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(800.0, 450.0));
+        let at = egui::pos2(dest.left() + 20.0, dest.top() + 30.0);
+        assert_eq!(
+            PictureZoom::FULL.zoomed(0.25, at, dest),
+            PictureZoom::FULL,
+            "a pinch closed past whole is whole, and centred"
+        );
+        let pushed = PictureZoom::FULL.zoomed(100.0, dest.center(), dest);
+        assert!((pushed.scale - PICTURE_ZOOM_MAX).abs() < 0.001, "{}", pushed.scale);
+        assert!((pushed.center - Vec2::splat(0.5)).length() < 0.001, "aimed at the middle");
+    }
+
+    /// The turned canvas's own four corners: the whole window is the set of
+    /// coordinates that canvas was written with, so a picture nobody has pushed
+    /// in is drawn exactly as it was.
+    #[test]
+    fn a_turned_window_is_sampled_where_the_picture_puts_it() {
+        let whole = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        assert_eq!(
+            turned_corners(whole),
+            [
+                egui::pos2(0.0, 1.0),
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+            ],
+            "the whole picture"
+        );
+        // The left half of the picture: what is left of it lies further down
+        // the texture, and what is above it lies further to its left.
+        let left = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(0.5, 1.0));
+        assert_eq!(
+            turned_corners(left),
+            [
+                egui::pos2(0.0, 1.0),
+                egui::pos2(0.0, 0.5),
+                egui::pos2(1.0, 0.5),
+                egui::pos2(1.0, 1.0),
+            ]
+        );
     }
 }

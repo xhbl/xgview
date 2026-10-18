@@ -398,6 +398,17 @@ frame the tile was showing stays on screen until the main picture arrives, so th
 transition shows no black or green frames. `Esc` / `BACK`, or another double
 click, returns to the grid.
 
+The magnified picture can be pushed in further, which is how a detail is read off
+it: spread two fingers to zoom in on the point between them - up to eight times -
+and drag to move the picture under them. It is the picture being cropped and
+stretched, not a second stream: the magnified view is already pulling the main
+stream, so nothing reconnects and nothing is re-laid-out. A trackpad's pinch or a
+ctrl-wheel zooms the same way, aimed where the pointer is. While the picture is
+pushed in, a drag moves it instead of stepping to the next channel: the channel
+after this one is reached from the toolbar's arrows or the page keys, or by
+closing the fingers back to whole first. Leaving the magnified view, or stepping
+to another channel, gives the picture back whole.
+
 ### Keyboard and remote control
 
 | Key                                     | Action                                                                                                                                     |
@@ -469,6 +480,12 @@ as a portable monitoring screen:
 - **Tap to focus, double tap to magnify.** A tap focuses a tile; a double tap
   magnifies it to 1x1, and a second double tap returns it to the grid - the touch
   equivalent of `DPAD_CENTER`, with no `BACK` needed.
+- **Pinch to magnify further, drag to look around.** Inside the magnified view a
+  pinch pushes the picture in - up to eight times, about the point between the
+  fingers - and a drag moves it, so a number plate or a face across the yard can
+  be read without leaving the wall. The picture is cropped rather than a second
+  stream pulled. The next channel is then the toolbar's arrow or `PageUp` /
+  `PageDown`, and closing the fingers gives the whole picture back.
 - **Swipe to page.** Dragging horizontally over the grid turns the page, with the
   outgoing page sliding under the finger; while magnified the same swipe steps to
   the next or previous channel.
