@@ -112,7 +112,7 @@ it in sensitive setups.
 | Grid layouts        | 1x1, 2x2, 3x3 and 4x4 as direct buttons, plus nine mixed layouts (2, 3, 5, 6, 7, 8, 10, 12, 13 cells) behind a graphical picker; switchable at runtime with the digit keys or the toolbar. Held upright, the four stacked grids (1x1 to 1x4) stand in their place                                                                                                                |
 | Portrait            | Where the device can stand upright - a phone or a tablet, not a television - the wall turns: four stacked grids, the on-screen display rotated with the video, a picture fit of its own per camera, and the page arrows floated at the screen edges. The settings panel is reached in landscape, and the choice is remembered across restarts - the wall comes up already turned |
 | Pagination          | Channels beyond the grid's capacity are paged; swipe, `PageUp` / `PageDown` or the toolbar slides between pages                                                                                                                                                                                                                                                                  |
-| Focus navigation    | A 2 px cyan focus ring walks the tiles with the arrow keys or a TV remote's DPAD; the sideways arrows turn the page at the left and right edges, and the vertical ones stop at the top and bottom, where the wall hands the keys to the bars. It is the remote's cursor: a press of the mouse or a finger does not move it                                                       |
+| Focus navigation    | A 2 px cyan focus ring walks the tiles with the arrow keys or a TV remote's DPAD; the sideways arrows turn the page at the left and right edges, and the vertical ones stop at the top and bottom, where the wall hands the keys to the bars. It is the remote's cursor: a press of the mouse or a finger does not move it, and it is drawn only while the wall is being operated - the first input brings it back and it goes again ten seconds later, on its own clock rather than the bars'. The two meet only at the ends of the bars' life: the ring is taken down as they hide and brought back as they appear, and a wall driven in full screen with the bars away keeps its ring |
 | Temporary zoom      | Double click, `DPAD_CENTER`, `Enter` or `Space` magnifies a viewport to 1x1; `Esc` / `BACK` restores the grid                                                                                                                                                                                                                                                                    |
 | Stream switching    | Every layout pulls the cheap sub stream (360P / 480P), the 1x1 grid included; only a magnified viewport switches to the main stream (1080P / 4K)                                                                                                                                                                                                                                 |
 | Seamless transition | The last sub-stream frame is held until the main stream delivers its first keyframe - no black or green frames                                                                                                                                                                                                                                                                   |
@@ -419,12 +419,19 @@ XGView is designed to be driven with nothing but a TV remote. Every action is
 reachable through the five DPAD keys - up, down, left, right and center - plus
 `BACK`, so no on-screen keyboard or keyboard-only shortcut is ever required:
 
-- **Clear focus, always visible.** The focused viewport is marked by a 2 px cyan
+- **Clear focus when it matters.** The focused viewport is marked by a 2 px cyan
   focus ring, and the focus is restored to a sensible tile after every layout
   change, page turn or zoom, so the user never loses track of where the remote
   points. The ring is the remote's cursor rather than the pointer's: a click or
   a tap on a control is an action and does not move it, so a wall that was
   touched once does not take the arrows away from where the remote left them.
+  It is also drawn only while the wall is being operated: the first input brings
+  it up, ten seconds without one takes it down (its own clock, not the bars'
+  timeout), and a wall nobody has touched yet - a fresh start - has none at all.
+  The bars are the only connection the two have, and it is at the ends of their
+  life: the ring goes down with them as they hide and comes back with them as
+  they appear - and, with the bars away in full screen, a wall still being driven
+  keeps its ring.
 - **Edges do the obvious thing.** The sideways arrows turn the page when the
   focus is at the left or right edge of the grid; the vertical arrows stop at the
   top and bottom and hand the keys to the toolbar, letting the DPAD reach the

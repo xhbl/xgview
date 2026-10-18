@@ -1615,6 +1615,31 @@ cleanup is held back from it while it is up, the way `panel_anchor` and the
 hand-offs are. Inside it the ring is the crate's, kept and given up by its own
 rules - an arrow key breaks out of the field and into the list, by design.
 
+**The ring stands only while the wall is being operated.** *Landed 2026-10-18,
+in the 1.4.x line.* It used to be drawn whenever the bars were on screen, and
+for the bars' idle time after they went; that is a cursor standing on a wall
+nobody is watching it on, and on a fresh start it is one standing there before
+the viewer has touched anything. The reading is now the viewer's own input:
+`ring_seen: Option<Instant>` is armed by `any_input` - the same reading the bars
+take - and the ring is drawn within `RING_IDLE` = 10 s of it, so it comes back
+with the first input, goes ten seconds later, and starts out `None`, which is
+what keeps a fresh run's wall free of a cursor.
+
+**Its clock is its own, and the bars meet it at the two ends of their life.** The
+ring does not follow `chrome_idle_secs`: that is the viewer's setting for how long
+the bars stand in full screen, and a cursor that faded with them would leave the
+wall unaimed halfway through a press. `ring_standing` therefore reads the ring's
+own ten seconds, and `ring_follows_bars` is all the bars do to it - arm it as they
+appear, take it with them as they go, and leave it alone in between.
+
+**Why not a gate on `chrome.visible`.** Written that way first, and it does not
+survive the wall: the wall's own keys are deliberately not a request for the bars
+(`viewer_active` exists to keep them away - the bars take their height from the
+wall), so in full screen, with the bars away and the viewer driving the wall with
+the arrows, nothing can bring them back. A ring drawn only while they were up was
+therefore never drawn at all in the one case the ring exists for. The connection
+has to be the two transitions, not the state.
+
 
 ## 25. Two activities, so the wall comes up already turned
 

@@ -71,6 +71,17 @@ const TOOLBAR_MIN_SCALE: f32 = 0.6;
 /// window leaves. It also bounds how long the question is drawn for.
 const EXIT_WINDOW: Duration = Duration::from_secs(2);
 
+/// How long the focus ring stands after the last input.
+///
+/// Its own clock, and deliberately not the bars': those fade after
+/// `chrome_idle_secs`, which is a setting the viewer chooses, and the ring is a
+/// cursor rather than a part of them - it stands on the wall while the viewer is
+/// using it and no longer. The two meet at the two ends of the bars' life and
+/// nowhere else: they arm the ring as they appear and take it with them as they
+/// go, and a wall driven with the bars away keeps the ring it is aimed with. See
+/// [`XgViewApp::ring_follows_bars`].
+const RING_IDLE: Duration = Duration::from_secs(10);
+
 /// Width of the settings side panel, and the narrowest it may be dragged to.
 ///
 /// A phone in landscape is barely wider than the panel at its default, which is
@@ -780,9 +791,13 @@ pub struct XgViewApp {
     /// Horizontal centre of the focused tile, which is where the arrow that
     /// walks off the top of the wall comes back down from.
     grid_focus_x: Option<f32>,
-    /// When the viewer last did something on the wall, which is what the focus
-    /// ring is timed by while the bars are hidden. See `paint_view`.
-    wall_seen: Instant,
+    /// When the focus ring was last armed by an input of the viewer's, and
+    /// `None` until it ever was.
+    ///
+    /// `None` is what keeps the ring off a wall nobody has touched yet: a fresh
+    /// run shows the picture, not a cursor standing on it. See
+    /// [`XgViewApp::ring_shown`].
+    ring_seen: Option<Instant>,
     /// Who answered the last frame's direction presses.
     owner: Owner,
     /// Explicit directional navigation for the windows that opted into it.
@@ -1119,7 +1134,7 @@ impl XgViewApp {
             last_turn: None,
             status_author: None,
             grid_focus_x: None,
-            wall_seen: Instant::now(),
+            ring_seen: None,
             // The "Add devices" window, the settings panel and the top bar are
             // on this layer: each is a row (of tabs, or of controls) over a
             // column, which is the shape egui's walk handles worst. The wall
@@ -1927,6 +1942,9 @@ impl XgViewApp {
     /// anything that keeps the control reachable keeps the bars - which the
     /// control it is part of cannot be drawn without. See
     /// [`Self::chrome_visible`].
+    ///
+    /// It is also what arms the focus ring: every key, press and movement the
+    /// bars answer to arms the ring as well. See [`Self::ring_shown`].
     fn any_input(input: &egui::InputState) -> bool {
         input.pointer.any_down()
             || input.events.iter().any(|event| match event {
@@ -1996,13 +2014,54 @@ impl XgViewApp {
     /// Outside full screen they always are - the window has a frame around it
     /// anyway, and the bars are where the controls live. In full screen they
     /// fade once the wall has been left alone for the configured idle time,
-    /// which is the difference between a monitor and a television.
+    /// which is the difference between a monitor and a television. The answer is
+    /// kept in [`Chrome::visible`], and what the focus ring makes of it is read
+    /// where it changes: the bars arm the ring as they appear and take it with
+    /// them as they go, and its own clock rules in between. See
+    /// [`Self::ring_follows_bars`].
     fn chrome_idle(&self) -> Duration {
         let secs = self.config.chrome_idle_secs;
         if secs <= 0.0 {
             Duration::MAX
         } else {
             Duration::from_secs_f32(secs)
+        }
+    }
+
+    /// Whether the focus ring is drawn this frame.
+    ///
+    /// Its own clock, and only its own: armed by the viewer's input - see
+    /// [`Self::any_input`] - and off until the viewer makes one, which is what
+    /// keeps a fresh run's wall free of a cursor. The bars have no say here; what
+    /// they do to the ring they do at the moment they come and go. See
+    /// [`Self::ring_follows_bars`].
+    fn ring_shown(&self) -> bool {
+        Self::ring_standing(self.ring_seen, Instant::now())
+    }
+
+    /// [`Self::ring_shown`], with its clock given: the rule we can test.
+    fn ring_standing(armed: Option<Instant>, now: Instant) -> bool {
+        armed.is_some_and(|at| now.saturating_duration_since(at) < RING_IDLE)
+    }
+
+    /// What the bars do to the ring as they come and go: they arm it as they
+    /// appear, and take it away with them as they go.
+    ///
+    /// It is the bars' *ends* and not their state, and that is what makes the
+    /// ring usable in full screen. The wall's own keys are deliberately not a
+    /// request for the bars - see [`Self::viewer_active`], and the height the
+    /// bars take from the wall - so a viewer driving the wall with the bars away
+    /// has nothing that could bring them back, and a ring that asked whether the
+    /// bars were up before it drew itself would never draw at all in the one
+    /// case it exists for. Read as a gate, `chrome.visible` did exactly that.
+    fn ring_follows_bars(seen: Option<Instant>, bars: bool, was: bool, now: Instant) -> Option<Instant> {
+        match (bars, was) {
+            // The bars coming up: the ring comes back with them.
+            (true, false) => Some(now),
+            // The bars going: they take the ring with them.
+            (false, true) => None,
+            // Either of them on its own: the ring keeps its own clock.
+            _ => seen,
         }
     }
 
@@ -3104,23 +3163,6 @@ impl XgViewApp {
                 }
             }
             return;
-        }
-
-        // Anything a press does on the wall keeps the focus ring alive for a
-        // moment: it is a cursor, and with the bars hidden it is the only thing
-        // that shows the viewer which tile the remote moved to. See
-        // `paint_view`.
-        if keys.left
-            || keys.right
-            || keys.up
-            || keys.down
-            || keys.enter
-            || keys.back
-            || keys.page_prev
-            || keys.page_next
-            || keys.layout.iter().any(|pressed| *pressed)
-        {
-            self.wall_seen = Instant::now();
         }
 
         if self.scheduler.is_zoomed() {
@@ -6052,6 +6094,9 @@ impl XgViewApp {
             return actions;
         }
         let focus = self.scheduler.focus();
+        // Read once for the frame: the same answer for every tile, and it is the
+        // frame's clock rather than each cell's turn at it.
+        let ring = self.ring_shown();
 
         for (cell, index) in view.cells.iter().enumerate() {
             let rect = grid::tile_rect(origin, view.layout, cell, grid::LINE);
@@ -6064,16 +6109,12 @@ impl XgViewApp {
                 camera: index.and_then(|index| cameras.get(index)),
                 channel: index.and_then(|index| self.channels.get(&index)),
                 video: index.and_then(|index| self.textures.get(&index)).map(|entry| entry.surface),
-                // The ring is a cursor. While the bars are on screen it is what
-                // tells the viewer which tile the remote is on. With the bars
-                // gone it is kept for a moment after the last press on the wall
-                // instead: moving the focus and magnifying a viewport are done
-                // on the wall without the bars now, and both are blind without
-                // the ring - and a wall nobody is operating is a picture, which
-                // a cursor left standing on it is not part of.
-                focused: interactive
-                    && *index == focus
-                    && (self.chrome.visible || self.wall_seen.elapsed() < self.chrome_idle()),
+                // The ring is a cursor, and a wall nobody is operating is just a
+                // picture: it is drawn from the last key or press on and goes
+                // once the wall has been left alone for the shorter of the ring's
+                // own idle and the bars'. Which bars are up does not come into
+                // it. See `ring_shown`.
+                focused: interactive && *index == focus && ring,
                 interactive,
                 dim: !interactive,
                 osd: self.config.osd,
@@ -6197,9 +6238,6 @@ impl XgViewApp {
                 self.needs_sync = true;
                 self.mark_dirty();
             }
-            // A pointer press is a press on the wall too, and the ring is what
-            // shows which tile it landed on. See `paint_view`.
-            self.wall_seen = Instant::now();
         }
         if let Some(index) = actions.zoom {
             self.zoom_to(index);
@@ -6692,6 +6730,12 @@ impl eframe::App for XgViewApp {
         // a viewer was there. What counts as asking for them is the whole of
         // `viewer_active`.
         self.chrome.input_seen = self.viewer_active(ctx);
+        // The focus ring is armed by the same reading as the bars, and by all
+        // of it: the ring is the cursor of whatever the remote is on, and
+        // anything the viewer does is them reaching for it.
+        if ctx.input(Self::any_input) {
+            self.ring_seen = Some(Instant::now());
+        }
 
         self.poll_events();
         self.poll_sealing();
@@ -6810,7 +6854,13 @@ impl eframe::App for XgViewApp {
         // *before* the bars are asked for, because the frame a press in a band
         // brings them back in is one of the frames that has to claim it.
         let bands_hidden = !self.chrome.visible;
-        if self.chrome_visible() {
+        let bars = self.chrome_visible();
+        // The focus ring's only connection with the bars, read where the bars'
+        // state is decided: they arm it as they appear and take it with them as
+        // they go, and apart from those two moments the ring is on its own
+        // clock. See `ring_follows_bars`.
+        self.ring_seen = Self::ring_follows_bars(self.ring_seen, bars, !bands_hidden, Instant::now());
+        if bars {
             let toolbar = egui::TopBottomPanel::top("xgview-toolbar").show(ctx, |ui| self.toolbar(ui));
             let status = egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| self.status_bar(ui));
             // Kept past this frame, when the bars are gone: the band a bar
@@ -7293,6 +7343,112 @@ mod tests {
         // Before the bars have been drawn once there is no band to press, and a
         // press anywhere is a press on the wall.
         assert!(!XgViewApp::in_a_bar_band(None, Pos2::new(640.0, 12.0)));
+    }
+
+    /// The ring is a cursor for a wall that is being operated. It is off until
+    /// the viewer makes an input the first time - a fresh run shows the picture,
+    /// not a cursor standing on it - and it stands for ten seconds after one, on
+    /// its own clock rather than the bars'.
+    #[test]
+    fn the_ring_stands_after_an_input_and_no_longer() {
+        let now = Instant::now();
+        assert!(!XgViewApp::ring_standing(None, now), "nothing has been touched yet");
+        // An input a moment ago: the ring stands.
+        assert!(XgViewApp::ring_standing(Some(now - Duration::from_secs(1)), now));
+        assert!(XgViewApp::ring_standing(Some(now - Duration::from_millis(9_900)), now));
+        // Ten seconds - its own clock, whatever the bars' idle is set to - and
+        // after it: gone.
+        assert!(!XgViewApp::ring_standing(Some(now - RING_IDLE), now));
+        assert!(!XgViewApp::ring_standing(Some(now - Duration::from_secs(11)), now));
+    }
+
+    /// The bars are the ring's only connection, and it is at the two ends of
+    /// their life: they arm it as they appear and take it with them as they go.
+    /// Neither of them is a gate the ring is drawn behind - a wall driven with
+    /// the bars away must keep its ring, or the one case the ring exists for is
+    /// the one it cannot be drawn in.
+    #[test]
+    fn the_bars_arm_the_ring_as_they_appear_and_take_it_as_they_go() {
+        let now = Instant::now();
+        let used = Some(now - Duration::from_secs(1));
+        let follows = XgViewApp::ring_follows_bars;
+
+        // Coming up: armed, whatever the ring was doing before.
+        assert_eq!(follows(used, true, false, now), Some(now), "the bars appeared");
+        assert_eq!(follows(None, true, false, now), Some(now), "the bars appeared");
+        // Going: taken away with them, however recently it was armed.
+        assert_eq!(follows(used, false, true, now), None, "the bars went");
+        assert_eq!(follows(None, false, true, now), None, "the bars went");
+        // Either of them on its own: the ring keeps its own clock. In full
+        // screen the bars are away most of the time and the wall is still being
+        // driven, which is exactly this case.
+        assert_eq!(follows(used, false, false, now), used, "the bars were away and stay away");
+        assert_eq!(follows(used, true, true, now), used, "the bars were up and stay up");
+        assert_eq!(follows(None, false, false, now), None, "the bars were away and stay away");
+    }
+
+    /// What arms the ring is a key or a press, and nothing the system does: a
+    /// window being focused or resized under the viewer is not the viewer
+    /// reaching for the cursor. The mouse moving counts here the same way it
+    /// does for the bars - the ring shares their reading.
+    #[test]
+    fn a_key_or_a_press_arms_the_ring() {
+        /// One frame of a program with `events` in it, and whether it was
+        /// answered as input. A context of its own each time: a pointer left down
+        /// by the case before would answer for the next one.
+        fn armed_by(events: Vec<egui::Event>) -> bool {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0))),
+                events,
+                ..Default::default()
+            };
+            let mut armed = false;
+            let _ = ctx.run(input, |ctx| armed = ctx.input(XgViewApp::any_input));
+            armed
+        }
+
+        assert!(armed_by(vec![press(Key::ArrowRight)]), "a key the wall acts on");
+        assert!(armed_by(vec![press(Key::F11)]), "a key that opens a bar");
+        assert!(
+            armed_by(vec![egui::Event::PointerButton {
+                pos: Pos2::new(640.0, 360.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }]),
+            "a press on the picture"
+        );
+        assert!(
+            armed_by(vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -40.0),
+                modifiers: Modifiers::NONE,
+            }]),
+            "the wheel"
+        );
+        assert!(armed_by(vec![egui::Event::MouseMoved(vec2(1.0, 1.0))]), "the mouse moving");
+        // The tail of a press that has already counted arms nothing, and nor
+        // does the system moving the window about.
+        let released = egui::Event::Key {
+            key: Key::ArrowRight,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        assert!(!armed_by(vec![released]), "a key coming back up");
+        assert!(
+            !armed_by(vec![egui::Event::PointerButton {
+                pos: Pos2::new(640.0, 360.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }]),
+            "a button coming back up"
+        );
+        assert!(!armed_by(vec![egui::Event::WindowFocused(true)]), "the window being focused");
+        assert!(!armed_by(vec![]), "an empty frame");
     }
 
     /// The layout picker's nine thumbnails are three rows of three, and the
