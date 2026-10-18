@@ -400,14 +400,16 @@ click, returns to the grid.
 
 The magnified picture can be pushed in further, which is how a detail is read off
 it: spread two fingers to zoom in on the point between them - up to eight times -
-and drag to move the picture under them. It is the picture being cropped and
-stretched, not a second stream: the magnified view is already pulling the main
-stream, so nothing reconnects and nothing is re-laid-out. A trackpad's pinch or a
-ctrl-wheel zooms the same way, aimed where the pointer is. While the picture is
-pushed in, a drag moves it instead of stepping to the next channel: the channel
-after this one is reached from the toolbar's arrows or the page keys, or by
-closing the fingers back to whole first. Leaving the magnified view, or stepping
-to another channel, gives the picture back whole.
+and drag to move the picture under them. A trackpad's pinch, or the wheel of a
+mouse, does the same and unwinds it again, aimed where the pointer is; a wheel
+turned over the picture belongs to the picture, so in full screen zooming does not
+bring the bars back. It is the picture being cropped and stretched, not a second
+stream: the magnified view is already pulling the main stream, so nothing
+reconnects and nothing is re-laid-out. While the picture is pushed in, a drag
+moves it instead of stepping to the next channel: the channel after this one is
+reached from the toolbar's arrows or the page keys, or by closing the fingers back
+to whole first. Leaving the magnified view, or stepping to another channel, gives
+the picture back whole.
 
 ### Keyboard and remote control
 

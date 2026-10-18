@@ -1938,9 +1938,18 @@ impl XgViewApp {
             | egui::Event::WindowFocused(_)
             | egui::Event::Screenshot { .. }
             | egui::Event::PointerGone => false,
-            // The wheel, a dropped file, a pinch: the viewer, and none of it is
-            // something done on the wall. The bars are asked for by a press in
-            // their band, by Back or by a function key, and by nothing else.
+            // A wheel and a trackpad's pinch are the viewer at the *picture*: in
+            // the magnified viewport a wheel pushes it in and a drag moves it.
+            // Turning one is no more a request for the bars than turning a page
+            // is - the wall's own keys and a swipe are read the same way - so in
+            // full screen a zoom leaves the bars to their own clock rather than
+            // bringing them back, and either is answered by the picture rather
+            // than by a press in the band the bars sit in.
+            egui::Event::MouseWheel { .. } | egui::Event::Zoom(_) => false,
+            // A dropped file, and anything an integration sends that is not named
+            // here: the viewer, and none of it is something done on the wall. The
+            // bars are asked for by a press in their band, by Back or by a
+            // function key, and by nothing else.
             _ => true,
         }
     }
@@ -6373,18 +6382,26 @@ impl XgViewApp {
         // frame's own input: while the magnification stands there is one picture
         // over the whole wall, and no tile beside it to catch a drag as one. See
         // `PictureZoom`.
-        let pinched = ui.ctx().input(pinch_frame);
+        let pinched = ui.ctx().input(|input| pinch_frame(input, area));
+        // A wheel is the same thing to the picture as a pinch - the fingers or
+        // the mouse, pushed in about the point between them - and it is read
+        // separately only because egui hands it over as a *scroll*: the interface
+        // scrolls elsewhere, and the magnified viewport is the one place where
+        // there is nothing to scroll. See `wheel_frame`.
+        let speed = ui.ctx().options(|options| options.input_options.scroll_zoom_speed);
+        let wheeled = ui.ctx().input(|input| wheel_frame(input, speed, area));
         // The fingers are the wall's on the same terms as the keys: while
         // something else owns them - a panel, a window, or the black - a gesture
         // made over the wall is the panel's to answer, and the picture keeps the
         // window it has. See `handle_keys`, which runs on the same answer.
         if self.scheduler.is_zoomed() && !self.blackout_on && self.owner == Owner::Grid {
             if let Some(dest) = self.magnified_area(&cameras, &view, wall, dx) {
-                // A pinch pushes the picture in about where it is aimed; a drag
-                // moves it. The two are one gesture or the other, never both: a
-                // pinch is the fingers, and the pointer follows the first of
-                // them.
-                if let Some((delta, at)) = pinched.filter(|(_, at)| area.contains(*at)) {
+                // A pinch or a wheel pushes the picture in about where it is
+                // aimed; a drag moves it. The first two are one gesture or the
+                // other, never both - a pinch is the fingers and the wheel is
+                // the mouse - and neither is a drag, because a pinch's pointer
+                // follows the first finger and a wheel has no pointer of its own.
+                if let Some((delta, at)) = pinched.or(wheeled) {
                     self.picture_zoom = self.picture_zoom.zoomed(delta, at, dest);
                 } else if self.picture_zoom.magnified() {
                     if let Some(delta) = ui.ctx().input(|input| drag_frame(input, area)) {
@@ -7501,18 +7518,50 @@ fn sub_is_derived(camera: &CameraSource, sub: &str) -> bool {
 ///
 /// A touch screen counts its own fingers and says where their middle is; a
 /// trackpad has no fingers to count and sends zoom events instead (a mouse's
-/// ctrl-wheel arrives as the same factor), aimed where the pointer is. Both are
-/// read here, so that a gesture has one answer rather than two, and neither is
-/// taken out of the queue - what the frame holds is what the devices sent.
-fn pinch_frame(input: &egui::InputState) -> Option<(f32, egui::Pos2)> {
+/// zoom-modified wheel arrives as the same factor), aimed where the pointer is.
+/// Both are read here, so that a gesture has one answer rather than two, and
+/// neither is taken out of the queue - what the frame holds is what the devices
+/// sent.
+///
+/// `area` is the wall: a gesture made over a panel or a bar belongs to whatever
+/// is there, and the picture behind it is not what is being pushed in.
+fn pinch_frame(input: &egui::InputState, area: Rect) -> Option<(f32, egui::Pos2)> {
     if let Some(touch) = input.multi_touch() {
-        return Some((touch.zoom_delta, touch.center_pos));
+        return area.contains(touch.center_pos).then_some((touch.zoom_delta, touch.center_pos));
     }
     let delta = input.zoom_delta();
     if delta == 1.0 {
         return None;
     }
-    input.pointer.hover_pos().map(|at| (delta, at))
+    let at = input.pointer.hover_pos()?;
+    area.contains(at).then_some((delta, at))
+}
+
+/// How much the plain wheel asked to push the picture in by this frame, if it was
+/// turned - and where, in screen points.
+///
+/// A wheel turned with the zoom modifier - Cmd on macOS, Ctrl elsewhere - is the
+/// *other* kind of wheel zoom, and [`pinch_frame`] reads it along with a
+/// trackpad's pinch. This one is the plain wheel, which egui reads as a scroll,
+/// because everywhere else in the interface there is something to scroll: in the
+/// magnified viewport there is not, and the picture is what the wheel is over.
+///
+/// The factor is egui's own - `speed` is its `scroll_zoom_speed` and the delta is
+/// the one it has already smoothed - so a plain wheel and a zoom-modified one
+/// push the picture in by the same amount per notch, and the smoothing adds up to
+/// the same total because the factors multiply. A wheel turned anywhere the
+/// interface scrolls is not ours to read, which is what `area` says.
+fn wheel_frame(input: &egui::InputState, speed: f32, area: Rect) -> Option<(f32, egui::Pos2)> {
+    // `Modifiers::COMMAND`, which egui's own `zoom_modifier` is set to.
+    if input.modifiers.command {
+        return None;
+    }
+    let scrolled = input.smooth_scroll_delta.x + input.smooth_scroll_delta.y;
+    if scrolled == 0.0 {
+        return None;
+    }
+    let at = input.pointer.hover_pos()?;
+    area.contains(at).then(|| ((speed * scrolled).exp(), at))
 }
 
 /// How far the magnified picture was dragged this frame, in points, if it was.
@@ -7862,7 +7911,8 @@ mod tests {
         let frame = |ctx: &egui::Context, events: Vec<egui::Event>| {
             let _ = ctx.run(egui::RawInput { events, ..Default::default() }, |_| {});
         };
-        let read = |ctx: &egui::Context| ctx.input(pinch_frame);
+        let wall = Rect::from_min_size(pos2(0.0, 40.0), vec2(1280.0, 640.0));
+        let read = |ctx: &egui::Context| ctx.input(|input| pinch_frame(input, wall));
 
         // Two fingers land. The frame that places the pointer is the one before
         // the gesture can be measured, because the touch state reads where the
@@ -7911,6 +7961,89 @@ mod tests {
         let (delta, at) = read(&ctx).expect("a zoom event is a pinch");
         assert!((delta - 1.2).abs() < 0.01, "the event's own factor: {delta}");
         assert_eq!(at, pos2(120.0, 400.0), "aimed at the pointer");
+        // The same event with the pointer over a bar belongs to the bar: the
+        // picture behind it is not what is being pushed in.
+        let band = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 40.0));
+        assert!(
+            ctx.input(|input| pinch_frame(input, band)).is_none(),
+            "a gesture over a bar is the bar's"
+        );
+    }
+
+    /// The plain wheel pushes the picture in where the pointer is, and it is read
+    /// only over the wall: a wheel turned where the interface scrolls, and the one
+    /// turned with the zoom modifier - which egui folds into the frame's zoom
+    /// factor and [`pinch_frame`] reads - are not the picture's to answer.
+    #[test]
+    fn the_plain_wheel_pushes_the_picture_in_where_the_pointer_is() {
+        let wall = Rect::from_min_size(pos2(0.0, 40.0), vec2(1280.0, 640.0));
+        let band = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 40.0));
+        let wheel = |delta, modifiers| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta,
+            modifiers,
+        };
+        let frame = |ctx: &egui::Context, events: Vec<egui::Event>, modifiers: Modifiers| {
+            let _ = ctx.run(egui::RawInput { events, modifiers, ..Default::default() }, |_| {});
+        };
+        let read = |ctx: &egui::Context, area: Rect| {
+            let speed = ctx.options(|options| options.input_options.scroll_zoom_speed);
+            ctx.input(|input| wheel_frame(input, speed, area))
+        };
+
+        // A notch forward, with the pointer over the wall: the picture is pushed
+        // in, about where the pointer is.
+        let ctx = egui::Context::default();
+        frame(
+            &ctx,
+            vec![egui::Event::PointerMoved(pos2(900.0, 500.0)), wheel(vec2(0.0, 1.0), Modifiers::NONE)],
+            Modifiers::NONE,
+        );
+        let (delta, at) = read(&ctx, wall).expect("a wheel over the wall is a zoom");
+        assert!(delta > 1.0, "a wheel forward pushes the picture in: {delta}");
+        assert_eq!(at, pos2(900.0, 500.0), "aimed at the pointer");
+        // The same wheel with the pointer over a bar is the bar's.
+        assert!(read(&ctx, band).is_none(), "a wheel over a bar scrolls the bar");
+
+        // A notch back pulls the picture out again, which is how it is unwound.
+        let ctx = egui::Context::default();
+        frame(
+            &ctx,
+            vec![egui::Event::PointerMoved(pos2(900.0, 500.0)), wheel(vec2(0.0, -1.0), Modifiers::NONE)],
+            Modifiers::NONE,
+        );
+        let (delta, _) = read(&ctx, wall).expect("a wheel back is a zoom too");
+        assert!(delta < 1.0, "a wheel back pulls the picture out: {delta}");
+
+        // Turned with the zoom modifier it is the other kind of wheel, and this
+        // reader leaves it alone: `pinch_frame` has it.
+        let ctx = egui::Context::default();
+        frame(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos2(900.0, 500.0)),
+                wheel(vec2(0.0, 1.0), Modifiers::COMMAND),
+            ],
+            Modifiers::COMMAND,
+        );
+        assert!(read(&ctx, wall).is_none(), "the zoom-modified wheel is not this one");
+    }
+
+    /// A wheel and a trackpad's pinch are the viewer at the picture rather than a
+    /// request for the bars: in full screen a zoom is done on the magnified
+    /// viewport, and bringing the bars back over it would be the one thing the
+    /// viewer did not ask for. The wall's own keys and a swipe are read the same
+    /// way.
+    #[test]
+    fn a_wheel_does_not_ask_for_the_bars_however_it_is_turned() {
+        let wheel = |modifiers| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: vec2(0.0, 1.0),
+            modifiers,
+        };
+        assert!(!XgViewApp::wall_event(bars(), true, &wheel(Modifiers::NONE)), "the plain wheel");
+        assert!(!XgViewApp::wall_event(bars(), true, &wheel(Modifiers::COMMAND)), "the zooming one");
+        assert!(!XgViewApp::wall_event(bars(), true, &egui::Event::Zoom(1.2)), "a trackpad's pinch");
     }
 
     /// Moving the magnified picture is the pointer's own movement, and only from

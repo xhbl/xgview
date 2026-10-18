@@ -1929,6 +1929,31 @@ there is nothing outside it to show. The ring is left out of all of it: a pan
 moves neither the page nor the focus, so `ring_follows_cursor` has nothing to take
 down, and neither a pinch nor a drag is an aim (§24).
 
+**The mouse, and the wheel that is a scroll.** egui reads a wheel as a scroll
+unless it is turned with `options.zoom_modifier` (`input_state`:
+`is_zoom = modifiers.matches_any(options.zoom_modifier)`), which is right
+everywhere except here: the magnified viewport is the one place in the interface
+with nothing to scroll. So the plain wheel is read on its own, and the factor is
+egui's own - its `scroll_zoom_speed` over the delta it has *already smoothed* -
+which is what makes a plain wheel and a ctrl-wheel zoom by the same amount per
+notch: the smoothing splits one notch over several frames, and the factors
+multiply, so the pieces compose to exactly the total. It is read only while the
+pointer is over the wall, so a wheel the settings body scrolls with stays the
+body's, and one turned with `Modifiers::COMMAND` is left to `zoom_delta()`, which
+`pinch_frame` already folds in. Reading it is passive: nothing is taken out of the
+queue, and a `ScrollArea` that consumed the delta has already zeroed the field.
+
+**A zoom is not a request for the bars.** `wall_event` answered everything it did
+not name with "the viewer is here, and asks for the bars" - true of a wheel while
+a wheel did nothing on the wall, and wrong the moment it pushed the picture in: in
+full screen, zooming brought the bars back over the picture, which is the one
+thing a viewer pushing in to read a number plate did not ask for. The wheel and a
+trackpad's `Event::Zoom` are now answered the way the wall's own keys and a swipe
+are - **not** a request for the bars - so the bars keep their own clock while the
+picture is being read. With the focus off the wall the whole of `any_input`
+answers instead, and there a wheel is scrolling something, so it still counts
+(§24).
+
 **Not to be confused with the pinch that is not here.** A pinch on the *grid* -
 two fingers over a tile to magnify it - was written first and taken out again:
 magnifying is what the double press is for, and the gesture the viewer wanted in
