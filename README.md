@@ -27,10 +27,10 @@ paging beyond that. No cloud, no account, MIT licensed.
 
 | Platform                           | File                                                                                                                |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Android / Android TV (arm64, 8.1+) | [`xgview-1.4.70-android-arm64-v8a.apk`](../../releases/download/xgview-v1.4.70/xgview-1.4.70-android-arm64-v8a.apk) |
-| Windows x64                        | [`xgview-1.4.70-windows-x86_64.zip`](../../releases/download/xgview-v1.4.70/xgview-1.4.70-windows-x86_64.zip)       |
-| Linux x64                          | [`xgview-1.4.70-linux-x86_64.tar.gz`](../../releases/download/xgview-v1.4.70/xgview-1.4.70-linux-x86_64.tar.gz)     |
-| macOS (universal)                  | [`xgview-1.4.70-macos-universal.zip`](../../releases/download/xgview-v1.4.70/xgview-1.4.70-macos-universal.zip)     |
+| Android / Android TV (arm64, 8.1+) | [`xgview-1.4.80-android-arm64-v8a.apk`](../../releases/download/xgview-v1.4.80/xgview-1.4.80-android-arm64-v8a.apk) |
+| Windows x64                        | [`xgview-1.4.80-windows-x86_64.zip`](../../releases/download/xgview-v1.4.80/xgview-1.4.80-windows-x86_64.zip)       |
+| Linux x64                          | [`xgview-1.4.80-linux-x86_64.tar.gz`](../../releases/download/xgview-v1.4.80/xgview-1.4.80-linux-x86_64.tar.gz)     |
+| macOS (universal)                  | [`xgview-1.4.80-macos-universal.zip`](../../releases/download/xgview-v1.4.80/xgview-1.4.80-macos-universal.zip)     |
 
 **Note: This is a personal project, shared as-is, with no warranty.** It was developed with **AI assistance** under my direction and testing; please review the code before using
 it in sensitive setups.

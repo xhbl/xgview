@@ -3,6 +3,67 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.4.80
+
+Changes since 1.4.70. **The picture can be read off the wall.** A magnified tile
+can be pushed in further - a pinch or a wheel zooms it up to eight times and a
+drag moves it - so a face or a number plate is legible where it stands, without
+pulling a second stream or leaving the wall. A tile can be pinned to its main
+stream for the camera worth watching closely, and the focus ring became the
+aiming cursor it was meant to be: drawn while the wall is being driven, and out
+of the way when nothing is aiming.
+
+### Reading detail off the magnified picture
+
+- **A pinch or a wheel pushes the picture in.** Inside the magnified view a
+  two-finger spread - or a trackpad's pinch, or a plain mouse wheel - zooms up to
+  eight times, about the point between the fingers or where the pointer is. A drag
+  moves the picture, a wheel turned back the other way unwinds it, and closing the
+  fingers gives the whole picture back.
+- **A drag pans rather than pages.** While the picture is pushed in, a drag moves
+  it instead of stepping to the next channel; the channel after this one is the
+  toolbar's arrow or the page keys. Leaving the magnified view, or stepping to
+  another channel, gives the picture back whole.
+- **The wheel belongs to the picture.** A wheel turned over it zooms the picture
+  and does not bring the toolbar and the status bar back in full screen, where any
+  other input does.
+
+### A tile pinned to its main stream
+
+- **A stream switch on the camera's row.** Beside the connection button sits a
+  second one reading `● Sub` or `● Main` - the tag a tile's corner already shows.
+  A press swaps the two: every grid tile pulls the cheap sub stream, and a camera
+  pinned to `● Main` pulls its main stream in the grid instead, for the tile worth
+  watching closely while the wall stays a wall. It is drawn only where the camera
+  has a second address to pull, and magnifying a tile pulls the main stream
+  whichever way its pin is set.
+
+### The focus ring is the aiming cursor
+
+- **Drawn only while the wall is being driven.** The ring no longer tracks every
+  input. The arrows, `Back` and the keys that open the bars bring it up, `Enter`
+  and `Space` while the wall is what they act on, and a click on a tile places it;
+  eight seconds without any of those takes it down, on a clock of its own rather
+  than the bars' timeout. A wall nobody has touched yet - a fresh start - has none
+  at all.
+- **A page turn is not an aim.** The page keys, the toolbar's page arrows and a
+  swipe change the picture rather than the ring - all three behave alike - and a
+  layout that re-places the focus under the viewer takes a showing ring down with
+  it. The bars are the only connection the two have: the ring goes down as they
+  hide and comes back as they appear, and a wall driven in full screen with the
+  bars away keeps its ring.
+
+### Smaller changes and fixes
+
+- **A Debian kiosk guide** walks a minimal Debian 13 install through to a
+  full-screen wall under systemd, with Docker for Frigate and Home Assistant, and
+  ships a one-shot `scripts/debian-kiosk.sh` for the setup itself.
+- **A couple of settings hints were trimmed**, and the Android import hint now
+  names both files an export can land as: `xgvconfig.seal` when it is sealed,
+  `xgvconfig.json` in clear.
+- **The code keeps to the Rust 1.80 it declares**, in place of an `Option` helper
+  that only arrived in 1.82.
+
 ## 1.4.70
 
 Changes since 1.4.40. **The wall can be stood upright.** A phone or a tablet
