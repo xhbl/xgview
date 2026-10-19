@@ -47,6 +47,10 @@ pub enum Icon {
     Landscape,
     /// Adjust the picture fit: a frame with arrows pointing in and out.
     AspectRatio,
+    /// Sound on: a speaker with waves leaving it.
+    Sound,
+    /// Sound off: a speaker with a cross where the waves were.
+    Mute,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -147,8 +151,35 @@ fn paint_button(
 
 /// Draws `icon` filling `rect`.
 pub fn paint(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke) {
-    let at = |x: f32, y: f32| Pos2::new(rect.left() + x * rect.width(), rect.top() + y * rect.height());
+    paint_turned(painter, rect, icon, stroke, false);
+}
+
+/// Draws `icon` filling `rect`, turned a quarter turn clockwise when `turned`.
+///
+/// The turn is the one the wall takes for a portrait picture: the unit square's
+/// left edge becomes the screen's top edge. A bar that turns with the picture
+/// carries its icons turned the same way.
+pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, turned: bool) {
+    let at = |x: f32, y: f32| {
+        if turned {
+            Pos2::new(rect.right() - y * rect.height(), rect.top() + x * rect.width())
+        } else {
+            Pos2::new(rect.left() + x * rect.width(), rect.top() + y * rect.height())
+        }
+    };
     let line = |points: &[Pos2]| Shape::line(points.to_vec(), stroke);
+    // The speaker both sound icons carry, so the two read as one control.
+    let speaker = || {
+        line(&[
+            at(0.10, 0.38),
+            at(0.30, 0.38),
+            at(0.52, 0.16),
+            at(0.52, 0.84),
+            at(0.30, 0.62),
+            at(0.10, 0.62),
+            at(0.10, 0.38),
+        ])
+    };
 
     match icon {
         Icon::Plus => {
@@ -236,6 +267,16 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke) {
             painter.rect_stroke(Rect::from_min_max(at(0.05, 0.20), at(0.95, 0.80)), CornerRadius::same(1), stroke, StrokeKind::Inside);
             painter.add(line(&[at(0.27, 0.52), at(0.27, 0.40), at(0.41, 0.40)]));
             painter.add(line(&[at(0.73, 0.48), at(0.73, 0.60), at(0.59, 0.60)]));
+        }
+        Icon::Sound => {
+            painter.add(speaker());
+            painter.add(line(&[at(0.64, 0.38), at(0.74, 0.50), at(0.64, 0.62)]));
+            painter.add(line(&[at(0.78, 0.26), at(0.90, 0.50), at(0.78, 0.74)]));
+        }
+        Icon::Mute => {
+            painter.add(speaker());
+            painter.add(line(&[at(0.62, 0.32), at(0.84, 0.68)]));
+            painter.add(line(&[at(0.84, 0.32), at(0.62, 0.68)]));
         }
     }
 }

@@ -831,6 +831,12 @@ pub struct XgViewApp {
     /// top and bottom bars, which take their height from the wall. See
     /// [`crate::tilebar`].
     tile_bar: tilebar::Bar,
+    /// The state the bar's sound control draws.
+    ///
+    /// Nothing is played yet - the streams carry no audio into the viewer - so
+    /// the control is here to be seen and aimed: the switch is what its icon
+    /// shows, and it is where the sound is wired in when there is some.
+    sound_on: bool,
     /// Who answered the last frame's direction presses.
     owner: Owner,
     /// Explicit directional navigation for the windows that opted into it.
@@ -1171,6 +1177,7 @@ impl XgViewApp {
             ring_aimed: false,
             picture_zoom: PictureZoom::FULL,
             tile_bar: tilebar::Bar::new(),
+            sound_on: true,
             // The "Add devices" window, the settings panel and the top bar are
             // on this layer: each is a row (of tabs, or of controls) over a
             // column, which is the shape egui's walk handles worst. The wall
@@ -6678,11 +6685,17 @@ impl XgViewApp {
             .chrome
             .bars
             .map_or((44.0, 30.0), |(top, bottom)| (top.height(), bottom.height()));
+        // The word is measured, so the strip is as wide as the label it carries;
+        // it is read again below, after the press, so a press that changes the
+        // picture fit also resizes the control to its new value in the same
+        // frame it changes it.
+        let label = self.tile_bar_label(index, rotated);
+        let widths = [tilebar::text_width(ui.ctx(), &label), tilebar::icon_width()];
         let layout = tilebar::layout(
             rect,
             rotated,
             self.tile_bar.dock(),
-            tilebar::BUTTONS,
+            &widths,
             top_band,
             bottom_band,
         );
@@ -6747,14 +6760,17 @@ impl XgViewApp {
         }
 
         // The press may have opened the bar on the other edge than the one the
-        // last opening used: lay it out again with the dock it has now, so this
-        // frame paints it there rather than at the old edge and then jumping
-        // over on the next one.
+        // last opening used, and it may have changed the word the strip carries:
+        // lay it out again with the dock and the width it has now, so this frame
+        // paints it there rather than at the old edge and then jumping over on
+        // the next one.
+        let label = self.tile_bar_label(index, rotated);
+        let widths = [tilebar::text_width(ui.ctx(), &label), tilebar::icon_width()];
         let layout = tilebar::layout(
             rect,
             rotated,
             self.tile_bar.dock(),
-            tilebar::BUTTONS,
+            &widths,
             top_band,
             bottom_band,
         );
@@ -6773,38 +6789,55 @@ impl XgViewApp {
                 tilebar::Hit::Button(button) => Some(button),
                 _ => None,
             });
-            // Read from the configuration rather than from the snapshot the
-            // tiles were painted with: the press that got here may have just
-            // changed it, and the label has to say what it now is.
-            let aspect = self
-                .config
-                .active_slots()
-                .get(index)
-                .copied()
-                .and_then(|slot| self.config.cameras.get(slot))
-                .map(|camera| if rotated { camera.portrait_aspect } else { camera.aspect })
-                .unwrap_or_default();
-            let label = monitor_i18n::tr(aspect.short_label());
+            let controls = [
+                tilebar::Control::Text(label.as_str()),
+                tilebar::Control::Icon(if self.sound_on { Icon::Sound } else { Icon::Mute }),
+            ];
             tilebar::paint(
                 &ui.painter_at(rect),
                 &layout,
                 rotated,
                 self.tile_bar.focus(),
                 hover,
-                &[label.as_str()],
+                &controls,
             );
         }
 
         consumed
     }
 
-    /// Steps the magnified camera's picture fit to the next one.
+    /// The word the bar's first control carries for the magnified camera.
+    ///
+    /// Read from the configuration rather than from the snapshot the tiles were
+    /// painted with: a press that changes the picture fit has to label the
+    /// control with its new value in the same frame.
+    fn tile_bar_label(&self, index: usize, rotated: bool) -> String {
+        let aspect = self
+            .config
+            .active_slots()
+            .get(index)
+            .copied()
+            .and_then(|slot| self.config.cameras.get(slot))
+            .map(|camera| if rotated { camera.portrait_aspect } else { camera.aspect })
+            .unwrap_or_default();
+        monitor_i18n::tr(aspect.short_label())
+    }
+
+    /// Answers the control the bar is on: the picture fit, or the sound switch.
     ///
     /// The fit is held per camera and per orientation, the same pair the settings
     /// panel and the portrait aspect picker write: a camera can be stretched on
     /// the landscape wall and kept at its own ratio upright, the two choices not
-    /// touching.
+    /// touching. The sound switch changes nothing yet - the streams are taken
+    /// for their picture - but its icon is drawn from it, and it is where the
+    /// sound is wired in once there is some.
     fn tile_bar_activate(&mut self) {
+        // The second control is the sound switch; the first steps the picture
+        // fit. The index is the one the press or the walk left the bar on.
+        if self.tile_bar.focus() == 1 {
+            self.sound_on = !self.sound_on;
+            return;
+        }
         let Some(index) = self.scheduler.zoom() else {
             return;
         };
