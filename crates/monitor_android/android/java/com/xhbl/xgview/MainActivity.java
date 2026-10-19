@@ -18,11 +18,14 @@ import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Insets;
 import android.graphics.Point;
+import android.hardware.display.DisplayManager;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.MediaStore;
@@ -131,6 +134,29 @@ public class MainActivity extends NativeActivity {
      */
     private ViewTreeObserver.OnGlobalLayoutListener pendingSurfaceResize;
 
+    /**
+     * Watches the display on Android 8.x. A 180-degree turn changes no
+     * configuration - the orientation stays portrait - so it never reaches
+     * {@link #onConfigurationChanged}, and the notch has to move from the top to
+     * the bottom when the display says it has. Newer releases do not need this:
+     * their window insets already follow the cutout.
+     */
+    private DisplayManager displayManager;
+
+    private final DisplayManager.DisplayListener displayListener =
+            new DisplayManager.DisplayListener() {
+                @Override
+                public void onDisplayAdded(int displayId) {}
+
+                @Override
+                public void onDisplayRemoved(int displayId) {}
+
+                @Override
+                public void onDisplayChanged(int displayId) {
+                    applySystemBars();
+                }
+            };
+
     private InputMethodManager inputMethod;
 
     /** Whether the native side wants the keyboard up, as last told by {@link #setKeyboardWanted}. */
@@ -185,6 +211,13 @@ public class MainActivity extends NativeActivity {
 
         super.onCreate(savedInstanceState);
         instance = this;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            displayManager = getSystemService(DisplayManager.class);
+            if (displayManager != null) {
+                displayManager.registerDisplayListener(displayListener,
+                        new Handler(Looper.getMainLooper()));
+            }
+        }
         applySystemBars();
         installTextInput();
         // The activity loads the native library itself, with a bare `dlopen`
@@ -204,6 +237,10 @@ public class MainActivity extends NativeActivity {
         // the system destroys has to release it here, or it is a leak the
         // battery pays for.
         releaseWakeLock();
+        if (displayManager != null) {
+            displayManager.unregisterDisplayListener(displayListener);
+            displayManager = null;
+        }
         if (instance == this) {
             instance = null;
         }
@@ -468,7 +505,7 @@ public class MainActivity extends NativeActivity {
         // appear, or go as the keyboard comes and goes.
         window.getDecorView().setOnApplyWindowInsetsListener((view, insets) -> {
             final int left;
-            final int top;
+            int top;
             final int right;
             final int bottom;
             final boolean portrait = getResources().getConfiguration().orientation
@@ -476,6 +513,7 @@ public class MainActivity extends NativeActivity {
             final int rotation = getWindowManager().getDefaultDisplay().getRotation();
             int notchLeft = 0;
             int notchRight = 0;
+            int notchBottom = 0;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 final Insets bars = insets.getInsets(WindowInsets.Type.navigationBars());
                 left = bars.left;
@@ -490,24 +528,33 @@ public class MainActivity extends NativeActivity {
                 //
                 // The notch is the exception: it is part of the screen the
                 // window still covers on these releases, and content must stay
-                // out of it even though the status bar is gone. It sits at the
-                // top of the device, so it is the top inset when the wall stands
-                // upright and a side inset when it lies on its side; the angle
-                // says which side, the device having been turned the other way.
-                // The stable top these releases report in landscape is the
-                // hidden status bar's height, and taking it as a top inset would
-                // put a blank band along the long edge for no reason.
+                // out of it even though the status bar is gone. It sits on a
+                // short edge, so it is the top inset upright, the bottom inset
+                // when the device is held the other way up - a turn that changes
+                // no configuration and is watched for separately - and a side
+                // inset when the wall lies on its side. The angle says which
+                // side, the device having been turned the other way. The stable
+                // top these releases report in landscape is the hidden status
+                // bar's height, and taking it as a top inset would put a blank
+                // band along the long edge for no reason.
                 final int notch = notchThickness(insets);
                 left = insets.getSystemWindowInsetLeft();
-                top = portrait ? notch : 0;
+                top = 0;
                 right = insets.getSystemWindowInsetRight();
                 bottom = insets.getSystemWindowInsetBottom();
-                if (!portrait) {
-                    if (rotation == Surface.ROTATION_90) {
-                        notchLeft = notch;
-                    } else if (rotation == Surface.ROTATION_270) {
-                        notchRight = notch;
+                if (portrait) {
+                    if (rotation == Surface.ROTATION_180) {
+                        notchBottom = notch;
+                    } else {
+                        top = notch;
                     }
+                } else if (rotation == Surface.ROTATION_90) {
+                    notchLeft = notch;
+                } else if (rotation == Surface.ROTATION_270) {
+                    notchRight = notch;
+                }
+                if (notchBottom > 0) {
+                    android.util.Log.i("xgview", "notch moved to the bottom (" + notchBottom + "px)");
                 }
             }
             // The library is loaded late in `onCreate`, and the first insets can
@@ -515,9 +562,10 @@ public class MainActivity extends NativeActivity {
             // except the notch, which is always kept clear; see `notchThickness`.
             if (nativeLoaded) {
                 if (reserveNavigationBar) {
-                    nativeInsets(Math.max(left, notchLeft), top, Math.max(right, notchRight), bottom);
+                    nativeInsets(Math.max(left, notchLeft), top, Math.max(right, notchRight),
+                            Math.max(bottom, notchBottom));
                 } else {
-                    nativeInsets(notchLeft, top, notchRight, 0);
+                    nativeInsets(notchLeft, top, notchRight, notchBottom);
                 }
             }
             return view.onApplyWindowInsets(insets);

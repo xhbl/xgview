@@ -2027,6 +2027,14 @@ immersive mode - a control under the notch cannot be used - while the navigation
 bar's own strip stays tied to the setting. A device with none of the properties
 keeps a zero inset.
 
+A 180-degree portrait turn changes no configuration at all - the orientation
+stays portrait - so a `DisplayManager` listener re-measures the insets when the
+display changes, and the same thickness moves to the bottom. That path is kept
+even though this OPPO never takes it: its sensor policy stops at 0/90/270 (an
+explicit `reversePortrait` renders correctly, but the app does not force one).
+A device that does hand the wall a 180-degree turn gets a clear bottom edge
+instead of a notch across the status bar.
+
 **Later releases already do both.** Measured, not assumed:
 
 | device | system | what it does |

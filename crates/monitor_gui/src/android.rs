@@ -17,13 +17,14 @@ use jni::JNIEnv;
 
 /// The window's safe insets, in physical pixels, as last reported by the
 /// activity: the strip the navigation bar keeps and the edge a notch covers -
-/// the top while the wall stands upright, the left or right while it lies on its
-/// side. Which edge the bar lies on is the device's to decide - a landscape
-/// phone carries it along a short edge, a tablet whose natural orientation is
-/// landscape along the bottom one - so all four are reported and the wall
-/// leaves each of them free. The notch's edge is reported even when the bars are
-/// hidden, because it is part of the display the window still covers. Zero on a
-/// television and on an external display, which have neither.
+/// the top while the wall stands upright, the bottom when the device is held the
+/// other way up, the left or right while it lies on its side. Which edge the bar
+/// lies on is the device's to decide - a landscape phone carries it along a
+/// short edge, a tablet whose natural orientation is landscape along the bottom
+/// one - so all four are reported and the wall leaves each of them free. The
+/// notch's edge is reported even when the bars are hidden, because it is part of
+/// the display the window still covers. Zero on a television and on an external
+/// display, which have neither.
 static INSET_LEFT_PX: AtomicI32 = AtomicI32::new(0);
 static INSET_TOP_PX: AtomicI32 = AtomicI32::new(0);
 static INSET_RIGHT_PX: AtomicI32 = AtomicI32::new(0);

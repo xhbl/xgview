@@ -7065,20 +7065,15 @@ impl eframe::App for XgViewApp {
         // control sits under the bar. A television and an external display have
         // no navigation bar, so those insets are zero and everything stays edge
         // to edge. The notch is separate: it is reserved even with the bars
-        // hidden, as a top strip upright and a side strip on its side, because
-        // a toolbar or tile drawn under it cannot be used. See
-        // `MainActivity.applySystemBars` for how the two are measured.
+        // hidden, as a top strip upright, a bottom strip when the device is held
+        // the other way up, and a side strip on its side, because a toolbar or
+        // tile drawn under it cannot be used. The activity reports only the
+        // notch when the bars are hidden, and the notch and the bar together
+        // when they are reserved; see `MainActivity.applySystemBars`.
         #[cfg(target_os = "android")]
         let (inset_left, inset_top, inset_right, inset_bottom) = {
             crate::android::set_reserve_navigation_bar(self.config.reserve_navigation_bar);
-            let (left, top, right, bottom) = crate::android::insets_px();
-            if self.config.reserve_navigation_bar {
-                (left, top, right, bottom)
-            } else {
-                // The activity reports only the notch on the sides in this mode;
-                // the navigation bar's strip is not reserved.
-                (left, top, right, 0)
-            }
+            crate::android::insets_px()
         };
         #[cfg(not(target_os = "android"))]
         let (inset_left, inset_top, inset_right, inset_bottom) = (0_i32, 0_i32, 0_i32, 0_i32);
