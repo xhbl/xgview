@@ -6364,6 +6364,21 @@ impl XgViewApp {
     ///
     /// A channel whose first picture has not arrived has no rectangle: what the
     /// tile shows meanwhile is a waiting icon, and an icon is nothing to push in.
+    /// The fit a camera's picture takes in a tile of the view on screen.
+    ///
+    /// Magnified, the viewport has a fit of its own - the bar's picture-fit
+    /// control edits it, and until it does the picture keeps its own ratio. A
+    /// tile on the wall takes the fit its orientation gives it.
+    fn tile_aspect(&self, camera: &CameraSource) -> TileAspect {
+        if self.scheduler.is_zoomed() {
+            camera.zoom_aspect.unwrap_or(TileAspect::Original)
+        } else if self.is_portrait() {
+            camera.portrait_aspect
+        } else {
+            camera.aspect
+        }
+    }
+
     fn magnified_area(
         &self,
         cameras: &[CameraSource],
@@ -6376,7 +6391,7 @@ impl XgViewApp {
         let rect = grid::tile_rect(wall.translate(vec2(dx, 0.0)), view.layout, cell, grid::LINE);
         let camera = cameras.get(index)?;
         let size = self.textures.get(&index)?.surface.size;
-        let aspect = if self.is_portrait() { camera.portrait_aspect } else { camera.aspect };
+        let aspect = self.tile_aspect(camera);
         // Upright, the magnified picture is the one drawn sideways - the same
         // answer the tile is drawn with. See `paint_view`.
         Some(grid::picture_area(size, rect, aspect, self.is_portrait()))
@@ -6431,7 +6446,7 @@ impl XgViewApp {
                 time: self.time,
                 aspect: index
                     .and_then(|index| cameras.get(index))
-                    .map(|camera| if self.is_portrait() { camera.portrait_aspect } else { camera.aspect })
+                    .map(|camera| self.tile_aspect(camera))
                     .unwrap_or_default(),
                 rotated: self.is_portrait() && self.scheduler.is_zoomed(),
                 // The magnified viewport is the one picture that can be pushed
@@ -6689,7 +6704,7 @@ impl XgViewApp {
         // it is read again below, after the press, so a press that changes the
         // picture fit also resizes the control to its new value in the same
         // frame it changes it.
-        let label = self.tile_bar_label(index, rotated);
+        let label = self.tile_bar_label(index);
         let widths = [tilebar::text_width(ui.ctx(), &label), tilebar::icon_width()];
         let layout = tilebar::layout(
             rect,
@@ -6764,7 +6779,7 @@ impl XgViewApp {
         // lay it out again with the dock and the width it has now, so this frame
         // paints it there rather than at the old edge and then jumping over on
         // the next one.
-        let label = self.tile_bar_label(index, rotated);
+        let label = self.tile_bar_label(index);
         let widths = [tilebar::text_width(ui.ctx(), &label), tilebar::icon_width()];
         let layout = tilebar::layout(
             rect,
@@ -6808,29 +6823,32 @@ impl XgViewApp {
 
     /// The word the bar's first control carries for the magnified camera.
     ///
-    /// Read from the configuration rather than from the snapshot the tiles were
-    /// painted with: a press that changes the picture fit has to label the
-    /// control with its new value in the same frame.
-    fn tile_bar_label(&self, index: usize, rotated: bool) -> String {
+    /// The magnified viewport's fit, not the wall's: `None` there is the
+    /// camera's own ratio, which is what the bar starts on. Read from the
+    /// configuration rather than from the snapshot the tiles were painted with:
+    /// a press that changes the fit has to label the control with its new value
+    /// in the same frame.
+    fn tile_bar_label(&self, index: usize) -> String {
         let aspect = self
             .config
             .active_slots()
             .get(index)
             .copied()
             .and_then(|slot| self.config.cameras.get(slot))
-            .map(|camera| if rotated { camera.portrait_aspect } else { camera.aspect })
-            .unwrap_or_default();
-        monitor_i18n::tr(aspect.short_label())
+            .and_then(|camera| camera.zoom_aspect)
+            .unwrap_or(TileAspect::Original);
+        monitor_i18n::tr(aspect.label())
     }
 
     /// Answers the control the bar is on: the picture fit, or the sound switch.
     ///
-    /// The fit is held per camera and per orientation, the same pair the settings
-    /// panel and the portrait aspect picker write: a camera can be stretched on
-    /// the landscape wall and kept at its own ratio upright, the two choices not
-    /// touching. The sound switch changes nothing yet - the streams are taken
-    /// for their picture - but its icon is drawn from it, and it is where the
-    /// sound is wired in once there is some.
+    /// The fit this writes is the magnified viewport's own: it is kept per
+    /// camera, and the wall's landscape and portrait fits - the pair the settings
+    /// panel and the portrait aspect picker write - are not touched. Until the
+    /// first press the fit is the camera's own ratio, `Original`, which is where
+    /// the walk starts. The sound switch changes nothing yet - the streams are
+    /// taken for their picture - but its icon is drawn from it, and it is where
+    /// the sound is wired in once there is some.
     fn tile_bar_activate(&mut self) {
         // The second control is the sound switch; the first steps the picture
         // fit. The index is the one the press or the walk left the bar on.
@@ -6844,16 +6862,11 @@ impl XgViewApp {
         let Some(slot) = self.config.active_slots().get(index).copied() else {
             return;
         };
-        let portrait = self.is_portrait();
         let Some(camera) = self.config.cameras.get_mut(slot) else {
             return;
         };
-        let next = if portrait { camera.portrait_aspect } else { camera.aspect }.next();
-        if portrait {
-            camera.portrait_aspect = next;
-        } else {
-            camera.aspect = next;
-        }
+        let next = camera.zoom_aspect.unwrap_or(TileAspect::Original).next();
+        camera.zoom_aspect = Some(next);
         self.mark_dirty();
     }
 

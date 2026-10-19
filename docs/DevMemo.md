@@ -2062,3 +2062,74 @@ the system has already moved.
 `libGLESv2_adreno.so`, `EsxContext::GlPushDebugGroup` calling `strlcpy`, during a
 start with ten channels. It did not reproduce on relaunch, and nothing in the
 inset or resize paths points at it.*
+
+## 32. The magnified viewport's bar: the wall answers for a strip of its own
+
+*All platforms — 2026-10-19, 1.4.85–1.4.87.*
+
+**What it is.** A small strip of controls drawn inside the magnified viewport:
+the picture fit and a sound switch. It is not a panel and not a window; it is
+part of the wall's own picture, for the two things a viewer wants while reading a
+detail - the shape of the picture and whether it is heard - without leaving the
+magnification or waking the chrome.
+
+**Where it lives.** In the *picture's* frame, mapped onto the screen the way the
+picture is: a quarter turn clockwise for a portrait wall's landscape stream, so
+the strip turns with the picture and its words come out upright to the viewer.
+The strip keeps 24 points from the picture edge and is centred along the edge's
+whole length; its thickness is 56 and its controls are 44 deep. The activation
+band is the one the top and bottom bars use - `Chrome::bars`' heights, read from
+the last frame they were drawn in. While the bars are away it is exactly where
+they were, so the press that used to summon them summons the strip; while they
+are up the wall is between them and the same depth is just inside the tile. No
+separate offset is computed: the tile's edge is the offset.
+
+**Who answers it.** The wall, never egui. The bar is painted on the wall's own
+painter, read from the tile's `Response`, and `owner` stays `Grid`: the bars are
+not woken, the wall is not resized under the finger, and the press is answered
+from the same interaction that draws the picture. The alternatives - a widget, an
+`Area`, a modal - were rejected for that reason; each of them would take the
+press out of the wall's hands.
+
+**The strip.** A word's control is measured in the font the word is drawn with
+(monospace 14), the padding is added, and the result is bounded to 56..96 points
+- a shorter word does not leave a wide empty button, a longer one is not clipped
+before the bound. An icon's control is a square the depth of the strip, its glyph
+22 points, drawn from the icon set and turned with the picture. The words are
+language-pack keys through `tr`, so a language that writes "Strecken" instead of
+"stretch" gets the room; the key itself is never measured or drawn.
+
+**The clock and the way out.** Eight seconds after the last press on it, or as
+soon as the picture is stepped, panned, or the wall is given to something else,
+the strip goes. `Back` takes it down and the magnification after it. A press on
+the picture closes it; a press on the strip itself (the padding included) does
+not, so aiming at a control cannot dismiss it by grazing the strip; a press in
+the band outside the strip closes it too, because that part is outside the bar.
+The 300 ms guard after opening keeps the second press of the double press that
+opened it from pressing a control or shutting it.
+
+**The fits.** The wall dresses a tile with `aspect` in landscape and
+`portrait_aspect` upright - two choices, per camera, chosen by orientation. The
+magnified viewport is neither: a camera carries `zoom_aspect`, absent until the
+strip's picture-fit control writes it, and `Original` (the camera's own ratio)
+until then. `tile_aspect` is the one place that chooses: magnified it reads
+`zoom_aspect`, otherwise the orientation's wall fit. The settings panel and the
+portrait aspect picker write the wall's pair; only the strip writes the
+viewport's. A configuration written before the field existed reads it as absent,
+so a camera's first magnification is its own ratio.
+
+**Two faults found on the way.** The hidden bars leave two invisible `Area`s over
+their bands (`xgview-toolbar-band` and `xgview-status-band`) whose job is to keep
+the summoning press off the tile. Magnified, that is exactly the press the strip
+needs, and in landscape the two coincide - which is why the strip opened in
+portrait (where the band is at the side) and not in landscape. The overlays are
+now skipped while the viewport is magnified. The other: the strip was laid out
+before the press with the *old* dock, so the frame that opened it painted at the
+old edge and the next frame jumped to the new one. It is laid out again after the
+press, with the dock and the measured label it has now, so the opening frame is
+already in place.
+
+**Left open.** The sound control is a switch only: the streams are taken for
+their picture, and the icon is where the audio is wired in when there is some.
+The 56..96 bounds are a judgement, not a measurement of every language; the
+word's control is bounded rather than allowed to grow without limit.

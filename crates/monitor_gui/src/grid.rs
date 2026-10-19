@@ -450,8 +450,8 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
     let format = || OsdLine {
         dot: None,
         text: match channel.and_then(|channel| channel.width.zip(channel.height)) {
-            Some((width, height)) => format!("{}x{} {}", width, height, monitor_i18n::tr(tile.aspect.short_label())),
-            None => format!("?x? {}", monitor_i18n::tr(tile.aspect.short_label())),
+            Some((width, height)) => format!("{}x{} {}", width, height, monitor_i18n::tr(tile.aspect.label())),
+            None => format!("?x? {}", monitor_i18n::tr(tile.aspect.label())),
         },
     };
     // The connection the channel pulls over, then the address it is pulling -

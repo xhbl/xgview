@@ -295,6 +295,7 @@ impl SynologyClient {
             stream: None,
             aspect: TileAspect::default(),
             portrait_aspect: TileAspect::default(),
+            zoom_aspect: None,
             main_profile: None,
             sub_profile: None,
             group: 0,

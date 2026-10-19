@@ -77,6 +77,13 @@ The viewer persists everything to one JSON file, created on first launch:
   the device therefore overwrites neither way's choices, and the fields a device
   cannot use - portrait on a desktop or a television - are ignored rather than
   refused.
+- **The magnified viewport is a third fit, not a third orientation**: a camera
+  also carries `zoom_aspect`, the fit the picture takes when it is magnified. It
+  is absent until the picture-fit control in that viewport's own bar is used,
+  and the magnified picture then keeps the camera's own ratio (`Original`). It
+  is independent of `aspect` and `portrait_aspect`: the bar writes this one, and
+  the settings panel and the portrait aspect picker write those. The value is
+  one of the `aspect` values - `Original`, `Stretch`, `16x9`, `4x3`, `1x1`.
 - Adding a field is backwards compatible: `AppConfig` is `#[serde(default)]`, so
   an older `xgvconfig.json` simply takes the default for anything it lacks. The
   same file is shared by every platform.

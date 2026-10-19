@@ -238,17 +238,6 @@ impl TileAspect {
         }
     }
 
-    /// The shape, written short for a tile's on-screen display.
-    pub fn short_label(self) -> &'static str {
-        match self {
-            TileAspect::Original => "aspect-short-original",
-            TileAspect::Stretch => "aspect-short-stretch",
-            TileAspect::Ratio16x9 => "aspect-short-16x9",
-            TileAspect::Ratio4x3 => "aspect-short-4x3",
-            TileAspect::Ratio1x1 => "aspect-short-1x1",
-        }
-    }
-
     /// The shape the picture is drawn in, for the modes that fix one.
     pub fn ratio(self) -> Option<f32> {
         match self {
@@ -502,6 +491,13 @@ pub struct CameraSource {
     /// kept at its original ratio in portrait.
     #[serde(default)]
     pub portrait_aspect: TileAspect,
+    /// How this camera's picture is fitted into the magnified viewport.
+    ///
+    /// `None` until the picture-fit control in that viewport's bar is used: the
+    /// magnified picture then takes the camera's own ratio. It is independent of
+    /// `aspect` and `portrait_aspect`, which fit the tile on the wall.
+    #[serde(default)]
+    pub zoom_aspect: Option<TileAspect>,
     /// ONVIF profile token of the main stream, kept for later re-negotiation.
     #[serde(default)]
     pub main_profile: Option<String>,
@@ -544,6 +540,7 @@ impl CameraSource {
             stream: None,
             aspect: TileAspect::default(),
             portrait_aspect: TileAspect::default(),
+            zoom_aspect: None,
             main_profile: None,
             sub_profile: None,
             group: 0,
@@ -1071,6 +1068,23 @@ mod tests {
         assert_eq!(TileAspect::Original.ratio(), None, "the stream's own shape");
         assert_eq!(TileAspect::Ratio16x9.ratio(), Some(16.0 / 9.0));
         assert_eq!(TileAspect::Ratio1x1.ratio(), Some(1.0));
+    }
+
+    /// The magnified viewport's fit is absent until it is set, so a camera's
+    /// zoom starts on its own ratio and an older configuration keeps reading.
+    #[test]
+    fn the_zoom_fit_starts_absent_and_round_trips() {
+        let camera: CameraSource = serde_json::from_str(
+            r#"{"id":"a","name":"a","host":"h","rtsp_main":"rtsp://h/x"}"#,
+        )
+        .expect("a camera saved before the zoom fit existed");
+        assert_eq!(camera.zoom_aspect, None);
+
+        let mut camera = camera;
+        camera.zoom_aspect = Some(TileAspect::Ratio16x9);
+        let text = serde_json::to_string(&camera).expect("written");
+        let back: CameraSource = serde_json::from_str(&text).expect("read back");
+        assert_eq!(back.zoom_aspect, Some(TileAspect::Ratio16x9));
     }
 
     /// The OSD enum is stored in `xgvconfig.json` by variant name, so a corner
