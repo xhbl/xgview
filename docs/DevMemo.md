@@ -1960,5 +1960,97 @@ magnifying is what the double press is for, and the gesture the viewer wanted in
 the magnified view was this one.
 
 
+## 31. A turn handled in place: the surface Android 8.x leaves behind, and the notch under it
 
+*OPPO PBAM00 (Snapdragon 450, Adreno 506), Android 8.1 / API 27 — 2026-10-19.*
 
+Two faults on the same generation of Android, both about the window a
+`NativeActivity` is given. One is a turn that leaves the renderer drawing into
+the old surface; the other is a notch the window covers and the UI does not keep
+out of. They were fixed together in 1.4.82 and 1.4.83.
+
+**The turn is handled in place, and Android 8.x forgets to say so.** The manifest
+lists `orientation` and `screenSize` among the activity's configuration changes,
+because the native side owns a winit event loop and cannot have a second one;
+`setRequestedOrientation` turns the existing activity instead of recreating it.
+That part is deliberate (§25). What the older platform does *not* do is raise
+`onNativeWindowResized`: logcat shows only `ContentRectChanged`, which winit
+answers with `TODO: find a way to notify application of content rect change` and
+nothing else. So no `WindowEvent::Resized` is sent, eframe never calls
+`Painter::on_window_resized`, and the swapchain keeps its old extent.
+
+**The geometry gives it away.** SurfaceFlinger had the layer at `size=(1520,720)`
+- the window the turn produced - with the application's buffers still at
+`activeBuffer=[720x1520]`. `wgpu` sets the buffer geometry once, when it creates
+the surface (`ANativeWindow_setBuffersGeometry(window, 0, 0, format)`, meaning
+"the window's size"), and winit reads that geometry back through
+`ANativeWindow_getWidth()` as the window size. On this generation nothing moves
+it again, so even the size winit would report is the old one. Pausing and
+resuming the activity - which destroys and recreates the native window - made
+the picture return at once, which is what separated a stale surface from a
+broken renderer.
+
+**The fix is to make the platform compare again.** From
+`MainActivity.onConfigurationChanged`, a one-shot `OnGlobalLayoutListener` waits
+for the first layout whose shape matches the new display (a quick second turn
+replaces the pending listener). Then `monitor_gui::android::set_window_geometry`
+moves the buffer geometry to the display size, and the activity calls its own
+`surfaceChanged` with the same figures. The framework's
+`onSurfaceChanged_native` compares the window's dimensions with the ones it
+remembered and raises `onNativeWindowResized`; winit turns that into `Resized`;
+eframe rebuilds the swapchain. The log line is:
+
+```text
+native surface resized to 1520x720
+```
+
+The whole path is gated to `SDK_INT < P`. Android 9 and newer send the resize
+themselves, as the device tests below show; on those releases the activity
+returns before registering the listener.
+
+**The notch was a second, unrelated hole.** With the status bar hidden the
+activity reported `top = 0` for every edge, because only the navigation bar had
+ever been reserved for. But the notch is still part of the window on Android
+8.x: OPPO publishes it as `ro.oppo.screen.heteromorphism=229,0:492,53`, and the
+window's `stable` inset was `[0,53][0,96]` - 53px of notch and status bar above,
+96px of navigation bar below. The portrait toolbar was drawn in those 53px.
+
+The fix reads the vendor's cutout on releases without `DisplayCutout`, caches
+the vendor test, and takes the thickness from the OPPO rectangle (its height;
+the stable top inset is the fallback for Xiaomi's and Huawei's properties, which
+carry no usable size). Upright it is a top inset. On its side the notch is on a
+narrow edge, so the same thickness becomes a side inset: `Display.getRotation()`
+is `ROTATION_90` when the device has been turned 90° counter-clockwise (the top
+edge on the left, as that call's own documentation defines it), and
+`ROTATION_270` when it has been turned the other way. The side is added even in
+immersive mode - a control under the notch cannot be used - while the navigation
+bar's own strip stays tied to the setting. A device with none of the properties
+keeps a zero inset.
+
+**Later releases already do both.** Measured, not assumed:
+
+| device | system | what it does |
+| --- | --- | --- |
+| OPPO PBAM00 | 8.1 / API 27, Adreno 506 | rotation black before 1.4.82; notch 53px in portrait, and on the left in the landscape that was tested, after 1.4.83 |
+| vivo X21UD A | 9 / API 28, Adreno 512 | rotation fine with no workaround; the window already starts 84px down in portrait and 65px in from the left in landscape, and the cutout's insets relative to the window are `Rect(0, 0 - 0, 0)` - the system moved the window below the notch |
+| HUAWEI VTR-AL00 (P10) | 9 / API 28, Mali-G71 | no notch; rotation fine with the workaround skipped, so the 8.x fault is the platform's, not GL's |
+| Samsung SM-S711U1 | 16 / API 36, Adreno 730 | punch-hole; window kept clear of it by the system; unchanged by this work |
+| Mi Pad 4 | 8.1 / API 27, Adreno 512 | no notch; the rotation workaround applies, the notch inset is zero. **Not yet re-tested on the device** |
+
+That is why no `DisplayCutout` code was added for API 28 and newer: on the
+vivo the window is already inset, and adding the cutout's safe inset on top
+would leave a second, empty band.
+
+**Left open.** The reverse landscape on the OPPO was not exercised remotely -
+the shell there has no `WRITE_SETTINGS`, so `user_rotation` cannot be set; the
+`ROTATION_270` side is derived from the platform's definition and needs one
+manual turn. On Xiaomi and Huawei 8.x devices the notch thickness falls back to
+the stable top inset, which some of them report as zero in landscape; a side
+band there is unproven. And a later OEM that lets a fullscreen window cover its
+cutout would need the official cutout inset after all, guarded against a window
+the system has already moved.
+
+*One crash seen once on the OPPO, while this was being tested: a `SIGSEGV` in
+`libGLESv2_adreno.so`, `EsxContext::GlPushDebugGroup` calling `strlcpy`, during a
+start with ten channels. It did not reproduce on relaunch, and nothing in the
+inset or resize paths points at it.*

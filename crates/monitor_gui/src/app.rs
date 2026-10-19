@@ -7063,16 +7063,21 @@ impl eframe::App for XgViewApp {
         // along a short edge, a tablet whose natural orientation is landscape
         // along the bottom one. The wall leaves exactly that strip free, so no
         // control sits under the bar. A television and an external display have
-        // no navigation bar, so every inset is zero and everything stays edge to
-        // edge. The setting chooses this or the immersive full screen, and is
-        // passed to the activity here; see the insets it reports back.
+        // no navigation bar, so those insets are zero and everything stays edge
+        // to edge. The notch is separate: it is reserved even with the bars
+        // hidden, as a top strip upright and a side strip on its side, because
+        // a toolbar or tile drawn under it cannot be used. See
+        // `MainActivity.applySystemBars` for how the two are measured.
         #[cfg(target_os = "android")]
         let (inset_left, inset_top, inset_right, inset_bottom) = {
             crate::android::set_reserve_navigation_bar(self.config.reserve_navigation_bar);
+            let (left, top, right, bottom) = crate::android::insets_px();
             if self.config.reserve_navigation_bar {
-                crate::android::insets_px()
+                (left, top, right, bottom)
             } else {
-                (0, 0, 0, 0)
+                // The activity reports only the notch on the sides in this mode;
+                // the navigation bar's strip is not reserved.
+                (left, top, right, 0)
             }
         };
         #[cfg(not(target_os = "android"))]

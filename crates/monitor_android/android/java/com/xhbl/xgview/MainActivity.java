@@ -29,6 +29,7 @@ import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.KeyEvent;
+import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.View;
 import android.view.ViewGroup;
@@ -239,6 +240,9 @@ public class MainActivity extends NativeActivity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             return;
         }
+        // The notch inset is portrait-only, so the edges have to be measured
+        // again for the new orientation before the layout below is looked at.
+        applySystemBars();
         final View decor = getWindow().getDecorView();
         final ViewTreeObserver observer = decor.getViewTreeObserver();
         if (pendingSurfaceResize != null) {
@@ -440,7 +444,8 @@ public class MainActivity extends NativeActivity {
 
     /**
      * Applies the bars for the mode {@link #setReserveNavigationBar} chose, and
-     * reports the navigation bar's insets to the native side.
+     * reports the safe insets to the native side: the navigation bar's strip
+     * when it is reserved, and the notch, which is kept clear either way.
      *
      * <p>With the bar reserved the wall is drawn edge to edge under the bars -
      * {@code setDecorFitsSystemWindows(false)}, and the matching layout flags on
@@ -466,6 +471,11 @@ public class MainActivity extends NativeActivity {
             final int top;
             final int right;
             final int bottom;
+            final boolean portrait = getResources().getConfiguration().orientation
+                    == Configuration.ORIENTATION_PORTRAIT;
+            final int rotation = getWindowManager().getDefaultDisplay().getRotation();
+            int notchLeft = 0;
+            int notchRight = 0;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 final Insets bars = insets.getInsets(WindowInsets.Type.navigationBars());
                 left = bars.left;
@@ -477,18 +487,37 @@ public class MainActivity extends NativeActivity {
                 // The status bar is hidden in this mode and has never been
                 // reserved for, so only the other three edges are taken - the
                 // navigation bar's strip can lie along the bottom here too.
+                //
+                // The notch is the exception: it is part of the screen the
+                // window still covers on these releases, and content must stay
+                // out of it even though the status bar is gone. It sits at the
+                // top of the device, so it is the top inset when the wall stands
+                // upright and a side inset when it lies on its side; the angle
+                // says which side, the device having been turned the other way.
+                // The stable top these releases report in landscape is the
+                // hidden status bar's height, and taking it as a top inset would
+                // put a blank band along the long edge for no reason.
+                final int notch = notchThickness(insets);
                 left = insets.getSystemWindowInsetLeft();
-                top = 0;
+                top = portrait ? notch : 0;
                 right = insets.getSystemWindowInsetRight();
                 bottom = insets.getSystemWindowInsetBottom();
+                if (!portrait) {
+                    if (rotation == Surface.ROTATION_90) {
+                        notchLeft = notch;
+                    } else if (rotation == Surface.ROTATION_270) {
+                        notchRight = notch;
+                    }
+                }
             }
             // The library is loaded late in `onCreate`, and the first insets can
-            // arrive before that. Nothing is reserved while the bar is hidden.
+            // arrive before that. Nothing is reserved while the bar is hidden -
+            // except the notch, which is always kept clear; see `notchThickness`.
             if (nativeLoaded) {
                 if (reserveNavigationBar) {
-                    nativeInsets(left, top, right, bottom);
+                    nativeInsets(Math.max(left, notchLeft), top, Math.max(right, notchRight), bottom);
                 } else {
-                    nativeInsets(0, 0, 0, 0);
+                    nativeInsets(notchLeft, top, notchRight, 0);
                 }
             }
             return view.onApplyWindowInsets(insets);
@@ -537,6 +566,85 @@ public class MainActivity extends NativeActivity {
         // A switch between the two modes changes what may be reserved, and the
         // bars coming or going is what reports it - ask for a fresh dispatch.
         window.getDecorView().requestApplyInsets();
+    }
+
+    /** Whether a legacy notch has been looked for, and whether one was found. */
+    private static Boolean legacyNotch;
+
+    /**
+     * The thickness of a legacy notch, in pixels: how far content must stay away
+     * from the edge the notch is on. Zero when there is no notch, or when the
+     * platform has {@code DisplayCutout} (API 28 and newer).
+     *
+     * <p>Android 8.x has no cutout API, but the vendors that shipped notches on
+     * it published the cutout through a system property. OPPO's is a rectangle,
+     * {@code x1,y1:x2,y2}; its height is the strip the status bar shares in
+     * portrait and the width the notch takes from the side in landscape. The
+     * stable top inset is the fallback for vendors whose property carries no
+     * usable size. A device with none of those properties keeps zero, so an
+     * ordinary full-screen wall is unchanged.
+     */
+    private static int notchThickness(WindowInsets insets) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P || !hasLegacyNotch()) {
+            return 0;
+        }
+        final String oppo = systemProperty("ro.oppo.screen.heteromorphism");
+        if (isNotchRect(oppo)) {
+            try {
+                final String[] parts = oppo.split("[:,]");
+                final int top = Integer.parseInt(parts[1].trim());
+                final int bottom = Integer.parseInt(parts[3].trim());
+                if (bottom > top) {
+                    return bottom - top;
+                }
+            } catch (RuntimeException unreadable) {
+                // Fall through to the inset the window reports.
+            }
+        }
+        return insets.getStableInsetTop();
+    }
+
+    /**
+     * Whether this Android 8.x device carries a notch, as its vendor reported
+     * it. The properties are the ones OPPO, Xiaomi and Huawei used before
+     * {@code DisplayCutout} existed; a hidden API is not a concern below API 28,
+     * where the platform does not enforce the hidden-API list.
+     */
+    private static boolean hasLegacyNotch() {
+        if (legacyNotch != null) {
+            return legacyNotch;
+        }
+        final String oppo = systemProperty("ro.oppo.screen.heteromorphism");
+        final String xiaomi = systemProperty("ro.miui.notch");
+        final String huawei = systemProperty("ro.config.hw_notch_size");
+        final String vivo = systemProperty("ro.vivo.notch");
+        legacyNotch = (isNotchRect(oppo)
+                || "1".equals(xiaomi)
+                || isNotchSize(huawei)
+                || "1".equals(vivo));
+        return legacyNotch;
+    }
+
+    /** An OPPO cutout rectangle such as {@code 229,0:492,53}, and not an empty one. */
+    private static boolean isNotchRect(String value) {
+        return value != null && !value.isEmpty() && !value.startsWith("0,0");
+    }
+
+    /** A Huawei cutout size, which is empty on a device without one. */
+    private static boolean isNotchSize(String value) {
+        return value != null && !value.isEmpty() && !value.startsWith("0");
+    }
+
+    /** A system property, read through the platform class that holds them. */
+    private static String systemProperty(String key) {
+        try {
+            final Class<?> properties = Class.forName("android.os.SystemProperties");
+            final Method get = properties.getMethod("get", String.class, String.class);
+            final Object value = get.invoke(null, key, "");
+            return value instanceof String ? (String) value : "";
+        } catch (ReflectiveOperationException | RuntimeException unavailable) {
+            return "";
+        }
     }
 
     /**
