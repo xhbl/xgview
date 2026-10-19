@@ -115,3 +115,16 @@ pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeInsets(
 ) {
     monitor_gui::android::set_insets(left, top, right, bottom);
 }
+
+/// The activity turned: the display's new size, in pixels. See
+/// `monitor_gui::android::set_window_geometry`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeWindowGeometry(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    width: jni::sys::jint,
+    height: jni::sys::jint,
+) {
+    monitor_gui::android::set_window_geometry(width, height);
+}

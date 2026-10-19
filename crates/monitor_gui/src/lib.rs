@@ -639,6 +639,10 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
         setup.instance_descriptor.backends = wgpu::Backends::GL;
         native.wgpu_options.wgpu_setup = egui_wgpu::WgpuSetup::CreateNew(setup);
     }
+    // Kept for the activity's own use: a turn handled in place leaves the
+    // window's buffer geometry at the old size on Android 8.x, and the geometry
+    // has to move before winit reads a size. See `android::set_window_geometry`.
+    android::set_native_app(app.clone());
     native.android_app = Some(app);
 
     // The renderer is built inside this call, and on the drivers this whole

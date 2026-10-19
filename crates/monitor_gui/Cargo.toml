@@ -51,6 +51,9 @@ windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
+# `ANativeWindow_setBuffersGeometry`, for the surface a turned activity leaves at
+# its old size; see `android::set_window_geometry`.
+ndk = "0.9"
 # The soft keyboard's text arrives through JNI from MainActivity; see
 # `src/keyboard.rs`. The version matches what android-activity already uses, so
 # only one copy of the crate is linked.

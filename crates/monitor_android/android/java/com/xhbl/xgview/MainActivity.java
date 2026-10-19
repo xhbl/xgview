@@ -14,8 +14,10 @@ import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Insets;
+import android.graphics.Point;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
@@ -27,8 +29,10 @@ import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.KeyEvent;
+import android.view.SurfaceHolder;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -108,6 +112,23 @@ public class MainActivity extends NativeActivity {
 
     /** The one pixel view the input method types into. */
     private View inputView;
+
+    /**
+     * The window's own surface holder, kept from the callbacks Android delivers
+     * to this activity. A {@code NativeActivity} takes the window's surface
+     * directly rather than putting a {@code SurfaceView} in its content, so this
+     * is the only handle the Java side has on it.
+     */
+    private SurfaceHolder windowSurface;
+
+    /** The format of the window's surface, as last reported with it. */
+    private int windowFormat;
+
+    /**
+     * The layout callback waiting to finish a turn, if one is pending. Kept so a
+     * second turn before the first layout can drop the callback it supersedes.
+     */
+    private ViewTreeObserver.OnGlobalLayoutListener pendingSurfaceResize;
 
     private InputMethodManager inputMethod;
 
@@ -194,6 +215,100 @@ public class MainActivity extends NativeActivity {
         if (hasFocus) {
             applySystemBars();
         }
+    }
+
+    /**
+     * Android 8.x keeps the activity alive across a turn ({@code orientation} and
+     * {@code screenSize} are among its configuration changes) but does not tell
+     * the native window that it was resized: only the content rect changes, and
+     * the buffer geometry stays at the old orientation. winit reads that geometry
+     * to size the window, so eframe never rebuilds the swapchain and the wall is
+     * black or torn after a turn on the GL fallback of that generation.
+     *
+     * <p>Two steps make up for it. The native side moves the window's buffer
+     * geometry to the new display size, and a second {@code surfaceChanged} with
+     * those figures makes the framework compare them with the ones it remembers
+     * and raise {@code onNativeWindowResized}, which is the event winit turns
+     * into {@code WindowEvent::Resized}. Later Android releases already deliver
+     * that event themselves, so this is skipped there and nothing changes on
+     * them.
+     */
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            return;
+        }
+        final View decor = getWindow().getDecorView();
+        final ViewTreeObserver observer = decor.getViewTreeObserver();
+        if (pendingSurfaceResize != null) {
+            if (observer.isAlive()) {
+                observer.removeOnGlobalLayoutListener(pendingSurfaceResize);
+            }
+            pendingSurfaceResize = null;
+        }
+        // The window manager lays the turned window out after this callback, so
+        // the frame is still the old one here. Wait for the layout that has the
+        // new orientation: that frame is what `surfaceChanged` is compared with.
+        final ViewTreeObserver.OnGlobalLayoutListener listener =
+                new ViewTreeObserver.OnGlobalLayoutListener() {
+                    @Override
+                    public void onGlobalLayout() {
+                        if (decor.getWidth() <= 0 || decor.getHeight() <= 0) {
+                            return;
+                        }
+                        final Point size = new Point();
+                        getWindowManager().getDefaultDisplay().getRealSize(size);
+                        final boolean bodyIsLandscape = decor.getWidth() > decor.getHeight();
+                        if (bodyIsLandscape != (size.x > size.y)) {
+                            return;
+                        }
+                        if (observer.isAlive()) {
+                            observer.removeOnGlobalLayoutListener(this);
+                        }
+                        if (pendingSurfaceResize == this) {
+                            pendingSurfaceResize = null;
+                        }
+                        resizeNativeSurface(size);
+                    }
+                };
+        pendingSurfaceResize = listener;
+        observer.addOnGlobalLayoutListener(listener);
+    }
+
+    /**
+     * Moves the native window's buffer geometry to {@code size}, then asks for a
+     * fresh {@code surfaceChanged} so the framework raises the resize callback
+     * winit listens for. See {@link #onConfigurationChanged}.
+     */
+    private void resizeNativeSurface(Point size) {
+        final SurfaceHolder holder = windowSurface;
+        if (holder == null || !holder.getSurface().isValid()) {
+            android.util.Log.w("xgview", "no valid window surface to resize after the turn");
+            return;
+        }
+        try {
+            // The geometry first: the native surfaceChanged check reads it.
+            nativeWindowGeometry(size.x, size.y);
+            surfaceChanged(holder, windowFormat, size.x, size.y);
+        } catch (RuntimeException error) {
+            android.util.Log.w("xgview", "cannot resize the native surface after the turn", error);
+            return;
+        }
+        android.util.Log.i("xgview", "native surface resized to " + size.x + "x" + size.y);
+    }
+
+    @Override
+    public void surfaceCreated(SurfaceHolder holder) {
+        windowSurface = holder;
+        super.surfaceCreated(holder);
+    }
+
+    @Override
+    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        windowSurface = holder;
+        windowFormat = format;
+        super.surfaceChanged(holder, format, width, height);
     }
 
     /** Whether the activity was started by the boot receiver; see {@link BootReceiver}. */
@@ -1299,4 +1414,10 @@ public class MainActivity extends NativeActivity {
      * figure per edge. Which edge it lies on belongs to the device.
      */
     private static native void nativeInsets(int left, int top, int right, int bottom);
+
+    /**
+     * Moves the native window's buffer geometry to a new size, in pixels; see
+     * {@link #onConfigurationChanged}.
+     */
+    private static native void nativeWindowGeometry(int width, int height);
 }

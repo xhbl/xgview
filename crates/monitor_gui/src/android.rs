@@ -26,6 +26,49 @@ static INSET_TOP_PX: AtomicI32 = AtomicI32::new(0);
 static INSET_RIGHT_PX: AtomicI32 = AtomicI32::new(0);
 static INSET_BOTTOM_PX: AtomicI32 = AtomicI32::new(0);
 
+/// The activity, kept so the native window can be reached from the UI thread.
+static APP: std::sync::OnceLock<android_activity::AndroidApp> = std::sync::OnceLock::new();
+
+/// Remembers the activity, once, at startup.
+pub fn set_native_app(app: android_activity::AndroidApp) {
+    let _ = APP.set(app);
+}
+
+/// Moves the native window's buffer geometry to the size the display now has.
+///
+/// Android 8.x leaves that geometry at the orientation the surface was created
+/// in when a turn is handled in place, and winit reads it back as the window
+/// size. The activity calls this from `onConfigurationChanged`, then calls its
+/// own `surfaceChanged` so the framework sees the difference and raises the
+/// resize callback winit listens for. See `MainActivity.onConfigurationChanged`.
+pub fn set_window_geometry(width: i32, height: i32) {
+    let Some(app) = APP.get() else {
+        return;
+    };
+    let Some(window) = app.native_window() else {
+        return;
+    };
+    let (had_width, had_height) = (window.width(), window.height());
+    if had_width == width && had_height == height {
+        return;
+    }
+    match window.set_buffers_geometry(width, height, None) {
+        Ok(()) => tracing::info!(
+            target: "xgview",
+            from = %format_args!("{had_width}x{had_height}"),
+            to = %format_args!("{width}x{height}"),
+            "the window's buffers follow the display"
+        ),
+        Err(error) => tracing::warn!(
+            target: "xgview",
+            %error,
+            width,
+            height,
+            "cannot resize the window's buffers"
+        ),
+    }
+}
+
 /// Records the window insets the activity reported.
 ///
 /// Called from the JNI entry point in `monitor_android`, on the UI thread.
