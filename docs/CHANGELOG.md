@@ -55,6 +55,12 @@ of the way when nothing is aiming.
 
 ### Smaller changes and fixes
 
+- **A page key no longer hands the ring to the toolbar.** `PageUp` / `PageDown`
+  turn the page from wherever the focus is, but only a focus that was standing on
+  a page button follows the turn at the edge into the other one - the turn is what
+  took the button it stood on away. A tile's focus, or a focus elsewhere in the
+  bars, turns the page and stays where it was put. A click on the button and
+  `Enter` on it behave as before.
 - **A Debian kiosk guide** walks a minimal Debian 13 install through to a
   full-screen wall under systemd, with Docker for Frigate and Home Assistant, and
   ships a one-shot `scripts/debian-kiosk.sh` for the setup itself.

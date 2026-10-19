@@ -1634,6 +1634,31 @@ impl XgViewApp {
             .is_some_and(|id| ctx.memory(|memory| memory.focused()) == Some(id))
     }
 
+    /// Whether one of the two page-turn buttons is where the remote's focus is.
+    ///
+    /// The pair is the landscape toolbar's and the upright bar's floating arrows
+    /// alike - whichever bar was up last set the two ids, so this answers for
+    /// either. What it guards is the bounce a turn at the edge makes; see
+    /// [`Self::turn_page`].
+    fn page_button_has_focus(&self, ctx: &egui::Context) -> bool {
+        Self::focus_on_page_button(
+            ctx.memory(|memory| memory.focused()),
+            self.page_prev_id,
+            self.page_next_id,
+        )
+    }
+
+    /// Whether `focused` is one of the two page-turn buttons.
+    ///
+    /// A page key turns the page from wherever the focus is; only a focus that
+    /// stood on a page button follows the turn past the edge into the other
+    /// one, because the turn is what took the button it stood on away. A tile's
+    /// focus, or a focus on anything else in the bars, turns the page and stays
+    /// where it was put.
+    fn focus_on_page_button(focused: Option<Id>, prev: Option<Id>, next: Option<Id>) -> bool {
+        focused.is_some_and(|focused| Some(focused) == prev || Some(focused) == next)
+    }
+
     /// Hands the remote's focus from the wall to the bar an arrow walked off it
     /// for.
     ///
@@ -3134,11 +3159,17 @@ impl XgViewApp {
         // turns and the layout digits - are spent, so a press cannot change the
         // wall behind it. Back is answered below, where the panels are unwound.
         if !self.layout_picker && !self.portrait_aspect_picker && !self.combined_info_picker {
+            // A page key turns the page from wherever the focus is, but the
+            // bounce a turn at the edge makes - to the other page button -
+            // belongs to a focus that was standing on one of those buttons: the
+            // turn is what took the button it stood on away. A tile's focus, or
+            // a focus anywhere else, turns the page and stays put.
+            let on_page_button = self.page_button_has_focus(ctx);
             if keys.page_prev {
-                self.advance(false, true);
+                self.advance(false, on_page_button);
             }
             if keys.page_next {
-                self.advance(true, true);
+                self.advance(true, on_page_button);
             }
             for (slot, pressed) in keys.layout.iter().enumerate() {
                 if !*pressed {
@@ -7749,6 +7780,32 @@ mod tests {
         assert!(!armed(|k| k.layout[2] = true), "so does a layout choice");
         assert!(!armed(|k| k.fullscreen = true), "and full screen takes it away with the bars");
         assert!(!armed(|_| {}), "nothing pressed arms nothing");
+    }
+
+    /// A page key turns the page from wherever the focus is, but only a focus
+    /// that was standing on a page button follows the turn at the edge into the
+    /// other one - the turn is what took the button it stood on away. A tile's
+    /// focus, or a focus on anything else in the bars, turns the page and stays
+    /// where it was put, so a page key never hands the ring to the toolbar.
+    #[test]
+    fn only_a_focus_on_a_page_button_follows_a_page_key_past_the_edge() {
+        let on = XgViewApp::focus_on_page_button;
+        let prev = Id::new("toolbar-prev-page");
+        let next = Id::new("toolbar-next-page");
+
+        assert!(on(Some(prev), Some(prev), Some(next)), "the previous button");
+        assert!(on(Some(next), Some(prev), Some(next)), "the next button");
+        assert!(!on(Some(Id::new("toolbar-settings")), Some(prev), Some(next)), "another control");
+        assert!(!on(Some(Id::new("tile-3")), Some(prev), Some(next)), "a tile");
+        assert!(!on(None, Some(prev), Some(next)), "nothing has the focus");
+
+        // Upright, the bar's own pair of ids answers the same way - and the
+        // landscape pair, which is not what those buttons were drawn with, does
+        // not.
+        let upright_prev = Id::new("portrait-prev-page");
+        let upright_next = Id::new("portrait-next-page");
+        assert!(on(Some(upright_next), Some(upright_prev), Some(upright_next)));
+        assert!(!on(Some(prev), Some(upright_prev), Some(upright_next)), "not this bar's");
     }
 
     /// A change of the wall's cursor takes down a ring that is showing, whichever
