@@ -3,7 +3,7 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 1.4.80
+## 1.4.81
 
 Changes since 1.4.70. **The picture can be read off the wall.** A magnified tile
 can be pushed in further - a pinch or a wheel zooms it up to eight times and a
