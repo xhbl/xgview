@@ -6742,12 +6742,15 @@ impl XgViewApp {
         if let Some(pos) = actions.click_pos {
             let hit = layout.hit(pos);
             if self.tile_bar.is_open() {
-                let on_bar = !matches!(hit, tilebar::Hit::Outside);
                 if matches!(hit, tilebar::Hit::Outside) {
                     // A press on the picture takes the bar down, and does so at
-                    // once: it is the way out of the bar that a finger has. It is
-                    // left to the picture as well, so a double press out here
-                    // still puts the magnified viewport back.
+                    // once: it is the way out of the bar that a finger has. The
+                    // bar takes this press with it, so one press outside is not
+                    // also the first click of a double press on the picture - a
+                    // tap that opened the bar and then closed it would otherwise
+                    // put the magnification back. A double press out here still
+                    // does: its second press lands on the picture after the bar
+                    // is down.
                     self.tile_bar.hide();
                 } else if !self.tile_bar.ignoring(now) {
                     match hit {
@@ -6771,27 +6774,28 @@ impl XgViewApp {
                         tilebar::Hit::Outside => unreachable!("handled above"),
                     }
                 }
-                consumed = on_bar;
+                consumed = true;
             } else if let Some(dock) = layout.band_at(pos) {
-                // A double press in the band is one gesture: the first press
-                // has already opened the bar, so the second must not open it
-                // again after a press in the band has shut it.
-                if actions.double_click_pos.is_none() {
-                    // A bar that is down has no controls to take the press: the
-                    // band is read on its own, so a press on the band where a
-                    // control will be drawn still asks for the bar - though the
-                    // band stops short of the control's middle, so only the edge
-                    // is being tapped.
-                    // The bar is the wall's, so it takes the keys back from any
-                    // control that had them: the next Enter presses the bar rather
-                    // than the button the viewer was on before.
-                    self.leave_controls(ui.ctx());
-                    self.tile_bar.show(dock, now);
-                    // Asking for the bar is aiming at the wall, so the ring that
-                    // marks the picture comes with it.
-                    self.ring_seen = Some(now);
-                    self.ring_aimed = true;
-                }
+                // A press on the band while the bar is down asks for it. A
+                // double press in the band opens with its first press, and the
+                // bar's own guard then keeps the second from shutting it - no
+                // double-click check is needed here, and one would refuse to
+                // reopen the bar after a press on the picture had just taken it
+                // down.
+                // A bar that is down has no controls to take the press: the
+                // band is read on its own, so a press on the band where a
+                // control will be drawn still asks for the bar - though the
+                // band stops short of the control's middle, so only the edge
+                // is being tapped.
+                // The bar is the wall's, so it takes the keys back from any
+                // control that had them: the next Enter presses the bar rather
+                // than the button the viewer was on before.
+                self.leave_controls(ui.ctx());
+                self.tile_bar.show(dock, now);
+                // Asking for the bar is aiming at the wall, so the ring that
+                // marks the picture comes with it.
+                self.ring_seen = Some(now);
+                self.ring_aimed = true;
                 consumed = true;
             }
         }

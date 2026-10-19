@@ -3,6 +3,47 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.4.90
+
+Changes since 1.4.81. **The magnified picture carries a bar of its own, with a
+fit of its own.** A press in the band the top and bottom bars would use brings
+up a floating strip inside the magnified viewport - the picture fit, laid out in
+the picture's frame and turned with a portrait wall's picture - and the fit it
+edits is the viewport's own, kept apart from the wall's landscape and portrait
+fits. Android 8.x devices no longer keep the old surface when the wall turns,
+and the notch is kept clear whichever way up the device is.
+
+### The viewport's bar
+
+- **A press in the band, or the confirm key, brings it up.** The band is the one
+  the top and bottom bars use - their depth, where they were, while they are
+  away - so the same press that wakes those bars brings this one instead; with
+  the bars on screen it is the same depth just inside the tile.
+- **It belongs to the picture.** The bar is drawn on the wall rather than added
+  as a panel, so it never wakes the bars or resizes the picture under the
+  finger. It turns with a portrait wall's picture and is walked with
+  `Left`/`Right` and `Enter`.
+- **A press outside takes it down, a press on it does not.** Eight seconds after
+  the last press it goes; `Back` takes it down first and the magnification after
+  it. One press outside closes the bar and leaves the magnification standing;
+  two quick presses still put the viewport back. A tap on the bar itself works
+  the same over a pushed-in picture.
+- **The picture fit it edits is the viewport's own.** A camera carries one fit
+  for the magnified view - the camera's own ratio until the bar's control is
+  used - kept apart from the landscape and portrait fits that dress the tiles on
+  the wall. The control names the fit in full - Original, Portrait, Stretch,
+  Contain - and is measured in the bar's font, so a longer language gets the
+  room and a short one does not leave an empty button.
+
+### Android 8.x and the notch
+
+- **A turn rebuilds the surface on Android 8.x.** The wall turns with the
+  picture instead of keeping the old buffer geometry, which that Android
+  generation never refreshed on its own.
+- **The notch is kept clear whichever way up the wall is.** A portrait wall
+  reserves the strip on the side the notch is on, including upside down; the
+  landscape wall keeps its side clear too.
+
 ## 1.4.81
 
 Changes since 1.4.70. **The picture can be read off the wall.** A magnified tile
