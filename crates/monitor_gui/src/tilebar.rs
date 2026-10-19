@@ -64,6 +64,13 @@ const EDGE: f32 = 24.0;
 /// Thickness of the strip, across the picture's edge.
 const THICK: f32 = 56.0;
 
+/// How far the strip reaches in from the picture edge.
+///
+/// The edge margin plus the thickness. The activation band is shallower, so
+/// this is the whole depth a gesture for the bar can start within; see
+/// `app::in_tile_bar_strip`.
+pub const DEPTH: f32 = EDGE + THICK;
+
 /// Side of a control across the strip, and of a square icon control along it.
 const BUTTON_H: f32 = 44.0;
 

@@ -6572,9 +6572,27 @@ impl XgViewApp {
                     self.tile_bar.hide();
                     self.picture_zoom = self.picture_zoom.zoomed(delta, at, dest);
                 } else if self.picture_zoom.magnified() {
-                    if let Some(delta) = ui.ctx().input(|input| drag_frame(input, area)) {
-                        self.tile_bar.hide();
-                        self.picture_zoom = self.picture_zoom.panned(delta, dest);
+                    // A drag on the picture moves it; one that starts on the bar
+                    // is the bar's. A finger's tap carries a little movement,
+                    // and taking that as a pan would put the bar away before
+                    // the touch could press it.
+                    let drag = ui.ctx().input(|input| {
+                        drag_frame(input, area).map(|delta| (delta, input.pointer.press_origin()))
+                    });
+                    if let Some((delta, origin)) = drag {
+                        let on_bar = self.tile_bar.is_open()
+                            && origin.is_some_and(|origin| {
+                                in_tile_bar_strip(
+                                    origin,
+                                    wall,
+                                    self.is_portrait(),
+                                    self.tile_bar.dock(),
+                                )
+                            });
+                        if !on_bar {
+                            self.tile_bar.hide();
+                            self.picture_zoom = self.picture_zoom.panned(delta, dest);
+                        }
                     }
                 }
             }
@@ -8035,6 +8053,24 @@ fn drag_frame(input: &egui::InputState, area: Rect) -> Option<egui::Vec2> {
     area.contains(origin).then_some(delta)
 }
 
+/// Whether a point is in the strip the magnified bar occupies along its edge.
+///
+/// The bar reaches [`tilebar::DEPTH`] points in from the picture edge, and its
+/// activation band is shallower, so this covers both. A gesture that starts here
+/// belongs to the bar, not the picture behind it: a finger's tap carries a little
+/// movement, and reading that as a pan puts the bar away before it can be used.
+/// Upright, the picture's top edge is the screen's right one and its bottom the
+/// left, the same mapping the bar itself uses.
+fn in_tile_bar_strip(pos: egui::Pos2, area: Rect, rotated: bool, dock: tilebar::Dock) -> bool {
+    let depth = tilebar::DEPTH;
+    match (rotated, dock) {
+        (false, tilebar::Dock::Top) => pos.y <= area.top() + depth,
+        (false, tilebar::Dock::Bottom) => pos.y >= area.bottom() - depth,
+        (true, tilebar::Dock::Top) => pos.x >= area.right() - depth,
+        (true, tilebar::Dock::Bottom) => pos.x <= area.left() + depth,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8706,5 +8742,20 @@ mod tests {
             repeat: false,
             modifiers: Modifiers::NONE,
         }
+    }
+
+    /// The bar's strip is the picture edge in its own frame: the screen's top
+    /// and bottom in landscape, its right and left once the picture is turned.
+    #[test]
+    fn a_gesture_starting_in_the_bars_strip_is_the_bars() {
+        let area = Rect::from_min_max(pos2(0.0, 0.0), pos2(1280.0, 720.0));
+        assert!(in_tile_bar_strip(pos2(640.0, 40.0), area, false, tilebar::Dock::Top));
+        assert!(!in_tile_bar_strip(pos2(640.0, 200.0), area, false, tilebar::Dock::Top));
+        assert!(in_tile_bar_strip(pos2(640.0, 680.0), area, false, tilebar::Dock::Bottom));
+        assert!(!in_tile_bar_strip(pos2(640.0, 520.0), area, false, tilebar::Dock::Bottom));
+        assert!(in_tile_bar_strip(pos2(1240.0, 360.0), area, true, tilebar::Dock::Top));
+        assert!(!in_tile_bar_strip(pos2(1000.0, 360.0), area, true, tilebar::Dock::Top));
+        assert!(in_tile_bar_strip(pos2(40.0, 360.0), area, true, tilebar::Dock::Bottom));
+        assert!(!in_tile_bar_strip(pos2(280.0, 360.0), area, true, tilebar::Dock::Bottom));
     }
 }
