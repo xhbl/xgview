@@ -60,7 +60,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.4.87"
+version = "1.4.88"
 authors = ["XHBL <newxhbl@hotmail.com>"]
 description = "A grid viewer for surveillance cameras"
 license = "MIT"

@@ -833,9 +833,9 @@ pub struct XgViewApp {
     tile_bar: tilebar::Bar,
     /// The state the bar's sound control draws.
     ///
-    /// Nothing is played yet - the streams carry no audio into the viewer - so
-    /// the control is here to be seen and aimed: the switch is what its icon
-    /// shows, and it is where the sound is wired in when there is some.
+    /// Audio is deferred to 1.5; the control is compiled but hidden until then
+    /// (`tilebar::SOUND`). Nothing is played yet - the streams carry no audio
+    /// into the viewer - and this state is where the sound is wired in.
     sound_on: bool,
     /// Who answered the last frame's direction presses.
     owner: Owner,
@@ -6705,7 +6705,11 @@ impl XgViewApp {
         // picture fit also resizes the control to its new value in the same
         // frame it changes it.
         let label = self.tile_bar_label(index);
-        let widths = [tilebar::text_width(ui.ctx(), &label), tilebar::icon_width()];
+        let controls = self.tile_bar_controls(&label);
+        let widths: Vec<f32> = controls
+            .iter()
+            .map(|control| control.width(ui.ctx()))
+            .collect();
         let layout = tilebar::layout(
             rect,
             rotated,
@@ -6780,7 +6784,11 @@ impl XgViewApp {
         // paints it there rather than at the old edge and then jumping over on
         // the next one.
         let label = self.tile_bar_label(index);
-        let widths = [tilebar::text_width(ui.ctx(), &label), tilebar::icon_width()];
+        let controls = self.tile_bar_controls(&label);
+        let widths: Vec<f32> = controls
+            .iter()
+            .map(|control| control.width(ui.ctx()))
+            .collect();
         let layout = tilebar::layout(
             rect,
             rotated,
@@ -6804,10 +6812,6 @@ impl XgViewApp {
                 tilebar::Hit::Button(button) => Some(button),
                 _ => None,
             });
-            let controls = [
-                tilebar::Control::Text(label.as_str()),
-                tilebar::Control::Icon(if self.sound_on { Icon::Sound } else { Icon::Mute }),
-            ];
             tilebar::paint(
                 &ui.painter_at(rect),
                 &layout,
@@ -6840,18 +6844,36 @@ impl XgViewApp {
         monitor_i18n::tr(aspect.label())
     }
 
-    /// Answers the control the bar is on: the picture fit, or the sound switch.
+    /// The controls the magnified bar carries, in walk order.
+    ///
+    /// The picture fit is always there. The sound switch is compiled but hidden
+    /// until audio lands in 1.5: `tilebar::SOUND` turns it on there, and this is
+    /// the one place the bar's controls are assembled.
+    fn tile_bar_controls<'a>(&self, label: &'a str) -> Vec<tilebar::Control<'a>> {
+        let mut controls = vec![tilebar::Control::Text(label)];
+        if tilebar::SOUND {
+            controls.push(tilebar::Control::Icon(if self.sound_on {
+                Icon::Sound
+            } else {
+                Icon::Mute
+            }));
+        }
+        controls
+    }
+
+    /// Answers the control the bar is on: the picture fit, or the sound switch
+    /// when [`tilebar::SOUND`] is on.
     ///
     /// The fit this writes is the magnified viewport's own: it is kept per
     /// camera, and the wall's landscape and portrait fits - the pair the settings
     /// panel and the portrait aspect picker write - are not touched. Until the
     /// first press the fit is the camera's own ratio, `Original`, which is where
-    /// the walk starts. The sound switch changes nothing yet - the streams are
-    /// taken for their picture - but its icon is drawn from it, and it is where
-    /// the sound is wired in once there is some.
+    /// the walk starts. The sound branch is kept for the release that adds audio
+    /// (1.5); it flips `sound_on`, which is not drawn while the control is hidden.
     fn tile_bar_activate(&mut self) {
-        // The second control is the sound switch; the first steps the picture
-        // fit. The index is the one the press or the walk left the bar on.
+        // The second control is the sound switch when it is shown; the first
+        // steps the picture fit. The index is the one the press or the walk left
+        // the bar on.
         if self.tile_bar.focus() == 1 {
             self.sound_on = !self.sound_on;
             return;

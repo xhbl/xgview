@@ -42,11 +42,18 @@ pub const IDLE: Duration = Duration::from_secs(8);
 /// second click of the gesture that opened the bar can never press it.
 const GUARD: Duration = Duration::from_millis(300);
 
-/// How many controls the bar holds.
+/// Whether the bar carries the sound switch.
 ///
-/// The picture fit and the sound toggle. The geometry takes the widths, so the
-/// strip grows along the picture's edge as controls are added.
-pub const BUTTONS: usize = 2;
+/// Audio playback is deferred to 1.5; the plan is `docs/audio-plan.md` in the
+/// private tree. The control, its icon and the toggle stay compiled so that
+/// release only has to turn this on - until then the bar carries the picture
+/// fit alone.
+pub const SOUND: bool = false;
+
+/// How many controls the bar holds: the picture fit, and the sound switch when
+/// [`SOUND`] is on. The geometry takes the widths, so the strip grows along the
+/// picture's edge as controls are added.
+pub const BUTTONS: usize = if SOUND { 2 } else { 1 };
 
 /// Distance kept from the picture edge, in points.
 ///
@@ -102,6 +109,19 @@ pub fn text_width(ctx: &egui::Context, text: &str) -> f32 {
 /// How much room an icon control asks for: square, the strip's depth.
 pub fn icon_width() -> f32 {
     BUTTON_H
+}
+
+impl Control<'_> {
+    /// How much room along the strip the control asks for.
+    ///
+    /// A word is measured in the font it is drawn with; an icon is square, so
+    /// the strip of them reads as a row of squares beside the words.
+    pub fn width(&self, ctx: &egui::Context) -> f32 {
+        match self {
+            Control::Text(text) => text_width(ctx, text),
+            Control::Icon(_) => icon_width(),
+        }
+    }
 }
 
 /// Which edge of the picture the bar is docked to, in the picture's own frame.

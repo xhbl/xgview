@@ -2068,10 +2068,13 @@ inset or resize paths points at it.*
 *All platforms — 2026-10-19, 1.4.85–1.4.87.*
 
 **What it is.** A small strip of controls drawn inside the magnified viewport:
-the picture fit and a sound switch. It is not a panel and not a window; it is
-part of the wall's own picture, for the two things a viewer wants while reading a
-detail - the shape of the picture and whether it is heard - without leaving the
-magnification or waking the chrome.
+the picture fit, and (from the audio release, 1.5) a sound switch. It is not a
+panel and not a window; it is part of the wall's own picture, for the two things
+a viewer wants while reading a detail - the shape of the picture and whether it
+is heard - without leaving the magnification or waking the chrome. The sound
+control is compiled but hidden until then: `tilebar::SOUND` is `false`, and the
+icon drawing and the toggle stay in the code for the release that turns it on.
+See `docs/audio-plan.md` in the private tree.
 
 **Where it lives.** In the *picture's* frame, mapped onto the screen the way the
 picture is: a quarter turn clockwise for a portrait wall's landscape stream, so
@@ -2129,7 +2132,8 @@ old edge and the next frame jumped to the new one. It is laid out again after th
 press, with the dock and the measured label it has now, so the opening frame is
 already in place.
 
-**Left open.** The sound control is a switch only: the streams are taken for
-their picture, and the icon is where the audio is wired in when there is some.
-The 56..96 bounds are a judgement, not a measurement of every language; the
-word's control is bounded rather than allowed to grow without limit.
+**Left open.** The sound control is compiled but hidden until 1.5: it is a
+switch only, the streams are taken for their picture, and the icon is where the
+audio is wired in when there is some. The 56..96 bounds are a judgement, not a
+measurement of every language; the word's control is bounded rather than allowed
+to grow without limit.
