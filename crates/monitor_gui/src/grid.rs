@@ -224,6 +224,20 @@ pub struct TileActions {
     pub drag_started: bool,
     pub drag_delta: f32,
     pub drag_stopped: bool,
+    /// Where the pointer was when the tile was clicked, if it was.
+    ///
+    /// The magnified viewport's one tile covers the whole wall, and the bar it
+    /// carries is drawn by the application rather than as a widget of its own:
+    /// this is the position that tells a press on a control from one on the
+    /// picture. See [`crate::tilebar`].
+    pub click_pos: Option<egui::Pos2>,
+    /// Where the pointer was on a double click.
+    ///
+    /// Read to keep a double click in the bar's activation band from unwinding
+    /// the magnification: a press there is the bar being asked for.
+    pub double_click_pos: Option<egui::Pos2>,
+    /// Where the pointer is over the tile, if it is over it at all.
+    pub hover_pos: Option<egui::Pos2>,
 }
 
 /// Paints one cell and reports the user interaction.

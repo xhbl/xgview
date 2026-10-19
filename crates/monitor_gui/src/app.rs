@@ -33,6 +33,7 @@ use crate::icons::{self, Icon};
 use crate::controls;
 use crate::nav::{Axis, Dir, Exit, Kind, Nav, ScopeDef};
 use crate::theme;
+use crate::tilebar;
 use crate::video::{VideoRenderer, VideoSurface};
 use crate::window::{self, OnTop};
 use crate::RunOptions;
@@ -643,6 +644,13 @@ struct Keys {
     up: bool,
     down: bool,
     enter: bool,
+    /// Whether this frame's Enter / Space was a press of its own.
+    ///
+    /// [`egui::InputState::consume_key`] matches key-repeat events as well, which
+    /// is what a held key sends: fine for walking a selection, wrong for opening
+    /// a bar or pressing its control, which a held OK would otherwise do again
+    /// and again. Read before the event is consumed.
+    enter_fresh: bool,
     back: bool,
     page_next: bool,
     page_prev: bool,
@@ -816,6 +824,13 @@ pub struct XgViewApp {
     /// channel, or the way back to the grid - because a window is a part of one
     /// picture and means nothing on the next. See [`PictureZoom`].
     picture_zoom: PictureZoom,
+    /// The floating bar inside the magnified viewport.
+    ///
+    /// A press in the picture's top or bottom band brings it up, and it is
+    /// answered by the wall rather than by egui's focus: it must not wake the
+    /// top and bottom bars, which take their height from the wall. See
+    /// [`crate::tilebar`].
+    tile_bar: tilebar::Bar,
     /// Who answered the last frame's direction presses.
     owner: Owner,
     /// Explicit directional navigation for the windows that opted into it.
@@ -1155,6 +1170,7 @@ impl XgViewApp {
             ring_seen: None,
             ring_aimed: false,
             picture_zoom: PictureZoom::FULL,
+            tile_bar: tilebar::Bar::new(),
             // The "Add devices" window, the settings panel and the top bar are
             // on this layer: each is a row (of tabs, or of controls) over a
             // column, which is the shape egui's walk handles worst. The wall
@@ -1400,6 +1416,7 @@ impl XgViewApp {
         if self.scheduler.layout() == layout && !self.scheduler.is_zoomed() {
             return;
         }
+        self.tile_bar.hide();
         self.scheduler.zoom_out();
         self.scheduler.set_layout(layout);
         self.slide = Slide::default();
@@ -1449,6 +1466,7 @@ impl XgViewApp {
         self.needs_sync = true;
         self.sync();
         self.orientation = wanted;
+        self.tile_bar.hide();
         let view = self.config.group().clone();
         let layout = if wanted.is_portrait() { view.portrait_layout } else { view.layout };
         self.scheduler.zoom_out();
@@ -1565,6 +1583,9 @@ impl XgViewApp {
         let Some(current) = self.scheduler.zoom() else {
             return false;
         };
+        // The bar belongs to one picture: stepping to the next one leaves it
+        // behind, the way the window a pinch left behind is.
+        self.tile_bar.hide();
         if !self.scheduler.zoom_step(forward) {
             self.slide.drag = 0.0;
             return false;
@@ -1678,6 +1699,7 @@ impl XgViewApp {
     }
 
     fn zoom_in(&mut self) {
+        self.tile_bar.hide();
         if self.scheduler.zoom_in() {
             // The viewport comes up whole: the window the last one was left at is
             // a part of another picture, and there is none of this one to keep.
@@ -1688,6 +1710,7 @@ impl XgViewApp {
     }
 
     fn zoom_out(&mut self) {
+        self.tile_bar.hide();
         if self.scheduler.zoom_out() {
             self.needs_sync = true;
             self.mark_dirty();
@@ -1897,8 +1920,14 @@ impl XgViewApp {
             return ctx.input(Self::any_input);
         }
         ctx.input(|input| {
+            // While the picture is magnified and the bars are away, the band
+            // along its top and bottom edge is the viewport's own bar being
+            // asked for, not the menus: the two are the same part of the screen,
+            // and one press cannot be both. With the bars on screen their band is
+            // their own as it always was.
+            let band_is_a_door = !self.scheduler.is_zoomed() || self.chrome.visible;
             input.events.iter().any(|event| {
-                Self::wall_event(self.chrome.bars, self.back_is_a_door(), event)
+                Self::wall_event(self.chrome.bars, self.back_is_a_door(), band_is_a_door, event)
             })
         })
     }
@@ -1922,9 +1951,18 @@ impl XgViewApp {
     /// [`Self::viewer_active`] for why.
     ///
     /// `back_is_a_door` is [`Self::back_is_a_door`], read once for the frame.
+    ///
+    /// `band_is_a_door` is whether a press in the band a bar sits in is that
+    /// bar's: true on the grid, and true while magnified with the bars on
+    /// screen, where the wall's own band lies below theirs. It is false only in
+    /// the one state where the two bands are the same part of the screen - the
+    /// magnified viewport with the bars away - and there the band is the
+    /// viewport's own bar being asked for. The menus are still reachable there:
+    /// `F1`/`F2`, or Back a layer at a time. See [`crate::tilebar`].
     fn wall_event(
         bars: Option<(Rect, Rect)>,
         back_is_a_door: bool,
+        band_is_a_door: bool,
         event: &egui::Event,
     ) -> bool {
         match event {
@@ -1944,14 +1982,19 @@ impl XgViewApp {
             // sits in is the pointer asking for that bar. A release is the tail
             // of a press that has already been answered, and never a request of
             // its own.
-            egui::Event::PointerButton { pos, pressed: true, .. } => Self::in_a_bar_band(bars, *pos),
+            //
+            // Magnified with the bars away, that band belongs to the viewport's
+            // own bar; see above.
+            egui::Event::PointerButton { pos, pressed: true, .. } => {
+                band_is_a_door && Self::in_a_bar_band(bars, *pos)
+            }
             egui::Event::PointerButton { pressed: false, .. } => false,
             // A touch is placed by where it is, whatever phase it is in. A tap
             // on a touch screen arrives as a `Start` and an `End` at the same
             // place, and the end is not a second request for the bars - reading
             // it as one is what brought the bars back under every touch on the
             // wall, however carefully its start had been placed.
-            egui::Event::Touch { pos, .. } => Self::in_a_bar_band(bars, *pos),
+            egui::Event::Touch { pos, .. } => band_is_a_door && Self::in_a_bar_band(bars, *pos),
             // What a printable key arrives as *on top of* its key event, which
             // is why the grid digits are read as keys above: a character typed
             // at the wall does nothing at all - there is no field on the wall to
@@ -2250,7 +2293,14 @@ impl XgViewApp {
         // meant, and unwinding it would put an exit out of reach. F11 and the
         // settings panel's own checkbox are what toggle it.
         if self.scheduler.is_zoomed() {
-            self.zoom_out();
+            // Back unwinds the magnification a layer at a time: the bar the
+            // viewport carries, and then the magnification itself. It is the one
+            // key that gets out of it now - the confirm key is the bar's.
+            if self.tile_bar.is_open() {
+                self.tile_bar.hide();
+            } else {
+                self.zoom_out();
+            }
             self.exit_armed = None;
         } else if self.discovery.open {
             self.discovery.open = false;
@@ -3016,6 +3066,15 @@ impl XgViewApp {
         let keys = ctx.input_mut(|input| {
             let none = Modifiers::NONE;
             let mut keys = Keys::default();
+            // Read before the press is consumed: `consume_key` matches key
+            // repeats too, and a repeated Enter must not press the magnified
+            // viewport's bar over and over. See `Keys::enter_fresh`.
+            keys.enter_fresh = input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key { key: Key::Enter | Key::Space, pressed: true, repeat: false, .. }
+                )
+            });
             // Back is Escape on a keyboard and `BrowserBack` from an Android
             // remote: winit maps `AKEYCODE_BACK` onto that, not onto Escape, so
             // a remote that only ever sends BACK would otherwise have no way out
@@ -3154,6 +3213,18 @@ impl XgViewApp {
         if keys.fullscreen {
             let enabled = !self.fullscreen;
             self.set_fullscreen(ctx, enabled);
+        }
+        // A key that opens a panel, or changes the shape of the wall, is not the
+        // magnified viewport's bar's: it takes the bar down before it acts, so
+        // the two are never up at once. See [`crate::tilebar`].
+        if keys.settings
+            || keys.devices
+            || keys.fullscreen
+            || keys.page_prev
+            || keys.page_next
+            || keys.layout.iter().any(|pressed| *pressed)
+        {
+            self.tile_bar.hide();
         }
         // The picker is a modal: while it is up the wall's own keys - page
         // turns and the layout digits - are spent, so a press cannot change the
@@ -3298,20 +3369,55 @@ impl XgViewApp {
         }
 
         if self.scheduler.is_zoomed() {
-            // A magnified viewport is one channel, not a grid: Right and Left
-            // are the next and previous channel in channel order, and Up and
-            // Down have no grid to walk, so they go straight to the bars.
-            if keys.left {
-                self.step_zoom(false);
-            }
-            if keys.right {
-                self.step_zoom(true);
-            }
-            if keys.down {
-                self.hand_off(ctx, Bar::Status);
-            }
-            if keys.up {
-                self.hand_off(ctx, Bar::Toolbar);
+            if self.tile_bar.is_open() {
+                // The bar owns the remote while it is up: the arrows move its
+                // selection, the confirm key presses the selected control, and
+                // Up and Down are spent - a strip of controls has nothing above
+                // or below it to walk to. The channel step is not reachable
+                // until the bar is down, which is the point of it being a
+                // surface of its own; see `crate::tilebar`.
+                let mut touched = false;
+                if keys.left {
+                    self.tile_bar.step(false, tilebar::BUTTONS);
+                    touched = true;
+                }
+                if keys.right {
+                    self.tile_bar.step(true, tilebar::BUTTONS);
+                    touched = true;
+                }
+                if keys.up || keys.down {
+                    touched = true;
+                }
+                if keys.enter && keys.enter_fresh {
+                    self.tile_bar_activate();
+                    touched = true;
+                }
+                if touched {
+                    self.tile_bar.touch(Instant::now());
+                }
+            } else {
+                // A magnified viewport is one channel, not a grid: Right and
+                // Left are the next and previous channel in channel order, and
+                // Up and Down have no grid to walk, so they go straight to the
+                // bars.
+                if keys.left {
+                    self.step_zoom(false);
+                }
+                if keys.right {
+                    self.step_zoom(true);
+                }
+                if keys.down {
+                    self.hand_off(ctx, Bar::Status);
+                }
+                if keys.up {
+                    self.hand_off(ctx, Bar::Toolbar);
+                }
+                // The confirm key brings the viewport's bar up rather than
+                // unwinding the magnification: Back is the way out now, a layer
+                // at a time. A held key is not a second press.
+                if keys.enter && keys.enter_fresh {
+                    self.tile_bar.show(self.tile_bar.dock(), Instant::now());
+                }
             }
         } else {
             if keys.left {
@@ -3326,11 +3432,7 @@ impl XgViewApp {
             if keys.up && self.navigate(Direction::Up) == NavigateOutcome::Blocked {
                 self.hand_off(ctx, Bar::Toolbar);
             }
-        }
-        if keys.enter {
-            if self.scheduler.is_zoomed() {
-                self.zoom_out();
-            } else {
+            if keys.enter {
                 self.zoom_in();
             }
         }
@@ -3385,6 +3487,10 @@ impl XgViewApp {
             self.apply_power_for_blackout();
         }
         if on {
+            // The magnified viewport's bar is part of the picture the blank
+            // covers, and a control that cannot be seen must not be the one the
+            // next press lands on.
+            self.tile_bar.hide();
             // Nothing behind the blank may act on this frame's input: a click
             // aimed at a black screen must not press a button that cannot be
             // seen, and the pointer should not be there to aim with either.
@@ -6332,9 +6438,11 @@ impl XgViewApp {
             if interactive {
                 if response.clicked() {
                     actions.focus = *index;
+                    actions.click_pos = response.interact_pointer_pos();
                 }
                 if response.double_clicked() {
                     actions.zoom = *index;
+                    actions.double_click_pos = response.interact_pointer_pos();
                 }
                 if response.drag_started() {
                     actions.drag_started = true;
@@ -6344,6 +6452,9 @@ impl XgViewApp {
                 }
                 if response.drag_stopped() {
                     actions.drag_stopped = true;
+                }
+                if let Some(pos) = response.hover_pos() {
+                    actions.hover_pos = Some(pos);
                 }
             }
         }
@@ -6433,9 +6544,14 @@ impl XgViewApp {
                 // the mouse - and neither is a drag, because a pinch's pointer
                 // follows the first finger and a wheel has no pointer of its own.
                 if let Some((delta, at)) = pinched.or(wheeled) {
+                    // Pushing the picture in or out is the viewer at the
+                    // picture; a control strip left standing over it would take
+                    // the next press meant for the gesture.
+                    self.tile_bar.hide();
                     self.picture_zoom = self.picture_zoom.zoomed(delta, at, dest);
                 } else if self.picture_zoom.magnified() {
                     if let Some(delta) = ui.ctx().input(|input| drag_frame(input, area)) {
+                        self.tile_bar.hide();
                         self.picture_zoom = self.picture_zoom.panned(delta, dest);
                     }
                 }
@@ -6480,26 +6596,232 @@ impl XgViewApp {
                 self.advance(false, false);
             }
         }
-        if let Some(index) = actions.focus {
-            // A press on the wall is the viewer pointing at what they are
-            // watching, so whatever control of the bars was holding the
-            // remote's focus gives it up and the arrows move channels again.
-            self.leave_controls(ui.ctx());
-            if self.scheduler.focus() != Some(index) {
-                self.scheduler.set_focus(Some(index));
-                self.needs_sync = true;
-                self.mark_dirty();
+        // The magnified viewport's bar is answered and drawn before the tile's
+        // own click is: a press on it, or in the band that asks for it, belongs
+        // to the bar rather than to the picture behind. See [`crate::tilebar`].
+        let bar_owns_press = self.tile_bar_overlay(ui, &view, wall, dx, &actions);
+
+        if !bar_owns_press {
+            if let Some(index) = actions.focus {
+                // A press on the wall is the viewer pointing at what they are
+                // watching, so whatever control of the bars was holding the
+                // remote's focus gives it up and the arrows move channels again.
+                self.leave_controls(ui.ctx());
+                if self.scheduler.focus() != Some(index) {
+                    self.scheduler.set_focus(Some(index));
+                    self.needs_sync = true;
+                    self.mark_dirty();
+                }
+                // A click on a tile is the pointer's way of placing the ring, and
+                // the only one it has: a drag turns the page without aiming at
+                // anything, and a movement places nothing. So this is where a
+                // pointer arms it. See `ring_keys`.
+                self.ring_seen = Some(Instant::now());
+                self.ring_aimed = true;
             }
-            // A click on a tile is the pointer's way of placing the ring, and the
-            // only one it has: a drag turns the page without aiming at anything,
-            // and a movement places nothing. So this is where a pointer arms it.
-            // See `ring_keys`.
-            self.ring_seen = Some(Instant::now());
-            self.ring_aimed = true;
+            if let Some(index) = actions.zoom {
+                self.zoom_to(index);
+            }
         }
-        if let Some(index) = actions.zoom {
-            self.zoom_to(index);
+    }
+
+    /// Answers the magnified viewport's bar and paints it.
+    ///
+    /// The bar is part of the wall rather than one of its panels: it is drawn on
+    /// the wall's own painter, it never takes egui's focus, and the pointer is
+    /// read from the tile's own interaction - the tile covers the whole wall in
+    /// this view, so there is nothing else to read. Returns whether the press
+    /// belonged to the bar, in which case the wall does not also act on it.
+    ///
+    /// Its shape comes from [`crate::tilebar`], which lays it out in the
+    /// picture's frame and maps that onto the screen, so a picture drawn turned
+    /// for a portrait wall carries a turned bar.
+    fn tile_bar_overlay(
+        &mut self,
+        ui: &mut egui::Ui,
+        view: &PageView,
+        wall: Rect,
+        dx: f32,
+        actions: &TileActions,
+    ) -> bool {
+        if !self.scheduler.is_zoomed() {
+            return false;
         }
+        // A page or a channel sliding under the viewer is not the moment to
+        // bring the bar up, and one that is up belongs to the picture that is
+        // leaving: the step closed it already, and this keeps a press during the
+        // slide from bringing it back over a moving picture.
+        if self.slide.offset != 0.0 || self.slide.dragging {
+            return false;
+        }
+        let Some(index) = self.scheduler.zoom() else {
+            return false;
+        };
+        let Some(cell) = view.cells.iter().position(|slot| *slot == Some(index)) else {
+            return false;
+        };
+        let rect = grid::tile_rect(wall.translate(vec2(dx, 0.0)), view.layout, cell, grid::LINE);
+        // A window too small to hold the strip and the room it keeps clear of
+        // the edge is not given one; this is a picture down to a postage stamp.
+        if rect.width() < 120.0 || rect.height() < 120.0 {
+            self.tile_bar.hide();
+            return false;
+        }
+
+        let rotated = self.is_portrait();
+        // The band is the one the bars use, and the magnified viewport's bar
+        // takes it over: while the bars are away it is where they would have
+        // been, and while they are on screen it is the same depth just inside
+        // the tile. The heights are the ones the bars were last drawn at; before
+        // that has happened once, roughly what a toolbar and a status bar are.
+        let (top_band, bottom_band) = self
+            .chrome
+            .bars
+            .map_or((44.0, 30.0), |(top, bottom)| (top.height(), bottom.height()));
+        let layout = tilebar::layout(
+            rect,
+            rotated,
+            self.tile_bar.dock(),
+            tilebar::BUTTONS,
+            top_band,
+            bottom_band,
+        );
+        let now = Instant::now();
+        let mut consumed = false;
+
+        if let Some(pos) = actions.click_pos {
+            let hit = layout.hit(pos);
+            if self.tile_bar.is_open() {
+                let on_bar = !matches!(hit, tilebar::Hit::Outside);
+                if matches!(hit, tilebar::Hit::Outside) {
+                    // A press on the picture takes the bar down, and does so at
+                    // once: it is the way out of the bar that a finger has. It is
+                    // left to the picture as well, so a double press out here
+                    // still puts the magnified viewport back.
+                    self.tile_bar.hide();
+                } else if !self.tile_bar.ignoring(now) {
+                    match hit {
+                        tilebar::Hit::Button(button) => {
+                            // The wall answers for the bar, so whatever control
+                            // of the bars was holding the remote's focus gives
+                            // it up - the same hand-over a press on a tile
+                            // makes.
+                            self.leave_controls(ui.ctx());
+                            self.tile_bar.set_focus(button);
+                            self.tile_bar_activate();
+                            self.tile_bar.touch(now);
+                        }
+                        tilebar::Hit::Inside => self.tile_bar.touch(now),
+                        // The band is the edge the bar came from, and the part
+                        // of it outside the strip is outside the bar: a press
+                        // there takes the bar down like a press on the picture.
+                        // The guard keeps the second press of a double press
+                        // that opened the bar from shutting it again.
+                        tilebar::Hit::Band(_) => self.tile_bar.hide(),
+                        tilebar::Hit::Outside => unreachable!("handled above"),
+                    }
+                }
+                consumed = on_bar;
+            } else if let Some(dock) = layout.band_at(pos) {
+                // A double press in the band is one gesture: the first press
+                // has already opened the bar, so the second must not open it
+                // again after a press in the band has shut it.
+                if actions.double_click_pos.is_none() {
+                    // A bar that is down has no controls to take the press: the
+                    // band is read on its own, so a press on the band where a
+                    // control will be drawn still asks for the bar - though the
+                    // band stops short of the control's middle, so only the edge
+                    // is being tapped.
+                    // The bar is the wall's, so it takes the keys back from any
+                    // control that had them: the next Enter presses the bar rather
+                    // than the button the viewer was on before.
+                    self.leave_controls(ui.ctx());
+                    self.tile_bar.show(dock, now);
+                    // Asking for the bar is aiming at the wall, so the ring that
+                    // marks the picture comes with it.
+                    self.ring_seen = Some(now);
+                    self.ring_aimed = true;
+                }
+                consumed = true;
+            }
+        }
+
+        // The press may have opened the bar on the other edge than the one the
+        // last opening used: lay it out again with the dock it has now, so this
+        // frame paints it there rather than at the old edge and then jumping
+        // over on the next one.
+        let layout = tilebar::layout(
+            rect,
+            rotated,
+            self.tile_bar.dock(),
+            tilebar::BUTTONS,
+            top_band,
+            bottom_band,
+        );
+
+        // A double press in the band is the bar being asked for, not the
+        // viewport being put back: its first press has already opened the bar,
+        // and the second is the same gesture.
+        if let Some(pos) = actions.double_click_pos {
+            if !matches!(layout.hit(pos), tilebar::Hit::Outside) {
+                consumed = true;
+            }
+        }
+
+        if self.tile_bar.is_open() {
+            let hover = actions.hover_pos.and_then(|pos| match layout.hit(pos) {
+                tilebar::Hit::Button(button) => Some(button),
+                _ => None,
+            });
+            // Read from the configuration rather than from the snapshot the
+            // tiles were painted with: the press that got here may have just
+            // changed it, and the label has to say what it now is.
+            let aspect = self
+                .config
+                .active_slots()
+                .get(index)
+                .copied()
+                .and_then(|slot| self.config.cameras.get(slot))
+                .map(|camera| if rotated { camera.portrait_aspect } else { camera.aspect })
+                .unwrap_or_default();
+            let label = monitor_i18n::tr(aspect.short_label());
+            tilebar::paint(
+                &ui.painter_at(rect),
+                &layout,
+                rotated,
+                self.tile_bar.focus(),
+                hover,
+                &[label.as_str()],
+            );
+        }
+
+        consumed
+    }
+
+    /// Steps the magnified camera's picture fit to the next one.
+    ///
+    /// The fit is held per camera and per orientation, the same pair the settings
+    /// panel and the portrait aspect picker write: a camera can be stretched on
+    /// the landscape wall and kept at its own ratio upright, the two choices not
+    /// touching.
+    fn tile_bar_activate(&mut self) {
+        let Some(index) = self.scheduler.zoom() else {
+            return;
+        };
+        let Some(slot) = self.config.active_slots().get(index).copied() else {
+            return;
+        };
+        let portrait = self.is_portrait();
+        let Some(camera) = self.config.cameras.get_mut(slot) else {
+            return;
+        };
+        let next = if portrait { camera.portrait_aspect } else { camera.aspect }.next();
+        if portrait {
+            camera.portrait_aspect = next;
+        } else {
+            camera.aspect = next;
+        }
+        self.mark_dirty();
     }
 
     /// The picker that offers the layouts with no button of their own.
@@ -6938,6 +7260,19 @@ impl eframe::App for XgViewApp {
         // black.
         self.update_blackout(ctx);
 
+        // The magnified viewport's bar belongs to one picture, and to a wall on
+        // which nothing else is open: anything that takes that away - the way
+        // back to the grid, a step to the next channel, the blank, a panel over
+        // the wall - takes the bar with it. The step and the two zooms also
+        // close it where they happen; this is the net under all of them.
+        if !self.scheduler.is_zoomed()
+            || self.blackout_on
+            || self.panel_anchor().is_some()
+            || self.owner != Owner::Grid
+        {
+            self.tile_bar.hide();
+        }
+
         // The start-up full screen is asked for here, on the first frame the
         // window is on its monitor, rather than on the viewport builder: asked
         // for there it is answered before the window has a monitor to be made
@@ -7152,7 +7487,12 @@ impl eframe::App for XgViewApp {
         // the widgets of the frame it lands in, which is why the frame that
         // brings the bars back claims the band just like any other: by the time
         // the press is placed the bars are drawn, and the band is over them.
-        if bands_hidden {
+        //
+        // Magnified, the band is the viewport's own bar's instead, and the tile
+        // under it is what has to see the press: these overlays are exactly
+        // where that bar is drawn, so one of them would eat the press before the
+        // tile could open it. See `crate::tilebar` and `wall_event`.
+        if bands_hidden && !self.scheduler.is_zoomed() {
             if let Some((top, bottom)) = self.chrome.bars {
                 for (id, band) in [("xgview-toolbar-band", top), ("xgview-status-band", bottom)] {
                     // The size is given, and never left to the area's own
@@ -7211,7 +7551,12 @@ impl eframe::App for XgViewApp {
             .show(ctx, |ui| {
                 let area = ui.available_rect_before_wrap();
                 self.draw_grid(ui);
-                if self.is_portrait() && self.chrome.visible {
+                // The floating page arrows sit at the very edges the magnified
+                // viewport's bar is docked to, and are drawn after the wall - so
+                // they would lie on top of it. The bar is the surface in use
+                // while it is up, and the bars' own page buttons are still
+                // there; the arrows come back with the picture once it goes.
+                if self.is_portrait() && self.chrome.visible && !self.tile_bar.is_open() {
                     self.portrait_page_buttons(ui, area);
                 }
             });
@@ -7516,6 +7861,17 @@ impl eframe::App for XgViewApp {
             self.ring_aimed,
         );
 
+        // The magnified viewport's bar keeps a clock of its own, and the repaint
+        // is asked for against it: a wall showing no live picture is not
+        // repainting on its own, and the bar still has to go when its time is up.
+        if let Some(left) = self.tile_bar.remaining(Instant::now()) {
+            if left.is_zero() {
+                self.tile_bar.hide();
+            } else {
+                ctx.request_repaint_after(left);
+            }
+        }
+
         let animation = self.needs_animation();
         ctx.request_repaint_after(if animation { LIVE_REPAINT } else { Duration::from_millis(500) });
 
@@ -7660,11 +8016,11 @@ mod tests {
             Key::Num4,
         ] {
             assert!(XgViewApp::wall_key(key), "{key:?} acts on the wall");
-            assert!(!XgViewApp::wall_event(bars(), true, &press(key)), "{key:?} acts on the wall");
+            assert!(!XgViewApp::wall_event(bars(), true, true, &press(key)), "{key:?} acts on the wall");
         }
         // A press on the picture, magnifying or not, is a press on the picture.
         assert!(!XgViewApp::in_a_bar_band(bars(), Pos2::new(640.0, 360.0)));
-        assert!(!XgViewApp::wall_event(bars(), true, &egui::Event::PointerButton {
+        assert!(!XgViewApp::wall_event(bars(), true, true, &egui::Event::PointerButton {
             pos: Pos2::new(640.0, 360.0),
             button: egui::PointerButton::Primary,
             pressed: true,
@@ -7676,7 +8032,7 @@ mod tests {
         // wall.
         for pos in [Pos2::new(640.0, 360.0), Pos2::new(640.0, 12.0)] {
             assert!(
-                !XgViewApp::wall_event(bars(), true, &egui::Event::PointerButton {
+                !XgViewApp::wall_event(bars(), true, true, &egui::Event::PointerButton {
                     pos,
                     button: egui::PointerButton::Primary,
                     pressed: false,
@@ -7694,6 +8050,37 @@ mod tests {
         // Before the bars have been drawn once there is no band to press, and a
         // press anywhere is a press on the wall.
         assert!(!XgViewApp::in_a_bar_band(None, Pos2::new(640.0, 12.0)));
+    }
+
+    /// Magnified with the bars away, the band along the top and bottom of the
+    /// picture is that viewport's own bar being asked for, and not the menus:
+    /// the two bands are the same part of the screen there, and one press cannot
+    /// be both. On the grid, and magnified with the bars on screen, the band is
+    /// the bars' as it always was.
+    #[test]
+    fn the_magnified_band_asks_for_the_viewport_bar_and_not_the_menus() {
+        let band = egui::Event::PointerButton {
+            pos: Pos2::new(640.0, 12.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        };
+        // `band_is_a_door` is false in the one state where the bands coincide.
+        assert!(XgViewApp::wall_event(bars(), true, true, &band), "the band is the bars'");
+        assert!(
+            !XgViewApp::wall_event(bars(), true, false, &band),
+            "magnified with the bars away, the band belongs to the viewport's bar"
+        );
+
+        // A press on the picture is the picture in either state.
+        let picture = egui::Event::PointerButton {
+            pos: Pos2::new(640.0, 360.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        };
+        assert!(!XgViewApp::wall_event(bars(), true, true, &picture));
+        assert!(!XgViewApp::wall_event(bars(), true, false, &picture));
     }
 
     /// The ring is a cursor for a wall that is being operated. It is off until
@@ -7930,7 +8317,7 @@ mod tests {
     /// the bars back - which is what the digits are not supposed to do.
     #[test]
     fn the_text_half_of_a_printable_key_does_not_ask_for_the_bars() {
-        assert!(!XgViewApp::wall_event(bars(), true, &egui::Event::Text("3".to_owned())));
+        assert!(!XgViewApp::wall_event(bars(), true, true, &egui::Event::Text("3".to_owned())));
     }
 
     /// A tap on a touch screen reaches egui as a `Start` and an `End` at the
@@ -7947,8 +8334,8 @@ mod tests {
                 pos: Pos2::new(640.0, y),
                 force: None,
             };
-            assert!(!XgViewApp::wall_event(bars(), true, &at(360.0)), "{phase:?} on the wall");
-            assert!(XgViewApp::wall_event(bars(), true, &at(12.0)), "{phase:?} in the toolbar band");
+            assert!(!XgViewApp::wall_event(bars(), true, true, &at(360.0)), "{phase:?} on the wall");
+            assert!(XgViewApp::wall_event(bars(), true, true, &at(12.0)), "{phase:?} in the toolbar band");
         }
     }
 
@@ -8098,9 +8485,9 @@ mod tests {
             delta: vec2(0.0, 1.0),
             modifiers,
         };
-        assert!(!XgViewApp::wall_event(bars(), true, &wheel(Modifiers::NONE)), "the plain wheel");
-        assert!(!XgViewApp::wall_event(bars(), true, &wheel(Modifiers::COMMAND)), "the zooming one");
-        assert!(!XgViewApp::wall_event(bars(), true, &egui::Event::Zoom(1.2)), "a trackpad's pinch");
+        assert!(!XgViewApp::wall_event(bars(), true, true, &wheel(Modifiers::NONE)), "the plain wheel");
+        assert!(!XgViewApp::wall_event(bars(), true, true, &wheel(Modifiers::COMMAND)), "the zooming one");
+        assert!(!XgViewApp::wall_event(bars(), true, true, &egui::Event::Zoom(1.2)), "a trackpad's pinch");
     }
 
     /// Moving the magnified picture is the pointer's own movement, and only from
@@ -8173,7 +8560,7 @@ mod tests {
     fn menu_keys_still_ask_for_the_bars() {
         for key in [Key::F1, Key::F2, Key::F11] {
             assert!(!XgViewApp::wall_key(key), "{key:?} opens the menus");
-            assert!(XgViewApp::wall_event(bars(), true, &press(key)), "{key:?} opens the menus");
+            assert!(XgViewApp::wall_event(bars(), true, true, &press(key)), "{key:?} opens the menus");
         }
     }
 
@@ -8185,11 +8572,11 @@ mod tests {
     fn back_asks_for_the_bars_only_when_there_is_nothing_to_unwind() {
         for key in [Key::Escape, Key::BrowserBack] {
             assert!(
-                XgViewApp::wall_event(bars(), true, &press(key)),
+                XgViewApp::wall_event(bars(), true, true, &press(key)),
                 "{key:?} with nothing to unwind is the door to the menus"
             );
             assert!(
-                !XgViewApp::wall_event(bars(), false, &press(key)),
+                !XgViewApp::wall_event(bars(), false, true, &press(key)),
                 "{key:?} with something to unwind is the wall's, and leaves the bars alone"
             );
         }
@@ -8199,7 +8586,7 @@ mod tests {
     /// a press in the band a bar occupies.
     #[test]
     fn moving_the_mouse_does_not_ask_for_the_bars() {
-        assert!(!XgViewApp::wall_event(bars(), true, &egui::Event::MouseMoved(egui::vec2(4.0, 0.0))));
+        assert!(!XgViewApp::wall_event(bars(), true, true, &egui::Event::MouseMoved(egui::vec2(4.0, 0.0))));
     }
 
     #[test]

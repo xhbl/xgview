@@ -10,6 +10,7 @@
 //! * [`keyboard`] – the soft keyboard on Android (Android only).
 //! * [`nav`]     – explicit directional navigation for a remote control.
 //! * [`theme`]   – colour palette and typography.
+//! * [`tilebar`] – the floating bar of the magnified viewport.
 //! * [`video`]   – uploads the decoded planes and turns them into pictures.
 //! * [`window`]  – the window's place among the others.
 //!
@@ -37,6 +38,7 @@ pub mod android;
 pub mod keyboard;
 pub mod nav;
 pub mod theme;
+pub mod tilebar;
 pub mod video;
 pub mod window;
 
