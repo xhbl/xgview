@@ -647,16 +647,20 @@ program return 0.
 
 ## 9. Day-to-day operations and short commands
 
-### 9.1 Common commands (as root)
+### 9.1 Common commands
 
 ```bash
-systemctl start monitor      # start
-systemctl stop monitor       # stop, back to the tty login
-systemctl restart monitor    # restart the program
-systemctl status monitor     # status and exit code
-journalctl -u monitor -n 50 --no-pager   # recent log
-journalctl -u monitor -f                  # live log
+systemctl start monitor      # start (as root)
+systemctl stop monitor       # stop, back to the tty login (as root)
+xgs                          # start; needs sudo
+xgr                          # restart the program; see 9.5 (needs sudo)
+systemctl status monitor     # status and exit code (as root)
+journalctl -u monitor -n 50 --no-pager   # recent log (as root)
+journalctl -u monitor -f                  # live log (as root)
 ```
+
+A plain `systemctl restart monitor` is **not** reliable with this unit; see
+9.5 for why and for `xgr`.
 
 ### 9.2 Running it again after an exit
 
@@ -696,11 +700,13 @@ EOF
 Then, on tty1 as `admin`, `xg` runs it by hand with the log in the terminal. For
 debugging: `RUST_LOG=debug xg`.
 
-### 9.4 Optional: the short command `xgs` to start the service (needs sudo)
+### 9.4 The short command `xgs` to start the service (needs sudo)
+
+The installer writes `/usr/local/bin/xgs`; a hand-installed kiosk can add it
+with the block below. It needs sudo membership (`apt install sudo`;
+`usermod -aG sudo admin`, then log in again):
 
 ```bash
-# apt install sudo
-# usermod -aG sudo admin
 # cat > /usr/local/bin/xgs <<'EOF'
 #!/bin/sh
 exec sudo systemctl start monitor
@@ -708,7 +714,29 @@ EOF
 # chmod +x /usr/local/bin/xgs
 ```
 
-It works after `admin` logs in again; then `xgs` starts the service.
+Then `xgs` starts the service.
+
+### 9.5 The short command `xgr` to restart the kiosk (needs sudo)
+
+`systemctl restart monitor` is not reliable with this unit. The stop half runs
+the unit's `ExecStopPost`, which starts `getty@tty1`; the start half is then
+queued against a tty1 that the getty already owns, and the `Conflicts`/`After`
+relationship cancels it - systemd reports **"Job for monitor.service canceled"**
+and the service is left failed, with tty1 at the login prompt.
+
+`xgr` does the stop and start in the order that works:
+
+```bash
+# cat > /usr/local/bin/xgr <<'EOF'
+#!/bin/sh
+exec sudo sh -c 'systemctl stop monitor; systemctl stop getty@tty1; systemctl reset-failed monitor; systemctl start monitor'
+EOF
+# chmod +x /usr/local/bin/xgr
+```
+
+Then `xgr` restarts the wall. It needs the same sudo membership as `xgs`
+(9.4). The `debian-kiosk.sh` installer writes it; a hand-installed kiosk can
+add it with the block above.
 
 ---
 
@@ -771,6 +799,8 @@ Copy these to the N100:
 - `/usr/local/bin/xgview-session.sh`
 - `/etc/systemd/system/monitor.service`
 - `/usr/local/bin/xg` (optional)
+- `/usr/local/bin/xgs` (optional; the start helper, see 9.4)
+- `/usr/local/bin/xgr` (optional; the restart helper, see 9.5)
 - The configuration `~/.config/xgview/xgvconfig.json` (so the cameras need no
   setting up again)
 
@@ -909,8 +939,8 @@ x11vnc -display "$DISPLAY" -rfbauth /home/admin/.vnc/passwd -rfbport 5900 \
 - `-bg`: runs in the background, so `exec xgview` still happens.
 - `-forever -shared`: allows reconnections and several viewers at once.
 
-Apply it with `systemctl restart monitor` as root (the graphical session
-restarts).
+Apply it with `xgr` (or the stop/start sequence in 9.5; a plain `systemctl
+restart monitor` can be canceled by the tty1 getty).
 
 ### 13.3 Connecting
 
@@ -967,7 +997,8 @@ Use any VNC client (RealVNC Viewer, TightVNC, Remmina and so on) against
 | `/usr/local/bin/xgview-session.sh` | Session script: disable blanking + openbox + xgview --supervise |
 | `/etc/systemd/system/monitor.service` | The systemd unit |
 | `/usr/local/bin/xg` | Short command to run it by hand (optional) |
-| `/usr/local/bin/xgs` | Short command to start the service (optional, needs sudo) |
+| `/usr/local/bin/xgs` | Short command to start the service (needs sudo; written by the installer) |
+| `/usr/local/bin/xgr` | Short command to restart the kiosk (needs sudo; see 9.5) |
 | `/home/admin/.vnc/passwd` | VNC password file (written by the script, mode 600; default `vnc`, `--vnc` overrides) |
 | `/tmp/x11vnc.log` | x11vnc's log |
 

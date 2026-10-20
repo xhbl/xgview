@@ -286,6 +286,24 @@ exec xinit /usr/local/bin/xgview-session.sh -- :0 vt1
 EOF
 chmod +x /usr/local/bin/xg
 
+# The short command that restarts the kiosk. A plain `systemctl restart
+# monitor` cancels itself: the stop's `ExecStopPost` starts `getty@tty1`, and
+# the restart's start job then conflicts with it. This does the stop and start
+# in the order that works.
+cat > /usr/local/bin/xgr <<'EOF'
+#!/bin/sh
+exec sudo sh -c 'systemctl stop monitor; systemctl stop getty@tty1; systemctl reset-failed monitor; systemctl start monitor'
+EOF
+chmod +x /usr/local/bin/xgr
+
+# The short command for starting the service (needs sudo membership on the
+# ordinary user; the installer writes it alongside xg and xgr).
+cat > /usr/local/bin/xgs <<'EOF'
+#!/bin/sh
+exec sudo systemctl start monitor
+EOF
+chmod +x /usr/local/bin/xgs
+
 # ---------- 5. systemd unit ----------
 say "Writing the systemd unit monitor.service"
 cat > /etc/systemd/system/monitor.service <<EOF
@@ -379,8 +397,10 @@ Next:
   1. Install the program to: $PROG (run the package's install.sh as the ordinary
      user if it is not installed yet; --xg does this automatically)
   2. Reboot to check start-up: reboot
-  3. Common commands (root):
-       systemctl start|stop|restart|status monitor
+  3. Common commands:
+       systemctl start|stop|status monitor
+       xgs                          # start; needs sudo
+       xgr                          # restart; handles the tty1 getty
        journalctl -u monitor -f
      On tty1, logged in as $USER_NAME, run it by hand: xg
 EOF
