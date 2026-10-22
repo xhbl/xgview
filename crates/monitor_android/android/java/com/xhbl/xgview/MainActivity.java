@@ -715,6 +715,18 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
+     * The activity the native side talks back to: whichever one is resumed.
+     *
+     * <p>Not merely the one created last. Returning from the background can
+     * bring an older activity back to the front after a launcher-started
+     * sibling has come and gone, and that older activity is the one on screen;
+     * {@link #onResume} is what keeps this pointing at it.
+     */
+    public static MainActivity current() {
+        return instance;
+    }
+
+    /**
      * Called from the native side when the viewer switches the way the wall
      * stands: {@code true} for portrait, {@code false} for landscape.
      *
@@ -723,15 +735,36 @@ public class MainActivity extends NativeActivity {
      * turned over. The activity is not recreated - the manifest lists
      * {@code orientation} among its config changes - so the wall simply
      * re-lays-out on the resize.
+     *
+     * <p>Returns whether there was an activity to ask. The caller uses the
+     * answer to decide whether the request has been handed over: a call that
+     * found no activity is one to try again, not one to remember as sent.
      */
-    public static void setOrientation(final boolean portrait) {
+    public static boolean setOrientation(final boolean portrait) {
         final MainActivity self = instance;
         if (self == null) {
-            return;
+            return false;
         }
         self.runOnUiThread(() -> self.setRequestedOrientation(portrait
                 ? ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
                 : ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE));
+        return true;
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // The activity on screen is the one native calls must reach, even when
+        // it was not the last one created. This is also where a sibling that
+        // the launcher started and then destroyed can leave the static behind.
+        instance = this;
+        // A request made while nothing was resumed, or the orientation settled
+        // while the viewer was elsewhere, has to be repeated now. Rather than
+        // replaying a remembered boolean - which can itself be stale - the
+        // native side is asked to send the orientation it is laying out for.
+        if (nativeLoaded) {
+            nativeResumed();
+        }
     }
 
     /**
@@ -1576,4 +1609,11 @@ public class MainActivity extends NativeActivity {
      * {@link #onConfigurationChanged}.
      */
     private static native void nativeWindowGeometry(int width, int height);
+
+    /**
+     * The activity resumed: ask the native side to send the orientation it is
+     * laying out for again, so a request made while nothing was resumed is not
+     * lost. See {@link #onResume}.
+     */
+    private static native void nativeResumed();
 }

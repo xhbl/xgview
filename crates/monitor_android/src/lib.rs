@@ -128,3 +128,14 @@ pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeWindowGeometry(
 ) {
     monitor_gui::android::set_window_geometry(width, height);
 }
+
+/// The activity resumed: send the orientation the wall is laid out for again.
+/// See `monitor_gui::android::reset_orientation`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeResumed(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    monitor_gui::android::reset_orientation();
+}

@@ -127,12 +127,25 @@ static ORIENTATION_SENT: AtomicI8 = AtomicI8::new(-1);
 /// rotation lock; see `MainActivity.setOrientation`.
 pub fn set_orientation(portrait: bool) {
     let wanted = portrait as i8;
-    if ORIENTATION_SENT.load(Ordering::Relaxed) == wanted {
+    let sent = ORIENTATION_SENT.load(Ordering::Relaxed);
+    if sent == wanted {
         return;
     }
-    if call_void_bool("setOrientation", portrait) {
+    let called = call_bool_bool("setOrientation", portrait);
+    if called {
         ORIENTATION_SENT.store(wanted, Ordering::Relaxed);
     }
+}
+
+/// Forgets the last orientation sent, so the next frame sends it again.
+///
+/// Called when the activity resumes: a request made while nothing was resumed
+/// found no activity and was not remembered as sent, and a platform may also
+/// have dropped a request made from the background. Re-sending the orientation
+/// the native side is actually laying out for is what puts the window back in
+/// step, without keeping a second copy of that answer in Java.
+pub fn reset_orientation() {
+    ORIENTATION_SENT.store(-1, Ordering::Relaxed);
 }
 
 /// Whether the device can stand upright - it has a touch screen and is not a
@@ -314,6 +327,19 @@ fn call_void_bool(method: &str, value: bool) -> bool {
     // process on the next JNI call.
     clear_exception(&mut env);
     called
+}
+
+/// Calls a Java static method taking and returning a `boolean`.
+fn call_bool_bool(method: &str, value: bool) -> bool {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return false;
+    };
+    let answer = env
+        .call_static_method(class, method, "(Z)Z", &[JValue::Bool(u8::from(value))])
+        .and_then(|value| value.z())
+        .unwrap_or(false);
+    clear_exception(&mut env);
+    answer
 }
 
 fn class() -> Option<&'static GlobalRef> {

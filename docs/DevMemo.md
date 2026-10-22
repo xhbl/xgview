@@ -2137,3 +2137,81 @@ switch only, the streams are taken for their picture, and the icon is where the
 audio is wired in when there is some. The 56..96 bounds are a judgement, not a
 measurement of every language; the word's control is bounded rather than allowed
 to grow without limit.
+
+## 33. One damaged length, every picture after it: why a camera can be pulled over UDP
+
+*Landed 2026-10-01, in the 1.2.x line.*
+
+**The default, and what it buys.** RTSP is pulled over TCP with interleaved
+framing unless that camera says otherwise. One connection then carries the
+control exchange, the RTP and the RTCP: it crosses a firewall that would have to
+be opened twice for UDP, and it loses nothing - TCP retransmits whatever the wire
+drops and hands the bytes over in order. A gap in the RTP sequence numbers over
+TCP therefore says the *sender* skipped those packets; it is never the network.
+Our gap counter is computed on the UDP path alone, where reordering and
+duplication have to be written off (§16). `SETUP` asks for `interleaved=0-1` and
+takes whatever pair the answer names, because a server is allowed to frame the
+video on channels of its own choosing (§20).
+
+**What went wrong, and whose end it was.** A Synology Surveillance Station's
+high-resolution restream, pulled over the interleaved transport, came up and
+stayed up - the session was healthy and packets kept arriving - while the
+pictures were wrong. The shape of that matters: **nothing was lost in transit.**
+TCP retransmits and delivers in order, so whatever the wall did not get to draw
+was either never written by the relay or written in a shape the client could not
+use - a packet the relay's own queue let go, or an interleaved length that did
+not match the payload behind it. Both ends are the source's, and from the wall
+they look alike: pictures missing, while every counter that measures the
+connection stays healthy. The recorded note in `RtspTransport` names the second;
+either way, the differential is what places the fault - the same stream over UDP
+was intact, and switching that one camera's transport, with nothing else
+changed, cleared it, while the depacketizer, the session deadline and the retry
+schedule are shared by both paths. So the only variable left is the source's own
+framing and send queue - not our client, and not the LAN between them. The box
+here is a **relay in front of the cameras rather than a camera**, which is where
+the search has to go when it comes back: a Surveillance Station restream is
+software re-serving streams it did not encode.
+
+**Why a mangled interleaved packet is not one lost packet.** Interleaved framing
+is four bytes of header - `$`, a channel, and a two-byte big-endian length -
+followed by exactly that many bytes, and there is no resynchronisation inside
+the stream. A length that is wrong by even one byte moves the start of the frame
+after it, and from there every frame is read from the wrong offset:
+`read_packet` either refuses a length past `MAX_INTERLEAVED_PAYLOAD` or takes
+payload for header until the next `$` happens to line up. So one damaged byte
+costs every picture after it, not one. A datagram is different: it arrives whole
+or not at all, so a packet the network loses costs that packet alone, its
+sequence number announces the gap, and the next datagram is still read from
+where it begins. That is the whole trade - order and a firewall-proof path,
+against a framing that a middlebox can shift under every picture that follows.
+
+**A sequence gap would be a different source-side fault.** If the RTP numbers
+themselves skip, TCP delivers that gap faithfully - the sender dropped those
+packets, its send queue having overflowed or its real-time policy choosing a
+skipped frame over a late one - and that is still not transport loss. The fix is
+not the same either: UDP removes the relay's framing work, not its dropping
+policy, so a stream that gaps for this reason may gap either way. The two are
+worth telling apart before reaching for the switch - a gap in the sequence
+numbers belongs to the sender, a picture the client cannot parse belongs to the
+framing - and the recorded case here is the second.
+
+**Why this is a setting and not a fallback.** The fallback of §16 runs one way,
+UDP to TCP, and only for a handshake that is refused or goes silent: there the
+session never came up, which is something the client can see. Here it comes up
+and runs, and the damage exists only in the picture - no counter we keep can
+tell "the source shifts the framing" from "this camera produces torn pictures"
+without somebody watching. So the transport is chosen per camera and stored in
+the configuration beside its address (`RtspTransport`, `toggled()` from the row's
+`TCP` / `UDP` button), and it is offered only where there is an RTSP address to
+pull; an MSE camera has one transport and nothing to switch.
+
+**What UDP costs, and where it lives.** `setup_udp` binds a consecutive pair of
+local ports and names them in `client_port`, then sends to the `server_port` the
+answer returns; the RTP socket asks for a 4 MB receive buffer, because a
+sixteen-channel wall arrives in bursts, and the RTCP socket is drained so its
+reports do not pile up in the kernel. Only RTP reaches the caller. A reordered
+datagram is written off as lost rather than held for its neighbours (§16), and
+RTCP's lost and jitter fields start carrying the real numbers, which is what a
+camera that adapts to receiver reports needs to hear. The two paths share
+everything else, so a camera that runs better one way can be moved without
+anything else about it changing.

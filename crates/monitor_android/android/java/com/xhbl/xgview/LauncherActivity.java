@@ -31,9 +31,17 @@ public class LauncherActivity extends Activity {
         super.onCreate(savedInstanceState);
 
         final boolean portrait = shouldStartPortrait();
-        final String target = portrait
-                ? "com.xhbl.xgview.MainActivityPortrait"
-                : "com.xhbl.xgview.MainActivity";
+        // A wall already alive is brought back rather than a second activity of
+        // the other orientation started beside it: the two would race for the
+        // foreground, and the one that lost would clear the static the native
+        // side talks to. Its class, not the remembered preference, is what the
+        // running wall actually is.
+        final MainActivity running = MainActivity.current();
+        final String target = running != null
+                ? running.getClass().getName()
+                : (portrait
+                        ? "com.xhbl.xgview.MainActivityPortrait"
+                        : "com.xhbl.xgview.MainActivity");
         final Intent intent = new Intent();
         intent.setComponent(new ComponentName(getPackageName(), target));
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
