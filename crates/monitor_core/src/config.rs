@@ -843,6 +843,13 @@ impl AppConfig {
         self.cameras.iter().filter(|camera| usize::from(camera.group) == group).count()
     }
 
+    /// Finds the first entry with this identifier, in file order.
+    ///
+    /// Test-only: an identifier is not unique across the groups, so this answers
+    /// with whichever group comes first in the file. Everything that edits,
+    /// removes or labels a camera in production works from the entry's slot, or
+    /// through [`Self::find_camera_in_group`].
+    #[cfg(test)]
     pub fn find_camera(&self, id: &str) -> Option<&CameraSource> {
         self.cameras.iter().find(|camera| camera.id == id)
     }
@@ -852,15 +859,21 @@ impl AppConfig {
     /// The entry-level identifier is not unique across the groups: a camera may
     /// sit in more than one as an entry of its own, and configurations written
     /// before entries got identifiers of their own can hold two entries sharing
-    /// one. [`Self::find_camera`] returns the first in file order, which is why
-    /// anything that edits, removes or labels a camera through the settings page
-    /// narrows the lookup to the group the list is showing.
+    /// one. An identifier-only lookup returns the first in file order, which is
+    /// why anything that edits, removes or labels a camera through the settings
+    /// page works from the entry's slot, or narrows the lookup to the group the
+    /// list is showing.
     pub fn find_camera_in_group(&self, id: &str, group: usize) -> Option<&CameraSource> {
         self.cameras
             .iter()
             .find(|camera| camera.id == id && usize::from(camera.group) == group)
     }
 
+    /// Finds the first entry with this identifier, in file order, to change.
+    ///
+    /// Test-only, for the reason [`Self::find_camera`] gives: the group an entry
+    /// belongs to is part of what names it.
+    #[cfg(test)]
     pub fn find_camera_mut(&mut self, id: &str) -> Option<&mut CameraSource> {
         self.cameras.iter_mut().find(|camera| camera.id == id)
     }
@@ -911,13 +924,6 @@ impl AppConfig {
         let id = camera.id.clone();
         self.cameras.push(camera);
         id
-    }
-
-    /// Removes a camera by id.
-    pub fn remove_camera(&mut self, id: &str) -> bool {
-        let before = self.cameras.len();
-        self.cameras.retain(|camera| camera.id != id);
-        self.cameras.len() != before
     }
 
     /// Adds a group at the end, and returns the index it landed on.
@@ -1585,6 +1591,50 @@ mod tests {
             group
         );
         assert!(config.find_camera_in_group("shared", group + 1).is_none());
+    }
+
+    /// The same camera imported into a second group is a new entry there, and
+    /// the one the first group holds keeps its own name, address and settings:
+    /// the refresh `upsert_camera` offers is scoped to the group the wall is on.
+    #[test]
+    fn importing_into_a_second_group_leaves_the_first_groups_entry_alone() {
+        let mut config = AppConfig::default();
+        let first_id = config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
+
+        let group = config.add_group(String::new());
+        config.active_group = group;
+        // An import carries the identifier and the stream name it read from the
+        // first group; both are already taken there.
+        let mut again = CameraSource::new("door renamed", "rtsp://10.0.0.1/live");
+        again.id = first_id.clone();
+        let second_id = config.upsert_camera(again);
+
+        assert_ne!(second_id, first_id, "the second group's entry is its own");
+        let first = config.find_camera(&first_id).unwrap();
+        assert_eq!(first.name, "door", "the first group's entry keeps its name");
+        assert_eq!(usize::from(first.group), 0);
+        let second = config.find_camera(&second_id).unwrap();
+        assert_eq!(second.name, "door renamed");
+        assert_eq!(usize::from(second.group), group);
+    }
+
+    /// Two groups holding the same camera are two entries; removing one group
+    /// takes only the entry that belongs to it.
+    #[test]
+    fn removing_a_group_keeps_the_same_camera_in_another_one() {
+        let mut config = AppConfig::default();
+        let first_id = config.upsert_camera(CameraSource::new("door", "rtsp://10.0.0.1/live"));
+        let group = config.add_group(String::new());
+        config.active_group = group;
+        let mut again = CameraSource::new("door", "rtsp://10.0.0.1/live");
+        again.id = first_id.clone();
+        let second_id = config.upsert_camera(again);
+        assert_ne!(second_id, first_id);
+
+        assert!(config.remove_group(group));
+        assert!(config.find_camera(&first_id).is_some(), "the built-in group keeps its entry");
+        assert!(config.find_camera(&second_id).is_none());
+        assert_eq!(config.cameras.len(), 1);
     }
 
     /// The order a rearranged list is written back as. An identifier that names

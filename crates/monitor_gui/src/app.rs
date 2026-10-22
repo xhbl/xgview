@@ -4895,7 +4895,14 @@ impl XgViewApp {
 
     /// Loads the active group's view into the scheduler. The cameras follow on
     /// the next [`Self::sync`].
+    ///
+    /// The magnified viewport goes with the wall it was opened on: a channel
+    /// index is a place in a group's camera list, so keeping it would open the
+    /// new group magnified on whatever sits at that index there. A group
+    /// arriving on the wall arrives whole, on the page and focus it was left at.
     fn load_group_view(&mut self) {
+        self.tile_bar.hide();
+        self.scheduler.zoom_out();
         let group = self.config.group().clone();
         let layout =
             if self.orientation.is_portrait() { group.portrait_layout } else { group.layout };
