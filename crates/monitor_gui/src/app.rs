@@ -364,9 +364,14 @@ impl Handoff {
 /// A camera the settings panel is editing, and the form bound to it.
 #[derive(Debug)]
 struct CameraEdit {
-    /// Identifier of the entry being edited. The update keeps it, so that a
-    /// changed url repoints the camera instead of adding a second one.
-    id: String,
+    /// Position of the entry in `AppConfig::cameras`.
+    ///
+    /// The slot, rather than the identifier: a camera may sit in more than one
+    /// group, as an entry of its own, and entries created by an import can share
+    /// an identifier. An identifier-only lookup would then find the entry in
+    /// whichever group comes first in the file rather than the one the list the
+    /// edit came from shows.
+    slot: usize,
     draft: CameraDraft,
     /// The edit button that opened the window, to give it back its focus.
     ///
@@ -379,7 +384,7 @@ struct CameraEdit {
 /// A camera the settings panel is asking about removing.
 #[derive(Debug)]
 struct RemoveConfirm {
-    id: String,
+    slot: usize,
     name: String,
     /// The remove button that opened the window, to give it back its focus.
     ///
@@ -4987,8 +4992,8 @@ impl XgViewApp {
         ui.add_space(theme::space::S);
 
         let mut toggle: Option<(usize, bool)> = None;
-        let mut ask_remove: Option<(String, String, Option<Id>)> = None;
-        let mut edit: Option<(String, Option<Id>)> = None;
+        let mut ask_remove: Option<(usize, String, Option<Id>)> = None;
+        let mut edit: Option<(usize, Option<Id>)> = None;
         let mut aspect_change: Option<(usize, TileAspect)> = None;
         let mut infer: Option<usize> = None;
         let mut connect_change: Option<usize> = None;
@@ -5085,12 +5090,12 @@ impl XgViewApp {
                         // either.
                         let from = (!remove_button.clicked_by(egui::PointerButton::Primary))
                             .then_some(remove_button.id);
-                        ask_remove = Some((camera.id.clone(), camera.name.clone(), from));
+                        ask_remove = Some((slot, camera.name.clone(), from));
                     }
                     if edit_button.clicked() {
                         let from = (!edit_button.clicked_by(egui::PointerButton::Primary))
                             .then_some(edit_button.id);
-                        edit = Some((camera.id.clone(), from));
+                        edit = Some((slot, from));
                     }
                 });
             });
@@ -5133,8 +5138,8 @@ impl XgViewApp {
             // differently from this frame on.
             dirty = true;
         }
-        if let Some((id, name, from)) = ask_remove {
-            self.remove_confirm = Some(RemoveConfirm { id, name, from });
+        if let Some((slot, name, from)) = ask_remove {
+            self.remove_confirm = Some(RemoveConfirm { slot, name, from });
         }
         if let Some((slot, enabled)) = toggle {
             if let Some(camera) = self.config.cameras.get_mut(slot) {
@@ -5153,15 +5158,10 @@ impl XgViewApp {
                 }
             }
         }
-        if let Some((id, from)) = edit {
-            let draft = self
-                .config
-                .cameras
-                .iter()
-                .find(|camera| camera.id == id)
-                .map(CameraDraft::from_source);
+        if let Some((slot, from)) = edit {
+            let draft = self.config.cameras.get(slot).map(CameraDraft::from_source);
             if let Some(draft) = draft {
-                self.camera_edit = Some(CameraEdit { id, draft, from });
+                self.camera_edit = Some(CameraEdit { slot, draft, from });
             }
         }
         if let Some(slot) = connect_change {
@@ -5324,10 +5324,14 @@ impl XgViewApp {
         let last = order.len().saturating_sub(1);
         let mut moved: Option<(usize, i32, Id)> = None;
         let mut anchor = None;
+        // The list is the active group's, so its labels come from that group:
+        // the identifier alone would find the entry in whichever group comes
+        // first in the file.
+        let active = self.config.active_group;
         for (slot, id) in order.iter().enumerate() {
             let label = self
                 .config
-                .find_camera(id)
+                .find_camera_in_group(id, active)
                 .map(|camera| camera.short_label(24))
                 .unwrap_or_default();
             let first = slot == 0;
@@ -5471,7 +5475,7 @@ impl XgViewApp {
     fn camera_edit_window(&mut self, ctx: &egui::Context) -> bool {
         // Taken for the frame, so the form and the navigation layer can be
         // borrowed apart; put back unless the window was closed or saved.
-        let Some(CameraEdit { id, mut draft, from }) = self.camera_edit.take() else {
+        let Some(CameraEdit { slot, mut draft, from }) = self.camera_edit.take() else {
             return false;
         };
         let mut save = false;
@@ -5481,7 +5485,8 @@ impl XgViewApp {
         // group it is in - when there is more than one to tell apart.
         let group = self
             .config
-            .find_camera(&id)
+            .cameras
+            .get(slot)
             .map(|camera| usize::from(camera.group))
             .unwrap_or(0);
         let title = dialogs::group_heading(
@@ -5493,7 +5498,7 @@ impl XgViewApp {
         // The form reads the entry to decide what it draws - greyed addresses
         // for an imported camera, and no "infer sub" offer on a restream. It is
         // read afresh each frame, so pressing Detach unlocks it on the spot.
-        let camera = self.config.find_camera(&id);
+        let camera = self.config.cameras.get(slot);
 
         // A modal: centred, and its backdrop swallows the presses that would
         // otherwise reach the panel it was opened from. It is left only by its
@@ -5530,11 +5535,11 @@ impl XgViewApp {
             // The camera leaves the import's hands: its MSE address and login go
             // with the mark, so its addresses can be edited by hand without one
             // falling out of step. The window stays open, now unlocked.
-            if let Some(camera) = self.config.cameras.iter_mut().find(|camera| camera.id == id) {
+            if let Some(camera) = self.config.cameras.get_mut(slot) {
                 camera.detach();
             }
             self.needs_sync = true;
-            self.camera_edit = Some(CameraEdit { id, draft, from });
+            self.camera_edit = Some(CameraEdit { slot, draft, from });
             return true;
         }
 
@@ -5545,11 +5550,9 @@ impl XgViewApp {
                     // its identifier, its origin, its transport and everything
                     // else the form has no field for - the display aspect among
                     // them - so an edit to a name or a url cannot reset them.
-                    match self.config.cameras.iter_mut().find(|camera| camera.id == id) {
+                    match self.config.cameras.get_mut(slot) {
                         Some(camera) => camera.apply_edit(&source),
                         None => {
-                            let mut source = source;
-                            source.id = id;
                             self.config.upsert_camera(source);
                         }
                     }
@@ -5566,7 +5569,7 @@ impl XgViewApp {
             }
         }
         if !cancel {
-            self.camera_edit = Some(CameraEdit { id, draft, from });
+            self.camera_edit = Some(CameraEdit { slot, draft, from });
         } else {
             self.camera_edit_anchor = None;
             self.restore_focus = from;
@@ -5582,7 +5585,7 @@ impl XgViewApp {
     fn remove_confirm_window(&mut self, ctx: &egui::Context) -> bool {
         // Taken for the frame, like the edit window, so the layer and the
         // question can be borrowed apart.
-        let Some(RemoveConfirm { id, name, from }) = self.remove_confirm.take() else {
+        let Some(RemoveConfirm { slot, name, from }) = self.remove_confirm.take() else {
             return false;
         };
         let mut remove = false;
@@ -5627,7 +5630,8 @@ impl XgViewApp {
         });
 
         if remove {
-            if self.config.remove_camera(&id) {
+            if slot < self.config.cameras.len() {
+                self.config.cameras.remove(slot);
                 // The row is gone, so there is no button to hand the focus
                 // back to; the panel anchor picks it up.
                 self.needs_sync = true;
@@ -5636,7 +5640,7 @@ impl XgViewApp {
             }
         }
         if !cancel {
-            self.remove_confirm = Some(RemoveConfirm { id, name, from });
+            self.remove_confirm = Some(RemoveConfirm { slot, name, from });
         } else {
             self.remove_confirm_anchor = None;
             self.restore_focus = from;

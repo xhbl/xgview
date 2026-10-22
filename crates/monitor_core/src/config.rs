@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 use crate::layout::GridLayout;
-use crate::model::{CameraSource, ConnectionMode, CombinedInfo, Osd, OsdItem};
+use crate::model::{new_id, CameraSource, ConnectionMode, CombinedInfo, Osd, OsdItem};
 use crate::{APP_NAME, CONFIG_FILE_NAME};
 
 /// Version of the configuration schema written to disk.
@@ -847,6 +847,20 @@ impl AppConfig {
         self.cameras.iter().find(|camera| camera.id == id)
     }
 
+    /// Finds the entry with this identifier in one particular group.
+    ///
+    /// The entry-level identifier is not unique across the groups: a camera may
+    /// sit in more than one as an entry of its own, and configurations written
+    /// before entries got identifiers of their own can hold two entries sharing
+    /// one. [`Self::find_camera`] returns the first in file order, which is why
+    /// anything that edits, removes or labels a camera through the settings page
+    /// narrows the lookup to the group the list is showing.
+    pub fn find_camera_in_group(&self, id: &str, group: usize) -> Option<&CameraSource> {
+        self.cameras
+            .iter()
+            .find(|camera| camera.id == id && usize::from(camera.group) == group)
+    }
+
     pub fn find_camera_mut(&mut self, id: &str) -> Option<&mut CameraSource> {
         self.cameras.iter_mut().find(|camera| camera.id == id)
     }
@@ -885,6 +899,14 @@ impl AppConfig {
             let tags = existing.tags.clone();
             *existing = CameraSource { id: id.clone(), origin, enabled, transport, aspect, tags, ..camera };
             return id;
+        }
+        // A fresh entry needs an identifier of its own. The same camera may
+        // already sit in another group as an entry of its own, and an import
+        // carries the identifier it had there: storing it again would leave two
+        // entries that only the group can tell apart, which the identifier-only
+        // lookups elsewhere cannot.
+        if self.cameras.iter().any(|existing| existing.id == camera.id) {
+            camera.id = new_id();
         }
         let id = camera.id.clone();
         self.cameras.push(camera);
@@ -1517,6 +1539,52 @@ mod tests {
         assert_eq!(camera.transport, RtspTransport::Udp, "the transport survives");
         assert_eq!(camera.tags, vec!["gate".to_string()], "the tags survive");
         assert!(!camera.enabled, "a camera switched off stays off");
+    }
+
+    /// The same camera in a second group is an entry of its own: an import
+    /// carries the identifier the entry in the first group already holds, so the
+    /// new entry is given one of its own. Two entries sharing an id would only
+    /// be distinguishable by their group, which an id-only lookup does not see.
+    #[test]
+    fn a_camera_added_to_a_second_group_gets_its_own_identifier() {
+        let mut config = AppConfig::default();
+        let mut first = CameraSource::new("door", "rtsp://10.0.0.1/live");
+        first.id = "shared".to_string();
+        let first_id = config.upsert_camera(first);
+        assert_eq!(first_id, "shared");
+
+        let group = config.add_group(String::new());
+        config.active_group = group;
+        let mut again = CameraSource::new("door", "rtsp://10.0.0.1/live");
+        again.id = "shared".to_string();
+        let second_id = config.upsert_camera(again);
+
+        assert_ne!(second_id, first_id, "the second entry cannot reuse the first's id");
+        assert_eq!(config.cameras.len(), 2);
+        assert_eq!(usize::from(config.find_camera(&first_id).unwrap().group), 0);
+        assert_eq!(usize::from(config.find_camera(&second_id).unwrap().group), group);
+    }
+
+    /// A configuration written before entries got identifiers of their own can
+    /// hold two entries sharing one, one per group; the group-scoped lookup
+    /// tells them apart, which the identifier-only one cannot.
+    #[test]
+    fn a_group_scoped_lookup_tells_apart_entries_sharing_an_identifier() {
+        let mut config = AppConfig::default();
+        let group = config.add_group(String::new());
+        let mut first = CameraSource::new("door", "rtsp://10.0.0.1/live");
+        first.id = "shared".to_string();
+        let mut second = first.clone();
+        second.group = group as u8;
+        config.cameras.push(first);
+        config.cameras.push(second);
+
+        assert_eq!(usize::from(config.find_camera("shared").unwrap().group), 0);
+        assert_eq!(
+            usize::from(config.find_camera_in_group("shared", group).unwrap().group),
+            group
+        );
+        assert!(config.find_camera_in_group("shared", group + 1).is_none());
     }
 
     /// The order a rearranged list is written back as. An identifier that names
