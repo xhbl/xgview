@@ -160,6 +160,7 @@ camera-edit-detach = Detach from import
 
 ## Remove confirmation
 remove-title = Remove "{ $name }"?
+remove-title-group = Remove "{ $name }" from { $group }?
 remove-hint = It leaves the wall and the configuration; the camera itself is untouched.
 action-keep = Keep
 action-remove = Remove

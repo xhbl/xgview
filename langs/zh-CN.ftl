@@ -154,6 +154,7 @@ camera-edit-detach = 脱离导入
 
 ## 移除确认
 remove-title = 移除“{ $name }”？
+remove-title-group = 从{ $group }移除“{ $name }”？
 remove-hint = 它将离开监控墙和配置；摄像头本身不受影响。
 action-keep = 保留
 action-remove = 移除

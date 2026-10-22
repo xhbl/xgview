@@ -1204,6 +1204,23 @@ pub fn group_heading(config: &AppConfig, index: usize, plain: &str, named: &str)
     }
 }
 
+/// The heading of the remove confirmation.
+///
+/// The camera's name, and the group it is leaving when there is more than one to
+/// tell apart: two groups can hold a camera of the same name, and the question is
+/// about one entry of one of them - the same reason the edit window names the
+/// group it is editing in.
+pub fn remove_title(config: &AppConfig, group: usize, name: &str) -> String {
+    if config.groups.len() > 1 {
+        monitor_i18n::tr_args(
+            "remove-title-group",
+            &[("name", name.into()), ("group", group_name(config, group).into())],
+        )
+    } else {
+        monitor_i18n::tr_args("remove-title", &[("name", name.into())])
+    }
+}
+
 /// Whether a listed camera is already on the wall, and whether importing it
 /// would change anything.
 ///

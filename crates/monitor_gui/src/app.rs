@@ -5598,6 +5598,17 @@ impl XgViewApp {
         let mut remove = false;
         let mut cancel = false;
 
+        // The heading names the group the camera is leaving when there is more
+        // than one to tell apart, as the edit window's names the group it is in:
+        // two groups can hold a camera of the same name.
+        let group = self
+            .config
+            .cameras
+            .get(slot)
+            .map(|camera| usize::from(camera.group))
+            .unwrap_or(0);
+        let title = dialogs::remove_title(&self.config, group, &name);
+
         // A modal, like the edit window: centred, and nothing behind it answers.
         // Its own buttons (or Back) are the only way out.
         egui::Modal::new(Id::new("xgview-remove-camera")).show(ctx, |ui| {
@@ -5607,12 +5618,7 @@ impl XgViewApp {
             // panel behind then takes away from them.
             self.nav.open("confirm-body");
             ui.set_width(380.0);
-            dialogs::title_bar(
-                ui,
-                &monitor_i18n::tr_args("remove-title", &[("name", name.clone().into())]),
-                false,
-                "",
-            );
+            dialogs::title_bar(ui, &title, false, "");
             ui.label(
                 RichText::new(monitor_i18n::tr("remove-hint"))
                     .small()
