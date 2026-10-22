@@ -28,6 +28,8 @@
 //!   that say which restarts are worth making.
 //! * [`sealed`]     – the configuration sealed with a passphrase for the trip to
 //!   another machine, against it in clear for the machine that owns it.
+//! * [`vitals`]     – memory, processor load and the operating system, for the
+//!   About page.
 
 pub mod autostart;
 pub mod blackout;
@@ -49,6 +51,7 @@ pub mod rtsp;
 pub mod scheduler;
 pub mod sealed;
 pub mod supervise;
+pub mod vitals;
 
 pub use error::{CoreError, Result};
 pub use h264::{AccessUnit, H264Depacketizer};

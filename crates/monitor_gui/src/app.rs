@@ -679,6 +679,11 @@ pub struct XgViewApp {
     textures: HashMap<usize, ChannelTexture>,
     /// Uploads the decoded planes and turns them into those pictures.
     video: VideoRenderer,
+    /// The machine's memory, processor load and operating system, read while the
+    /// About page is open; see `monitor_core::vitals`.
+    vitals: monitor_core::vitals::Vitals,
+    /// When this viewer started, for the About page's uptime.
+    started: Instant,
     events_tx: Sender<BackgroundEvent>,
     events_rx: Receiver<BackgroundEvent>,
     /// The file dialog the export / import opens, and what it was opened for.
@@ -1119,6 +1124,8 @@ impl XgViewApp {
             channels: HashMap::new(),
             textures: HashMap::new(),
             video,
+            vitals: monitor_core::vitals::Vitals::new(),
+            started: Instant::now(),
             events_tx,
             events_rx,
             #[cfg(not(target_os = "android"))]
@@ -5989,6 +5996,50 @@ impl XgViewApp {
             self.name(&only, "about-only-cameras-name");
         });
         ui.label(RichText::new(self.import_hint()).small().color(theme::TEXT_DIM));
+
+        // The machine itself, under everything else the page says - the one
+        // place a viewer looks to see what this installation is running on. The
+        // numbers are re-read at most once a second and only while the page is
+        // open; the page asks for the repaint that keeps them moving.
+        ui.add_space(theme::space::M);
+        ui.separator();
+        self.vitals.refresh(Duration::from_secs(1));
+        ui.ctx().request_repaint_after(Duration::from_millis(500));
+        match self.vitals.memory_percent() {
+            Some(percent) if self.vitals.total_memory() > 0 => {
+                let megabytes = |bytes: u64| (bytes / (1024 * 1024)) as usize;
+                ui.label(monitor_i18n::tr_args(
+                    "about-memory",
+                    &[
+                        ("used", megabytes(self.vitals.used_memory()).into()),
+                        ("total", megabytes(self.vitals.total_memory()).into()),
+                        ("percent", (percent as usize).into()),
+                    ],
+                ));
+            }
+            _ => {
+                ui.label(monitor_i18n::tr("about-memory-unknown"));
+            }
+        }
+        // Android does not let an application read the processor counters, so
+        // the line is left out there rather than drawn as an unknown.
+        #[cfg(not(target_os = "android"))]
+        match self.vitals.cpu_percent() {
+            Some(percent) => {
+                ui.label(monitor_i18n::tr_args(
+                    "about-cpu",
+                    &[("percent", (percent.round() as usize).into())],
+                ));
+            }
+            None => {
+                ui.label(monitor_i18n::tr("about-cpu-unknown"));
+            }
+        }
+        ui.label(monitor_i18n::tr_args("about-system", &[("os", self.vitals.os().into())]));
+        ui.label(monitor_i18n::tr_args(
+            "about-uptime",
+            &[("duration", uptime_text(self.started.elapsed()).into())],
+        ));
     }
 
     /// What the export / import pair does. The desktop picks files with the
@@ -8004,6 +8055,31 @@ impl eframe::App for XgViewApp {
 fn sub_is_derived(camera: &CameraSource, sub: &str) -> bool {
     camera.sub_profile.is_none()
         && sub == monitor_core::model::infer_sub_stream(&camera.rtsp_main).unwrap_or_default()
+}
+
+/// How long the viewer has been running, in the units its language names.
+///
+/// The seconds are always there, so the line moves while the page is open even
+/// when the viewer has been up for days; every unit above them that has a value
+/// is named too, and one that is left at zero between two that are not is
+/// still named, so the parts always read in order.
+fn uptime_text(elapsed: Duration) -> String {
+    let unit = |value: u64, key: &str| monitor_i18n::tr_args(key, &[("n", (value as usize).into())]);
+    let total = elapsed.as_secs();
+    let (days, hours, minutes, seconds) =
+        (total / 86_400, total % 86_400 / 3_600, total % 3_600 / 60, total % 60);
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(unit(days, "about-duration-days"));
+    }
+    if days > 0 || hours > 0 {
+        parts.push(unit(hours, "about-duration-hours"));
+    }
+    if days > 0 || hours > 0 || minutes > 0 {
+        parts.push(unit(minutes, "about-duration-minutes"));
+    }
+    parts.push(unit(seconds, "about-duration-seconds"));
+    parts.join(" ")
 }
 
 /// This frame's pinch, as the devices reported it: how far the fingers spread

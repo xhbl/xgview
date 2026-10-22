@@ -190,6 +190,16 @@ about-only-cameras = 仅导入摄像头
 about-only-cameras-name = 仅导入摄像头
 about-import-hint = 导入会覆盖当前配置。勾选此框仅导入摄像头及其分组，保留本查看器自身的设置。导出默认用口令加密后写入，取消旁边的勾选则明文导出。
 about-import-hint-android = 导出会保存到 Download/xgview：勾选口令加密时为 xgvconfig.seal，取消勾选则明文导出为 xgvconfig.json。导入会打开系统文件选择器。{ about-import-hint }
+about-memory = 内存使用：{ $used } MB / { $total } MB（{ $percent }%）
+about-memory-unknown = 内存使用：--
+about-cpu = CPU 使用：{ $percent }%
+about-cpu-unknown = CPU 使用：--
+about-system = 操作系统：{ $os }
+about-uptime = 运行时间：{ $duration }
+about-duration-seconds = { $n } 秒
+about-duration-minutes = { $n } 分钟
+about-duration-hours = { $n } 小时
+about-duration-days = { $n } 天
 
 ## 口令
 prompt-seal-title = 加密配置

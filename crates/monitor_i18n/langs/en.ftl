@@ -196,6 +196,16 @@ about-only-cameras = Only import the cameras
 about-only-cameras-name = Only import the cameras
 about-import-hint = Importing overwrites your current configuration. Check the box to import the cameras and their groups only, keeping your viewer settings. The export is sealed with a passphrase unless you untick the box beside it.
 about-import-hint-android = Export saves into Download/xgview: xgvconfig.seal sealed with a passphrase, or xgvconfig.json in clear when you untick the box beside it. Import opens the system file picker. { about-import-hint }
+about-memory = Memory: { $used } MB / { $total } MB ({ $percent }%)
+about-memory-unknown = Memory: --
+about-cpu = CPU: { $percent }%
+about-cpu-unknown = CPU: --
+about-system = System: { $os }
+about-uptime = Uptime: { $duration }
+about-duration-seconds = { $n } s
+about-duration-minutes = { $n } min
+about-duration-hours = { $n } h
+about-duration-days = { $n } d
 
 ## Passphrase prompt
 prompt-seal-title = Seal the configuration

@@ -38,6 +38,9 @@ monitor_codec = { path = "../monitor_codec" }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# Memory and processor load, for the About page; see `vitals`. The same crate
+# version the interface already uses, so nothing new is linked.
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 # `localtime_r` for the blackout schedule's local clock. Already in the tree
 # through the async runtime, so naming it costs nothing new.
