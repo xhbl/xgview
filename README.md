@@ -27,10 +27,10 @@ paging beyond that. No cloud, no account, MIT licensed.
 
 | Platform                           | File                                                                                                                |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Android / Android TV (arm64, 8.1+) | [`xgview-1.4.90-android-arm64-v8a.apk`](../../releases/download/xgview-v1.4.90/xgview-1.4.90-android-arm64-v8a.apk) |
-| Windows x64                        | [`xgview-1.4.90-windows-x86_64.zip`](../../releases/download/xgview-v1.4.90/xgview-1.4.90-windows-x86_64.zip)       |
-| Linux x64                          | [`xgview-1.4.90-linux-x86_64.tar.gz`](../../releases/download/xgview-v1.4.90/xgview-1.4.90-linux-x86_64.tar.gz)     |
-| macOS (universal)                  | [`xgview-1.4.90-macos-universal.zip`](../../releases/download/xgview-v1.4.90/xgview-1.4.90-macos-universal.zip)     |
+| Android / Android TV (arm64, 8.1+) | [`xgview-1.4.98-android-arm64-v8a.apk`](../../releases/download/xgview-v1.4.98/xgview-1.4.98-android-arm64-v8a.apk) |
+| Windows x64                        | [`xgview-1.4.98-windows-x86_64.zip`](../../releases/download/xgview-v1.4.98/xgview-1.4.98-windows-x86_64.zip)       |
+| Linux x64                          | [`xgview-1.4.98-linux-x86_64.tar.gz`](../../releases/download/xgview-v1.4.98/xgview-1.4.98-linux-x86_64.tar.gz)     |
+| macOS (universal)                  | [`xgview-1.4.98-macos-universal.zip`](../../releases/download/xgview-v1.4.98/xgview-1.4.98-macos-universal.zip)     |
 
 **Note: This is a personal project, shared as-is, with no warranty.** It was developed with **AI assistance** under my direction and testing; please review the code before using
 it in sensitive setups.
@@ -507,11 +507,11 @@ as a portable monitoring screen:
 | Tab      | What it holds                                                                                                                                                                                                        |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Display  | Interface **language**, grid, the four OSD corners and the items behind the combined ones, full screen at start-up, how long the bars stay in full screen, staying on top in full screen, the Android navigation bar |
-| Cameras  | The group strip, and the group on the wall: its camera list (add, edit, reorder, remove; a display aspect for each orientation, the stream each tile pulls and the RTSP transport per camera), its name, Set as Default and Remove |
+| Cameras  | The group strip, and the group on the wall: its camera list (add, edit, reorder, remove; a display aspect for each orientation, the stream each tile pulls and the RTSP transport per camera), its name, Set as Default and Remove. An edit or a removal acts on the row the list shows, not on the first entry the identifier finds; with more than one group, the removal's heading names the group the camera is leaving |
 | Streams  | Reconnect timings (first retry, first-frame retry, max delay, handshake timeout, backoff factor / jitter / spread, attempts) and the hardware-decoding preference                                                    |
 | Blackout | The blank schedule: on/off, the periods (weekday, start, end), and how long the wall stays back after input                                                                                                          |
 | System   | Start on boot, one instance per configuration, **keep awake** (prevent sleep / keep the screen on) with the mechanism in use, the key list, and the Android boot helpers                                             |
-| About    | Version, author, decoder in use, config path, export / import                                                                                                                                                        |
+| About    | Version, author, decoder in use, config path, export / import, and the machine at the foot of the page: memory in use, processor load, the operating system and how long the viewer has been running, re-read once a second and only while the page is open. Android reports no load, its applications not being allowed to read the processor counters |
 
 Every change is written to `xgvconfig.json` as you make it, so there is no separate
 "save" step.
@@ -601,7 +601,11 @@ name and the number of cameras it holds.
   one a new installation starts on; the two change places and nothing is lost.
 - **The groups are independent.** The same camera may be an entry in more than
   one, and adding, reordering or removing works only on the group being looked
-  at - an import lands in the group the wall is on.
+  at - an import lands in the group the wall is on, and an edit or a removal
+  changes the row the list shows rather than a namesake in another group.
+- **A group switch leaves the magnification behind.** A magnified viewport
+  belongs to the wall it was opened on, so the group arriving comes up on its own
+  page and focus rather than magnified on whatever sits at that channel index.
 - With a single group - the built-in one - the group is not named on the wall:
   the status bar, the empty wall and the dialogs leave the word out.
 

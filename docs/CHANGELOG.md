@@ -3,6 +3,77 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.4.98
+
+Changes since 1.4.90. **The settings list edits and removes the camera it
+shows**, and Android hands the wall its orientation again whenever it comes
+back to the screen. The About page ends with the machine it runs on - memory,
+processor load, the operating system and the viewer's own uptime. The Debian
+kiosk guide gained `xgr`, a restart the tty1 getty does not cancel.
+
+### Editing the camera the list shows
+
+- **The entry, not the identifier.** The edit window, its save and the remove
+  confirmation resolved the camera by identifier alone, which returns the first
+  entry in file order. A camera that sits in more than one group - or a
+  configuration written before entries got identifiers of their own - was then
+  opened and written in the first group, and removing one removed every entry
+  sharing that identifier. The list now hands the entry's slot over, so the
+  title, the form, the save, detach and the removal all act on the row that was
+  clicked.
+- **A new entry gets an identifier of its own** when the incoming one is
+  already used, so an import into a second group can be told apart from the
+  entry it was copied from.
+- **The reorder list labels its rows through the active group**, which is the
+  list it is showing.
+- **The remove question names the group too.** With more than one group, the
+  confirmation's heading says which group the camera is leaving, as the edit
+  window says which group it is in.
+
+### Android: handing the orientation to the activity on screen
+
+- **No sibling activity beside the running wall.** Returning through the
+  launcher could start the other orientation's activity; that sibling was then
+  destroyed and cleared the static instance the native side talks to, while the
+  activity actually resumed never registered itself - so orientation requests
+  found nothing, the call reported success all the same, and the old
+  orientation was remembered as sent.
+- **The resumed activity owns the static again**, asks the native side to
+  resend the orientation it is laying out for, and the launcher brings the
+  running class back rather than starting a second one. A request that found no
+  activity is retried instead of cached.
+
+### Switching groups
+
+- **The wall comes back whole.** A magnified viewport belongs to the wall it was
+  opened on: switching groups leaves it behind, and the group arriving comes up
+  on its own page and focus rather than magnified on whatever camera sits at the
+  same channel index there.
+
+### The machine on the About page
+
+- **Memory, CPU, the system and the uptime.** The page ends with what the
+  machine is doing: memory in use of the memory installed, the processor load,
+  the system as it names itself - `Windows 11 Pro 26H2`, `Debian GNU/Linux 13
+  (trixie)`, `macOS 13.2.1`, `Android 14` - and how long this viewer has been
+  running. The numbers are re-read at most once a second while the page is
+  open, and nothing is read while it is shut.
+- **Every platform answers, and says so when it cannot.** Memory and load come
+  from `/proc` on Linux, `GlobalMemoryStatusEx` and `GetSystemTimes` on Windows,
+  and the Mach host statistics on macOS; Android reports its memory and its
+  system, but no processor load - its applications are not allowed to read the
+  counters - so that line is left out there. A reading the platform cannot give
+  is drawn as `--` rather than as a zero.
+
+### The kiosk's short commands
+
+- **`xgr` restarts the wall.** A plain `systemctl restart monitor` is canceled
+  with this unit: the stop half runs `ExecStopPost`, which starts
+  `getty@tty1`, and the start half is then queued against a tty1 the getty
+  already owns. `xgr` stops the service and that getty, clears the failed
+  state and starts again. The installer writes it beside `xgs`, and the guide's
+  command table, file list and VNC section point at it.
+
 ## 1.4.90
 
 Changes since 1.4.81. **The magnified picture carries a bar of its own, with a
