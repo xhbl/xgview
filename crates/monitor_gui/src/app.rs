@@ -1810,14 +1810,23 @@ impl XgViewApp {
     ///
     /// Switching it on for the first time opens the device; a machine without
     /// one says so once and then stays silent - the picture is never affected.
+    /// On Android the record permission is asked for the same way: the first
+    /// press puts the system dialog up and says what to do about it, and the
+    /// next press finds the capture open.
     fn set_talking(&mut self, on: bool) {
         if on {
             if self.mic.is_none() {
-                self.mic = crate::mic::Mic::open(self.manager.talk().clone());
-            }
-            if self.mic.is_none() {
-                self.flash(monitor_i18n::tr("toast-no-microphone"), ToastKind::Error);
-                return;
+                match crate::mic::Mic::open(self.manager.talk().clone()) {
+                    Ok(mic) => self.mic = Some(mic),
+                    Err(crate::mic::MicError::Permission) => {
+                        self.flash(monitor_i18n::tr("toast-microphone-permission"), ToastKind::Error);
+                        return;
+                    }
+                    Err(crate::mic::MicError::NoDevice) => {
+                        self.flash(monitor_i18n::tr("toast-no-microphone"), ToastKind::Error);
+                        return;
+                    }
+                }
             }
         }
         self.talking = on;

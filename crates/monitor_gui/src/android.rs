@@ -467,6 +467,17 @@ fn jstring(env: &mut JNIEnv, value: &JString) -> Option<String> {
     env.get_string(value).ok().map(String::from)
 }
 
+/// Whether XGView may use the microphone, asking for the permission when it is
+/// missing.
+///
+/// `true` means talk-back can open its capture now. `false` means the system
+/// dialog has just been put up, and the viewer presses the switch again once it
+/// has been answered - the same shape as the export's storage permission on
+/// Android 9. See `MainActivity.requestRecordAudio`.
+pub fn request_record_audio() -> bool {
+    call_bool("requestRecordAudio")
+}
+
 /// The message of a pending Java exception, taken out of the way.
 ///
 /// A pending exception aborts the process on the next JNI call - see the note

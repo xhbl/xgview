@@ -324,6 +324,7 @@ toast-decoding-gpu = 通道重开，GPU 尽力解码
 toast-decoding-cpu = 通道在 CPU 上重开
 toast-no-sub = 未识别出辅码流地址规则
 toast-no-microphone = 没有可用的麦克风
+toast-microphone-permission = 请允许使用麦克风后再按一次
 toast-reorder = 重排：上 / 下移动 · 确认应用 · 返回取消
 toast-config-save-failed = 无法保存 { $path }：{ $error }
 toast-config-exported = 配置已导出到 { $path }

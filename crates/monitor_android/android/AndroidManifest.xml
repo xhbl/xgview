@@ -64,6 +64,13 @@
          otherwise the WS-Discovery probe never leaves the device. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!-- Talk-back captures the viewer's voice. Declared rather than implied:
+         without it Oboe refuses to open an input stream at all, and the
+         magnified bar's microphone would show and do nothing. The grant is a
+         runtime one from Android 6, asked for by `MainActivity.requestRecordAudio`
+         the first time the microphone is switched on. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <!-- Android TV / leanback is optional, the app also runs on phones and
          on the plain Android launcher. -->
     <uses-feature
@@ -71,6 +78,12 @@
         android:required="false" />
     <uses-feature
         android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <!-- Plenty of the boxes this runs on - a television or a Shield - have no
+         microphone at all, and the viewer works there: the talk switch is simply
+         never offered. -->
+    <uses-feature
+        android:name="android.hardware.microphone"
         android:required="false" />
 
     <application

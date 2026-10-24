@@ -1281,6 +1281,38 @@ public class MainActivity extends NativeActivity {
     /** Request code for the document picker an import opens. */
     private static final int REQUEST_IMPORT_DOCUMENT = 0x5848;
 
+    /** Request code for the microphone permission talk-back needs. */
+    private static final int REQUEST_RECORD_AUDIO = 0x5849;
+
+    /**
+     * Whether talk-back may capture, asking for the microphone permission when
+     * it is missing.
+     *
+     * <p>Called from the native side, on the UI thread, the first time the
+     * magnified bar's microphone is switched on. `true` means the capture can be
+     * opened now; `false` means the system dialog has just been asked for and
+     * the viewer has to press the switch again once it has been answered - the
+     * same shape as the storage permission an export asks for on Android 9.
+     *
+     * <p>This answers about the permission only. A device with no microphone at
+     * all has it granted like any other, and says so when the capture is opened
+     * rather than here.
+     */
+    public static boolean requestRecordAudio() {
+        final MainActivity self = instance;
+        if (self == null) {
+            return false;
+        }
+        if (self.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED) {
+            return true;
+        }
+        self.runOnUiThread(() -> self.requestPermissions(
+                new String[] { android.Manifest.permission.RECORD_AUDIO },
+                REQUEST_RECORD_AUDIO));
+        return false;
+    }
+
     /**
      * Writes the exported configuration into {@link #EXPORT_FOLDER} and returns
      * the path to show the viewer.

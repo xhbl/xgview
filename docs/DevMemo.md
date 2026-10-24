@@ -2310,7 +2310,37 @@ well as the downsample - and hands 16 bit samples on. Nothing is captured while
 the switch is off, but the device stays open, so the start-up delay is paid once
 rather than on every press.
 
-**What is not here.** There is no echo cancellation - a speaker beside a live
-microphone howls at some gain - and Android declares no `RECORD_AUDIO` and asks
-for none, so its switch reports that there is no microphone. Both are the next
-steps rather than parts of this one.
+**Android: the permission comes before the stream.** `cpal` reaches the
+microphone through Oboe there, and Oboe refuses to open an input stream without
+`RECORD_AUDIO` - a refusal that looks exactly like a box with no microphone. So
+the manifest declares the permission (and `android.hardware.microphone` as not
+required, because a television or a Shield has none), and the first press of the
+talk switch asks the activity for it: `MainActivity.requestRecordAudio` answers
+granted, or puts the system dialog up and answers `false`. The viewer says
+"allow microphone access, then press it again" and the next press opens the
+capture - the same shape as the storage permission an export asks for on Android
+9. After that the two failures are distinct again: no permission (the dialog
+path) and no device (`no microphone to talk into`).
+
+**What is not here.** There is no echo cancellation, and that is the deliberate
+scope of this step: on the OPPO the phone's own speaker came back through the
+microphone at a peak of 3003 while the room sat at 150-300, which is exactly the
+loop an AEC exists to break. A speaker beside a live microphone will howl at some
+gain.
+
+**Measured on the OPPO PBAM00** (Android 8.1, API 27, 2026-10-24). The wall was
+started, the doorbell magnified, and the bar's microphone tapped: the permission
+dialog came up, the grant was accepted, and the next press logged
+`microphone opened rate=44100 channels=2` - Oboe took the device at its own rate
+and the box-averaging brought it to 8 kHz. `AudioFlinger` shows the app's own
+`RECORD` track on an input thread while it runs, and a temporary probe of the
+pushed samples read peaks of 150-300 in a quiet room (so real audio, not a dead
+silent stream). The session around it logged `talk-back track set up channel=4
+codec=PCMU`. The SHIELD, which has no microphone, says so instead.
+
+**A bar that loses its microphone and gets it back.** Leaving the magnification
+tears down the back channel and magnifying again reopens it, so the switch
+disappears and returns with the session - and for a moment after re-magnifying
+it can be missing until the new session reports its stats. That is the same
+"appears when the stream says it can" rule as the sound switch; it is not a
+failure.

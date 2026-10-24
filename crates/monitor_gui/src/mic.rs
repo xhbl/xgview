@@ -45,14 +45,40 @@ pub struct Mic {
     rate: u32,
 }
 
+/// Why the microphone could not be opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicError {
+    /// The machine has no input device, or the platform refused to open it. A
+    /// television, a box with no microphone, a device whose audio service is
+    /// busy.
+    NoDevice,
+    /// Android: the record permission is not granted yet. The system dialog has
+    /// been asked for; the switch is pressed again once it has been answered.
+    Permission,
+}
+
 impl Mic {
-    /// Opens the default input device, or `None` when the machine has none, or
-    /// the platform refuses access (a phone without the record permission, a
-    /// box with no microphone). Missing is not a failure: the picture carries
-    /// on and the talk switch is simply not offered.
-    pub fn open(hub: Arc<TalkHub>) -> Option<Arc<Self>> {
-        let device = cpal::default_host().default_input_device()?;
-        let supported = device.default_input_config().ok()?;
+    /// Opens the default input device, or says why it could not.
+    ///
+    /// On Android the record permission comes first: Oboe refuses an input
+    /// stream without it, and a refused stream looks exactly like a machine with
+    /// no microphone - so the two are told apart here, where the dialog can be
+    /// asked for, rather than reported as one failure further up.
+    ///
+    /// Missing is not fatal anywhere: the picture carries on and the talk switch
+    /// simply stays off.
+    pub fn open(hub: Arc<TalkHub>) -> Result<Arc<Self>, MicError> {
+        #[cfg(target_os = "android")]
+        if !crate::android::request_record_audio() {
+            return Err(MicError::Permission);
+        }
+        let device = cpal::default_host()
+            .default_input_device()
+            .ok_or(MicError::NoDevice)?;
+        let supported = device.default_input_config().map_err(|err| {
+            tracing::warn!(target: "xgview::mic", error = %err, "no usable input configuration");
+            MicError::NoDevice
+        })?;
         let sample_format = supported.sample_format();
         let config: cpal::StreamConfig = supported.config();
         let rate = config.sample_rate.0.max(1);
@@ -67,14 +93,15 @@ impl Mic {
                 tracing::warn!(target: "xgview::mic", ?other, "unsupported input sample format");
                 None
             }
-        }?;
+        }
+        .ok_or(MicError::NoDevice)?;
         if let Err(err) = stream.play() {
             tracing::warn!(target: "xgview::mic", error = %err, "could not start the microphone");
-            return None;
+            return Err(MicError::NoDevice);
         }
         INPUT_STREAM.with(|slot| *slot.borrow_mut() = Some(stream));
         tracing::debug!(target: "xgview::mic", rate, channels, "microphone opened");
-        Some(Arc::new(Self { rate }))
+        Ok(Arc::new(Self { rate }))
     }
 
     /// Rate the device was opened at, in Hz.
