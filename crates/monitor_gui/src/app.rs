@@ -4876,7 +4876,45 @@ impl XgViewApp {
 
         ui.add_space(theme::space::M);
         ui.label(RichText::new(monitor_i18n::tr("settings-audio")).strong());
-        let volume = controls::slider(&mut self.nav, ui, &mut self.config.volume, 0.0..=1.0, 0.05, "", &monitor_i18n::tr("streams-volume"), 1.0);
+        // The volume slider carries the sound switch on its right, the way the
+        // magnified bar does: the icon shows the same `sound_on` the bar flips,
+        // so the two always agree. The reset button the shared `controls::slider`
+        // would draw is left out - the switch is the row's second control.
+        let (volume, mute) = ui
+            .horizontal(|ui| {
+                ui.label(monitor_i18n::tr("streams-volume"));
+                let slider_response =
+                    ui.add(egui::Slider::new(&mut self.config.volume, 0.0..=1.0).step_by(0.05));
+                // The glyph is the state: a speaker when sound is on, a crossed
+                // speaker when it is not - the same pair the magnified bar
+                // draws. The button is as tall as a text button on this row, so
+                // that the slider, the words and the switch share one baseline,
+                // and the drawing takes most of that box rather than the
+                // toolbar's half: a line-high square would otherwise leave the
+                // shape looking like a note beside the text.
+                let side = ui.text_style_height(&egui::TextStyle::Button)
+                    + 2.0 * ui.spacing().button_padding.y;
+                let mute = icons::button_sized_glyph(
+                    ui,
+                    if self.sound_on { Icon::Sound } else { Icon::Mute },
+                    false,
+                    false,
+                    &monitor_i18n::tr("streams-sound"),
+                    side,
+                    0.7,
+                );
+                (slider_response, mute)
+            })
+            .inner;
+        self.nav.item_kind(Kind::Slider, &volume);
+        self.nav.item(&mute);
+        if mute.clicked() {
+            self.sound_on = !self.sound_on;
+            self.config.sound_on = self.sound_on;
+            self.apply_audio();
+            self.mark_dirty();
+            dirty = true;
+        }
         if volume.changed() {
             if let Some(sink) = &self.audio {
                 sink.set_volume(self.config.volume);

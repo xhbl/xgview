@@ -62,6 +62,16 @@ const BUTTON: f32 = 30.0;
 /// Fraction of the button the drawing itself takes.
 const GLYPH: f32 = 0.5;
 
+/// The line weight a glyph of a given extent is drawn with.
+///
+/// A glyph keeps the same weight relative to its own size whatever the button,
+/// so that a small copy in a form is not drawn with the heavy lines the toolbar
+/// can afford: at a 10 point glyph the toolbars 1.6 would close the gap between
+/// the two arcs of the speaker and turn the shape into a blob.
+fn stroke_width(extent: f32) -> f32 {
+    (extent * 0.1).clamp(1.0, 1.6)
+}
+
 /// An icon button: a square carrying `icon`, with `tooltip` under the pointer.
 ///
 /// The icon is the whole label, which is why the tooltip is not optional - it is
@@ -87,8 +97,26 @@ pub fn button_sized(
     tooltip: &str,
     side: f32,
 ) -> Response {
+    button_sized_glyph(ui, icon, selected, muted, tooltip, side, GLYPH)
+}
+
+/// [`button_sized`] whose drawing takes `glyph` of the button rather than the
+/// usual [`GLYPH`].
+///
+/// A row that sizes its buttons to the text height leaves a square only as tall
+/// as a line, and the usual half of it is a shape that looks lost beside the
+/// words. A larger share fills that square without raising the row.
+pub fn button_sized_glyph(
+    ui: &mut Ui,
+    icon: Icon,
+    selected: bool,
+    muted: bool,
+    tooltip: &str,
+    side: f32,
+    glyph: f32,
+) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
-    paint_button(ui, rect, &response, icon, selected, muted, side);
+    paint_button(ui, rect, &response, icon, selected, muted, side, glyph);
     response.on_hover_text(tooltip)
 }
 
@@ -117,12 +145,13 @@ pub fn button_at(
     // out of both, while `Sense::click` would put it in the focus order.
     let sense = if muted { Sense::hover() } else { Sense::click() };
     let response = ui.interact(rect, id, sense);
-    paint_button(ui, rect, &response, icon, selected, muted, side);
+    paint_button(ui, rect, &response, icon, selected, muted, side, GLYPH);
     response.on_hover_text(tooltip)
 }
 
 /// Draws a button's frame and glyph; the allocation is the caller's, so that
-/// the automatic and the explicit id forms share one painting.
+/// the automatic and the explicit id forms share one painting. `glyph` is the
+/// share of the button the drawing takes, see [`button_sized_glyph`].
 fn paint_button(
     ui: &Ui,
     rect: Rect,
@@ -131,6 +160,7 @@ fn paint_button(
     selected: bool,
     muted: bool,
     side: f32,
+    glyph: f32,
 ) {
     if !ui.is_rect_visible(rect) {
         return;
@@ -144,9 +174,20 @@ fn paint_button(
         // whatever has the keyboard focus, and that state carries a stroke.
         ui.painter().rect_stroke(frame, corner, visuals.bg_stroke, StrokeKind::Inside);
     }
-    let glyph = Rect::from_center_size(rect.center(), Vec2::splat(side * GLYPH));
-    let color = if muted { theme::TEXT_DIM } else { visuals.text_color() };
-    paint(ui.painter(), glyph, icon, Stroke::new(1.6_f32, color));
+    let extent = side * glyph;
+    let glyph_rect = Rect::from_center_size(rect.center(), Vec2::splat(extent));
+    // The theme sets `override_text_color` so that every label draws in the
+    // project's text colour; egui's text widgets take it too, so an icon that
+    // sits beside a text button has to as well, or it reads as a dimmer kind of
+    // button. `muted` is the one case that is deliberately dim.
+    let color = if muted {
+        theme::TEXT_DIM
+    } else {
+        ui.visuals()
+            .override_text_color
+            .unwrap_or_else(|| visuals.text_color())
+    };
+    paint(ui.painter(), glyph_rect, icon, Stroke::new(stroke_width(extent), color));
 }
 
 /// Draws `icon` filling `rect`.

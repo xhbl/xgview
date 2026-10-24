@@ -126,7 +126,8 @@ streams-summary-available = 若设备支持该视频流的硬件解码，则由 
 streams-summary-software = 当前构建未集成硬件解码器：无论此项如何设置，均由 CPU 进行软件解码。
 settings-audio = 音频
 streams-volume = 播放音量
-streams-volume-hint = 声音仅在放大画面时播放，由放大栏的喇叭按钮开关；此处调节音量大小。
+streams-sound = 声音开关
+streams-volume-hint = 声音仅在放大画面时播放。
 
 ## 摄像头
 cameras-confirm-order = 确认顺序

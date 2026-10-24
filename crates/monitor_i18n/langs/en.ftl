@@ -132,7 +132,8 @@ streams-summary-available = Pictures are decoded on the GPU where the machine of
 streams-summary-software = This build has no hardware decoder: the CPU decodes, whatever this setting says.
 settings-audio = Audio
 streams-volume = Playback volume
-streams-volume-hint = Sound plays for the magnified camera only, switched by the speaker button in its bar; this is how loud.
+streams-sound = Sound on or off
+streams-volume-hint = Sound plays for the magnified camera only.
 
 ## Cameras
 cameras-confirm-order = Confirm order
