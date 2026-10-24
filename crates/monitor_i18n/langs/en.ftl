@@ -130,6 +130,9 @@ streams-prefer-hardware = Prefer hardware decoding
 streams-summary-fixed = Decoding is left to the platform: hardware where it takes the stream, and its own fallback where it will not, so there is nothing to switch.
 streams-summary-available = Pictures are decoded on the GPU where the machine offers a decoder for the stream, and on the CPU everywhere else. Each tile shows which one it got.
 streams-summary-software = This build has no hardware decoder: the CPU decodes, whatever this setting says.
+settings-audio = Audio
+streams-volume = Playback volume
+streams-volume-hint = Sound plays for the magnified camera only, switched by the speaker button in its bar; this is how loud.
 
 ## Cameras
 cameras-confirm-order = Confirm order

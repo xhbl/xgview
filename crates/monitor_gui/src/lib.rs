@@ -20,6 +20,7 @@
 //! Neither socket nor decoder ever runs on the UI thread.
 
 pub mod app;
+pub mod audio;
 #[cfg(any(target_os = "android", test))]
 pub(crate) mod backend;
 pub mod blackout;

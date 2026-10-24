@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 #[cfg(not(target_os = "android"))]
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -841,12 +842,11 @@ pub struct XgViewApp {
     /// top and bottom bars, which take their height from the wall. See
     /// [`crate::tilebar`].
     tile_bar: tilebar::Bar,
-    /// The state the bar's sound control draws.
-    ///
-    /// Audio is deferred to 1.5; the control is compiled but hidden until then
-    /// (`tilebar::SOUND`). Nothing is played yet - the streams carry no audio
-    /// into the viewer - and this state is where the sound is wired in.
+    /// The state the bar's sound control draws, and the switch the sink follows.
     sound_on: bool,
+    /// The audio sink, `None` when this machine has no output device. The core
+    /// only ever sees it through the audio hub, as an `AudioOutput`.
+    audio: Option<Arc<crate::audio::CpalOutput>>,
     /// Who answered the last frame's direction presses.
     owner: Owner,
     /// Explicit directional navigation for the windows that opted into it.
@@ -1079,6 +1079,15 @@ impl XgViewApp {
             Duration::from_millis(config.handshake_timeout_ms),
             config.prefer_hardware_decode,
         );
+        // The audio sink, opened once. A machine without an output device leaves
+        // `None` here, and the sound switch has nothing to drive - not a failure:
+        // the picture carries on.
+        let audio = crate::audio::CpalOutput::open();
+        if let Some(sink) = &audio {
+            sink.set_volume(config.volume);
+            manager.audio().set_output(Some(sink.clone()));
+        }
+        let sound_on = config.sound_on;
         let (events_tx, events_rx) = unbounded();
         let capabilities = monitor_codec::capabilities();
 
@@ -1189,7 +1198,8 @@ impl XgViewApp {
             ring_aimed: false,
             picture_zoom: PictureZoom::FULL,
             tile_bar: tilebar::Bar::new(),
-            sound_on: true,
+            sound_on,
+            audio,
             // The "Add devices" window, the settings panel and the top bar are
             // on this layer: each is a row (of tabs, or of controls) over a
             // column, which is the shape egui's walk handles worst. The wall
@@ -1725,6 +1735,7 @@ impl XgViewApp {
             self.picture_zoom = PictureZoom::FULL;
             self.needs_sync = true;
             self.mark_dirty();
+            self.apply_audio();
         }
     }
 
@@ -1733,6 +1744,7 @@ impl XgViewApp {
         if self.scheduler.zoom_out() {
             self.needs_sync = true;
             self.mark_dirty();
+            self.apply_audio();
         }
     }
 
@@ -1745,6 +1757,17 @@ impl XgViewApp {
             self.scheduler.set_focus(Some(index));
             self.zoom_in();
         }
+    }
+
+    /// Points the sink at the magnified camera, or at nothing when the grid is
+    /// showing, and follows the sound switch. Called whenever the zoom or the
+    /// switch changes; the hub's index is the camera the listener is listening
+    /// to, and the sink's active flag is whether anything comes out at all.
+    fn apply_audio(&self) {
+        if let Some(sink) = &self.audio {
+            sink.set_active(self.sound_on);
+        }
+        self.manager.audio().set_index(self.scheduler.zoom());
     }
 
     fn set_fullscreen(&mut self, ctx: &egui::Context, enabled: bool) {
@@ -4849,6 +4872,17 @@ impl XgViewApp {
         };
         ui.label(RichText::new(summary).small().color(theme::TEXT_DIM));
 
+        ui.add_space(theme::space::M);
+        ui.label(RichText::new(monitor_i18n::tr("settings-audio")).strong());
+        let volume = controls::slider(&mut self.nav, ui, &mut self.config.volume, 0.0..=1.0, 0.05, "", &monitor_i18n::tr("streams-volume"), 1.0);
+        if volume.changed() {
+            if let Some(sink) = &self.audio {
+                sink.set_volume(self.config.volume);
+            }
+            dirty = true;
+        }
+        ui.label(RichText::new(monitor_i18n::tr("streams-volume-hint")).small().color(theme::TEXT_DIM));
+
         dirty
     }
 
@@ -6966,6 +7000,9 @@ impl XgViewApp {
         // the bar on.
         if self.tile_bar.focus() == 1 {
             self.sound_on = !self.sound_on;
+            self.config.sound_on = self.sound_on;
+            self.apply_audio();
+            self.mark_dirty();
             return;
         }
         let Some(index) = self.scheduler.zoom() else {

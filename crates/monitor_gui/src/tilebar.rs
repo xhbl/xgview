@@ -44,11 +44,10 @@ const GUARD: Duration = Duration::from_millis(300);
 
 /// Whether the bar carries the sound switch.
 ///
-/// Audio playback is deferred to 1.5; the plan is `docs/audio-plan.md` in the
-/// private tree. The control, its icon and the toggle stay compiled so that
-/// release only has to turn this on - until then the bar carries the picture
-/// fit alone.
-pub const SOUND: bool = false;
+/// Audio playback landed for 1.5 (the plan is `docs/audio-plan.md` in the
+/// private tree). This is the switch the magnified bar draws and the toggle the
+/// core's audio hub follows.
+pub const SOUND: bool = true;
 
 /// How many controls the bar holds: the picture fit, and the sound switch when
 /// [`SOUND`] is on. The geometry takes the widths, so the strip grows along the

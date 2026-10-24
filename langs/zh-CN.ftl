@@ -124,6 +124,9 @@ streams-prefer-hardware = 优先硬件解码
 streams-summary-fixed = 解码交给平台处理：能硬解的走硬解，平台无法处理的流由其自行回落，因此无需切换。
 streams-summary-available = 若设备支持该视频流的硬件解码，则由 GPU 解码；其余情况均由 CPU 解码。每个画面均会显示当前所使用的解码方式。
 streams-summary-software = 当前构建未集成硬件解码器：无论此项如何设置，均由 CPU 进行软件解码。
+settings-audio = 音频
+streams-volume = 播放音量
+streams-volume-hint = 声音仅在放大画面时播放，由放大栏的喇叭按钮开关；此处调节音量大小。
 
 ## 摄像头
 cameras-confirm-order = 确认顺序

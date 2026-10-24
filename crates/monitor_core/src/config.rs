@@ -590,6 +590,13 @@ pub struct AppConfig {
     /// a preference: a device that cannot be opened, or a stream the hardware
     /// decoder will not take, is decoded on the CPU.
     pub prefer_hardware_decode: bool,
+    /// Whether the magnified view plays its camera's sound. Global, not per
+    /// camera, and off by default: a wall that starts talking on its own is a
+    /// surprise, so the switch is the user's to turn on.
+    pub sound_on: bool,
+    /// Playback volume, `0.0..=1.0`, global like the switch. The magnified bar's
+    /// switch decides whether anything plays, this decides how loud.
+    pub volume: f32,
     pub reconnect: ReconnectPolicy,
     /// How long a session has to establish itself before the attempt is written
     /// off and retried: the `OPTIONS` / `DESCRIBE` / `SETUP` / `PLAY` exchange,
@@ -637,6 +644,8 @@ impl Default for AppConfig {
             keep_screen_on: true,
             language: "auto".to_string(),
             prefer_hardware_decode: true,
+            sound_on: false,
+            volume: 1.0,
             reconnect: ReconnectPolicy::default(),
             handshake_timeout_ms: 15_000,
             discovery: DiscoveryConfig::default(),

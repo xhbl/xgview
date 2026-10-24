@@ -1,0 +1,280 @@
+//! The audio sink the interface owns.
+//!
+//! The core decodes a channel's audio and hands it to an [`AudioOutput`]; this is
+//! that output, built on `cpal`, which reaches WASAPI on Windows, ALSA / JACK on
+//! Linux, CoreAudio on macOS and Oboe on Android through one API. The device is
+//! opened once, at whatever rate and channel count it prefers, and the samples a
+//! camera sends are resampled into it: the camera is 8 kHz or 16 kHz mono, the
+//! device is almost always 48 kHz and often stereo.
+//!
+//! Everything here is behind `&self` and shared by every channel, because there
+//! is one device and one thing being listened to. Decoding happens on a channel
+//! worker; the platform's own audio thread drains the ring buffer, so no lock is
+//! held for long.
+
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
+
+use monitor_codec::audio::AudioStreamInfo;
+use monitor_core::audio::AudioOutput;
+
+/// How much audio the ring buffer is allowed to hold, in seconds. Past this the
+/// oldest samples are dropped rather than growing the delay: a live view wants
+/// to stay close to the picture, not to a backlog.
+const RING_SECONDS: f32 = 1.0;
+
+thread_local! {
+    /// A live cpal stream is `!Send` - the crate marks it so on purpose - and so
+    /// cannot sit in [`CpalOutput`], which is shared with the channel workers.
+    /// It is parked on the thread that opened the device instead: the interface
+    /// opens the sink on its own thread and keeps it for the life of the window,
+    /// which is exactly how long the stream has to run. Dropping it would stop
+    /// the sound, so it is never taken back out.
+    static OUTPUT_STREAM: RefCell<Option<Stream>> = const { RefCell::new(None) };
+}
+
+/// The sink, alive as long as the window is.
+pub struct CpalOutput {
+    /// Whether sound is wanted. A channel does no audio work while this is false.
+    active: AtomicBool,
+    /// Volume as `0.0..=1.0`, kept as bits so the atomic carries an `f32`.
+    volume: AtomicU32,
+    /// Sample rate and channel count of the source being pushed.
+    source_rate: AtomicU32,
+    source_channels: AtomicU32,
+    /// What the device was opened at.
+    device_rate: u32,
+    device_channels: usize,
+    /// Interleaved f32 at the device's rate and channel count.
+    buffer: Arc<Mutex<VecDeque<f32>>>,
+}
+
+impl CpalOutput {
+    /// Opens the default output device, or `None` when there is none (a headless
+    /// box, a kiosk without a sound card). A missing device is not a failure:
+    /// the picture carries on and the sound switch simply has nothing to drive.
+    pub fn open() -> Option<Arc<Self>> {
+        let device = cpal::default_host().default_output_device()?;
+        let supported = device.default_output_config().ok()?;
+        let sample_format = supported.sample_format();
+        let config: StreamConfig = supported.config();
+        let device_rate = config.sample_rate.0.max(1);
+        let device_channels = (config.channels as usize).max(1);
+        let capacity = (device_rate as f32 * RING_SECONDS) as usize * device_channels;
+        let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(capacity)));
+
+        let sink = Arc::new(Self {
+            active: AtomicBool::new(false),
+            volume: AtomicU32::new(1.0f32.to_bits()),
+            source_rate: AtomicU32::new(device_rate),
+            source_channels: AtomicU32::new(device_channels as u32),
+            device_rate,
+            device_channels,
+            buffer: buffer.clone(),
+        });
+
+        let stream = match sample_format {
+            SampleFormat::F32 => build_stream::<f32>(&device, &config, buffer),
+            SampleFormat::I16 => build_stream::<i16>(&device, &config, buffer),
+            SampleFormat::U16 => build_stream::<u16>(&device, &config, buffer),
+            SampleFormat::I32 => build_stream::<i32>(&device, &config, buffer),
+            other => {
+                tracing::warn!(target: "xgview::audio", ?other, "unsupported output sample format");
+                None
+            }
+        }?;
+        if let Err(err) = stream.play() {
+            tracing::warn!(target: "xgview::audio", error = %err, "could not start the audio stream");
+            return None;
+        }
+        OUTPUT_STREAM.with(|slot| *slot.borrow_mut() = Some(stream));
+        tracing::debug!(
+            target: "xgview::audio",
+            rate = device_rate,
+            channels = device_channels,
+            "audio sink opened"
+        );
+        Some(sink)
+    }
+
+    /// Turns the sound on or off, the switch in the magnified bar driving this.
+    pub fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Relaxed);
+        if !active {
+            self.clear();
+        }
+    }
+
+    /// Sets the volume, `0.0..=1.0`.
+    pub fn set_volume(&self, volume: f32) {
+        self.volume.store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// The last volume set.
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+
+    /// Empties the ring buffer so a resume does not play stale audio.
+    fn clear(&self) {
+        match self.buffer.lock() {
+            Ok(mut buffer) => buffer.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
+        }
+    }
+}
+
+impl AudioOutput for CpalOutput {
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::Relaxed)
+    }
+
+    fn configure(&self, info: &AudioStreamInfo) {
+        // The device is never reopened: only the source description changes, and
+        // the resampler reads it per push. A rate of 0 would divide by zero.
+        self.source_rate.store(info.sample_rate.max(1), Ordering::Relaxed);
+        self.source_channels.store(info.channels.max(1) as u32, Ordering::Relaxed);
+    }
+
+    fn push(&self, samples: &[i16]) {
+        if !self.is_active() || samples.is_empty() {
+            return;
+        }
+        let source_rate = self.source_rate.load(Ordering::Relaxed).max(1) as f32;
+        let source_channels = self.source_channels.load(Ordering::Relaxed).max(1) as usize;
+        let device_channels = self.device_channels;
+        let ratio = self.device_rate as f32 / source_rate;
+        let volume = self.volume();
+        let frames_in = samples.len() / source_channels;
+        if frames_in == 0 {
+            return;
+        }
+
+        let mut converted: Vec<f32> =
+            Vec::with_capacity(((frames_in as f32 * ratio) as usize + 1) * device_channels);
+        resample_into(samples, source_channels, device_channels, ratio, volume, &mut converted);
+
+        let max = (self.device_rate as f32 * RING_SECONDS) as usize * device_channels;
+        match self.buffer.lock() {
+            Ok(mut buffer) => {
+                buffer.extend(converted);
+                while buffer.len() > max {
+                    buffer.pop_front();
+                }
+            }
+            Err(poisoned) => {
+                let mut buffer = poisoned.into_inner();
+                buffer.extend(converted);
+                while buffer.len() > max {
+                    buffer.pop_front();
+                }
+            }
+        }
+    }
+
+    fn stop(&self) {
+        self.clear();
+    }
+}
+
+/// Resamples one block of interleaved `i16` into interleaved `f32` at the
+/// device's rate, channel count and volume.
+///
+/// A linear interpolation is enough for voice, and the common cases are exact:
+/// an 8 kHz or 16 kHz camera into a 48 kHz device is a whole ratio, so no phase
+/// is carried between blocks. A source channel count of one spreads over every
+/// device channel; otherwise the channels are taken as they come.
+fn resample_into(
+    samples: &[i16],
+    source_channels: usize,
+    device_channels: usize,
+    ratio: f32,
+    volume: f32,
+    out: &mut Vec<f32>,
+) {
+    let frames_in = samples.len() / source_channels;
+    if frames_in < 2 {
+        return;
+    }
+    let frames_out = (frames_in as f32 * ratio) as usize;
+    for n in 0..frames_out {
+        let position = n as f32 / ratio;
+        let i0 = position.floor() as usize;
+        if i0 + 1 >= frames_in {
+            break;
+        }
+        let frac = position - i0 as f32;
+        for channel in 0..device_channels {
+            let source = if source_channels == 1 { 0 } else { channel.min(source_channels - 1) };
+            let a = samples[i0 * source_channels + source] as f32 / 32768.0;
+            let b = samples[(i0 + 1) * source_channels + source] as f32 / 32768.0;
+            out.push((a + (b - a) * frac) * volume);
+        }
+    }
+}
+
+/// Builds the output stream for one device sample type.
+fn build_stream<T>(
+    device: &cpal::Device,
+    config: &StreamConfig,
+    buffer: Arc<Mutex<VecDeque<f32>>>,
+) -> Option<Stream>
+where
+    T: Sample + SizedSample + FromSample<f32>,
+{
+    let error = |err| tracing::warn!(target: "xgview::audio", error = %err, "audio stream error");
+    let data = move |out: &mut [T], _: &cpal::OutputCallbackInfo| {
+        let mut ring = buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for sample in out.iter_mut() {
+            // The ring is interleaved the same way the device is, so it is drained
+            // flat; a short ring yields silence rather than a stall.
+            let value = ring.pop_front().unwrap_or(0.0);
+            *sample = T::from_sample(value);
+        }
+    };
+    match device.build_output_stream(config, data, error, None) {
+        Ok(stream) => Some(stream),
+        Err(err) => {
+            tracing::warn!(target: "xgview::audio", error = %err, "could not build the audio stream");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resampling_widens_a_mono_block_to_the_device() {
+        // 8 kHz mono into 48 kHz stereo: six output frames per input frame, each
+        // spread over both channels.
+        let input: Vec<i16> = (0..8).map(|v| (v * 1000) as i16).collect();
+        let mut out = Vec::new();
+        resample_into(&input, 1, 2, 6.0, 1.0, &mut out);
+        // Every output frame carries two channels.
+        assert_eq!(out.len() % 2, 0);
+        assert!(!out.is_empty());
+        // The first frame is sample 0 on both channels.
+        assert_eq!(out[0], 0.0);
+        assert_eq!(out[1], 0.0);
+    }
+
+    #[test]
+    fn volume_scales_the_output() {
+        let input: Vec<i16> = vec![1000, 1000, 1000, 1000];
+        let mut full = Vec::new();
+        let mut half = Vec::new();
+        resample_into(&input, 1, 1, 1.0, 1.0, &mut full);
+        resample_into(&input, 1, 1, 1.0, 0.5, &mut half);
+        assert_eq!(full.len(), half.len());
+        for (a, b) in full.iter().zip(half.iter()) {
+            assert!((a / 2.0 - b).abs() < 1e-6);
+        }
+    }
+}
