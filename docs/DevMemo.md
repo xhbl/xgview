@@ -2215,3 +2215,59 @@ RTCP's lost and jitter fields start carrying the real numbers, which is what a
 camera that adapts to receiver reports needs to hear. The two paths share
 everything else, so a camera that runs better one way can be moved without
 anything else about it changing.
+
+## 34. Talking back: the track is offered only when the session asks, and go2rtc asks its first request
+
+*Landed 2026-10-24, in the 1.5 line.*
+
+**The back channel is one more media in the same SDP.** A camera that accepts
+ONVIF Profile T audio from the client lists an audio track with `a=sendonly` -
+the client sends, the camera receives - and a control of its own: `audioback` on
+a camera, `trackID=N` behind go2rtc, which publishes it as
+`media=audio,sendonly,codec=PCMU/8000`. The session negotiates it the way it
+negotiates the video: `SETUP` that control with an interleaved pair, take the
+pair the answer names (§20), and write RTP to that channel. The video path is
+untouched, and a session that gets no such track simply has no talk-back. Only
+the magnified session asks for one, because a camera may allow a single
+back-channel client and the grid's sessions must not take it.
+
+**The `Require` header works on a camera and not on go2rtc.** A client indicates
+the capability with `Require: www.onvif.org/ver20/backchannel`, which is what a
+camera that implements Profile T answers with the track. Against the go2rtc
+restream it changes nothing: the track appears only when the stream URL carries
+`backchannel=1` - the same stream whose `producers[].medias` already read
+`audio, sendonly` - so a probe that only sets the header concludes there is no
+back channel where there is one.
+
+**Where go2rtc reads that query is the trap.** `internal/rtsp/rtsp.go` keeps
+`c.URL` from the **first request of the connection** - our `OPTIONS` - and reads
+`query := conn.URL.Query()` from it, and `reqTrackID` consults the same query.
+So `backchannel=1` cannot be added at `DESCRIBE`: it has to be on the URL the
+session opens with, before `OPTIONS`. And because `reqTrackID` reads a query
+when there is one, the `SETUP` control URI must carry none, or the track is
+looked up under the wrong id and the answer names another track's channels.
+`RtspClient` appends the flag once in `start_with_options` and `resolve_control`
+strips the query from the base before joining a relative control.
+
+**Sending is a clock, not a burst.** A 20 ms frame at 8 kHz mono is 160 samples:
+the worker takes one from the queue every 20 ms, encodes it as G.711 (PCMU or
+PCMA, whichever the track's `rtpmap` names) and writes it on the negotiated
+channel, advancing the sequence number and the timestamp by 160 a packet. While
+the viewer is not talking it sends that codec's silence byte rather than nothing:
+a back channel that stops can be torn down by the camera or the NAT in between,
+and the packets also keep the timestamp continuous. A queue more than four frames
+behind is emptied instead of sent as a burst - the camera's speaker wants the
+last 300 ms, not a backlog. Interleaved only: the back channel is set up on the
+`TCP` transport, where the video's connection already carries control.
+
+**What reaches the queue.** `cpal`'s input side runs at whatever rate and channel
+count the device prefers; its callback mixes to mono and box-averages each
+125 µs window - six input samples at 48 kHz, which is the anti-alias filter as
+well as the downsample - and hands 16 bit samples on. Nothing is captured while
+the switch is off, but the device stays open, so the start-up delay is paid once
+rather than on every press.
+
+**What is not here.** There is no echo cancellation - a speaker beside a live
+microphone howls at some gain - and Android declares no `RECORD_AUDIO` and asks
+for none, so its switch reports that there is no microphone. Both are the next
+steps rather than parts of this one.
