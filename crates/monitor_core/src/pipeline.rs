@@ -696,7 +696,7 @@ async fn run_once(
     if endpoint.is_mjpeg() {
         run_mjpeg_session(endpoint.clone(), handshake_timeout, events, frames).await
     } else if endpoint.is_ws() {
-        run_ws_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames).await
+        run_ws_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames, audio).await
     } else {
         run_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames, audio).await
     }
@@ -2181,10 +2181,14 @@ async fn run_ws_session(
     handshake_timeout: Duration,
     events: &Sender<StreamEvent>,
     frames: &FrameStore,
+    audio: &AudioHub,
 ) -> Result<()> {
 
     use futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
+
+    // The audio track's decoder, when the init segment carried an audio trak.
+    let mut audio_decoder: Option<(Box<dyn AudioDecoder>, AudioStreamInfo)> = None;
 
     let Endpoint { index, camera_id, uri, stream, credentials, .. } = endpoint;
     let camera_id_str = camera_id.as_str();
@@ -2248,6 +2252,23 @@ async fn run_ws_session(
 
         let parsed = parser.parse_message(&data)?;
 
+        // The audio track's description, when the init segment carried one:
+        // open its decoder so the media segments can be fed to it below.
+        if let Some(audio_init) = parsed.audio {
+            let info = AudioStreamInfo::new(audio_init.codec, audio_init.sample_rate, audio_init.channels);
+            let mut decoder = create_audio_decoder(audio_init.codec);
+            match decoder.configure(&info) {
+                Ok(()) => audio_decoder = Some((decoder, info)),
+                Err(err) => tracing::debug!(
+                    target: "xgview::pipeline",
+                    index,
+                    codec = %audio_init.codec,
+                    error = %err,
+                    "no audio backend for this MSE track, the channel stays silent"
+                ),
+            }
+        }
+
         // Init segment: open the decoder and feed it the parameter sets.
         if let Some(mut init) = parsed.init {
             codec = Some(init.codec);
@@ -2291,6 +2312,22 @@ async fn run_ws_session(
                     total_frames: 0,
                 },
             );
+        }
+
+        // The audio units that rode along in the same segment, decoded while this
+        // channel is the audible one and the sink is open.
+        for sample in parsed.audio_samples {
+            if audio.wants(index) {
+                if let Some(output) = audio.output().filter(|output| output.is_active()) {
+                    if let Some((decoder, info)) = audio_decoder.as_mut() {
+                        let mut pcm: Vec<i16> = Vec::new();
+                        if decoder.decode(&sample.data, &mut pcm).is_ok() && !pcm.is_empty() {
+                            output.configure(info);
+                            output.push(&pcm);
+                        }
+                    }
+                }
+            }
         }
 
         // Media segment: decode each access unit.

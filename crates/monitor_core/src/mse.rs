@@ -10,6 +10,7 @@
 //! the existing decoders can consume them unchanged.
 
 use crate::error::{CoreError, Result};
+use monitor_codec::audio::AudioCodec;
 use monitor_codec::Codec;
 
 /// The codec and parameter sets parsed from an init segment.
@@ -23,6 +24,13 @@ pub struct MseInit {
     pub height: u32,
 }
 
+/// The audio track an init segment carries (`mp4a`/`esds` → AAC).
+pub struct MseAudioInit {
+    pub codec: AudioCodec,
+    pub sample_rate: u32,
+    pub channels: u8,
+}
+
 /// One access unit extracted from a media segment.
 pub struct MseSample {
     /// Annex-B formatted access unit data.
@@ -33,62 +41,134 @@ pub struct MseSample {
     pub keyframe: bool,
 }
 
+/// One audio access unit from a media segment - a raw AAC frame, not Annex-B.
+pub struct MseAudioSample {
+    pub data: Vec<u8>,
+    pub pts_us: i64,
+}
+
 /// What [`MseParser::parse_message`] found in one WebSocket binary frame.
 pub struct ParsedMessage {
-    /// Present when the message contained a `moov` box (init segment).
+    /// Present when the message contained a `moov` box (init segment), video.
     pub init: Option<MseInit>,
-    /// Access units from `moof` + `mdat` pairs (media segment).
+    /// The audio track's description, when the init segment carried one.
+    pub audio: Option<MseAudioInit>,
+    /// Video access units from `moof` + `mdat` pairs (media segment).
     pub samples: Vec<MseSample>,
+    /// Audio access units from the same segments, keyed off the audio track.
+    pub audio_samples: Vec<MseAudioSample>,
+}
+
+/// What an init segment yields: the video track and, when present, the audio one.
+struct MoovOut {
+    video: Option<MseInit>,
+    audio: Option<MseAudioInit>,
+}
+
+/// Whether a `trak` holds video or audio.
+enum TrackKind {
+    Video(MseInit),
+    Audio(MseAudioInit),
+}
+
+/// One parsed `trak`: its `track_ID`, its `mdhd` timescale, and what it holds.
+struct TrackDesc {
+    id: u32,
+    timescale: u32,
+    kind: TrackKind,
 }
 
 /// Parses fMP4 init and media segments from go2rtc's MSE WebSocket.
 pub struct MseParser {
-    timescale: u32,
+    /// `track_ID` of the video / audio track, learned from the init segment.
+    video_track_id: Option<u32>,
+    audio_track_id: Option<u32>,
+    /// Each track's own `mdhd` timescale.
+    video_timescale: u32,
+    audio_timescale: u32,
     nal_length_size: usize,
 }
 
 impl MseParser {
     pub fn new() -> Self {
-        Self { timescale: 90000, nal_length_size: 4 }
+        Self {
+            video_track_id: None,
+            audio_track_id: None,
+            video_timescale: 90000,
+            audio_timescale: 8000,
+            nal_length_size: 4,
+        }
     }
 
     /// Parses one binary WebSocket message, which may contain an init segment,
     /// a media segment, or both.
     pub fn parse_message(&mut self, data: &[u8]) -> Result<ParsedMessage> {
         let mut init = None;
+        let mut audio = None;
         let mut samples = Vec::new();
+        let mut audio_samples = Vec::new();
         let mut pending_run: Option<TrackRun> = None;
 
         for (box_type, content) in iter_boxes(data) {
             match box_type {
-                b"moov" => init = Some(self.parse_moov(content)?),
+                b"moov" => {
+                    let moov = self.parse_moov(content)?;
+                    init = moov.video;
+                    audio = moov.audio;
+                }
                 b"moof" => pending_run = Some(self.parse_moof(content, content.len() + 8)?),
                 b"mdat" => {
                     if let Some(run) = pending_run.take() {
-                        self.extract_samples(&run, content, &mut samples)?;
+                        self.extract_samples(&run, content, &mut samples, &mut audio_samples)?;
                     }
                 }
                 _ => {}
             }
         }
 
-        Ok(ParsedMessage { init, samples })
+        Ok(ParsedMessage { init, audio, samples, audio_samples })
     }
 
-    fn parse_moov(&mut self, data: &[u8]) -> Result<MseInit> {
+
+    fn parse_moov(&mut self, data: &[u8]) -> Result<MoovOut> {
+        let mut video = None;
+        let mut audio = None;
         for (box_type, content) in iter_boxes(data) {
             if box_type == b"trak" {
-                if let Some(init) = self.parse_trak(content)? {
-                    return Ok(init);
+                if let Some(desc) = self.parse_trak(content)? {
+                    match desc.kind {
+                        TrackKind::Video(init) => {
+                            self.video_track_id = Some(desc.id);
+                            self.video_timescale = desc.timescale.max(1);
+                            if video.is_none() {
+                                video = Some(init);
+                            }
+                        }
+                        TrackKind::Audio(init) => {
+                            self.audio_track_id = Some(desc.id);
+                            self.audio_timescale = desc.timescale.max(1);
+                            if audio.is_none() {
+                                audio = Some(init);
+                            }
+                        }
+                    }
                 }
             }
         }
-        Err(CoreError::network("moov had no usable video trak"))
+        if video.is_none() && audio.is_none() {
+            return Err(CoreError::network("moov had no usable trak"));
+        }
+        Ok(MoovOut { video, audio })
     }
 
-    fn parse_trak(&mut self, data: &[u8]) -> Result<Option<MseInit>> {
+    fn parse_trak(&mut self, data: &[u8]) -> Result<Option<TrackDesc>> {
+        let mut track_id = None;
+        let mut timescale = 90000;
         let mut mdia = None;
         for (box_type, content) in iter_boxes(data) {
+            if box_type == b"tkhd" {
+                track_id = Some(parse_tkhd(content));
+            }
             if box_type == b"mdia" {
                 mdia = Some(content);
             }
@@ -97,40 +177,40 @@ impl MseParser {
 
         for (box_type, content) in iter_boxes(mdia) {
             if box_type == b"mdhd" {
-                self.timescale = parse_mdhd(content);
+                timescale = parse_mdhd(content);
             }
             if box_type == b"minf" {
-                if let Some(init) = self.parse_minf(content)? {
-                    return Ok(Some(init));
+                if let Some(kind) = self.parse_minf(content)? {
+                    return Ok(Some(TrackDesc { id: track_id.unwrap_or(0), timescale, kind }));
                 }
             }
         }
         Ok(None)
     }
 
-    fn parse_minf(&mut self, data: &[u8]) -> Result<Option<MseInit>> {
+    fn parse_minf(&mut self, data: &[u8]) -> Result<Option<TrackKind>> {
         for (box_type, content) in iter_boxes(data) {
             if box_type == b"stbl" {
-                if let Some(init) = self.parse_stbl(content)? {
-                    return Ok(Some(init));
+                if let Some(kind) = self.parse_stbl(content)? {
+                    return Ok(Some(kind));
                 }
             }
         }
         Ok(None)
     }
 
-    fn parse_stbl(&mut self, data: &[u8]) -> Result<Option<MseInit>> {
+    fn parse_stbl(&mut self, data: &[u8]) -> Result<Option<TrackKind>> {
         for (box_type, content) in iter_boxes(data) {
             if box_type == b"stsd" {
-                if let Some(init) = self.parse_stsd(content)? {
-                    return Ok(Some(init));
+                if let Some(kind) = self.parse_stsd(content)? {
+                    return Ok(Some(kind));
                 }
             }
         }
         Ok(None)
     }
 
-    fn parse_stsd(&mut self, data: &[u8]) -> Result<Option<MseInit>> {
+    fn parse_stsd(&mut self, data: &[u8]) -> Result<Option<TrackKind>> {
         // stsd: 1 byte version + 3 bytes flags + 4 bytes entry_count, then entries.
         if data.len() < 8 {
             return Ok(None);
@@ -140,18 +220,39 @@ impl MseParser {
             match box_type {
                 b"avc1" | b"avc3" => {
                     if let Some(init) = self.parse_avc_entry(content)? {
-                        return Ok(Some(init));
+                        return Ok(Some(TrackKind::Video(init)));
                     }
                 }
                 b"hvc1" | b"hev1" => {
                     if let Some(init) = self.parse_hevc_entry(content)? {
-                        return Ok(Some(init));
+                        return Ok(Some(TrackKind::Video(init)));
+                    }
+                }
+                b"mp4a" => {
+                    if let Some(init) = self.parse_mp4a_entry(content) {
+                        return Ok(Some(TrackKind::Audio(init)));
                     }
                 }
                 _ => {}
             }
         }
         Ok(None)
+    }
+
+    /// Parses an `mp4a` (AAC) sample entry for its rate and channel count.
+    ///
+    /// AudioSampleEntry is 6 reserved + 2 data-reference + version/revision/
+    /// vendor, then `channelcount` at offset 16, then `samplerate` at offset 24
+    /// as a 16.16 fixed point. The AAC `esds` (the AudioSpecificConfig) is not
+    /// read: the decoder builds an ADTS header from the rate and channels
+    /// instead, which says the same things.
+    fn parse_mp4a_entry(&mut self, data: &[u8]) -> Option<MseAudioInit> {
+        if data.len() < 28 {
+            return None;
+        }
+        let channels = u16::from_be_bytes([data[16], data[17]]) as u8;
+        let rate = u32::from_be_bytes([data[24], data[25], data[26], data[27]]) >> 16;
+        Some(MseAudioInit { codec: AudioCodec::Aac, sample_rate: rate.max(1), channels: channels.max(1) })
     }
 
     /// Parses an `avc1`/`avc3` sample entry to find the `avcC` box.
@@ -214,6 +315,7 @@ impl MseParser {
     }
 
     fn parse_traf(&self, data: &[u8]) -> Result<Option<TrackRun>> {
+        let mut track_id: u32 = 0;
         let mut base_dts: u64 = 0;
         let mut trun: Option<TrunData> = None;
         let mut default_sample_duration: u32 = 0;
@@ -223,7 +325,8 @@ impl MseParser {
         for (box_type, content) in iter_boxes(data) {
             match box_type {
                 b"tfhd" => {
-                    let (dur, size, flags) = parse_tfhd(content);
+                    let (id, dur, size, flags) = parse_tfhd(content);
+                    track_id = id;
                     default_sample_duration = dur;
                     default_sample_size = size;
                     default_sample_flags = flags;
@@ -236,6 +339,7 @@ impl MseParser {
 
         let trun = trun.ok_or_else(|| CoreError::network("traf had no trun"))?;
         Ok(Some(TrackRun {
+            track_id,
             base_dts,
             trun,
             default_sample_duration,
@@ -245,9 +349,19 @@ impl MseParser {
         }))
     }
 
-    fn extract_samples(&self, run: &TrackRun, mdat: &[u8], out: &mut Vec<MseSample>) -> Result<()> {
+    fn extract_samples(
+        &self,
+        run: &TrackRun,
+        mdat: &[u8],
+        out: &mut Vec<MseSample>,
+        audio_out: &mut Vec<MseAudioSample>,
+    ) -> Result<()> {
         let trun = &run.trun;
-        let timescale = self.timescale.max(1) as u64;
+        // Audio samples are raw access units; video ones need the Annex-B
+        // conversion. The track the `tfhd` named decides which, and each track
+        // keeps its own timescale.
+        let is_audio = self.audio_track_id == Some(run.track_id);
+        let timescale = if is_audio { self.audio_timescale.max(1) } else { self.video_timescale.max(1) } as u64;
 
         // trun.data_offset is from the start of the moof box. The mdat payload
         // begins at moof_start + moof_size + 8 (mdat header), so the offset
@@ -272,7 +386,9 @@ impl MseParser {
 
             if offset + size <= mdat.len() && size > 0 {
                 let sample = &mdat[offset..offset + size];
-                if let Some(annexb) = avcc_to_annexb(sample, self.nal_length_size) {
+                if is_audio {
+                    audio_out.push(MseAudioSample { data: sample.to_vec(), pts_us });
+                } else if let Some(annexb) = avcc_to_annexb(sample, self.nal_length_size) {
                     out.push(MseSample { data: annexb, pts_us, keyframe });
                 }
             }
@@ -456,6 +572,7 @@ fn avcc_to_annexb(data: &[u8], length_size: usize) -> Option<Vec<u8>> {
 // ── trun / tfhd / tfdt parsing ──────────────────────────────────────────────
 
 struct TrackRun {
+    track_id: u32,
     base_dts: u64,
     trun: TrunData,
     default_sample_duration: u32,
@@ -558,15 +675,17 @@ fn parse_trun(data: &[u8]) -> Result<TrunData> {
     })
 }
 
-fn parse_tfhd(data: &[u8]) -> (u32, u32, u32) {
+fn parse_tfhd(data: &[u8]) -> (u32, u32, u32, u32) {
     let (_, flags, body) = match full_box_header(data) {
         Some(t) => t,
-        None => return (0, 0, 0),
+        None => return (0, 0, 0, 0),
     };
 
     if body.len() < 4 {
-        return (0, 0, 0);
+        return (0, 0, 0, 0);
     }
+    // The `track_ID` is the first field, before the flagged optional ones.
+    let track_id = u32::from_be_bytes(body[0..4].try_into().unwrap());
     let mut pos = 4;
 
     if flags & 0x000002 != 0 {
@@ -593,10 +712,12 @@ fn parse_tfhd(data: &[u8]) -> (u32, u32, u32) {
         if pos + 4 <= body.len() {
             sflags = u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap());
         }
+
     }
 
-    (dur, size, sflags)
+    (track_id, dur, size, sflags)
 }
+
 
 fn parse_tfdt(data: &[u8]) -> u64 {
     let (version, _, body) = match full_box_header(data) {
@@ -607,6 +728,23 @@ fn parse_tfdt(data: &[u8]) -> u64 {
         u64::from_be_bytes(body[0..8].try_into().unwrap())
     } else if body.len() >= 4 {
         u32::from_be_bytes(body[0..4].try_into().unwrap()) as u64
+    } else {
+        0
+    }
+}
+
+/// Reads the `track_ID` out of a `tkhd` box.
+///
+/// Full box: version(1) + flags(3), then version 0 is creation(4) +
+/// modification(4) + track_ID(4). Only the version-0 layout matters: go2rtc's
+/// init segments are version 0.
+fn parse_tkhd(data: &[u8]) -> u32 {
+    let (_, _, body) = match full_box_header(data) {
+        Some(t) => t,
+        None => return 0,
+    };
+    if body.len() >= 16 {
+        u32::from_be_bytes(body[12..16].try_into().unwrap())
     } else {
         0
     }
