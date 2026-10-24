@@ -110,6 +110,10 @@ pub enum StreamEvent {
         /// hardware decoder refused the stream reports `false` here, whatever
         /// the preference asked for.
         hardware: bool,
+        /// True when this stream carries an audio track the build can decode.
+        /// The magnified bar offers its sound switch on this: a camera that is
+        /// heard from nothing should not show a button that does nothing.
+        audio: bool,
         /// Frames per second measured on RTP marker bits.
         fps: f32,
         bitrate_kbps: f32,
@@ -1215,8 +1219,14 @@ async fn run_session(
     // The camera's audio, when it carries a track the client receives. The
     // decoder is opened once here and fed only while this channel is the audible
     // one. A codec with no backend yet (AAC, until the FFmpeg path lands) fails
-    // at `configure`, and the channel simply plays no sound.
-    let mut audio_decoder = audio_track_decoder(&tracks);
+    // at `configure`, and the channel simply plays no sound. The sound travels
+    // interleaved with the picture on the TCP transport only, so a UDP session
+    // has none to hear whatever its SDP lists.
+    let mut audio_decoder = if transport == RtspTransport::Tcp {
+        audio_track_decoder(&tracks)
+    } else {
+        None
+    };
 
     // `a=framesize` is optional, but a decoder has to be sized before its first
     // picture arrives: Android builds its image reader to that size, and a
@@ -1274,6 +1284,7 @@ async fn run_session(
             width,
             height,
             hardware: uses_hardware(&decoder),
+            audio: audio_decoder.is_some(),
             fps: 0.0,
             bitrate_kbps: 0.0,
             total_frames: 0,
@@ -1731,6 +1742,7 @@ async fn run_session(
                     width,
                     height,
                     hardware: uses_hardware(&decoder),
+                    audio: audio_decoder.is_some(),
                     fps: window_frames as f32 / seconds,
                     bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
                     total_frames,
@@ -1891,6 +1903,7 @@ async fn run_mjpeg_session(
             width,
             height,
             hardware: uses_hardware(&decoder),
+            audio: false,
             fps: 0.0,
             bitrate_kbps: 0.0,
             total_frames: 0,
@@ -1967,6 +1980,7 @@ async fn run_mjpeg_session(
                     width,
                     height,
                     hardware: uses_hardware(&decoder),
+                    audio: false,
                     fps,
                     bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
                     total_frames,
@@ -2325,6 +2339,7 @@ async fn run_ws_session(
                     width,
                     height,
                     hardware: uses_hardware(&decoder),
+                    audio: audio_decoder.is_some(),
                     fps: 0.0,
                     bitrate_kbps: 0.0,
                     total_frames: 0,
@@ -2410,6 +2425,7 @@ async fn run_ws_session(
                     width,
                     height,
                     hardware: uses_hardware(&decoder),
+                    audio: audio_decoder.is_some(),
                     fps,
                     bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
                     total_frames,

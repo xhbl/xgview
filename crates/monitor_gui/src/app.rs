@@ -165,6 +165,9 @@ pub struct ChannelUi {
     pub codec: Option<String>,
     /// True while this channel's picture is decoded on the GPU.
     pub hardware: bool,
+    /// True once the stream has proved to carry an audio track this build can
+    /// decode. The magnified bar's sound switch is offered on it.
+    pub audio: bool,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub fps: f32,
@@ -183,6 +186,7 @@ impl Default for ChannelUi {
             stream: None,
             codec: None,
             hardware: false,
+            audio: false,
             width: None,
             height: None,
             fps: 0.0,
@@ -208,12 +212,13 @@ impl ChannelUi {
                     self.total_frames = 0;
                 }
             }
-            StreamEvent::Stats { stream, codec, width, height, hardware, fps, bitrate_kbps, total_frames, .. } => {
+            StreamEvent::Stats { stream, codec, width, height, hardware, audio, fps, bitrate_kbps, total_frames, .. } => {
                 self.stream = Some(stream);
                 if codec.is_some() {
                     self.codec = codec;
                 }
                 self.hardware = hardware;
+                self.audio = audio;
                 if width.is_some() {
                     self.width = width;
                 }
@@ -7009,14 +7014,27 @@ impl XgViewApp {
         monitor_i18n::tr(aspect.label())
     }
 
+    /// Whether the magnified camera has sound for the bar to switch.
+    ///
+    /// A camera that has not reported yet counts as having it: the switch shows
+    /// with the picture and only goes away once the stream itself says it
+    /// carries no audio track, so it never flickers in and out while a session
+    /// is coming up.
+    fn magnified_has_audio(&self) -> bool {
+        self.scheduler
+            .zoom()
+            .map_or(false, |index| self.channels.get(&index).map_or(true, |channel| channel.audio))
+    }
+
     /// The controls the magnified bar carries, in walk order.
     ///
-    /// The picture fit is always there. The sound switch is compiled but hidden
-    /// until audio lands in 1.5: `tilebar::SOUND` turns it on there, and this is
-    /// the one place the bar's controls are assembled.
+    /// The picture fit is always there, the sound switch only for a camera that
+    /// has sound: `tilebar::SOUND` switches the feature on, this decides whether
+    /// the camera in the viewport earns a button for it, and this is the one
+    /// place the bar's controls are assembled.
     fn tile_bar_controls<'a>(&self, label: &'a str) -> Vec<tilebar::Control<'a>> {
         let mut controls = vec![tilebar::Control::Text(label)];
-        if tilebar::SOUND {
+        if tilebar::SOUND && self.magnified_has_audio() {
             controls.push(tilebar::Control::Icon(if self.sound_on {
                 Icon::Sound
             } else {
@@ -7027,19 +7045,18 @@ impl XgViewApp {
     }
 
     /// Answers the control the bar is on: the picture fit, or the sound switch
-    /// when [`tilebar::SOUND`] is on.
+    /// when [`tilebar::SOUND`] is on and the camera has sound to switch.
     ///
     /// The fit this writes is the magnified viewport's own: it is kept per
     /// camera, and the wall's landscape and portrait fits - the pair the settings
     /// panel and the portrait aspect picker write - are not touched. Until the
     /// first press the fit is the camera's own ratio, `Original`, which is where
-    /// the walk starts. The sound branch is kept for the release that adds audio
-    /// (1.5); it flips `sound_on`, which is not drawn while the control is hidden.
+    /// the walk starts.
     fn tile_bar_activate(&mut self) {
         // The second control is the sound switch when it is shown; the first
         // steps the picture fit. The index is the one the press or the walk left
         // the bar on.
-        if self.tile_bar.focus() == 1 {
+        if self.tile_bar.focus() == 1 && tilebar::SOUND && self.magnified_has_audio() {
             self.sound_on = !self.sound_on;
             self.config.sound_on = self.sound_on;
             self.apply_audio();
