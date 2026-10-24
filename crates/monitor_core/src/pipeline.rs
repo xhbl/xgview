@@ -461,21 +461,14 @@ impl Endpoint {
 
     /// Asks the same address for the camera's back channel, or stops asking.
     ///
-    /// The request has to be on the URL, not only on the `DESCRIBE`: go2rtc
-    /// reads the query of the **first** request of the session - which is the
-    /// `OPTIONS` this client opens with - and answers the `DESCRIBE` from it, so
-    /// a `backchannel=1` added to that one request alone is never seen.
+    /// Only the intent is recorded here; where the parameter goes on the wire is
+    /// the RTSP client's business, because it is the client that knows which
+    /// request each server reads it from and that it must be gone again before
+    /// the `DESCRIBE`. Appending it to the endpoint's URL instead put it on
+    /// every request - a direct Foscam answers `404` to the `DESCRIBE` that way
+    /// - and that is a picture lost for the sake of a switch.
     fn with_talk(mut self, on: bool) -> Self {
         self.talk = on;
-        if !on {
-            self.uri = crate::rtsp::strip_query_flag(&self.uri, "backchannel");
-            return self;
-        }
-        if self.uri.to_ascii_lowercase().starts_with("rtsp") && !self.uri.contains("backchannel=") {
-            self.uri = crate::rtsp::append_query_flag(&self.uri, "backchannel=1");
-        } else {
-            self.talk = self.uri.contains("backchannel=");
-        }
         self
     }
 }

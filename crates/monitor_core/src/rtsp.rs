@@ -765,6 +765,14 @@ pub struct RtspClient {
     /// `a=sendonly` audio media a camera or go2rtc offers when the session asks
     /// for it. `None` when the session did not ask, or the server offered none.
     talk_interleaved: Option<(u8, u8)>,
+    /// Whether this session carries `Require: www.onvif.org/ver20/backchannel`
+    /// on the requests that follow the `DESCRIBE`.
+    ///
+    /// A camera that answered the header with a track is sent it again on the
+    /// talk-back `SETUP` and on `PLAY`, as ONVIF Profile T expects; one that
+    /// refused it - and was asked plainly instead - must not hear it again, or
+    /// the `PLAY` is refused too and the picture goes with it.
+    backchannel_require: bool,
     /// Address of the RTSP server. With the UDP transport the TCP connection
     /// carries only the control plane, and the media is delivered here.
     peer_addr: Option<SocketAddr>,
@@ -841,6 +849,7 @@ impl RtspClient {
             interleaved: None,
             audio_interleaved: None,
             talk_interleaved: None,
+            backchannel_require: false,
             peer_addr,
             rtp: None,
             rtcp: None,
@@ -1215,9 +1224,14 @@ impl RtspClient {
                 status = response.status,
                 "the camera does not take the back-channel header, asking plainly"
             );
+            // The session carries no header from here on: repeating it on the
+            // `PLAY` would only be refused the same way, and take the picture
+            // with it.
+            self.backchannel_require = false;
             return self.describe().await;
         }
         let response = self.expect_success(response, "DESCRIBE")?;
+        self.backchannel_require = true;
         if let Some(base) = response.header("Content-Base") {
             self.content_base = Some(base.to_string());
         }
@@ -1233,16 +1247,23 @@ impl RtspClient {
     /// channels by track index, so a track that follows another is framed on
     /// `2-3` even when `0-1` was requested. Without an `interleaved` parameter
     /// in the answer there is nothing to honour and the requested pair stands.
-    async fn setup_interleaved_pair(&mut self, control: &str, rtp_channel: u8) -> Result<(u8, u8)> {
+    async fn setup_interleaved_pair(
+        &mut self,
+        control: &str,
+        rtp_channel: u8,
+        require: bool,
+    ) -> Result<(u8, u8)> {
         let track_uri = self.resolve_control(control);
         let transport = format!(
             "RTP/AVP/TCP;unicast;interleaved={}-{}",
             rtp_channel,
             rtp_channel + 1
         );
-        let response = self
-            .request("SETUP", &track_uri, &[("Transport", transport)], None)
-            .await?;
+        let mut headers = vec![("Transport", transport)];
+        if require {
+            headers.push(("Require", BACKCHANNEL_REQUIRE.to_string()));
+        }
+        let response = self.request("SETUP", &track_uri, &headers, None).await?;
         self.update_session(&response);
         let response = self.expect_success(response, "SETUP")?;
         let (rtp, rtcp) = response
@@ -1259,7 +1280,7 @@ impl RtspClient {
     /// The pair returned is the one the server confirmed in the answer, which
     /// is not necessarily the one requested - see [`RtspClient::interleaved`].
     pub async fn setup_interleaved(&mut self, control: &str, rtp_channel: u8) -> Result<u8> {
-        let (rtp, rtcp) = self.setup_interleaved_pair(control, rtp_channel).await?;
+        let (rtp, rtcp) = self.setup_interleaved_pair(control, rtp_channel, false).await?;
         self.interleaved = Some((rtp, rtcp));
         Ok(rtp)
     }
@@ -1267,7 +1288,7 @@ impl RtspClient {
     /// `SETUP` the audio track on its own interleaved pair, stored apart from
     /// the video's so that [`RtspClient::read_media`] can tell the two apart.
     pub async fn setup_audio_interleaved(&mut self, control: &str, rtp_channel: u8) -> Result<u8> {
-        let (rtp, rtcp) = self.setup_interleaved_pair(control, rtp_channel).await?;
+        let (rtp, rtcp) = self.setup_interleaved_pair(control, rtp_channel, false).await?;
         self.audio_interleaved = Some((rtp, rtcp));
         Ok(rtp)
     }
@@ -1278,7 +1299,9 @@ impl RtspClient {
     /// from this pair. Its channel is kept apart from the video's and from the
     /// camera's own audio, which is what [`RtspClient::read_media`] routes by.
     pub async fn setup_talk_interleaved(&mut self, control: &str, rtp_channel: u8) -> Result<u8> {
-        let (rtp, rtcp) = self.setup_interleaved_pair(control, rtp_channel).await?;
+        let (rtp, rtcp) = self
+            .setup_interleaved_pair(control, rtp_channel, self.backchannel_require)
+            .await?;
         self.talk_interleaved = Some((rtp, rtcp));
         Ok(rtp)
     }
@@ -1330,11 +1353,20 @@ impl RtspClient {
     }
 
     /// `PLAY`. `range` defaults to `npt=0.000-` (live).
+    ///
+    /// A session whose `DESCRIBE` carried the back-channel header carries it
+    /// here too: ONVIF Profile T asks for it on the presentation as well, and a
+    /// camera that answered it once expects it again before it opens the
+    /// `sendonly` media. The session that fell back to a plain `DESCRIBE` sends
+    /// nothing, because that camera refused the header and would refuse the
+    /// whole `PLAY` with it.
     pub async fn play(&mut self, range: &str) -> Result<()> {
         let uri = self.session_uri();
-        let response = self
-            .request("PLAY", &uri, &[("Range", range.to_string())], None)
-            .await?;
+        let mut headers = vec![("Range", range.to_string())];
+        if self.backchannel_require {
+            headers.push(("Require", BACKCHANNEL_REQUIRE.to_string()));
+        }
+        let response = self.request("PLAY", &uri, &headers, None).await?;
         self.update_session(&response);
         self.expect_success(response, "PLAY")?;
         self.state = RtspSessionState::Playing;
@@ -1413,24 +1445,48 @@ impl RtspClient {
     /// `OPTIONS` URL and taken off again before the `DESCRIBE`: a camera that
     /// does not know it treats the path as a different stream and answers `404`,
     /// which would otherwise cost the picture on every camera without go2rtc.
+    ///
+    /// A URL handed in that already carries the flag is cleaned the same way -
+    /// the parameter belongs to the probe and to nothing after it, whoever put
+    /// it there.
     pub async fn start_with_options(
         &mut self,
         transport: RtspTransport,
         backchannel: bool,
     ) -> Result<Vec<SdpTrack>> {
-        let plain_url = self.url.clone();
-        if backchannel && !plain_url.request_uri().contains("backchannel=") {
-            let uri = append_query_flag(&plain_url.request_uri(), "backchannel=1");
-            self.url = RtspUrl::parse(&uri)?;
+        self.backchannel_require = false;
+        let clean_uri = strip_query_flag(&self.url.request_uri(), "backchannel");
+        let probe_added = backchannel && !self.url.request_uri().contains("backchannel=");
+        if backchannel {
+            let probe_uri = append_query_flag(&clean_uri, "backchannel=1");
+            self.url = RtspUrl::parse(&probe_uri)?;
         }
         // Each step is stamped before it is waited on, so that a deadline which
         // fires somewhere in here can say which request was not answered.
         self.stage = Some(RtspStage::Options);
-        let options = self.options().await;
+        let probe = self.options().await;
         // The probe is over, whatever it answered: the path the camera knows is
         // the one it was given, and go2rtc has already kept the query.
-        self.url = plain_url;
-        options?;
+        self.url = RtspUrl::parse(&clean_uri)?;
+        match probe {
+            Ok(_) => {}
+            // A camera may refuse the parameter on the path itself - a `404`
+            // for a stream it does not serve under that name. That is a status,
+            // not a dead connection: ask again on the clean URL and let the
+            // `DESCRIBE` carry the question. A network failure is the caller's,
+            // which reconnects.
+            Err(CoreError::Rtsp(err)) if backchannel && probe_added => {
+                tracing::debug!(
+                    target: "xgview::rtsp",
+                    error = %err,
+                    "the camera refused the back-channel parameter on the path, asking again without it"
+                );
+                self.challenge = None;
+                self.stage = Some(RtspStage::Options);
+                self.options().await?;
+            }
+            Err(err) => return Err(err),
+        }
         self.stage = Some(RtspStage::Describe);
         let sdp = if backchannel {
             self.describe_backchannel().await?
@@ -2255,6 +2311,10 @@ a=sendonly\r\n";
                         .cloned()
                         .unwrap_or_default();
                     let pair = if transport.contains("interleaved=4-5") { "4-5" } else { "0-1" };
+                    // The talk-back track's `SETUP` repeats the header the
+                    // `DESCRIBE` was answered with; the video's does not.
+                    let require = request.iter().any(|line| line.contains("ver20/backchannel"));
+                    assert_eq!(require, pair == "4-5", "SETUP carried the wrong headers: {request:?}");
                     write_response(
                         &mut write_half,
                         &format!(
@@ -2264,6 +2324,8 @@ a=sendonly\r\n";
                     )
                     .await;
                 } else if method.starts_with("PLAY") {
+                    // Profile T asks for the header on the presentation too.
+                    assert!(request.iter().any(|line| line.contains("ver20/backchannel")));
                     write_response(
                         &mut write_half,
                         "RTSP/1.0 200 OK\r\nCSeq: 4\r\nSession: 1234\r\n\r\n",
@@ -2335,6 +2397,8 @@ a=sendonly\r\n";
                     )
                     .await;
                 } else if method.starts_with("PLAY") {
+                    // The header was refused, so it must not come back here.
+                    assert!(!request.iter().any(|line| line.contains("ver20/backchannel")));
                     write_response(
                         &mut write_half,
                         "RTSP/1.0 200 OK\r\nCSeq: 5\r\nSession: 1234\r\n\r\n",
@@ -2355,6 +2419,202 @@ a=sendonly\r\n";
         assert!(!tracks.iter().any(|track| track.is_audio() && track.is_sendonly()));
         assert_eq!(client.talk_rtp_channel(), None);
         assert_eq!(server.await.unwrap(), 1);
+    }
+
+    /// A caller may hand the flag in already - the channel manager did, before
+    /// this was moved into the client - and it must not change where the
+    /// parameter ends up: the probe asks once with it, and every request after
+    /// it is sent to the clean path. A camera that does not serve the parameter
+    /// answers `404` to a `DESCRIBE` that carries it, which is the picture gone.
+    #[tokio::test]
+    async fn a_url_that_already_carries_the_flag_is_cleaned_before_the_describe() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let sdp = "v=0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=control:track1\r\n";
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            loop {
+                let request = read_request(&mut reader).await;
+                if request.is_empty() {
+                    break;
+                }
+                let method = request[0].clone();
+                if method.starts_with("OPTIONS") {
+                    assert!(
+                        method.contains("/videoMain?backchannel=1"),
+                        "the probe must carry the flag: {method}"
+                    );
+                    write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
+                } else if method.starts_with("DESCRIBE") {
+                    assert_eq!(method, format!("DESCRIBE rtsp://127.0.0.1:{port}/videoMain RTSP/1.0"));
+                    write_response(
+                        &mut write_half,
+                        &format!(
+                            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
+                             Content-Length: {}\r\n\r\n{sdp}",
+                            sdp.len()
+                        ),
+                    )
+                    .await;
+                } else if method.starts_with("SETUP") {
+                    assert_eq!(
+                        method,
+                        format!("SETUP rtsp://127.0.0.1:{port}/videoMain/track1 RTSP/1.0")
+                    );
+                    write_response(
+                        &mut write_half,
+                        "RTSP/1.0 200 OK\r\nCSeq: 3\r\nSession: 1234\r\n\
+                         Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+                    )
+                    .await;
+                } else if method.starts_with("PLAY") {
+                    assert_eq!(method, format!("PLAY rtsp://127.0.0.1:{port}/videoMain RTSP/1.0"));
+                    write_response(
+                        &mut write_half,
+                        "RTSP/1.0 200 OK\r\nCSeq: 4\r\nSession: 1234\r\n\r\n",
+                    )
+                    .await;
+                    break;
+                } else {
+                    write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 5\r\n\r\n").await;
+                }
+            }
+        });
+
+        let url = format!("rtsp://127.0.0.1:{port}/videoMain?backchannel=1");
+        let mut client = RtspClient::connect(&url).await.unwrap();
+        let tracks = client.start_with_options(RtspTransport::Tcp, true).await.unwrap();
+        assert!(tracks.iter().any(|track| track.is_video()));
+        server.await.unwrap();
+    }
+
+    /// A camera may refuse the parameter on the path itself - a `404` for the
+    /// `OPTIONS` that carries it. That costs a round trip, not the session: the
+    /// probe is repeated on the clean URL, and the header asks the question
+    /// instead. Neither refusal may cost the picture.
+    #[tokio::test]
+    async fn a_camera_that_refuses_the_back_channel_parameter_on_the_path_still_plays() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let sdp = "v=0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=control:realvideo\r\n";
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut clean_options = 0;
+            loop {
+                let request = read_request(&mut reader).await;
+                if request.is_empty() {
+                    break;
+                }
+                let method = request[0].clone();
+                if method.starts_with("OPTIONS") {
+                    if method.contains("backchannel=1") {
+                        write_response(
+                            &mut write_half,
+                            "RTSP/1.0 404 Stream Not Found\r\nCSeq: 1\r\n\r\n",
+                        )
+                        .await;
+                    } else {
+                        clean_options += 1;
+                        write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 2\r\n\r\n").await;
+                    }
+                } else if method.starts_with("DESCRIBE") {
+                    if request.iter().any(|line| line.contains("ver20/backchannel")) {
+                        write_response(
+                            &mut write_half,
+                            "RTSP/1.0 551 Option not supported\r\nCSeq: 3\r\n\r\n",
+                        )
+                        .await;
+                    } else {
+                        write_response(
+                            &mut write_half,
+                            &format!(
+                                "RTSP/1.0 200 OK\r\nCSeq: 4\r\nContent-Type: application/sdp\r\n\
+                                 Content-Length: {}\r\n\r\n{sdp}",
+                                sdp.len()
+                            ),
+                        )
+                        .await;
+                    }
+                } else if method.starts_with("SETUP") {
+                    write_response(
+                        &mut write_half,
+                        "RTSP/1.0 200 OK\r\nCSeq: 5\r\nSession: 1234\r\n\
+                         Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+                    )
+                    .await;
+                } else if method.starts_with("PLAY") {
+                    write_response(
+                        &mut write_half,
+                        "RTSP/1.0 200 OK\r\nCSeq: 6\r\nSession: 1234\r\n\r\n",
+                    )
+                    .await;
+                    break;
+                } else {
+                    write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 7\r\n\r\n").await;
+                }
+            }
+            clean_options
+        });
+
+        let url = format!("rtsp://127.0.0.1:{port}/videoMain");
+        let mut client = RtspClient::connect(&url).await.unwrap();
+        let tracks = client.start_with_options(RtspTransport::Tcp, true).await.unwrap();
+        assert!(tracks.iter().any(|track| track.is_video()));
+        assert_eq!(client.talk_rtp_channel(), None);
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    /// **The assumption the whole back channel rests on, and the test that
+    /// notices when it stops holding.**
+    ///
+    /// `?backchannel=1` rides on the first request of the connection because
+    /// **go2rtc** keeps the session URL from it (`internal/rtsp/rtsp.go`, `c.URL`
+    /// on the `OPTIONS`) - an implementation detail, not something RTSP or ONVIF
+    /// promises. A go2rtc upgrade that reads the query somewhere else, or only
+    /// from the `DESCRIBE`, would leave every restreamed camera without a back
+    /// channel and nothing in the viewer to say why. This test connects to a
+    /// restream and asks; it is `#[ignore]` because it needs that host, and is
+    /// run by hand:
+    ///
+    /// ```text
+    /// XGVIEW_TALK_TEST_URL=rtsp://192.168.17.88:8554/cam_doorbell_1 \
+    /// XGVIEW_TALK_TEST_USER=admin XGVIEW_TALK_TEST_PASSWORD=... \
+    /// cargo test -p monitor_core --lib the_go2rtc_restream -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "needs the reference go2rtc on the network"]
+    async fn the_go2rtc_restream_still_offers_the_back_channel() {
+        let url = std::env::var("XGVIEW_TALK_TEST_URL").expect(
+            "set XGVIEW_TALK_TEST_URL to a go2rtc restream, e.g. \
+             rtsp://192.168.17.88:8554/cam_doorbell_1",
+        );
+        let credentials = std::env::var("XGVIEW_TALK_TEST_USER")
+            .ok()
+            .map(|user| (user, std::env::var("XGVIEW_TALK_TEST_PASSWORD").unwrap_or_default()));
+        let mut client = RtspClient::connect_with_auth(&url, credentials)
+            .await
+            .expect("connecting to the go2rtc restream");
+        let tracks = client
+            .start_with_options(RtspTransport::Tcp, true)
+            .await
+            .expect("opening a session with the back channel");
+        assert!(
+            tracks.iter().any(|track| track.is_audio() && track.is_sendonly()),
+            "back-channel probe failed for {url}: the answer carries no sendonly audio \
+             media. go2rtc reads `backchannel=1` off the first request of the connection, \
+             which is an implementation detail - an upgrade may have moved it. See \
+             docs/DevMemo.md section 34."
+        );
+        println!("back channel offered: {tracks:?}");
+        client.teardown().await;
     }
 
     /// Full UDP handshake against a minimal RTSP server: the client has to bind

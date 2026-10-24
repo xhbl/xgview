@@ -112,6 +112,7 @@ this bug; they are noise once the session is understood.
 | FOSCAM R2 V4 | Sends around thirty pictures before its first `IDR`. A decoder rejects every one of them for want of a reference frame, so the first second of a session is a burst of failures that clears itself — see §4 for what that does to libavcodec's output. |
 | Reolink doorbell | Does not really serve four concurrent sessions. With four open the stream degrades to a picture every six to eight seconds where it runs at fifteen, and the fourth suffers first. Nothing is refused and nothing is reported — see §8. |
 | FOSCAM MCS2021, and one unbranded `IP-Camera` | Declare the Baseline profile *without* `constraint_set1_flag`, a declaration the Direct3D 11 decoder has no mode for. Both streams of both cameras decode on the CPU until the flag is set for them — see §7. |
+| FOSCAM (北过道, `192.168.27.42`) | Answers the ONVIF Profile T probe with an `a=sendonly` `audioback` media (`PCMU/8000`) and accepts the talk-back `SETUP` and 150 written packets, but nothing comes out of its speaker — direct and through go2rtc alike. The media is advertised; the hardware does not play it. The vendor's own two-way audio is probably its HTTP path rather than this one, so a back channel that answers is not proof of a speaker that works. |
 
 ---
 
@@ -2248,18 +2249,48 @@ when there is one, the `SETUP` control URI must carry none, or the track is
 looked up under the wrong id and the answer names another track's channels.
 `RtspClient` therefore puts the flag on the `OPTIONS` URL and only there, and
 `resolve_control` strips the query from the base before joining a relative
-control.
+control. That this still holds is not something RTSP promises, so it is checked
+against a live restream rather than assumed: `the_go2rtc_restream_still_offers_the_back_channel`
+is an `#[ignore]`d test that connects to a go2rtc host named by
+`XGVIEW_TALK_TEST_URL` and asserts the answer carries a `sendonly` audio media.
+It is the test to run after a go2rtc upgrade, and its failure says the probe
+assumption broke, not that the picture did.
+
+**The header is session state, not a one-off.** `Require` is sent on the
+`DESCRIBE`; a camera that took it is sent it again on the talk-back `SETUP` and
+on the `PLAY`, because Profile T asks for it on the presentation as well and a
+device expecting it there would otherwise open no back channel. A camera that
+refused it is asked once more plainly, and the session then carries no header
+at all - repeating what was already rejected would take the `PLAY` down and the
+picture with it. `RtspClient::backchannel_require` holds which of the two this
+session is. The `OPTIONS` that carries the query is tolerated the same way: a
+`404` there is retried on the clean URL, and only a network failure is left to
+the reconnect, so no part of the probe can end a session.
 
 **The query is not free on a camera.** The first version left it on every
 request and a Foscam direct (`192.168.27.40:88/videoMain`) answered `DESCRIBE`
 with `404 Stream Not Found` - the parameter made the path a stream it does not
 serve - so magnifying that camera lost the picture entirely. The flag is now
 taken off again before the `DESCRIBE`, and the back channel is asked for the way
-a camera reads it, with the `Require` header. A camera that will not take the
-header either - it answers `551 Option not supported`, or `400` / `404` - is
-asked once more plainly, without the header, and the session goes on with no
-back channel: the probe is allowed to fail, the picture is not. What the SDP
-says is the answer, whichever request produced it.
+a camera reads it, with the `Require` header.
+
+**Who puts the flag on the URL is part of the bug.** It came back a second time,
+in the magnified view only, and the cause was that the channel manager appended
+`backchannel=1` to the endpoint's own URL before opening the session: the client
+then took the parameter for the caller's and stripped nothing, so it rode on
+`DESCRIBE`, `SETUP` and `PLAY` and every direct camera but the one that tolerates
+it answered `404`. The lesson is where the knowledge belongs - **only the RTSP
+client knows which request reads the query and that it must be gone afterwards**,
+so it both adds and removes it, and a URL that arrives carrying it is cleaned the
+same way (`a_url_that_already_carries_the_flag_is_cleaned_before_the_describe`).
+`Endpoint::talk` now carries the intent alone. The probe cost an afternoon
+because the stand-alone probe tool passed a clean URL and therefore never
+reproduced it: a probe has to take the same shape of input the product does.
+
+A camera that will not take the header either - it answers `551 Option not
+supported`, or `400` / `404` - is asked once more plainly, without the header,
+and the session goes on with no back channel: the probe is allowed to fail, the
+picture is not. What the SDP says is the answer, whichever request produced it.
 
 **Sending is a clock, not a burst.** A 20 ms frame at 8 kHz mono is 160 samples:
 the worker takes one from the queue every 20 ms, encodes it as G.711 (PCMU or
