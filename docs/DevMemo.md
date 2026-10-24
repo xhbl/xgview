@@ -2338,6 +2338,16 @@ pushed samples read peaks of 150-300 in a quiet room (so real audio, not a dead
 silent stream). The session around it logged `talk-back track set up channel=4
 codec=PCMU`. The SHIELD, which has no microphone, says so instead.
 
+**A call takes the bar over.** While the microphone is open the strip carries one
+control - a red square with the handset on it, the shape a phone draws on the key
+that ends a call - and nothing else can be pressed until it is pressed. The bar's
+idle clock is suspended for as long as the call is up, because the one control
+that ends it would otherwise leave with the strip eight seconds in; hanging up
+puts the fit, the sound switch and the microphone back and the clock resumes
+from that press. Enter on the remote is that press, and the selection is put back
+to the first control when the call starts, since the fit it stood on before has
+gone.
+
 **The bar follows the viewport, whichever way the viewport moved.** Leaving the
 magnification tears down the back channel and magnifying again reopens it, so the
 switch disappears and returns with the session - and for a moment after

@@ -93,6 +93,11 @@ pub enum Control<'a> {
     Text(&'a str),
     /// A shape, drawn square.
     Icon(Icon),
+    /// The one control a call has: a red button carrying the handset that ends
+    /// the talk-back. It takes over the whole bar while the viewer is talking,
+    /// so that hanging up is one press and nothing else can be pressed by
+    /// mistake.
+    Hangup,
 }
 
 /// How much room a word asks for, measured in the font it is drawn with.
@@ -120,7 +125,9 @@ impl Control<'_> {
     pub fn width(&self, ctx: &egui::Context) -> f32 {
         match self {
             Control::Text(text) => text_width(ctx, text),
-            Control::Icon(_) => icon_width(),
+            // The handset is a square button like the icons beside it, so a bar
+            // holding only it is one square wide.
+            Control::Icon(_) | Control::Hangup => icon_width(),
         }
     }
 }
@@ -410,7 +417,12 @@ pub fn paint(
     );
     for (index, rect) in layout.buttons.iter().enumerate() {
         let selected = index == focus;
-        if selected {
+        let hangup = matches!(controls.get(index), Some(Control::Hangup));
+        // The backdrop is painted before the focus ring, so that the ring of the
+        // call's red button is drawn over its colour rather than under it.
+        if hangup {
+            painter.rect_filled(*rect, CornerRadius::same(CONTROL_RADIUS), theme::ERROR);
+        } else if selected {
             painter.rect_filled(*rect, CornerRadius::same(CONTROL_RADIUS), theme::FOCUS_FILL);
         } else if hover == Some(index) {
             painter.rect_filled(*rect, CornerRadius::same(CONTROL_RADIUS), Color32::from_white_alpha(22));
@@ -431,6 +443,14 @@ pub fn paint(
             Some(Control::Icon(icon)) => {
                 let glyph = Rect::from_center_size(rect.center(), vec2(BUTTON_H * 0.5, BUTTON_H * 0.5));
                 icons::paint_turned(&clip, glyph, *icon, Stroke::new(1.6_f32, theme::TEXT), rotated);
+            }
+            Some(Control::Hangup) => {
+                // White on the red: the handset is the label, and the colour is
+                // the state - a call is up, and this is the way out of it.
+                let side = BUTTON_H * 0.62;
+                let glyph = Rect::from_center_size(rect.center(), vec2(side, side));
+                let stroke = Stroke::new(1.8_f32, Color32::WHITE);
+                icons::paint_turned(&clip, glyph, Icon::Hangup, stroke, rotated);
             }
             None => {}
         }
@@ -535,6 +555,19 @@ mod tests {
             (level.bar.width() - (2.0 * PAD + TEXT_MIN + GAP + BUTTON_H)).abs() < 0.01,
             "the strip is the two controls and the gaps"
         );
+    }
+
+    /// The call's handset is a square button like the icons, so a bar holding
+    /// only it is one square wide - the whole strip while a call is up.
+    #[test]
+    fn the_hangup_control_is_one_square() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |_| {});
+        assert!((Control::Hangup.width(&ctx) - icon_width()).abs() < 0.01);
+
+        let call = placed(landscape(), false, Dock::Top, &[Control::Hangup.width(&ctx)]);
+        assert_eq!(call.buttons.len(), 1);
+        assert!((call.bar.width() - (2.0 * PAD + BUTTON_H)).abs() < 0.01);
     }
 
     /// A word's control is as wide as the word and its padding, and no wider or

@@ -53,8 +53,8 @@ pub enum Icon {
     Mute,
     /// Talk-back idle: a microphone on its stand.
     Mic,
-    /// Talking: the same microphone with sound leaving it.
-    Talk,
+    /// End the call: a handset put down, the shape a phone's hang-up key carries.
+    Hangup,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -331,15 +331,20 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
             painter.add(line(&[at(0.50, 0.74), at(0.50, 0.92)]));
             painter.add(line(&[at(0.34, 0.92), at(0.66, 0.92)]));
         }
-        Icon::Talk => {
-            // The same microphone, with sound leaving it on both sides.
-            let capsule = Rect::from_min_max(at(0.36, 0.06), at(0.64, 0.56));
-            painter.rect_stroke(capsule, CornerRadius::same(6), stroke, StrokeKind::Inside);
-            painter.add(line(&[at(0.30, 0.44), at(0.30, 0.56), at(0.50, 0.70), at(0.70, 0.56), at(0.70, 0.44)]));
-            painter.add(line(&[at(0.50, 0.70), at(0.50, 0.88)]));
-            painter.add(line(&[at(0.34, 0.88), at(0.66, 0.88)]));
-            painter.add(line(&[at(0.10, 0.26), at(0.14, 0.46)]));
-            painter.add(line(&[at(0.90, 0.26), at(0.86, 0.46)]));
+        Icon::Hangup => {
+            // The handset laid down: a bar with the two cups at its ends, the
+            // shape a phone draws on the key that ends a call. It is drawn
+            // wider than tall on purpose - it is one stroke, and a square of it
+            // would read as a bracket.
+            painter.add(line(&[
+                at(0.12, 0.64),
+                at(0.12, 0.46),
+                at(0.26, 0.34),
+                at(0.50, 0.30),
+                at(0.74, 0.34),
+                at(0.88, 0.46),
+                at(0.88, 0.64),
+            ]));
         }
     }
 }

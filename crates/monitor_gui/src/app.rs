@@ -1837,6 +1837,11 @@ impl XgViewApp {
         self.talking = on;
         self.talk_index = on.then(|| self.scheduler.zoom()).flatten();
         self.manager.talk().set_talking(on);
+        // The bar holds one control while the call is up, so the remote's place
+        // in it is the first - the fit it was on before has gone.
+        if on {
+            self.tile_bar.set_focus(0);
+        }
     }
 
     fn set_fullscreen(&mut self, ctx: &egui::Context, enabled: bool) {
@@ -7102,9 +7107,15 @@ impl XgViewApp {
 
     /// The controls the magnified bar carries, in walk order.
     ///
-    /// The picture fit is always there; the sound switch for a camera that has
-    /// sound, the microphone for one that offers a back channel.
+    /// A call in progress takes the bar over: it carries one control, the red
+    /// handset that ends it, and nothing else can be pressed while the
+    /// microphone is open. Otherwise the picture fit is always there; the sound
+    /// switch for a camera that has sound, the microphone for one that offers a
+    /// back channel.
     fn tile_bar_controls<'a>(&self, label: &'a str) -> Vec<tilebar::Control<'a>> {
+        if self.talking {
+            return vec![tilebar::Control::Hangup];
+        }
         let mut controls = vec![tilebar::Control::Text(label)];
         if tilebar::SOUND && self.magnified_has_audio() {
             controls.push(tilebar::Control::Icon(if self.sound_on {
@@ -7114,11 +7125,7 @@ impl XgViewApp {
             }));
         }
         if self.magnified_has_backchannel() {
-            controls.push(tilebar::Control::Icon(if self.talking {
-                Icon::Talk
-            } else {
-                Icon::Mic
-            }));
+            controls.push(tilebar::Control::Icon(Icon::Mic));
         }
         controls
     }
@@ -7129,8 +7136,9 @@ impl XgViewApp {
         self.tile_bar_controls("").len()
     }
 
-    /// Answers the control the bar is on: the picture fit, the sound switch
-    /// when the camera has sound, or the microphone when it has a back channel.
+    /// Answers the control the bar is on: the handset that ends a call, the
+    /// picture fit, the sound switch when the camera has sound, or the
+    /// microphone when it has a back channel.
     ///
     /// The fit this writes is the magnified viewport's own: it is kept per
     /// camera, and the wall's landscape and portrait fits - the pair the settings
@@ -7138,6 +7146,11 @@ impl XgViewApp {
     /// first press the fit is the camera's own ratio, `Original`, which is where
     /// the walk starts.
     fn tile_bar_activate(&mut self) {
+        // A call is up, so the bar holds one control and it is the way out.
+        if self.talking {
+            self.set_talking(false);
+            return;
+        }
         // The controls after the picture fit are the sound switch and then the
         // microphone, each present only when the camera earns it. The index is
         // the one the press or the walk left the bar on.
@@ -8208,8 +8221,14 @@ impl eframe::App for XgViewApp {
         // The magnified viewport's bar keeps a clock of its own, and the repaint
         // is asked for against it: a wall showing no live picture is not
         // repainting on its own, and the bar still has to go when its time is up.
+        //
+        // A call in progress is the exception: its bar carries the one control
+        // that ends it, so it stays up for as long as the microphone is open
+        // rather than going down on the idle the viewer last touched it at.
         if let Some(left) = self.tile_bar.remaining(Instant::now()) {
-            if left.is_zero() {
+            if self.talking {
+                self.tile_bar.touch(Instant::now());
+            } else if left.is_zero() {
                 self.tile_bar.hide();
             } else {
                 ctx.request_repaint_after(left);
