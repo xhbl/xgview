@@ -2338,9 +2338,16 @@ pushed samples read peaks of 150-300 in a quiet room (so real audio, not a dead
 silent stream). The session around it logged `talk-back track set up channel=4
 codec=PCMU`. The SHIELD, which has no microphone, says so instead.
 
-**A bar that loses its microphone and gets it back.** Leaving the magnification
-tears down the back channel and magnifying again reopens it, so the switch
-disappears and returns with the session - and for a moment after re-magnifying
-it can be missing until the new session reports its stats. That is the same
-"appears when the stream says it can" rule as the sound switch; it is not a
-failure.
+**The bar follows the viewport, whichever way the viewport moved.** Leaving the
+magnification tears down the back channel and magnifying again reopens it, so the
+switch disappears and returns with the session - and for a moment after
+re-magnifying it can be missing until the new session reports its stats. That is
+the same "appears when the stream says it can" rule as the sound switch; it is
+not a failure. The one path that did not do this was **stepping the magnified
+view** to the next or previous channel with an arrow or a swipe: `step_zoom`
+moved the viewport and nothing else, so the sound stayed on the camera that was
+left and the arriving camera's session was never asked for a back channel - its
+bar carried no microphone at all, while entering the same camera from the grid
+did. The talk target and the sink index are now moved by `apply_audio` on that
+step as well, and it is the one place a new camera can enter the viewport
+without going through `zoom_in`.

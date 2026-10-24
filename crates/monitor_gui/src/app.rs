@@ -1654,6 +1654,11 @@ impl XgViewApp {
         self.picture_zoom = PictureZoom::FULL;
         self.needs_sync = true;
         self.mark_dirty();
+        // The viewport is a different camera now, and the sound and the back
+        // channel follow the viewport: without this the new camera never asked
+        // its session for a back channel, so its bar carried no microphone, and
+        // the sound stayed on the camera that was left.
+        self.apply_audio();
         true
     }
 
