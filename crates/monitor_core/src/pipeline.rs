@@ -33,6 +33,11 @@ use crate::model::{
 };
 use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtspStage, RtpHeader, SdpTrack};
 use crate::scheduler::ScheduleChange;
+use crate::talk::{TalkHub, TalkStream};
+
+/// How often the talk-back track is fed: one RTP packet every 20 ms, which is
+/// what the cameras send their own audio at and what their speakers expect.
+const TALK_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Time without any RTP payload after which the session is considered dead.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -114,6 +119,9 @@ pub enum StreamEvent {
         /// The magnified bar offers its sound switch on this: a camera that is
         /// heard from nothing should not show a button that does nothing.
         audio: bool,
+        /// True when the session offers a talk-back media and set it up. The
+        /// magnified bar shows its microphone switch on this.
+        backchannel: bool,
         /// Frames per second measured on RTP marker bits.
         fps: f32,
         bitrate_kbps: f32,
@@ -236,6 +244,12 @@ enum ChannelCommand {
     SetPolicy(ReconnectPolicy),
     /// Replace the budget a session has to establish itself.
     SetHandshakeTimeout(Duration),
+    /// Talk to the camera on this channel, or to none when it is `None`.
+    ///
+    /// The back channel is opened by the session that carries it, so a change
+    /// reopens the two channels it moves between - the one that loses the
+    /// microphone and the one that gains it.
+    Talk(Option<usize>),
     Shutdown,
 }
 
@@ -246,6 +260,7 @@ pub struct ChannelManager {
     events: Receiver<StreamEvent>,
     frames: Arc<FrameStore>,
     audio: Arc<AudioHub>,
+    talk: Arc<TalkHub>,
     handle: Handle,
 }
 
@@ -264,16 +279,31 @@ impl ChannelManager {
         let (event_tx, event_rx) = unbounded();
         let frames = Arc::new(FrameStore::default());
         let audio = AudioHub::new();
+        let talk = TalkHub::new();
         handle.spawn(supervisor(
             command_rx,
             event_tx,
             frames.clone(),
             audio.clone(),
+            talk.clone(),
             Arc::new(Mutex::new(SessionSettings { reconnect: policy, handshake_timeout })),
             prefer_hardware,
             handle.clone(),
         ));
-        Self { commands: command_tx, events: event_rx, frames, audio, handle: handle.clone() }
+        Self { commands: command_tx, events: event_rx, frames, audio, talk, handle: handle.clone() }
+    }
+
+    /// The shared talk hub: the interface pushes captured audio here and names
+    /// the channel the viewer has the microphone on.
+    pub fn talk(&self) -> &Arc<TalkHub> {
+        &self.talk
+    }
+
+    /// Names the channel the viewer may talk to, `None` when nothing is
+    /// magnified. Only that channel's session carries the back channel, which
+    /// is why the sessions either side of a change are reopened.
+    pub fn set_talk(&self, index: Option<usize>) {
+        self.send(ChannelCommand::Talk(index));
     }
 
     /// Switches decoding between the GPU and the CPU.
@@ -384,6 +414,10 @@ struct Endpoint {
     credentials: Option<(String, String)>,
     stream: StreamKind,
     transport: RtspTransport,
+    /// Whether this session also asks for the camera's talk-back media. Set for
+    /// the magnified channel alone: a back channel is a camera resource, and
+    /// sixteen tiles asking for one at once would fight over it.
+    talk: bool,
     /// The second address a channel may try when the first cannot be reached,
     /// with its own credentials. Present only for [`ConnectionMode::Auto`]: a
     /// protocol the user forced has no fallback.
@@ -408,6 +442,7 @@ impl Endpoint {
             && self.uri == other.uri
             && self.credentials == other.credentials
             && self.transport == other.transport
+            && self.talk == other.talk
             && self.fallback == other.fallback
     }
 
@@ -422,6 +457,26 @@ impl Endpoint {
 
     fn is_ws(&self) -> bool {
         is_ws_url(&self.uri)
+    }
+
+    /// Asks the same address for the camera's back channel, or stops asking.
+    ///
+    /// The request has to be on the URL, not only on the `DESCRIBE`: go2rtc
+    /// reads the query of the **first** request of the session - which is the
+    /// `OPTIONS` this client opens with - and answers the `DESCRIBE` from it, so
+    /// a `backchannel=1` added to that one request alone is never seen.
+    fn with_talk(mut self, on: bool) -> Self {
+        self.talk = on;
+        if !on {
+            self.uri = crate::rtsp::strip_query_flag(&self.uri, "backchannel");
+            return self;
+        }
+        if self.uri.to_ascii_lowercase().starts_with("rtsp") && !self.uri.contains("backchannel=") {
+            self.uri = crate::rtsp::append_query_flag(&self.uri, "backchannel=1");
+        } else {
+            self.talk = self.uri.contains("backchannel=");
+        }
+        self
     }
 }
 
@@ -446,7 +501,7 @@ fn credentials_of(source: &CameraSource) -> Option<(String, String)> {
 /// MSE. An `Auto` camera keeps the MSE address as the fallback, with Frigate's
 /// own login rather than the restream account; a forced protocol carries no
 /// fallback, so `Rtsp` means RTSP alone and `Mse` means MSE alone.
-fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endpoint {
+fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize, talk: bool) -> Endpoint {
     let mse_primary = matches!(source.connect, ConnectionMode::Mse) && source.has_mse();
     let (uri, credentials) = if mse_primary {
         (source.active_uri(stream).to_string(), source.mse_credentials())
@@ -460,14 +515,23 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endp
         }),
         ConnectionMode::Rtsp | ConnectionMode::Mse => None,
     };
-    Endpoint {
+    let is_rtsp = uri.to_ascii_lowercase().starts_with("rtsp");
+    let endpoint = Endpoint {
         index,
         camera_id: source.id.clone(),
         uri,
         credentials,
         stream,
         transport: source.transport,
+        talk: false,
         fallback,
+    };
+    // Only an RTSP session can carry a back channel; MSE and MJPEG have no
+    // media the client sends.
+    if talk && is_rtsp {
+        endpoint.with_talk(true)
+    } else {
+        endpoint
     }
 }
 
@@ -476,11 +540,16 @@ async fn supervisor(
     events: Sender<StreamEvent>,
     frames: Arc<FrameStore>,
     audio: Arc<AudioHub>,
+    talk: Arc<TalkHub>,
     settings: Arc<Mutex<SessionSettings>>,
     mut prefer_hardware: bool,
     handle: Handle,
 ) {
     let mut channels: HashMap<usize, ChannelRuntime> = HashMap::new();
+    // The channel the viewer may talk to. Kept beside the channels because it
+    // outlives the sessions it opens: a channel reopened for another reason
+    // gets the back channel back if it is still the one magnified.
+    let mut talk_target: Option<usize> = None;
 
     while let Some(command) = commands.recv().await {
         match command {
@@ -494,7 +563,7 @@ async fn supervisor(
                     }
                     kind => kind,
                 };
-                let endpoint = endpoint_for(&source, stream, index);
+                let endpoint = endpoint_for(&source, stream, index, talk_target == Some(index));
                 if let Some(existing) = channels.get(&index) {
                     if existing.endpoint.is_same_stream(&endpoint) {
                         continue;
@@ -525,6 +594,7 @@ async fn supervisor(
                     events.clone(),
                     frames.clone(),
                     audio.clone(),
+                    talk.clone(),
                 ));
                 channels.insert(index, ChannelRuntime { endpoint, task });
             }
@@ -559,6 +629,36 @@ async fn supervisor(
                         events.clone(),
                         frames.clone(),
                         audio.clone(),
+                        talk.clone(),
+                    ));
+                    channels.insert(index, ChannelRuntime { endpoint, task });
+                }
+            }
+            ChannelCommand::Talk(target) => {
+                if talk_target == target {
+                    continue;
+                }
+                talk_target = target;
+                // Only the sessions either side of the change need reopening:
+                // one gives the back channel up, the other takes it. A channel
+                // whose sessions are both without it is left alone.
+                let reopen: Vec<usize> = channels
+                    .iter()
+                    .filter(|(index, runtime)| runtime.endpoint.talk != target.is_some_and(|t| t == **index))
+                    .map(|(index, _)| *index)
+                    .collect();
+                for index in reopen {
+                    let Some(runtime) = channels.remove(&index) else { continue };
+                    runtime.task.abort();
+                    let endpoint = runtime.endpoint.with_talk(talk_target == Some(index));
+                    let task = handle.spawn(run_channel(
+                        endpoint.clone(),
+                        prefer_hardware,
+                        settings.clone(),
+                        events.clone(),
+                        frames.clone(),
+                        audio.clone(),
+                        talk.clone(),
                     ));
                     channels.insert(index, ChannelRuntime { endpoint, task });
                 }
@@ -708,13 +808,14 @@ async fn run_once(
     events: &Sender<StreamEvent>,
     frames: &FrameStore,
     audio: &AudioHub,
+    talk: &TalkHub,
 ) -> Result<()> {
     if endpoint.is_mjpeg() {
         run_mjpeg_session(endpoint.clone(), handshake_timeout, events, frames).await
     } else if endpoint.is_ws() {
         run_ws_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames, audio).await
     } else {
-        run_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames, audio).await
+        run_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames, audio, talk).await
     }
 }
 
@@ -726,6 +827,7 @@ async fn run_channel(
     events: Sender<StreamEvent>,
     frames: Arc<FrameStore>,
     audio: Arc<AudioHub>,
+    talk: Arc<TalkHub>,
 ) {
     let index = endpoint.index;
     let mut attempt: u32 = 0;
@@ -769,7 +871,7 @@ async fn run_channel(
         // endpoint picks the one it needs rather than a single session branching
         // on it statement by statement.
         let started = Instant::now();
-        let mut outcome = run_once(&endpoint, prefer_hardware, settings.handshake_timeout, &events, &frames, &audio).await;
+        let mut outcome = run_once(&endpoint, prefer_hardware, settings.handshake_timeout, &events, &frames, &audio, &talk).await;
 
         // `Auto`: RTSP is preferred, and an RTSP that could not be reached at
         // all is answered with the MSE address at once rather than with a
@@ -793,7 +895,7 @@ async fn run_channel(
                 },
             );
             let mse = Endpoint { uri: fallback.uri, credentials: fallback.credentials, fallback: None, ..endpoint.clone() };
-            outcome = run_once(&mse, prefer_hardware, settings.handshake_timeout, &events, &frames, &audio).await;
+            outcome = run_once(&mse, prefer_hardware, settings.handshake_timeout, &events, &frames, &audio, &talk).await;
         }
 
         let lived = started.elapsed();
@@ -1147,8 +1249,9 @@ async fn negotiate(
     transport: RtspTransport,
     timeout: Duration,
     index: usize,
+    backchannel: bool,
 ) -> Result<Vec<SdpTrack>, HandshakeFailure> {
-    match tokio::time::timeout(timeout, client.start_with_transport(transport)).await {
+    match tokio::time::timeout(timeout, client.start_with_options(transport, backchannel)).await {
         Ok(Ok(tracks)) => Ok(tracks),
         Ok(Err(crate::error::CoreError::Transport(message))) => {
             Err(HandshakeFailure::Refused(message))
@@ -1176,8 +1279,9 @@ async fn run_session(
     events: &Sender<StreamEvent>,
     frames: &FrameStore,
     audio: &AudioHub,
+    talk: &TalkHub,
 ) -> Result<()> {
-    let Endpoint { index, camera_id, uri, credentials, stream, transport, .. } = endpoint;
+    let Endpoint { index, camera_id, uri, credentials, stream, transport, talk: wants_talk, .. } = endpoint;
     let camera_id = camera_id.as_str();
     let uri = uri.as_str();
     let mut client = RtspClient::connect_with_auth(uri, credentials.clone()).await?;
@@ -1190,7 +1294,7 @@ async fn run_session(
     // opened afresh rather than patched, because the failed attempt left the
     // old one half set up.
     let mut transport = transport;
-    let tracks = match negotiate(&mut client, transport, handshake_timeout, index).await {
+    let tracks = match negotiate(&mut client, transport, handshake_timeout, index, wants_talk).await {
         Ok(tracks) => tracks,
         Err(failure) if failure.worth_the_other_transport(transport) => {
             tracing::debug!(
@@ -1200,7 +1304,7 @@ async fn run_session(
             );
             client = RtspClient::connect_with_auth(uri, credentials).await?;
             transport = RtspTransport::Tcp;
-            negotiate(&mut client, transport, handshake_timeout, index)
+            negotiate(&mut client, transport, handshake_timeout, index, wants_talk)
                 .await
                 .map_err(HandshakeFailure::into_error)?
         }
@@ -1227,6 +1331,27 @@ async fn run_session(
     } else {
         None
     };
+
+    // The talk-back track, when this session asked for one and the answer
+    // carried it. Its codec is the one the media advertises - PCMU or PCMA in
+    // practice - and a media this build cannot encode is reported as absent
+    // rather than half used: the bar's microphone is drawn on this flag.
+    let talk_track = tracks.iter().find(|track| track.is_audio() && track.is_sendonly());
+    let talk_codec =
+        talk_track.map(|track| AudioCodec::from_encoding(track.encoding.as_deref().unwrap_or_default()));
+    let mut talk_sender = client.talk_rtp_channel().and_then(|channel| {
+        let stream = TalkStream::new(talk_codec?)?;
+        Some((stream, channel))
+    });
+    let backchannel = talk_sender.is_some();
+    if wants_talk && !backchannel {
+        tracing::debug!(
+            target: "xgview::pipeline",
+            index,
+            offered = ?talk_track.map(|track| track.encoding.clone()),
+            "this session offers no usable back channel, the camera cannot be talked to"
+        );
+    }
 
     // `a=framesize` is optional, but a decoder has to be sized before its first
     // picture arrives: Android builds its image reader to that size, and a
@@ -1285,6 +1410,7 @@ async fn run_session(
             height,
             hardware: uses_hardware(&decoder),
             audio: audio_decoder.is_some(),
+            backchannel,
             fps: 0.0,
             bitrate_kbps: 0.0,
             total_frames: 0,
@@ -1366,7 +1492,33 @@ async fn run_session(
     // itself: see `StallDeadline`.
     let mut stall = StallDeadline::new();
 
+    // The talk-back clock: one packet every 20 ms, silence included, which is
+    // what keeps the camera's speaker media alive while the viewer has the
+    // microphone switched on. Nothing is sent when the session has no back
+    // channel.
+    let mut last_talk = Instant::now();
+
     loop {
+        // Talk-back, before waiting on the picture: the session's clock is the
+        // RTP clock, and it must not be tied to how often a camera sends video.
+        if let Some((stream, channel)) = talk_sender.as_mut() {
+            while last_talk.elapsed() >= TALK_INTERVAL {
+                let packet = if talk.talking_on(index) {
+                    stream.packet(&talk.next_frame())
+                } else {
+                    stream.silence()
+                };
+                client.send_interleaved(*channel, &packet).await?;
+                last_talk += TALK_INTERVAL;
+                // A loop that fell well behind - a stalled socket, a suspended
+                // process - is not worth a burst of catch-up packets: the
+                // camera's speaker wants the present, not the backlog.
+                if last_talk.elapsed() > TALK_INTERVAL * 4 {
+                    last_talk = Instant::now();
+                    break;
+                }
+            }
+        }
         // A channel with no decoder has no picture to expect - it shows a
         // placeholder - and is left out of this entirely.
         let patience = stall.patience();
@@ -1442,9 +1594,23 @@ async fn run_session(
         } else {
             READ_TIMEOUT.min(patience.saturating_sub(since_picture))
         };
+        // A session feeding a camera's speaker has one more clock to honour:
+        // the wait is cut so that the next talk packet is written on time even
+        // while the picture keeps the loop from ever timing out.
+        let talk_wait = talk_sender
+            .as_ref()
+            .map(|_| TALK_INTERVAL.saturating_sub(last_talk.elapsed()));
+        let wait = match talk_wait {
+            Some(talk_wait) => wait.min(talk_wait),
+            None => wait,
+        };
         match tokio::time::timeout(wait, client.wait_for_media()).await {
             Ok(result) => result?,
             Err(_) => {
+                // The talk clock waking the loop is not silence on the wire.
+                if talk_sender.is_some() && last_talk.elapsed() >= TALK_INTERVAL {
+                    continue;
+                }
                 // A wait that the picture deadline cut short is not silence on
                 // the wire, and reporting it as such would name the wrong fault
                 // and the wrong duration. The loop's own check reports that one.
@@ -1743,6 +1909,7 @@ async fn run_session(
                     height,
                     hardware: uses_hardware(&decoder),
                     audio: audio_decoder.is_some(),
+                    backchannel,
                     fps: window_frames as f32 / seconds,
                     bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
                     total_frames,
@@ -1904,6 +2071,7 @@ async fn run_mjpeg_session(
             height,
             hardware: uses_hardware(&decoder),
             audio: false,
+            backchannel: false,
             fps: 0.0,
             bitrate_kbps: 0.0,
             total_frames: 0,
@@ -1981,6 +2149,7 @@ async fn run_mjpeg_session(
                     height,
                     hardware: uses_hardware(&decoder),
                     audio: false,
+                    backchannel: false,
                     fps,
                     bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
                     total_frames,
@@ -2340,6 +2509,7 @@ async fn run_ws_session(
                     height,
                     hardware: uses_hardware(&decoder),
                     audio: audio_decoder.is_some(),
+                    backchannel: false,
                     fps: 0.0,
                     bitrate_kbps: 0.0,
                     total_frames: 0,
@@ -2426,6 +2596,7 @@ async fn run_ws_session(
                     height,
                     hardware: uses_hardware(&decoder),
                     audio: audio_decoder.is_some(),
+                    backchannel: false,
                     fps,
                     bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
                     total_frames,
@@ -2591,19 +2762,19 @@ mod tests {
         camera.mse_password = Some("pw".to_string());
 
         camera.connect = ConnectionMode::Auto;
-        let endpoint = endpoint_for(&camera, StreamKind::Main, 0);
+        let endpoint = endpoint_for(&camera, StreamKind::Main, 0, false);
         assert_eq!(endpoint.uri, "rtsp://10.0.0.1:8554/cam_1");
         let fallback = endpoint.fallback.expect("an auto camera keeps the mse address");
         assert_eq!(fallback.uri, "wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1");
         assert_eq!(fallback.credentials, Some(("frigate".to_string(), "pw".to_string())));
 
         camera.connect = ConnectionMode::Rtsp;
-        let endpoint = endpoint_for(&camera, StreamKind::Main, 0);
+        let endpoint = endpoint_for(&camera, StreamKind::Main, 0, false);
         assert_eq!(endpoint.uri, "rtsp://10.0.0.1:8554/cam_1");
         assert!(endpoint.fallback.is_none(), "a forced rtsp has no fallback");
 
         camera.connect = ConnectionMode::Mse;
-        let endpoint = endpoint_for(&camera, StreamKind::Main, 0);
+        let endpoint = endpoint_for(&camera, StreamKind::Main, 0, false);
         assert_eq!(endpoint.uri, "wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1");
         assert_eq!(endpoint.credentials, Some(("frigate".to_string(), "pw".to_string())));
         assert!(endpoint.fallback.is_none(), "a forced mse has no fallback");
@@ -2738,7 +2909,7 @@ mod tests {
         let mut client = RtspClient::connect_with_auth(&format!("rtsp://{address}/live"), None)
             .await
             .expect("the connection is accepted");
-        let failure = negotiate(&mut client, RtspTransport::Tcp, Duration::from_millis(100), 0)
+        let failure = negotiate(&mut client, RtspTransport::Tcp, Duration::from_millis(100), 0, false)
             .await
             .unwrap_err();
 

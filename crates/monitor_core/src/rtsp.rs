@@ -29,6 +29,51 @@ pub const RTSP_DEFAULT_PORT: u16 = 554;
 /// Maximum size accepted for a single interleaved RTP payload.
 const MAX_INTERLEAVED_PAYLOAD: usize = 1 << 21;
 
+/// The `Require` header a camera that implements ONVIF Profile T looks for
+/// before it advertises its talk-back media in the session description.
+pub const BACKCHANNEL_REQUIRE: &str = "www.onvif.org/ver20/backchannel";
+
+/// Adds one query parameter to a URL, before any fragment it carries.
+pub fn append_query_flag(uri: &str, flag: &str) -> String {
+    let (head, fragment) = match uri.split_once('#') {
+        Some((head, fragment)) => (head, Some(fragment)),
+        None => (uri, None),
+    };
+    let mut out = String::with_capacity(uri.len() + flag.len() + 1);
+    out.push_str(head);
+    out.push(if head.contains('?') { '&' } else { '?' });
+    out.push_str(flag);
+    if let Some(fragment) = fragment {
+        out.push('#');
+        out.push_str(fragment);
+    }
+    out
+}
+
+/// Drops one query parameter from a URL, leaving the rest of it as it was.
+pub fn strip_query_flag(uri: &str, name: &str) -> String {
+    let (head, fragment) = match uri.split_once('#') {
+        Some((head, fragment)) => (head, Some(fragment)),
+        None => (uri, None),
+    };
+    let Some((path, query)) = head.split_once('?') else { return uri.to_string() };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|part| !part.starts_with(name) || !part[name.len()..].starts_with('='))
+        .collect();
+    let mut out = String::with_capacity(uri.len());
+    out.push_str(path);
+    if !kept.is_empty() {
+        out.push('?');
+        out.push_str(&kept.join("&"));
+    }
+    if let Some(fragment) = fragment {
+        out.push('#');
+        out.push_str(fragment);
+    }
+    out
+}
+
 /// Keep alive delay used when the server announces no session timeout.
 const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(25);
 
@@ -716,6 +761,10 @@ pub struct RtspClient {
     /// [`RtspClient::interleaved`]. `None` when the track was not set up, in
     /// which case the session carries video alone.
     audio_interleaved: Option<(u8, u8)>,
+    /// Channel pair the server confirmed for the talk-back track - the
+    /// `a=sendonly` audio media a camera or go2rtc offers when the session asks
+    /// for it. `None` when the session did not ask, or the server offered none.
+    talk_interleaved: Option<(u8, u8)>,
     /// Address of the RTSP server. With the UDP transport the TCP connection
     /// carries only the control plane, and the media is delivered here.
     peer_addr: Option<SocketAddr>,
@@ -791,6 +840,7 @@ impl RtspClient {
             challenge: None,
             interleaved: None,
             audio_interleaved: None,
+            talk_interleaved: None,
             peer_addr,
             rtp: None,
             rtcp: None,
@@ -1132,6 +1182,40 @@ impl RtspClient {
         Ok(response.body_string())
     }
 
+    /// `DESCRIBE` asking for the talk-back media as well.
+    ///
+    /// Two different servers answer two different ways, and both are asked here
+    /// so that the session works in front of either: go2rtc adds an `a=sendonly`
+    /// audio media when the *URL* carries `backchannel=1`, and a camera that
+    /// implements ONVIF Profile T adds one when the DESCRIBE carries
+    /// `Require: www.onvif.org/ver20/backchannel`. The parameter is only added
+    /// when the URL does not already carry it, so a caller that set it itself
+    /// gets exactly one.
+    pub async fn describe_backchannel(&mut self) -> Result<String> {
+        let mut uri = self.url.request_uri();
+        if !uri.contains("backchannel=") {
+            uri.push(if uri.contains('?') { '&' } else { '?' });
+            uri.push_str("backchannel=1");
+        }
+        let response = self
+            .request(
+                "DESCRIBE",
+                &uri,
+                &[
+                    ("Accept", "application/sdp".to_string()),
+                    ("Require", BACKCHANNEL_REQUIRE.to_string()),
+                ],
+                None,
+            )
+            .await?;
+        if let Some(base) = response.header("Content-Base") {
+            self.content_base = Some(base.to_string());
+        }
+        let response = self.expect_success(response, "DESCRIBE")?;
+        self.state = RtspSessionState::Described;
+        Ok(response.body_string())
+    }
+
     /// `SETUP` a track over the TCP interleaved transport, returning the pair the
     /// server confirmed.
     ///
@@ -1176,6 +1260,17 @@ impl RtspClient {
     pub async fn setup_audio_interleaved(&mut self, control: &str, rtp_channel: u8) -> Result<u8> {
         let (rtp, rtcp) = self.setup_interleaved_pair(control, rtp_channel).await?;
         self.audio_interleaved = Some((rtp, rtcp));
+        Ok(rtp)
+    }
+
+    /// `SETUP` the talk-back track on its own interleaved pair.
+    ///
+    /// The media is `a=sendonly`: the client sends it, so nothing is ever read
+    /// from this pair. Its channel is kept apart from the video's and from the
+    /// camera's own audio, which is what [`RtspClient::read_media`] routes by.
+    pub async fn setup_talk_interleaved(&mut self, control: &str, rtp_channel: u8) -> Result<u8> {
+        let (rtp, rtcp) = self.setup_interleaved_pair(control, rtp_channel).await?;
+        self.talk_interleaved = Some((rtp, rtcp));
         Ok(rtp)
     }
 
@@ -1261,6 +1356,12 @@ impl RtspClient {
     }
 
     /// Resolves a track control attribute against the session base URI.
+    ///
+    /// The query is dropped from the base: a track URI never carries one, and a
+    /// server that reads it would misread the track. go2rtc is exactly such a
+    /// server - its `reqTrackID` looks at the query first when there is one, so
+    /// a `SETUP` of `trackID=2` sent to `.../cam?backchannel=1` would arrive as
+    /// track 1.
     fn resolve_control(&self, control: &str) -> String {
         if control.starts_with("rtsp://") {
             return control.to_string();
@@ -1269,6 +1370,7 @@ impl RtspClient {
             .content_base
             .clone()
             .unwrap_or_else(|| self.url.request_uri());
+        let base = base.split_once('?').map_or(base.as_str(), |(head, _)| head);
         let base = base.trim_end_matches('/');
         if control.is_empty() {
             base.to_string()
@@ -1287,12 +1389,42 @@ impl RtspClient {
     /// but a failure there is not fatal: a camera that refuses the second
     /// `SETUP` still gives a picture.
     pub async fn start_with_transport(&mut self, transport: RtspTransport) -> Result<Vec<SdpTrack>> {
+        self.start_with_options(transport, false).await
+    }
+
+    /// [`RtspClient::start_with_transport`], asking for the talk-back track too
+    /// when `backchannel` is set.
+    ///
+    /// The camera (or go2rtc in front of it) offers the back channel as an
+    /// `a=sendonly` audio media, and only when the session asks: go2rtc adds it
+    /// to a `DESCRIBE` whose URL carries `backchannel=1`, and a camera that
+    /// supports ONVIF Profile T adds it when the `DESCRIBE` carries
+    /// `Require: www.onvif.org/ver20/backchannel`. Both are therefore the
+    /// caller's - this only recognises the track in the answer and sets it up.
+    pub async fn start_with_options(
+        &mut self,
+        transport: RtspTransport,
+        backchannel: bool,
+    ) -> Result<Vec<SdpTrack>> {
+        // The parameter goes on the URL rather than on the one request that
+        // wants it: a server may read the session's URL from the first request
+        // it sees - go2rtc reads the query off the `OPTIONS` - and then answer
+        // the `DESCRIBE` from that, so a flag added to the `DESCRIBE` alone is
+        // never seen.
+        if backchannel && !self.url.request_uri().contains("backchannel=") {
+            let uri = append_query_flag(&self.url.request_uri(), "backchannel=1");
+            self.url = RtspUrl::parse(&uri)?;
+        }
         // Each step is stamped before it is waited on, so that a deadline which
         // fires somewhere in here can say which request was not answered.
         self.stage = Some(RtspStage::Options);
         self.options().await?;
         self.stage = Some(RtspStage::Describe);
-        let sdp = self.describe().await?;
+        let sdp = if backchannel {
+            self.describe_backchannel().await?
+        } else {
+            self.describe().await?
+        };
         let tracks = parse_sdp(&sdp);
         let video = tracks
             .iter()
@@ -1336,6 +1468,33 @@ impl RtspClient {
                     target: "xgview::rtsp",
                     "audio is set up over TCP only, skipping it on the UDP transport"
                 ),
+            }
+        }
+        // The back channel, when the session asked for one and the answer
+        // carries it. It is asked for far past the two receive pairs so that a
+        // server honouring the request cannot land on them.
+        if backchannel {
+            if let Some(track) = tracks.iter().find(|track| track.is_audio() && track.is_sendonly()) {
+                let control = track.control.clone().unwrap_or_default();
+                match transport {
+                    RtspTransport::Tcp => match self.setup_talk_interleaved(&control, 4).await {
+                        Ok(channel) => tracing::debug!(
+                            target: "xgview::rtsp",
+                            channel,
+                            codec = ?track.encoding,
+                            "talk-back track set up"
+                        ),
+                        Err(err) => tracing::warn!(
+                            target: "xgview::rtsp",
+                            error = %err,
+                            "the talk-back track was not set up"
+                        ),
+                    },
+                    RtspTransport::Udp => tracing::debug!(
+                        target: "xgview::rtsp",
+                        "talk-back is set up over TCP only, skipping it on the UDP transport"
+                    ),
+                }
             }
         }
         self.stage = Some(RtspStage::Play);
@@ -1400,6 +1559,12 @@ impl RtspClient {
     /// RTP channel of the audio track, `None` when it was not set up.
     fn audio_rtp_channel(&self) -> Option<u8> {
         self.audio_interleaved.map(|(rtp, _)| rtp)
+    }
+
+    /// RTP channel the talk-back track writes on, `None` when the session has
+    /// no back channel.
+    pub fn talk_rtp_channel(&self) -> Option<u8> {
+        self.talk_interleaved.map(|(rtp, _)| rtp)
     }
 
     /// RTCP channel of the audio track, `None` when it was not set up.

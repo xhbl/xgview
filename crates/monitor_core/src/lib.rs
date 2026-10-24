@@ -51,6 +51,7 @@ pub mod rtcp;
 pub mod rtsp;
 pub mod scheduler;
 pub mod sealed;
+pub mod talk;
 pub mod supervise;
 pub mod vitals;
 
