@@ -27,6 +27,7 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::ptr;
 use std::time::{Duration, Instant};
 
+use crate::audio::{AudioCodec, AudioDecoder, AudioStreamInfo};
 use crate::sps::decode_parameter_sets;
 use crate::{
     plane_stride, CodecError, ColorMatrix, ColorRange, ColorSpace, DecodedFrame, DecoderConfig,
@@ -545,5 +546,149 @@ impl AMediaCodecDecoder {
         if let Some(codec) = self.handle {
             unsafe { AMediaCodec_flush(codec) };
         }
+    }
+}
+/// Android `AMediaCodec` decoder for the compressed audio codecs - AAC above
+/// all. It reads raw AAC access units and hands over interleaved s16 PCM, the
+/// same contract as the desktop's FFmpeg backend. The session is opened once
+/// with the stream's `AudioSpecificConfig`, which is the SDP's `config=`.
+#[derive(Debug, Default)]
+pub struct AmcAudioDecoder {
+    handle: Option<*mut AMediaCodec>,
+    info: Option<AudioStreamInfo>,
+    /// Running timestamp handed to the input queue so the codec orders its
+    /// output. One AAC frame is 1024 samples.
+    next_pts_us: u64,
+}
+
+// Safety: same as the video codec - the channel worker owns it outright and is
+// the only thread that ever touches it.
+unsafe impl Send for AmcAudioDecoder {}
+
+impl AmcAudioDecoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn close(&mut self) {
+        if let Some(codec) = self.handle.take() {
+            unsafe {
+                AMediaCodec_stop(codec);
+                AMediaCodec_delete(codec);
+            }
+        }
+    }
+
+    /// Reads whatever the codec has ready into `out` as interleaved s16.
+    fn drain(&mut self, out: &mut Vec<i16>) {
+        let Some(codec) = self.handle else { return };
+        loop {
+            let mut info = AMediaCodecBufferInfo::default();
+            let index = unsafe { AMediaCodec_dequeueOutputBuffer(codec, &mut info, 0) };
+            if index < 0 {
+                break;
+            }
+            if info.size > 0 {
+                let mut capacity = 0usize;
+                let buffer = unsafe { AMediaCodec_getOutputBuffer(codec, index as usize, &mut capacity) };
+                let start = info.offset as usize;
+                let len = info.size as usize;
+                if !buffer.is_null() && start + len <= capacity {
+                    // The audio output format is interleaved 16 bit PCM.
+                    let ptr = unsafe { buffer.add(start) } as *const i16;
+                    let slice = unsafe { std::slice::from_raw_parts(ptr, len / 2) };
+                    out.extend_from_slice(slice);
+                }
+            }
+            unsafe { AMediaCodec_releaseOutputBuffer(codec, index as usize, false) };
+        }
+    }
+}
+
+impl AudioDecoder for AmcAudioDecoder {
+    fn name(&self) -> &'static str {
+        "amediacodec"
+    }
+
+    fn configure(&mut self, info: &AudioStreamInfo) -> Result<()> {
+        self.close();
+        let mime_name = match info.codec {
+            AudioCodec::Aac => "audio/mp4a-latm",
+            other => {
+                return Err(CodecError::Unsupported(format!("no AMediaCodec audio for {other}")))
+            }
+        };
+        let mime = CString::new(mime_name).map_err(|err| CodecError::Configure(err.to_string()))?;
+        let codec = unsafe { AMediaCodec_createDecoderByType(mime.as_ptr()) };
+        if codec.is_null() {
+            return Err(CodecError::Unsupported(format!("no AMediaCodec decoder for {mime_name}")));
+        }
+        let format = unsafe { AMediaFormat_new() };
+        unsafe {
+            AMediaFormat_setString(format, c"mime".as_ptr(), mime.as_ptr());
+            AMediaFormat_setInt32(format, c"sample-rate".as_ptr(), info.sample_rate as i32);
+            AMediaFormat_setInt32(format, c"channel-count".as_ptr(), info.channels as i32);
+            // AAC Low Complexity, the profile the cameras send.
+            AMediaFormat_setInt32(format, c"aac-profile".as_ptr(), 2);
+            // The SDP's `config=` is the AudioSpecificConfig the decoder opens with.
+            if !info.extradata.is_empty() {
+                AMediaFormat_setBuffer(
+                    format,
+                    c"csd-0".as_ptr(),
+                    info.extradata.as_ptr().cast(),
+                    info.extradata.len(),
+                );
+            }
+            AMediaFormat_setInt32(format, c"max-input-size".as_ptr(), 16 * 1024);
+        }
+        let configured = unsafe { AMediaCodec_configure(codec, format, ptr::null_mut(), ptr::null_mut(), 0) };
+        unsafe { AMediaFormat_delete(format) };
+        if configured != AMEDIA_OK {
+            unsafe { AMediaCodec_delete(codec) };
+            return Err(CodecError::Configure(format!("AMediaCodec audio configure failed: {configured}")));
+        }
+        if unsafe { AMediaCodec_start(codec) } != AMEDIA_OK {
+            unsafe { AMediaCodec_delete(codec) };
+            return Err(CodecError::Configure("AMediaCodec audio start failed".to_string()));
+        }
+        self.handle = Some(codec);
+        self.next_pts_us = 0;
+        self.info = Some(info.clone());
+        Ok(())
+    }
+
+    fn decode(&mut self, access_unit: &[u8], out: &mut Vec<i16>) -> Result<()> {
+        let codec = self
+            .handle
+            .ok_or_else(|| CodecError::Configure("audio decoder not configured".into()))?;
+        let index = unsafe { AMediaCodec_dequeueInputBuffer(codec, 0) };
+        if index >= 0 {
+            let mut capacity = 0usize;
+            let buffer = unsafe { AMediaCodec_getInputBuffer(codec, index as usize, &mut capacity) };
+            if !buffer.is_null() && access_unit.len() <= capacity {
+                unsafe { ptr::copy_nonoverlapping(access_unit.as_ptr(), buffer, access_unit.len()) };
+                let rate = self.info.as_ref().map(|i| i.sample_rate).unwrap_or(8000).max(1) as u64;
+                let pts = self.next_pts_us;
+                self.next_pts_us += 1024 * 1_000_000 / rate;
+                unsafe { AMediaCodec_queueInputBuffer(codec, index as usize, 0, access_unit.len(), pts, 0) };
+            }
+        }
+        self.drain(out);
+        Ok(())
+    }
+
+    fn flush(&mut self, out: &mut Vec<i16>) -> Result<()> {
+        self.drain(out);
+        Ok(())
+    }
+
+    fn info(&self) -> Option<&AudioStreamInfo> {
+        self.info.as_ref()
+    }
+}
+
+impl Drop for AmcAudioDecoder {
+    fn drop(&mut self) {
+        self.close();
     }
 }

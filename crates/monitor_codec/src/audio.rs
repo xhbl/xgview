@@ -202,12 +202,16 @@ impl AudioDecoder for UnsupportedAudioDecoder {
 /// have no backend yet in this phase - the desktop FFmpeg path comes next - so
 /// they come back as an [`UnsupportedAudioDecoder`] rather than a panic.
 pub fn create_audio_decoder(codec: AudioCodec) -> Box<dyn AudioDecoder> {
-    // The compressed codecs go to FFmpeg where it is linked, and to the
-    // unsupported stub where it is not: `configure` then fails loudly once and
-    // the caller leaves the channel silent.
+    // The compressed codecs go to FFmpeg where it is linked, and to
+    // `AMediaCodec` on Android; either way `configure` fails loudly once and the
+    // caller leaves the channel silent if the backend is absent.
     #[cfg(all(not(target_os = "android"), feature = "ffmpeg"))]
     if matches!(codec, AudioCodec::Aac | AudioCodec::Opus) {
         return Box::new(crate::ffmpeg_audio::FfmpegAudioDecoder::new());
+    }
+    #[cfg(target_os = "android")]
+    if codec == AudioCodec::Aac {
+        return Box::new(crate::amediacodec::AmcAudioDecoder::new());
     }
     match codec {
         AudioCodec::Pcmu | AudioCodec::Pcma => Box::new(G711Decoder::new()),
