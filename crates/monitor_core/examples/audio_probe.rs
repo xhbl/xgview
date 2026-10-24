@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use monitor_codec::audio::{create_audio_decoder, AudioCodec, AudioDecoder, AudioStreamInfo};
 
-use monitor_core::audio::aac_access_units;
+use monitor_core::audio::{aac_access_units, AacRtpParams};
 use monitor_core::rtsp::{parse_rtp_header, MediaPacket, RtspClient};
 
 #[tokio::main]
@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let info = AudioStreamInfo::new(codec, track.clock_rate.unwrap_or(8000), track.channels.unwrap_or(1));
     println!("audio: codec={} rate={} channels={}", codec, info.sample_rate, info.channels);
+    let aac = AacRtpParams::from_fmtp(track.fmtp.as_deref());
 
     let mut decoder: Box<dyn AudioDecoder> = create_audio_decoder(codec);
     decoder.configure(&info)?;
@@ -64,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let body = &payload[header.header_len..];
                     let mut pcm = Vec::new();
                     if codec == AudioCodec::Aac {
-                        for range in aac_access_units(body, 13, 3) {
+                        for range in aac_access_units(body, aac.size_length, aac.index_length) {
                             let _ = decoder.decode(&body[range], &mut pcm);
                         }
                     } else {

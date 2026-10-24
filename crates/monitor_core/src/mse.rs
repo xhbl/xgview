@@ -29,6 +29,10 @@ pub struct MseAudioInit {
     pub codec: AudioCodec,
     pub sample_rate: u32,
     pub channels: u8,
+    /// The AudioSpecificConfig out of the `esds` box. The desktop decoder builds
+    /// an ADTS header from the rate and channels and ignores it, but Android's
+    /// MediaCodec wants it as its `csd-0`; empty when the segment had no esds.
+    pub extradata: Vec<u8>,
 }
 
 /// One access unit extracted from a media segment.
@@ -239,20 +243,34 @@ impl MseParser {
         Ok(None)
     }
 
-    /// Parses an `mp4a` (AAC) sample entry for its rate and channel count.
+    /// Parses an `mp4a` (AAC) sample entry for its rate, channel count and the
+    /// `esds` box.
     ///
     /// AudioSampleEntry is 6 reserved + 2 data-reference + version/revision/
     /// vendor, then `channelcount` at offset 16, then `samplerate` at offset 24
-    /// as a 16.16 fixed point. The AAC `esds` (the AudioSpecificConfig) is not
-    /// read: the decoder builds an ADTS header from the rate and channels
-    /// instead, which says the same things.
+    /// as a 16.16 fixed point, then its child boxes (the AAC `esds` among them)
+    /// start at offset 28. The esds AudioSpecificConfig goes out as `extradata`;
+    /// the desktop decoder builds an ADTS header from the rate and channels
+    /// instead, but Android's MediaCodec asks for it as `csd-0`.
     fn parse_mp4a_entry(&mut self, data: &[u8]) -> Option<MseAudioInit> {
         if data.len() < 28 {
             return None;
         }
         let channels = u16::from_be_bytes([data[16], data[17]]) as u8;
         let rate = u32::from_be_bytes([data[24], data[25], data[26], data[27]]) >> 16;
-        Some(MseAudioInit { codec: AudioCodec::Aac, sample_rate: rate.max(1), channels: channels.max(1) })
+        let mut extradata = Vec::new();
+        for (box_type, content) in iter_boxes(&data[28..]) {
+            if box_type == b"esds" {
+                extradata = parse_esds(content).unwrap_or_default();
+                break;
+            }
+        }
+        Some(MseAudioInit {
+            codec: AudioCodec::Aac,
+            sample_rate: rate.max(1),
+            channels: channels.max(1),
+            extradata,
+        })
     }
 
     /// Parses an `avc1`/`avc3` sample entry to find the `avcC` box.
@@ -599,6 +617,70 @@ fn full_box_header(data: &[u8]) -> Option<(u8, u32, &[u8])> {
     Some((version, flags, &data[4..]))
 }
 
+/// The AudioSpecificConfig (the `DecoderSpecificInfo` descriptor of an `esds`
+/// box), or `None` when the box does not carry one.
+fn parse_esds(data: &[u8]) -> Option<Vec<u8>> {
+    let (_, _, body) = full_box_header(data)?;
+    find_decoder_specific_info(body)
+}
+
+/// Finds the first `DecoderSpecificInfo` (tag `0x05`) descriptor in `data`,
+/// descending into the `ES_Descriptor` (`0x03`) and `DecoderConfigDescriptor`
+/// (`0x04`) containers that hold the rest of the tree.
+fn find_decoder_specific_info(mut data: &[u8]) -> Option<Vec<u8>> {
+    while !data.is_empty() {
+        let (tag, body, rest) = next_descriptor(data)?;
+        if tag == 0x05 {
+            return Some(body.to_vec());
+        }
+        if tag == 0x03 {
+            // ES_ID (2) + flags (1), then the optional dependsOn / URL / OCR
+            // fields the flags promise, then the child descriptors.
+            let mut pos = 3;
+            let flags = *body.get(2)?;
+            if flags & 0x80 != 0 {
+                pos += 2;
+            }
+            if flags & 0x40 != 0 {
+                let url_len = *body.get(pos)? as usize;
+                pos += 1 + url_len;
+            }
+            if flags & 0x20 != 0 {
+                pos += 2;
+            }
+            if let Some(found) = find_decoder_specific_info(body.get(pos..)?) {
+                return Some(found);
+            }
+        } else if tag == 0x04 {
+            // objectTypeIndication (1) + streamType (1) + bufferSizeDB (3)
+            // + maxBitrate (4) + avgBitrate (4), then the child descriptors.
+            if let Some(found) = find_decoder_specific_info(body.get(13..)?) {
+                return Some(found);
+            }
+        }
+        data = rest;
+    }
+    None
+}
+
+/// Reads one descriptor from the front of `data`: its tag, the 1-4 byte varint
+/// length, the body, and the slice after the descriptor.
+fn next_descriptor(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let tag = *data.first()?;
+    let mut pos = 1;
+    let mut len = 0usize;
+    for _ in 0..4 {
+        let byte = *data.get(pos)?;
+        pos += 1;
+        len = (len << 7) | (byte & 0x7F) as usize;
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    let body = data.get(pos..pos + len)?;
+    Some((tag, body, &data[pos + len..]))
+}
+
 fn parse_trun(data: &[u8]) -> Result<TrunData> {
     let (version, flags, body) = full_box_header(data)
         .ok_or_else(|| CoreError::network("trun too short"))?;
@@ -770,6 +852,54 @@ fn parse_mdhd(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An `esds` box content (FullBox header + ES descriptor tree) whose
+    /// DecoderSpecificInfo is the two bytes `[0x14, 0x08]`.
+    fn esds_box_content() -> Vec<u8> {
+        let mut esds = vec![0x00, 0x00, 0x00, 0x00]; // FullBox version + flags
+        esds.extend_from_slice(&[0x03, 0x16]); // ES_Descriptor, length 22
+        esds.extend_from_slice(&[0x00, 0x01, 0x00]); // ES_ID = 1, flags = 0
+        esds.extend_from_slice(&[0x04, 0x11]); // DecoderConfigDescriptor, length 17
+        esds.extend_from_slice(&[0x40, 0x15]); // objectTypeIndication, streamType
+        esds.extend_from_slice(&[0x00, 0x00, 0x00]); // bufferSizeDB
+        esds.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // maxBitrate
+        esds.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // avgBitrate
+        esds.extend_from_slice(&[0x05, 0x02]); // DecoderSpecificInfo, length 2
+        esds.extend_from_slice(&[0x14, 0x08]); // the AudioSpecificConfig
+        esds
+    }
+
+    #[test]
+    fn esds_yields_the_audio_specific_config() {
+        assert_eq!(parse_esds(&esds_box_content()).unwrap(), vec![0x14, 0x08]);
+        // A box without a DecoderSpecificInfo yields nothing.
+        let mut bare = vec![0x00, 0x00, 0x00, 0x00];
+        bare.extend_from_slice(&[0x03, 0x03, 0x00, 0x01, 0x00]);
+        assert_eq!(parse_esds(&bare), None);
+        assert_eq!(parse_esds(&[]), None);
+    }
+
+    #[test]
+    fn mp4a_entry_carries_the_esds_as_extradata() {
+        // A 28-byte AudioSampleEntry (mono, 44100 Hz) followed by its esds box.
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&[0; 6]); // reserved
+        entry.extend_from_slice(&[0x00, 0x01]); // data_reference_index
+        entry.extend_from_slice(&[0; 8]); // version, revision, vendor
+        entry.extend_from_slice(&[0x00, 0x01]); // channelcount
+        entry.extend_from_slice(&[0x00, 0x10]); // samplesize
+        entry.extend_from_slice(&[0; 4]); // pre_defined
+        entry.extend_from_slice(&[0xAC, 0x44, 0x00, 0x00]); // samplerate 16.16
+        let esds = esds_box_content();
+        entry.extend_from_slice(&(8 + esds.len() as u32).to_be_bytes());
+        entry.extend_from_slice(b"esds");
+        entry.extend_from_slice(&esds);
+        let mut parser = MseParser::new();
+        let init = parser.parse_mp4a_entry(&entry).unwrap();
+        assert_eq!(init.sample_rate, 44100);
+        assert_eq!(init.channels, 1);
+        assert_eq!(init.extradata, vec![0x14, 0x08]);
+    }
 
     #[test]
     fn avcc_to_annexb_converts_length_prefix_to_start_code() {

@@ -138,6 +138,41 @@ fn read_bits(data: &[u8], start: usize, length: usize) -> usize {
     value
 }
 
+/// The RFC 3640 AU-header field widths of an AAC stream, from its SDP `fmtp`.
+///
+/// The `MPEG4-GENERIC` payload puts a `Size` field and an `Index` field in
+/// front of every access unit, and their bit widths are the `sizelength=` and
+/// `indexlength=` parameters of the fmtp. The cameras measured all send 13 and
+/// 3, and those are the fallback here - a conformant camera names its own, and
+/// RFC 3640 does not set a useful default for the size field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AacRtpParams {
+    pub size_length: u32,
+    pub index_length: u32,
+}
+
+impl AacRtpParams {
+    /// Reads the widths out of an SDP `fmtp` body, e.g.
+    /// `config=1408; mode=AAC-hbr; sizelength=13; indexlength=3`.
+    pub fn from_fmtp(fmtp: Option<&str>) -> Self {
+        let mut params = Self { size_length: 13, index_length: 3 };
+        let Some(fmtp) = fmtp else { return params };
+        for part in fmtp.split(';') {
+            let part = part.trim();
+            if let Some(value) = part.strip_prefix("sizelength=") {
+                if let Ok(size) = value.trim().parse() {
+                    params.size_length = size;
+                }
+            } else if let Some(value) = part.strip_prefix("indexlength=") {
+                if let Ok(index) = value.trim().parse() {
+                    params.index_length = index;
+                }
+            }
+        }
+        params
+    }
+}
+
 impl std::fmt::Debug for AudioHub {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AudioHub")
@@ -204,5 +239,25 @@ mod tests {
     fn aac_payload_that_is_too_short_yields_nothing() {
         assert!(aac_access_units(&[], 13, 3).is_empty());
         assert!(aac_access_units(&[0x00], 13, 3).is_empty());
+    }
+
+    #[test]
+    fn fmtp_carries_the_rfc3640_field_widths() {
+        let fmtp = Some("config=1408; mode=AAC-hbr; sizelength=13; indexlength=3");
+        let params = AacRtpParams::from_fmtp(fmtp);
+        assert_eq!(
+            params,
+            AacRtpParams { size_length: 13, index_length: 3 }
+        );
+    }
+
+    #[test]
+    fn fmtp_without_the_widths_falls_back_to_the_measured_ones() {
+        let params = AacRtpParams::from_fmtp(Some("config=1408; mode=AAC-hbr"));
+        assert_eq!(
+            params,
+            AacRtpParams { size_length: 13, index_length: 3 }
+        );
+        assert_eq!(AacRtpParams::from_fmtp(None).size_length, 13);
     }
 }

@@ -14,6 +14,7 @@
 # that read C headers at build time, and gawk/findutils for FFmpeg's configure.
 # meson, ninja and the libdrm headers are for the bundled libva that FFmpeg's
 # VAAPI support is built against (`build-linux.sh`, `build_hwcodecs`).
+# alsa-lib-devel is the ALSA headers the audio sink (`cpal`) needs at build time.
 #
 # The base image is a build argument so `--docker-image` can pick another RHEL 8
 # rebuild (AlmaLinux, CentOS, Oracle Linux); they all carry glibc 2.28 and all
@@ -25,7 +26,7 @@ FROM ${BASE_IMAGE}
 RUN dnf install -y --allowerasing --setopt=install_weak_deps=False \
         --enablerepo=powertools \
         gcc gcc-c++ make nasm curl tar xz pkgconfig clang gawk which findutils \
-        meson ninja-build libdrm-devel \
+        meson ninja-build libdrm-devel alsa-lib-devel \
     && dnf clean all \
     && rm -rf /var/cache/dnf /var/cache/yum
 

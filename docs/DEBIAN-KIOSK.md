@@ -241,6 +241,7 @@ apt install --no-install-recommends \
   libgl1-mesa-dri libegl1 mesa-vulkan-drivers \
   libxkbcommon-x11-0 libxcursor1 libxi6 libxrandr2 \
   fonts-dejavu-core fonts-noto-cjk x11-xserver-utils \
+  libasound2 \
   open-vm-tools
 ```
 
@@ -254,6 +255,7 @@ apt install --no-install-recommends \
 | `fonts-dejavu-core` | Interface and monospace fonts (DejaVu Sans / Sans Mono), read by XGView at runtime |
 | `fonts-noto-cjk` | Chinese font (Noto Sans CJK); without it Chinese renders as boxes |
 | `x11-xserver-utils` | Provides `xset`, used to disable blanking and power saving (a monitor wall must stay lit) |
+| `libasound2` | ALSA runtime, which the audio sink (cpal, 1.5) links; without it the sound switch has nothing to drive |
 | `open-vm-tools` | VMware guest tools (**virtual machines only**; skip on real hardware) |
 
 Do not install `open-vm-tools-desktop`: it pulls in graphical dependencies.

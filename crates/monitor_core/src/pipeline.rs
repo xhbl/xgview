@@ -22,7 +22,7 @@ use monitor_codec::audio::{create_audio_decoder, AudioCodec, AudioDecoder, Audio
 use monitor_codec::sps;
 use monitor_codec::{Codec, ColorSpace, DecodedFrame, DecoderConfig, VideoDecoder};
 
-use crate::audio::AudioHub;
+use crate::audio::{AacRtpParams, AudioHub};
 use crate::config::ReconnectPolicy;
 use crate::error::Result;
 use crate::h264::{nal_unit_type, AccessUnit, H264Depacketizer, START_CODE};
@@ -633,9 +633,17 @@ impl BaselineFix {
     }
 }
 
+/// An audio track the session feeds the hub, with the decoder opened for it.
+struct AudioTrack {
+    decoder: Box<dyn AudioDecoder>,
+    info: AudioStreamInfo,
+    /// The RFC 3640 AU-header field widths, for the AAC depacketiser.
+    aac: AacRtpParams,
+}
+
 /// Opens an audio decoder for the camera's audio track, or `None` when there is
 /// no track the client receives or the codec has no backend in this build.
-fn audio_track_decoder(tracks: &[SdpTrack]) -> Option<(Box<dyn AudioDecoder>, AudioStreamInfo)> {
+fn audio_track_decoder(tracks: &[SdpTrack]) -> Option<AudioTrack> {
     let track = tracks.iter().find(|track| track.is_audio() && !track.is_sendonly())?;
     let named = AudioCodec::from_encoding(track.encoding.as_deref().unwrap_or_default());
     let codec = if named == AudioCodec::Unknown {
@@ -656,7 +664,11 @@ fn audio_track_decoder(tracks: &[SdpTrack]) -> Option<(Box<dyn AudioDecoder>, Au
     }
     let mut decoder = create_audio_decoder(codec);
     match decoder.configure(&info) {
-        Ok(()) => Some((decoder, info)),
+        Ok(()) => Some(AudioTrack {
+            decoder,
+            info,
+            aac: AacRtpParams::from_fmtp(track.fmtp.as_deref()),
+        }),
         Err(err) => {
             tracing::debug!(
                 target: "xgview::pipeline",
@@ -1451,21 +1463,26 @@ async fn run_session(
         if channel == 2 {
             if audio.wants(index) {
                 if let Some(output) = audio.output().filter(|output| output.is_active()) {
-                    if let Some((decoder, info)) = audio_decoder.as_mut() {
+                    if let Some(track) = audio_decoder.as_mut() {
                         if let Some(header) = parse_rtp_header(&payload) {
                             let body = &payload[header.header_len..];
                             let mut pcm: Vec<i16> = Vec::with_capacity(512);
                             // RFC 3640 carries the AAC access units behind their
-                            // AU headers; G.711 is the payload as it stands.
-                            let result = if info.codec == AudioCodec::Aac {
-                                crate::audio::aac_access_units(body, 13, 3)
-                                    .into_iter()
-                                    .try_for_each(|range| decoder.decode(&body[range], &mut pcm))
+                            // AU headers; G.711 is the payload as it stands. The
+                            // header field widths come from the track's fmtp.
+                            let result = if track.info.codec == AudioCodec::Aac {
+                                crate::audio::aac_access_units(
+                                    body,
+                                    track.aac.size_length,
+                                    track.aac.index_length,
+                                )
+                                .into_iter()
+                                .try_for_each(|range| track.decoder.decode(&body[range], &mut pcm))
                             } else {
-                                decoder.decode(body, &mut pcm)
+                                track.decoder.decode(body, &mut pcm)
                             };
                             if result.is_ok() && !pcm.is_empty() {
-                                output.configure(info);
+                                output.configure(&track.info);
                                 output.push(&pcm);
                             }
                         }
@@ -2255,7 +2272,8 @@ async fn run_ws_session(
         // The audio track's description, when the init segment carried one:
         // open its decoder so the media segments can be fed to it below.
         if let Some(audio_init) = parsed.audio {
-            let info = AudioStreamInfo::new(audio_init.codec, audio_init.sample_rate, audio_init.channels);
+            let mut info = AudioStreamInfo::new(audio_init.codec, audio_init.sample_rate, audio_init.channels);
+            info.extradata = audio_init.extradata.clone();
             let mut decoder = create_audio_decoder(audio_init.codec);
             match decoder.configure(&info) {
                 Ok(()) => audio_decoder = Some((decoder, info)),

@@ -1451,6 +1451,7 @@ impl XgViewApp {
         self.slide = Slide::default();
         self.needs_sync = true;
         self.mark_dirty();
+        self.apply_audio();
     }
 
     /// Whether the wall stands upright. False whenever the device cannot.
@@ -1509,6 +1510,7 @@ impl XgViewApp {
         self.config.android_orientation = wanted;
         self.needs_sync = true;
         self.mark_dirty();
+        self.apply_audio();
     }
 
     /// The orientation button, shared by both bars: the shape is the mode it
@@ -4951,6 +4953,7 @@ impl XgViewApp {
         self.scheduler.set_page(group.page);
         self.scheduler.set_focus(group.focus);
         self.needs_sync = true;
+        self.apply_audio();
     }
 
     /// Switches the wall to another camera group.
