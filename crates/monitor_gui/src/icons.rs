@@ -51,6 +51,10 @@ pub enum Icon {
     Sound,
     /// Sound off: a speaker with a cross where the waves were.
     Mute,
+    /// Talk-back idle: a microphone on its stand.
+    Mic,
+    /// Talking: the same microphone with sound leaving it.
+    Talk,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -318,6 +322,24 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
             painter.add(speaker());
             painter.add(line(&[at(0.62, 0.32), at(0.84, 0.68)]));
             painter.add(line(&[at(0.84, 0.32), at(0.62, 0.68)]));
+        }
+        Icon::Mic => {
+            // The capsule, its yoke and its stand.
+            let capsule = Rect::from_min_max(at(0.36, 0.06), at(0.64, 0.56));
+            painter.rect_stroke(capsule, CornerRadius::same(6), stroke, StrokeKind::Inside);
+            painter.add(line(&[at(0.22, 0.44), at(0.22, 0.56), at(0.50, 0.74), at(0.78, 0.56), at(0.78, 0.44)]));
+            painter.add(line(&[at(0.50, 0.74), at(0.50, 0.92)]));
+            painter.add(line(&[at(0.34, 0.92), at(0.66, 0.92)]));
+        }
+        Icon::Talk => {
+            // The same microphone, with sound leaving it on both sides.
+            let capsule = Rect::from_min_max(at(0.36, 0.06), at(0.64, 0.56));
+            painter.rect_stroke(capsule, CornerRadius::same(6), stroke, StrokeKind::Inside);
+            painter.add(line(&[at(0.30, 0.44), at(0.30, 0.56), at(0.50, 0.70), at(0.70, 0.56), at(0.70, 0.44)]));
+            painter.add(line(&[at(0.50, 0.70), at(0.50, 0.88)]));
+            painter.add(line(&[at(0.34, 0.88), at(0.66, 0.88)]));
+            painter.add(line(&[at(0.10, 0.26), at(0.14, 0.46)]));
+            painter.add(line(&[at(0.90, 0.26), at(0.86, 0.46)]));
         }
     }
 }

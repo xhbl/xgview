@@ -168,6 +168,9 @@ pub struct ChannelUi {
     /// True once the stream has proved to carry an audio track this build can
     /// decode. The magnified bar's sound switch is offered on it.
     pub audio: bool,
+    /// True when the channel's session offers a talk-back media. The magnified
+    /// bar's microphone switch is offered on it.
+    pub backchannel: bool,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub fps: f32,
@@ -187,6 +190,7 @@ impl Default for ChannelUi {
             codec: None,
             hardware: false,
             audio: false,
+            backchannel: false,
             width: None,
             height: None,
             fps: 0.0,
@@ -212,13 +216,14 @@ impl ChannelUi {
                     self.total_frames = 0;
                 }
             }
-            StreamEvent::Stats { stream, codec, width, height, hardware, audio, fps, bitrate_kbps, total_frames, .. } => {
+            StreamEvent::Stats { stream, codec, width, height, hardware, audio, backchannel, fps, bitrate_kbps, total_frames, .. } => {
                 self.stream = Some(stream);
                 if codec.is_some() {
                     self.codec = codec;
                 }
                 self.hardware = hardware;
                 self.audio = audio;
+                self.backchannel = backchannel;
                 if width.is_some() {
                     self.width = width;
                 }
@@ -849,6 +854,18 @@ pub struct XgViewApp {
     tile_bar: tilebar::Bar,
     /// The state the bar's sound control draws, and the switch the sink follows.
     sound_on: bool,
+    /// Whether the microphone is switched on, the bar's talk control driving it.
+    ///
+    /// The bar is a toggle rather than a push-to-talk button: a remote control
+    /// has no way to hold one down, and one rule serves the pointer, the keys
+    /// and the remote alike - see `tile_bar_activate`.
+    talking: bool,
+    /// The channel the microphone was switched on for. Moving the magnification
+    /// somewhere else stops it, so a viewer never talks to the camera they left.
+    talk_index: Option<usize>,
+    /// The microphone, opened on the first talk and kept for the window's life.
+    /// `None` when this machine has no input device, or the platform refused it.
+    mic: Option<Arc<crate::mic::Mic>>,
     /// The audio sink, `None` when this machine has no output device. The core
     /// only ever sees it through the audio hub, as an `AudioOutput`.
     audio: Option<Arc<crate::audio::CpalOutput>>,
@@ -1204,6 +1221,9 @@ impl XgViewApp {
             picture_zoom: PictureZoom::FULL,
             tile_bar: tilebar::Bar::new(),
             sound_on,
+            talking: false,
+            talk_index: None,
+            mic: None,
             audio,
             // The "Add devices" window, the settings panel and the top bar are
             // on this layer: each is a row (of tabs, or of controls) over a
@@ -1770,11 +1790,39 @@ impl XgViewApp {
     /// showing, and follows the sound switch. Called whenever the zoom or the
     /// switch changes; the hub's index is the camera the listener is listening
     /// to, and the sink's active flag is whether anything comes out at all.
-    fn apply_audio(&self) {
+    ///
+    /// The talk-back target moves with it: only the magnified session asks for a
+    /// back channel, so naming the camera here is what opens one there - and a
+    /// microphone left open on the camera the viewer just left is closed.
+    fn apply_audio(&mut self) {
         if let Some(sink) = &self.audio {
             sink.set_active(self.sound_on);
         }
-        self.manager.audio().set_index(self.scheduler.zoom());
+        let index = self.scheduler.zoom();
+        self.manager.audio().set_index(index);
+        self.manager.set_talk(index);
+        if self.talking && self.talk_index != index {
+            self.set_talking(false);
+        }
+    }
+
+    /// Switches the microphone on or off.
+    ///
+    /// Switching it on for the first time opens the device; a machine without
+    /// one says so once and then stays silent - the picture is never affected.
+    fn set_talking(&mut self, on: bool) {
+        if on {
+            if self.mic.is_none() {
+                self.mic = crate::mic::Mic::open(self.manager.talk().clone());
+            }
+            if self.mic.is_none() {
+                self.flash(monitor_i18n::tr("toast-no-microphone"), ToastKind::Error);
+                return;
+            }
+        }
+        self.talking = on;
+        self.talk_index = on.then(|| self.scheduler.zoom()).flatten();
+        self.manager.talk().set_talking(on);
     }
 
     fn set_fullscreen(&mut self, ctx: &egui::Context, enabled: bool) {
@@ -3426,12 +3474,13 @@ impl XgViewApp {
                 // until the bar is down, which is the point of it being a
                 // surface of its own; see `crate::tilebar`.
                 let mut touched = false;
+                let buttons = self.tile_bar_buttons();
                 if keys.left {
-                    self.tile_bar.step(false, tilebar::BUTTONS);
+                    self.tile_bar.step(false, buttons);
                     touched = true;
                 }
                 if keys.right {
-                    self.tile_bar.step(true, tilebar::BUTTONS);
+                    self.tile_bar.step(true, buttons);
                     touched = true;
                 }
                 if keys.up || keys.down {
@@ -7026,12 +7075,21 @@ impl XgViewApp {
             .map_or(false, |index| self.channels.get(&index).map_or(true, |channel| channel.audio))
     }
 
+    /// Whether the magnified camera offers a talk-back media.
+    ///
+    /// Unlike the sound switch there is no optimistic default: a back channel
+    /// exists only once the session has asked for it and the answer carried it,
+    /// so the microphone appears when the stream says it can.
+    fn magnified_has_backchannel(&self) -> bool {
+        self.scheduler
+            .zoom()
+            .is_some_and(|index| self.channels.get(&index).is_some_and(|channel| channel.backchannel))
+    }
+
     /// The controls the magnified bar carries, in walk order.
     ///
-    /// The picture fit is always there, the sound switch only for a camera that
-    /// has sound: `tilebar::SOUND` switches the feature on, this decides whether
-    /// the camera in the viewport earns a button for it, and this is the one
-    /// place the bar's controls are assembled.
+    /// The picture fit is always there; the sound switch for a camera that has
+    /// sound, the microphone for one that offers a back channel.
     fn tile_bar_controls<'a>(&self, label: &'a str) -> Vec<tilebar::Control<'a>> {
         let mut controls = vec![tilebar::Control::Text(label)];
         if tilebar::SOUND && self.magnified_has_audio() {
@@ -7041,11 +7099,24 @@ impl XgViewApp {
                 Icon::Mute
             }));
         }
+        if self.magnified_has_backchannel() {
+            controls.push(tilebar::Control::Icon(if self.talking {
+                Icon::Talk
+            } else {
+                Icon::Mic
+            }));
+        }
         controls
     }
 
-    /// Answers the control the bar is on: the picture fit, or the sound switch
-    /// when [`tilebar::SOUND`] is on and the camera has sound to switch.
+    /// How many controls the bar holds for the magnified camera, which is what
+    /// the walk wraps at.
+    fn tile_bar_buttons(&self) -> usize {
+        self.tile_bar_controls("").len()
+    }
+
+    /// Answers the control the bar is on: the picture fit, the sound switch
+    /// when the camera has sound, or the microphone when it has a back channel.
     ///
     /// The fit this writes is the magnified viewport's own: it is kept per
     /// camera, and the wall's landscape and portrait fits - the pair the settings
@@ -7053,14 +7124,20 @@ impl XgViewApp {
     /// first press the fit is the camera's own ratio, `Original`, which is where
     /// the walk starts.
     fn tile_bar_activate(&mut self) {
-        // The second control is the sound switch when it is shown; the first
-        // steps the picture fit. The index is the one the press or the walk left
-        // the bar on.
-        if self.tile_bar.focus() == 1 && tilebar::SOUND && self.magnified_has_audio() {
+        // The controls after the picture fit are the sound switch and then the
+        // microphone, each present only when the camera earns it. The index is
+        // the one the press or the walk left the bar on.
+        let sound = tilebar::SOUND && self.magnified_has_audio();
+        let focus = self.tile_bar.focus();
+        if sound && focus == 1 {
             self.sound_on = !self.sound_on;
             self.config.sound_on = self.sound_on;
             self.apply_audio();
             self.mark_dirty();
+            return;
+        }
+        if self.magnified_has_backchannel() && focus == 1 + usize::from(sound) {
+            self.set_talking(!self.talking);
             return;
         }
         let Some(index) = self.scheduler.zoom() else {

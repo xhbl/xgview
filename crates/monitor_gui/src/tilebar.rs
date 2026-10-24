@@ -49,11 +49,6 @@ const GUARD: Duration = Duration::from_millis(300);
 /// core's audio hub follows.
 pub const SOUND: bool = true;
 
-/// How many controls the bar holds: the picture fit, and the sound switch when
-/// [`SOUND`] is on. The geometry takes the widths, so the strip grows along the
-/// picture's edge as controls are added.
-pub const BUTTONS: usize = if SOUND { 2 } else { 1 };
-
 /// Distance kept from the picture edge, in points.
 ///
 /// Also what keeps the bar out of the band a touch screen's own gesture

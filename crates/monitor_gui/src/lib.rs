@@ -37,6 +37,7 @@ pub mod instance;
 pub mod android;
 #[cfg(target_os = "android")]
 pub mod keyboard;
+pub mod mic;
 pub mod nav;
 pub mod theme;
 pub mod tilebar;
@@ -336,6 +337,10 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
     // the exit code with it. See `audio::shutdown`.
     #[cfg(not(target_os = "android"))]
     audio::shutdown();
+    // The microphone is the same shape of problem, and is let go here for the
+    // same reason: see `mic::shutdown`.
+    #[cfg(not(target_os = "android"))]
+    mic::shutdown();
 
     result
 }
