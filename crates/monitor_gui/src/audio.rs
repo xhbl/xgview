@@ -34,8 +34,41 @@ thread_local! {
     /// It is parked on the thread that opened the device instead: the interface
     /// opens the sink on its own thread and keeps it for the life of the window,
     /// which is exactly how long the stream has to run. Dropping it would stop
-    /// the sound, so it is never taken back out.
+    /// the sound, so it is only taken back out by [`shutdown`], on the way out.
     static OUTPUT_STREAM: RefCell<Option<Stream>> = const { RefCell::new(None) };
+}
+
+/// Stops the sound and lets the output device go, on the way out of the window.
+///
+/// This exists because of what happens when it is *not* called. The stream is
+/// `!Send` and lives in a thread local, so leaving it there hands it to the
+/// thread-local destructor at thread exit - and dropping a cpal stream joins its
+/// audio thread. By then that thread can already be gone, so the join fails with
+/// "threads should not terminate unexpectedly". A panic inside a thread-local
+/// destructor cannot unwind - `std` calls `abort_on_dtor_unwind` - so the process
+/// dies with `0xC0000409` (`STATUS_STACK_BUFFER_OVERRUN`, `__fastfail` code 7,
+/// `FAST_FAIL_FATAL_APP_EXIT`) instead of exiting cleanly. Nothing in the log
+/// points at the real culprit: the abort is the *last* thing that happens, and it
+/// replaces whatever exit code the viewer meant to return.
+///
+/// Dropping it here, while the process is still healthy, keeps that panic on an
+/// ordinary stack - where it is caught and logged instead of aborting the process.
+pub fn shutdown() {
+    OUTPUT_STREAM.with(|slot| {
+        let stream = match slot.borrow_mut().take() {
+            Some(stream) => stream,
+            None => return,
+        };
+        // The join inside this drop is what panics when the audio thread has
+        // already terminated. Catching it keeps the exit quiet; the stream is
+        // consumed either way and the process is on its way out.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(stream))).is_err() {
+            tracing::debug!(
+                target: "xgview::audio",
+                "the output stream did not stop cleanly; ignoring it on the way out"
+            );
+        }
+    });
 }
 
 /// The sink, alive as long as the window is.

@@ -315,7 +315,7 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
         }
     }
 
-    eframe::run_native(
+    let result = eframe::run_native(
         monitor_core::APP_DISPLAY_NAME,
         native_options(options.fullscreen),
         Box::new(move |cc| {
@@ -328,7 +328,16 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
         } else {
             anyhow::anyhow!("cannot start the viewer: {err}")
         }
-    })
+    });
+
+    // The window is gone, so the sound goes with it - and it has to be let go of
+    // here, on this thread, while the process is still healthy: left to the
+    // thread-local destructor the output stream panics on its way out and takes
+    // the exit code with it. See `audio::shutdown`.
+    #[cfg(not(target_os = "android"))]
+    audio::shutdown();
+
+    result
 }
 
 /// The viewer has no renderer to be had on this machine.
