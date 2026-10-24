@@ -31,6 +31,7 @@
 //! * [`vitals`]     – memory, processor load and the operating system, for the
 //!   About page.
 
+pub mod audio;
 pub mod autostart;
 pub mod blackout;
 pub mod config;

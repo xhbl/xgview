@@ -18,9 +18,11 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
+use monitor_codec::audio::{create_audio_decoder, AudioCodec, AudioDecoder, AudioStreamInfo};
 use monitor_codec::sps;
 use monitor_codec::{Codec, ColorSpace, DecodedFrame, DecoderConfig, VideoDecoder};
 
+use crate::audio::AudioHub;
 use crate::config::ReconnectPolicy;
 use crate::error::Result;
 use crate::h264::{nal_unit_type, AccessUnit, H264Depacketizer, START_CODE};
@@ -239,6 +241,7 @@ pub struct ChannelManager {
     commands: UnboundedSender<ChannelCommand>,
     events: Receiver<StreamEvent>,
     frames: Arc<FrameStore>,
+    audio: Arc<AudioHub>,
     handle: Handle,
 }
 
@@ -256,15 +259,17 @@ impl ChannelManager {
         let (command_tx, command_rx) = unbounded_channel();
         let (event_tx, event_rx) = unbounded();
         let frames = Arc::new(FrameStore::default());
+        let audio = AudioHub::new();
         handle.spawn(supervisor(
             command_rx,
             event_tx,
             frames.clone(),
+            audio.clone(),
             Arc::new(Mutex::new(SessionSettings { reconnect: policy, handshake_timeout })),
             prefer_hardware,
             handle.clone(),
         ));
-        Self { commands: command_tx, events: event_rx, frames, handle: handle.clone() }
+        Self { commands: command_tx, events: event_rx, frames, audio, handle: handle.clone() }
     }
 
     /// Switches decoding between the GPU and the CPU.
@@ -305,6 +310,12 @@ impl ChannelManager {
     /// The newest decoded picture of every channel.
     pub fn frames(&self) -> &Arc<FrameStore> {
         &self.frames
+    }
+
+    /// The shared audio hub: the interface installs its sink here and names the
+    /// channel whose sound should play.
+    pub fn audio(&self) -> &Arc<AudioHub> {
+        &self.audio
     }
 
     /// Applies the transitions produced by the scheduler.
@@ -460,6 +471,7 @@ async fn supervisor(
     mut commands: UnboundedReceiver<ChannelCommand>,
     events: Sender<StreamEvent>,
     frames: Arc<FrameStore>,
+    audio: Arc<AudioHub>,
     settings: Arc<Mutex<SessionSettings>>,
     mut prefer_hardware: bool,
     handle: Handle,
@@ -508,6 +520,7 @@ async fn supervisor(
                     settings.clone(),
                     events.clone(),
                     frames.clone(),
+                    audio.clone(),
                 ));
                 channels.insert(index, ChannelRuntime { endpoint, task });
             }
@@ -541,6 +554,7 @@ async fn supervisor(
                         settings.clone(),
                         events.clone(),
                         frames.clone(),
+                        audio.clone(),
                     ));
                     channels.insert(index, ChannelRuntime { endpoint, task });
                 }
@@ -619,6 +633,54 @@ impl BaselineFix {
     }
 }
 
+/// Opens an audio decoder for the camera's audio track, or `None` when there is
+/// no track the client receives or the codec has no backend in this build.
+fn audio_track_decoder(tracks: &[SdpTrack]) -> Option<(Box<dyn AudioDecoder>, AudioStreamInfo)> {
+    let track = tracks.iter().find(|track| track.is_audio() && !track.is_sendonly())?;
+    let named = AudioCodec::from_encoding(track.encoding.as_deref().unwrap_or_default());
+    let codec = if named == AudioCodec::Unknown {
+        track
+            .payload_type
+            .and_then(AudioCodec::from_static_payload_type)
+            .unwrap_or(named)
+    } else {
+        named
+    };
+    let rate = track.clock_rate.unwrap_or(8000);
+    let channels = track.channels.unwrap_or(1);
+    let mut info = AudioStreamInfo::new(codec, rate, channels);
+    if let Some(fmtp) = track.fmtp.as_deref() {
+        if let Some(config) = aac_config(fmtp) {
+            info.extradata = config;
+        }
+    }
+    let mut decoder = create_audio_decoder(codec);
+    match decoder.configure(&info) {
+        Ok(()) => Some((decoder, info)),
+        Err(err) => {
+            tracing::debug!(
+                target: "xgview::pipeline",
+                codec = %codec,
+                error = %err,
+                "no audio backend for this track, the channel stays silent"
+            );
+            None
+        }
+    }
+}
+
+/// The AAC AudioSpecificConfig out of an SDP `fmtp` body (`config=1408`).
+fn aac_config(fmtp: &str) -> Option<Vec<u8>> {
+    let value = fmtp.split(';').find_map(|part| part.trim().strip_prefix("config="))?;
+    let value = value.trim();
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    let mut chars = value.chars();
+    while let (Some(hi), Some(lo)) = (chars.next(), chars.next()) {
+        bytes.push((hi.to_digit(16)? as u8) << 4 | lo.to_digit(16)? as u8);
+    }
+    Some(bytes)
+}
+
 /// Runs one attempt on one endpoint, opening the session its address calls for.
 ///
 /// The scheme is what decides: an `http://` address is an MJPEG stream, a
@@ -629,13 +691,14 @@ async fn run_once(
     handshake_timeout: Duration,
     events: &Sender<StreamEvent>,
     frames: &FrameStore,
+    audio: &AudioHub,
 ) -> Result<()> {
     if endpoint.is_mjpeg() {
         run_mjpeg_session(endpoint.clone(), handshake_timeout, events, frames).await
     } else if endpoint.is_ws() {
         run_ws_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames).await
     } else {
-        run_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames).await
+        run_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames, audio).await
     }
 }
 
@@ -646,6 +709,7 @@ async fn run_channel(
     settings: Arc<Mutex<SessionSettings>>,
     events: Sender<StreamEvent>,
     frames: Arc<FrameStore>,
+    audio: Arc<AudioHub>,
 ) {
     let index = endpoint.index;
     let mut attempt: u32 = 0;
@@ -689,7 +753,7 @@ async fn run_channel(
         // endpoint picks the one it needs rather than a single session branching
         // on it statement by statement.
         let started = Instant::now();
-        let mut outcome = run_once(&endpoint, prefer_hardware, settings.handshake_timeout, &events, &frames).await;
+        let mut outcome = run_once(&endpoint, prefer_hardware, settings.handshake_timeout, &events, &frames, &audio).await;
 
         // `Auto`: RTSP is preferred, and an RTSP that could not be reached at
         // all is answered with the MSE address at once rather than with a
@@ -713,7 +777,7 @@ async fn run_channel(
                 },
             );
             let mse = Endpoint { uri: fallback.uri, credentials: fallback.credentials, fallback: None, ..endpoint.clone() };
-            outcome = run_once(&mse, prefer_hardware, settings.handshake_timeout, &events, &frames).await;
+            outcome = run_once(&mse, prefer_hardware, settings.handshake_timeout, &events, &frames, &audio).await;
         }
 
         let lived = started.elapsed();
@@ -1095,6 +1159,7 @@ async fn run_session(
     handshake_timeout: Duration,
     events: &Sender<StreamEvent>,
     frames: &FrameStore,
+    audio: &AudioHub,
 ) -> Result<()> {
     let Endpoint { index, camera_id, uri, credentials, stream, transport, .. } = endpoint;
     let camera_id = camera_id.as_str();
@@ -1134,6 +1199,12 @@ async fn run_session(
     let payload_type = video.and_then(|track| track.payload_type);
     let parameter_sets = video.map(|track| track.parameter_sets.clone()).unwrap_or_default();
     let kind = Codec::from_encoding(codec.as_deref().unwrap_or_default());
+
+    // The camera's audio, when it carries a track the client receives. The
+    // decoder is opened once here and fed only while this channel is the audible
+    // one. A codec with no backend yet (AAC, until the FFmpeg path lands) fails
+    // at `configure`, and the channel simply plays no sound.
+    let mut audio_decoder = audio_track_decoder(&tracks);
 
     // `a=framesize` is optional, but a decoder has to be sized before its first
     // picture arrives: Android builds its image reader to that size, and a
@@ -1369,11 +1440,34 @@ async fn run_session(
         let (channel, payload) = match client.read_media().await? {
             MediaPacket::Rtp(payload) => (0u8, payload),
             MediaPacket::Rtcp(payload) => (1u8, payload),
-            // The audio track is set up (see `rtsp`) but not routed yet: the
-            // decoder and the sink land in the next step, so for now its
-            // packets are consumed and dropped, leaving the video path exact.
-            MediaPacket::AudioRtp(_) | MediaPacket::AudioRtcp(_) => continue,
+            MediaPacket::AudioRtp(payload) => (2u8, payload),
+            MediaPacket::AudioRtcp(_) => (3u8, Vec::new()),
         };
+
+        // Channel 2 carries the audio RTP. It is decoded and played only while
+        // this channel is the one the user is listening to and the sink is open;
+        // otherwise the packet is dropped, which is what keeps the grid's nine
+        // tiles from all playing their microphones.
+        if channel == 2 {
+            if audio.wants(index) {
+                if let Some(output) = audio.output().filter(|output| output.is_active()) {
+                    if let Some((decoder, info)) = audio_decoder.as_mut() {
+                        if let Some(header) = parse_rtp_header(&payload) {
+                            let body = &payload[header.header_len..];
+                            let mut pcm: Vec<i16> = Vec::with_capacity(512);
+                            if decoder.decode(body, &mut pcm).is_ok() && !pcm.is_empty() {
+                                output.configure(info);
+                                output.push(&pcm);
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if channel == 3 {
+            continue;
+        }
 
         // Channel 0 carries RTP, channel 1 carries RTCP.
         if channel == 0 {
