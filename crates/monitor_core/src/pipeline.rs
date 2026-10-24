@@ -1455,7 +1455,16 @@ async fn run_session(
                         if let Some(header) = parse_rtp_header(&payload) {
                             let body = &payload[header.header_len..];
                             let mut pcm: Vec<i16> = Vec::with_capacity(512);
-                            if decoder.decode(body, &mut pcm).is_ok() && !pcm.is_empty() {
+                            // RFC 3640 carries the AAC access units behind their
+                            // AU headers; G.711 is the payload as it stands.
+                            let result = if info.codec == AudioCodec::Aac {
+                                crate::audio::aac_access_units(body, 13, 3)
+                                    .into_iter()
+                                    .try_for_each(|range| decoder.decode(&body[range], &mut pcm))
+                            } else {
+                                decoder.decode(body, &mut pcm)
+                            };
+                            if result.is_ok() && !pcm.is_empty() {
                                 output.configure(info);
                                 output.push(&pcm);
                             }

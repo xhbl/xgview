@@ -25,6 +25,8 @@ pub mod audio;
 pub mod fallback;
 #[cfg(all(not(target_os = "android"), feature = "ffmpeg"))]
 pub mod ffmpeg;
+#[cfg(all(not(target_os = "android"), feature = "ffmpeg"))]
+pub mod ffmpeg_audio;
 pub mod g711;
 #[cfg(feature = "h264")]
 pub mod h264;

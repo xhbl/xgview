@@ -92,6 +92,52 @@ impl AudioHub {
     }
 }
 
+/// Strips the RFC 3640 AU headers from an AAC RTP payload (`MPEG4-GENERIC`),
+/// returning each access unit's byte range within the payload.
+///
+/// The payload opens with a 16 bit count of header bits, then one header per
+/// access unit of `size_length + index_length` bits, then the units back to
+/// back. The cameras measured all send `sizelength=13; indexlength=3`, and
+/// those are what callers pass; a camera that differs takes its own fields from
+/// the SDP's fmtp.
+pub fn aac_access_units(
+    payload: &[u8],
+    size_length: u32,
+    index_length: u32,
+) -> Vec<std::ops::Range<usize>> {
+    if payload.len() < 2 {
+        return Vec::new();
+    }
+    let header_bits = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+    let header_len = (header_bits + 7) / 8;
+    let per_header = (size_length + index_length) as usize;
+    if per_header == 0 || header_len == 0 || header_len > payload.len() - 2 {
+        return Vec::new();
+    }
+    let count = header_bits / per_header;
+    let headers = &payload[2..2 + header_len];
+    let mut ranges = Vec::with_capacity(count);
+    let mut data = 2 + header_len;
+    for i in 0..count {
+        let size = read_bits(headers, per_header * i, size_length as usize);
+        if size == 0 || data + size > payload.len() {
+            return ranges;
+        }
+        ranges.push(data..data + size);
+        data += size;
+    }
+    ranges
+}
+
+/// Reads `length` big-endian bits starting at bit `start`.
+fn read_bits(data: &[u8], start: usize, length: usize) -> usize {
+    let mut value = 0usize;
+    for bit in start..start + length {
+        value = (value << 1) | ((data[bit / 8] >> (7 - bit % 8)) & 1) as usize;
+    }
+    value
+}
+
 impl std::fmt::Debug for AudioHub {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AudioHub")
@@ -141,5 +187,22 @@ mod tests {
         assert!(hub.output().is_some());
         hub.set_output(None);
         assert!(hub.output().is_none());
+    }
+
+    #[test]
+    fn aac_payload_splits_into_access_units() {
+        // Two 2 byte units, each headered by a 13 bit size and a 3 bit index.
+        // header_bits = 2 headers x 16 bits = 32.
+        let payload = [0x00, 0x20, 0x00, 0x10, 0x00, 0x11, 0xAA, 0xBB, 0xCC, 0xDD];
+        let ranges = aac_access_units(&payload, 13, 3);
+        assert_eq!(ranges, vec![6..8, 8..10]);
+        assert_eq!(&payload[ranges[0].clone()], &[0xAA, 0xBB]);
+        assert_eq!(&payload[ranges[1].clone()], &[0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn aac_payload_that_is_too_short_yields_nothing() {
+        assert!(aac_access_units(&[], 13, 3).is_empty());
+        assert!(aac_access_units(&[0x00], 13, 3).is_empty());
     }
 }
