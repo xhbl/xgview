@@ -269,10 +269,15 @@ pub enum RtspPacket {
 /// so that their receive buffer never fills up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaPacket {
-    /// A complete RTP packet, header included.
+    /// A complete RTP packet of the video track, header included.
     Rtp(Vec<u8>),
-    /// An RTCP packet (interleaved transport only).
+    /// An RTCP packet of the video track (interleaved transport only).
     Rtcp(Vec<u8>),
+    /// A complete RTP packet of the audio track, which travels on the second
+    /// `SETUP`'s interleaved pair.
+    AudioRtp(Vec<u8>),
+    /// An RTCP packet of the audio track.
+    AudioRtcp(Vec<u8>),
 }
 
 /// A video (or audio) track described by the session SDP.
@@ -286,6 +291,15 @@ pub struct SdpTrack {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub fps: Option<f32>,
+    /// Channel count from an audio `rtpmap` (`.../16000/1`), which the parser
+    /// used to throw away.
+    pub channels: Option<u8>,
+    /// The raw `a=fmtp` body, kept for audio: AAC's `config=` and the RFC 3640
+    /// size / index lengths a `MPEG4-GENERIC` depacketiser needs.
+    pub fmtp: Option<String>,
+    /// Offered direction: `a=sendonly` / `a=recvonly` / `a=sendrecv`. The back
+    /// channel is the `sendonly` audio media (§10 of the audio plan).
+    pub direction: SdpDirection,
     /// Raw parameter set NAL units the SDP advertised - H.264's SPS and PPS
     /// from `sprop-parameter-sets`, or H.265's VPS, SPS and PPS from
     /// `sprop-vps` / `sprop-sps` / `sprop-pps` - in the order the camera listed
@@ -294,9 +308,35 @@ pub struct SdpTrack {
     pub parameter_sets: Vec<Vec<u8>>,
 }
 
+/// Offered direction of an SDP media, `a=sendrecv` when the line is absent.
+///
+/// Only `sendonly` audio is load bearing here: that is the camera's back
+/// channel, a media the client sends. A camera's own audio track is `recvonly`
+/// from the client's point of view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SdpDirection {
+    #[default]
+    SendRecv,
+    SendOnly,
+    RecvOnly,
+    Inactive,
+}
+
 impl SdpTrack {
     pub fn is_video(&self) -> bool {
         self.media.eq_ignore_ascii_case("video")
+    }
+
+    /// An audio track, the counterpart to [`SdpTrack::is_video`] for the second
+    /// `SETUP`.
+    pub fn is_audio(&self) -> bool {
+        self.media.eq_ignore_ascii_case("audio")
+    }
+
+    /// Offered with `a=sendonly`: the client sends this media. For audio that
+    /// is the back channel; a media the client receives is `recvonly`.
+    pub fn is_sendonly(&self) -> bool {
+        self.direction == SdpDirection::SendOnly
     }
 
     /// Human readable resolution, e.g. `1920x1080`.
@@ -385,7 +425,7 @@ pub fn parse_sdp(sdp: &str) -> Vec<SdpTrack> {
         Regex::new(r"(?i)^a=framesize:(\d+)\s+(\d+)-(\d+)").expect("valid framesize regex")
     });
     static RTPMAP: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)^a=rtpmap:(\d+)\s+([^/]+)/(\d+)").expect("valid rtpmap regex")
+        Regex::new(r"(?i)^a=rtpmap:(\d+)\s+([^/]+)/(\d+)(?:/(\d+))?").expect("valid rtpmap regex")
     });
     static FRAMERATE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)^a=framerate:([0-9.]+)").expect("valid framerate regex")
@@ -410,6 +450,9 @@ pub fn parse_sdp(sdp: &str) -> Vec<SdpTrack> {
                 width: None,
                 height: None,
                 fps: None,
+                channels: None,
+                fmtp: None,
+                direction: SdpDirection::SendRecv,
                 parameter_sets: Vec::new(),
             });
             continue;
@@ -424,6 +467,10 @@ pub fn parse_sdp(sdp: &str) -> Vec<SdpTrack> {
             if pt == track.payload_type || track.encoding.is_none() {
                 track.encoding = Some(caps[2].to_ascii_uppercase());
                 track.clock_rate = caps[3].parse::<u32>().ok();
+                // The optional `/channels` an audio rtpmap carries.
+                if let Some(channels) = caps.get(4).and_then(|m| m.as_str().parse::<u8>().ok()) {
+                    track.channels = Some(channels);
+                }
             }
         } else if let Some(caps) = FRAMESIZE.captures(line) {
             let pt = caps[1].parse::<u8>().ok();
@@ -437,6 +484,37 @@ pub fn parse_sdp(sdp: &str) -> Vec<SdpTrack> {
             let pt = caps[1].parse::<u8>().ok();
             if pt == track.payload_type || track.parameter_sets.is_empty() {
                 track.parameter_sets = parse_parameter_sets(&caps[2]);
+                // Keep the whole body too: the audio codecs read `config=` and
+                // the RFC 3640 size / index lengths out of it.
+                if track.fmtp.is_none() {
+                    track.fmtp = Some(caps[2].to_string());
+                }
+            }
+        } else if line.eq_ignore_ascii_case("a=sendonly") {
+            track.direction = SdpDirection::SendOnly;
+        } else if line.eq_ignore_ascii_case("a=recvonly") {
+            track.direction = SdpDirection::RecvOnly;
+        } else if line.eq_ignore_ascii_case("a=sendrecv") {
+            track.direction = SdpDirection::SendRecv;
+        } else if line.eq_ignore_ascii_case("a=inactive") {
+            track.direction = SdpDirection::Inactive;
+        }
+    }
+
+    // A G.711 track may carry no `rtpmap` at all: RFC 3551 gives PCMU and PCMA
+    // the static payload types 0 and 8, and cameras lean on that.
+    for track in &mut tracks {
+        if track.encoding.is_none() {
+            match track.payload_type {
+                Some(0) => {
+                    track.encoding = Some("PCMU".to_string());
+                    track.clock_rate = Some(8000);
+                }
+                Some(8) => {
+                    track.encoding = Some("PCMA".to_string());
+                    track.clock_rate = Some(8000);
+                }
+                _ => {}
             }
         }
     }
@@ -634,6 +712,10 @@ pub struct RtspClient {
     /// reading channel `0` there returns the audio's packets and never a
     /// picture, which leaves the session looking stuck on "connecting".
     interleaved: Option<(u8, u8)>,
+    /// Channel pair the server confirmed for the audio track, the mirror of
+    /// [`RtspClient::interleaved`]. `None` when the track was not set up, in
+    /// which case the session carries video alone.
+    audio_interleaved: Option<(u8, u8)>,
     /// Address of the RTSP server. With the UDP transport the TCP connection
     /// carries only the control plane, and the media is delivered here.
     peer_addr: Option<SocketAddr>,
@@ -708,6 +790,7 @@ impl RtspClient {
             credentials,
             challenge: None,
             interleaved: None,
+            audio_interleaved: None,
             peer_addr,
             rtp: None,
             rtcp: None,
@@ -1049,11 +1132,15 @@ impl RtspClient {
         Ok(response.body_string())
     }
 
-    /// `SETUP` using the TCP interleaved transport.
+    /// `SETUP` a track over the TCP interleaved transport, returning the pair the
+    /// server confirmed.
     ///
-    /// The pair returned is the one the server confirmed in the answer, which
-    /// is not necessarily the one requested - see [`RtspClient::interleaved`].
-    pub async fn setup_interleaved(&mut self, control: &str, rtp_channel: u8) -> Result<u8> {
+    /// The pair it *answers* with is authoritative: RFC 2326 lets it pick its
+    /// own, and it need not be the pair that was asked for. go2rtc numbers the
+    /// channels by track index, so a track that follows another is framed on
+    /// `2-3` even when `0-1` was requested. Without an `interleaved` parameter
+    /// in the answer there is nothing to honour and the requested pair stands.
+    async fn setup_interleaved_pair(&mut self, control: &str, rtp_channel: u8) -> Result<(u8, u8)> {
         let track_uri = self.resolve_control(control);
         let transport = format!(
             "RTP/AVP/TCP;unicast;interleaved={}-{}",
@@ -1065,18 +1152,30 @@ impl RtspClient {
             .await?;
         self.update_session(&response);
         let response = self.expect_success(response, "SETUP")?;
-        // The server's answer decides the framing. It may keep the channels
-        // asked for, or number them itself - go2rtc puts the second track on
-        // `2-3` - so the pair it names is what media is read from. Without an
-        // `interleaved` parameter in the answer there is nothing to honour, and
-        // the requested pair stands.
         let (rtp, rtcp) = response
             .header("Transport")
             .and_then(|header| transport_ports(header, "interleaved"))
             .map(|(rtp, rtcp)| (rtp as u8, rtcp as u8))
             .unwrap_or((rtp_channel, rtp_channel + 1));
-        self.interleaved = Some((rtp, rtcp));
         self.state = RtspSessionState::Setup;
+        Ok((rtp, rtcp))
+    }
+
+    /// `SETUP` the video track, storing the confirmed pair.
+    ///
+    /// The pair returned is the one the server confirmed in the answer, which
+    /// is not necessarily the one requested - see [`RtspClient::interleaved`].
+    pub async fn setup_interleaved(&mut self, control: &str, rtp_channel: u8) -> Result<u8> {
+        let (rtp, rtcp) = self.setup_interleaved_pair(control, rtp_channel).await?;
+        self.interleaved = Some((rtp, rtcp));
+        Ok(rtp)
+    }
+
+    /// `SETUP` the audio track on its own interleaved pair, stored apart from
+    /// the video's so that [`RtspClient::read_media`] can tell the two apart.
+    pub async fn setup_audio_interleaved(&mut self, control: &str, rtp_channel: u8) -> Result<u8> {
+        let (rtp, rtcp) = self.setup_interleaved_pair(control, rtp_channel).await?;
+        self.audio_interleaved = Some((rtp, rtcp));
         Ok(rtp)
     }
 
@@ -1182,9 +1281,11 @@ impl RtspClient {
 
     /// Convenience helper: `OPTIONS` + `DESCRIBE` + `SETUP` + `PLAY`.
     ///
-    /// Returns the parsed SDP tracks of the session. Only the video track is set
-    /// up: an audio track the SDP advertises is left alone, so nothing of it is
-    /// ever sent to the client.
+    /// Returns the parsed SDP tracks of the session. The video track is always
+    /// set up. The camera's audio track is set up too, on its own interleaved
+    /// pair - a media the client *receives*, never the `sendonly` back channel -
+    /// but a failure there is not fatal: a camera that refuses the second
+    /// `SETUP` still gives a picture.
     pub async fn start_with_transport(&mut self, transport: RtspTransport) -> Result<Vec<SdpTrack>> {
         // Each step is stamped before it is waited on, so that a deadline which
         // fires somewhere in here can say which request was not answered.
@@ -1205,6 +1306,36 @@ impl RtspClient {
             }
             RtspTransport::Udp => {
                 self.setup_udp(&control).await?;
+            }
+        }
+        // The audio track the client receives. Over TCP it gets its own
+        // interleaved pair - asked for far from the video's, so a server that
+        // honours the request cannot collide with it - and a refusal is logged
+        // and left behind rather than failing the session, because the picture
+        // must survive a camera that will not open a second track. Over UDP the
+        // two tracks would share the single bound socket pair, so audio is left
+        // out there.
+        if let Some(audio) = tracks.iter().find(|track| track.is_audio() && !track.is_sendonly()) {
+            let audio_control = audio.control.clone().unwrap_or_default();
+            match transport {
+                RtspTransport::Tcp => {
+                    match self.setup_audio_interleaved(&audio_control, 2).await {
+                        Ok(channel) => tracing::debug!(
+                            target: "xgview::rtsp",
+                            channel,
+                            "audio track set up"
+                        ),
+                        Err(err) => tracing::warn!(
+                            target: "xgview::rtsp",
+                            error = %err,
+                            "audio track was not set up, the session carries video alone"
+                        ),
+                    }
+                }
+                RtspTransport::Udp => tracing::debug!(
+                    target: "xgview::rtsp",
+                    "audio is set up over TCP only, skipping it on the UDP transport"
+                ),
             }
         }
         self.stage = Some(RtspStage::Play);
@@ -1266,6 +1397,16 @@ impl RtspClient {
         self.interleaved.map(|(rtp, _)| rtp).unwrap_or(0)
     }
 
+    /// RTP channel of the audio track, `None` when it was not set up.
+    fn audio_rtp_channel(&self) -> Option<u8> {
+        self.audio_interleaved.map(|(rtp, _)| rtp)
+    }
+
+    /// RTCP channel of the audio track, `None` when it was not set up.
+    fn audio_rtcp_channel(&self) -> Option<u8> {
+        self.audio_interleaved.map(|(_, rtcp)| rtcp)
+    }
+
     /// Reads the next interleaved payload, ignoring control responses.
     ///
     /// A control response that arrives while media is flowing is noise, never a
@@ -1306,11 +1447,20 @@ impl RtspClient {
     pub async fn read_media(&mut self) -> Result<MediaPacket> {
         if self.rtp.is_none() {
             let (channel, payload) = self.read_interleaved().await?;
-            return Ok(if channel == self.rtp_channel() {
-                MediaPacket::Rtp(payload)
-            } else {
-                MediaPacket::Rtcp(payload)
-            });
+            // Route by the channel the two `SETUP`s confirmed. Anything that is
+            // neither the video nor the audio RTP channel is control the caller
+            // does not act on: it is handed back as video RTCP, which the caller
+            // already discards.
+            if channel == self.rtp_channel() {
+                return Ok(MediaPacket::Rtp(payload));
+            }
+            if self.audio_rtp_channel() == Some(channel) {
+                return Ok(MediaPacket::AudioRtp(payload));
+            }
+            if self.audio_rtcp_channel() == Some(channel) {
+                return Ok(MediaPacket::AudioRtcp(payload));
+            }
+            return Ok(MediaPacket::Rtcp(payload));
         }
 
         let rtp = self.rtp.as_ref().expect("bound by setup_udp");
@@ -1427,6 +1577,64 @@ a=control:trackID=1\r\n";
         assert_eq!(tracks[0].encoding.as_deref(), Some("H264"));
         assert_eq!(tracks[0].resolution().as_deref(), Some("1920x1080"));
         assert_eq!(tracks[0].control.as_deref(), Some("trackID=1"));
+    }
+
+    #[test]
+    fn parses_the_audio_track_and_its_direction() {
+        // The shape go2rtc serves: the video track, then the camera's own audio
+        // (`recvonly`) and the back channel (`sendonly`). Only the first audio
+        // is what the client plays; the `sendonly` one is the talk-back media.
+        let sdp = "v=0\r\n\
+m=video 0 RTP/AVP 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=control:trackID=0\r\n\
+a=recvonly\r\n\
+m=audio 0 RTP/AVP 97\r\n\
+a=rtpmap:97 mpeg4-generic/16000/1\r\n\
+a=fmtp:97 config=1408; mode=AAC-hbr; sizelength=13\r\n\
+a=control:trackID=1\r\n\
+a=recvonly\r\n\
+m=audio 0 RTP/AVP 0 8\r\n\
+a=control:trackID=2\r\n\
+a=sendonly\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:8 PCMA/8000\r\n";
+        let tracks = parse_sdp(sdp);
+        assert_eq!(tracks.len(), 3);
+        assert!(tracks[0].is_video());
+
+        let audio = &tracks[1];
+        assert!(audio.is_audio());
+        assert!(!audio.is_sendonly());
+        assert_eq!(audio.encoding.as_deref(), Some("MPEG4-GENERIC"));
+        assert_eq!(audio.clock_rate, Some(16000));
+        assert_eq!(audio.channels, Some(1));
+        assert!(audio.fmtp.as_deref().unwrap().contains("config=1408"));
+
+        let back = &tracks[2];
+        assert!(back.is_audio());
+        assert!(back.is_sendonly());
+        assert_eq!(back.control.as_deref(), Some("trackID=2"));
+    }
+
+    #[test]
+    fn names_the_g711_static_payload_types() {
+        // Some cameras send no `rtpmap` for PCMU / PCMA at all: RFC 3551 gives
+        // them the static payload types 0 and 8.
+        let tracks = parse_sdp("m=audio 0 RTP/AVP 0\r\n");
+        assert_eq!(tracks[0].encoding.as_deref(), Some("PCMU"));
+        assert_eq!(tracks[0].clock_rate, Some(8000));
+
+        let tracks = parse_sdp("m=audio 0 RTP/AVP 8\r\n");
+        assert_eq!(tracks[0].encoding.as_deref(), Some("PCMA"));
+    }
+
+    #[test]
+    fn a_plain_track_defaults_to_sendrecv() {
+        let tracks = parse_sdp("m=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n");
+        assert_eq!(tracks[0].direction, SdpDirection::SendRecv);
+        assert!(!tracks[0].is_sendonly());
+        assert!(!tracks[0].is_audio());
     }
 
     #[test]
@@ -1808,6 +2016,9 @@ a=control:trackID=1\r\n";
         match client.read_media().await.unwrap() {
             MediaPacket::Rtp(payload) => assert_eq!(payload.len(), 14),
             MediaPacket::Rtcp(_) => panic!("the video arrived on the wrong channel"),
+            MediaPacket::AudioRtp(_) | MediaPacket::AudioRtcp(_) => {
+                panic!("the audio arrived where the video was expected")
+            }
         }
         drop(client);
         server.await.unwrap();

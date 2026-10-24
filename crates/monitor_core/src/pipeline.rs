@@ -1369,6 +1369,10 @@ async fn run_session(
         let (channel, payload) = match client.read_media().await? {
             MediaPacket::Rtp(payload) => (0u8, payload),
             MediaPacket::Rtcp(payload) => (1u8, payload),
+            // The audio track is set up (see `rtsp`) but not routed yet: the
+            // decoder and the sink land in the next step, so for now its
+            // packets are consumed and dropped, leaving the video path exact.
+            MediaPacket::AudioRtp(_) | MediaPacket::AudioRtcp(_) => continue,
         };
 
         // Channel 0 carries RTP, channel 1 carries RTCP.

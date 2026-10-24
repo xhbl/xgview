@@ -75,6 +75,9 @@ async fn read_resolution(
         let payload = match client.read_media().await? {
             MediaPacket::Rtp(payload) => payload,
             MediaPacket::Rtcp(_) => continue,
+            // The probe reads the video only; a camera that also carries audio
+            // is not what it is measuring.
+            MediaPacket::AudioRtp(_) | MediaPacket::AudioRtcp(_) => continue,
         };
         let Some(header) = parse_rtp_header(&payload) else { continue };
         // The depacketizer takes the RTP payload, not the whole packet: the
