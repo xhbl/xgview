@@ -332,19 +332,24 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
             painter.add(line(&[at(0.34, 0.92), at(0.66, 0.92)]));
         }
         Icon::Hangup => {
-            // The handset laid down: a bar with the two cups at its ends, the
-            // shape a phone draws on the key that ends a call. It is drawn
-            // wider than tall on purpose - it is one stroke, and a square of it
-            // would read as a bracket.
-            painter.add(line(&[
-                at(0.12, 0.64),
-                at(0.12, 0.46),
-                at(0.26, 0.34),
-                at(0.50, 0.30),
-                at(0.74, 0.34),
-                at(0.88, 0.46),
-                at(0.88, 0.64),
-            ]));
+            // The handset laid down, drawn as the phone's own call-end key has
+            // it: an outer arc with the receiver's underside folded inside it
+            // and the two cups meeting its ends. Two arcs, not one line - the
+            // single line read as a bracket at the size of a button.
+            use std::f32::consts::PI;
+            let arc = |cx: f32, cy: f32, rx: f32, ry: f32, from: f32, to: f32| -> Vec<Pos2> {
+                (0..=12)
+                    .map(|i| {
+                        let a = from + (to - from) * i as f32 / 12.0;
+                        at(cx + rx * a.cos(), cy - ry * a.sin())
+                    })
+                    .collect()
+            };
+            let mut points = arc(0.5, 0.68, 0.42, 0.38, PI, 0.0);
+            points.push(at(0.68, 0.68));
+            points.extend(arc(0.5, 0.54, 0.18, 0.10, 0.0, PI));
+            points.push(at(0.32, 0.68));
+            painter.add(Shape::closed_line(points, stroke));
         }
     }
 }

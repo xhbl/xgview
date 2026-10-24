@@ -2340,13 +2340,22 @@ codec=PCMU`. The SHIELD, which has no microphone, says so instead.
 
 **A call takes the bar over.** While the microphone is open the strip carries one
 control - a red square with the handset on it, the shape a phone draws on the key
-that ends a call - and nothing else can be pressed until it is pressed. The bar's
-idle clock is suspended for as long as the call is up, because the one control
-that ends it would otherwise leave with the strip eight seconds in; hanging up
-puts the fit, the sound switch and the microphone back and the clock resumes
-from that press. Enter on the remote is that press, and the selection is put back
-to the first control when the call starts, since the fit it stood on before has
-gone.
+that ends a call (two arcs: the receiver's back and its underside, not one line,
+which read as a bracket at the size of a button) - and nothing else can be
+pressed until it is pressed. The bar's idle clock is suspended for as long as the
+call is up, because the one control that ends it would otherwise leave with the
+strip eight seconds in; hanging up puts the fit, the sound switch and the
+microphone back and the clock resumes from that press. Enter on the remote is
+that press, and the selection is put back to the first control when the call
+starts, since the fit it stood on before has gone.
+
+**A bar that has gone is a call that has ended.** The strip is the call's whole
+surface, so it is the call's existence: a press on the picture, `Back`, a pinch
+or a wheel over the magnified picture, or a step to another camera all take the
+bar down, and taking it down ends the call. That is one rule at the end of the
+frame - `talking && !tile_bar.is_open()` - rather than each of those paths
+remembering to hang up, which is what the earlier shape asked of them, and it is
+why the idle has to be suspended rather than left to fire.
 
 **The bar follows the viewport, whichever way the viewport moved.** Leaving the
 magnification tears down the back channel and magnifying again reopens it, so the

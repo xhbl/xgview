@@ -8218,6 +8218,15 @@ impl eframe::App for XgViewApp {
             self.ring_aimed,
         );
 
+        // The call lives in the bar, so a bar that has gone has ended it. The
+        // strip carries the one control that hangs up, and every way of putting
+        // it away - a press on the picture, Back, a pinch or a wheel, a step to
+        // another camera - is also a way out of the call. Stated once, here,
+        // rather than each of those paths remembering to stop talking.
+        if self.talking && !self.tile_bar.is_open() {
+            self.set_talking(false);
+        }
+
         // The magnified viewport's bar keeps a clock of its own, and the repaint
         // is asked for against it: a wall showing no live picture is not
         // repainting on its own, and the bar still has to go when its time is up.
