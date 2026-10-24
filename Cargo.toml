@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "xgview"
 # Every value below is declared once, in `[workspace.package]`, and inherited
 # here and by each crate of the workspace. `name` and `readme` cannot be
@@ -60,7 +60,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.5.14"
+version = "1.5.15"
 authors = ["XHBL <newxhbl@hotmail.com>"]
 description = "A grid viewer for surveillance cameras"
 license = "MIT"

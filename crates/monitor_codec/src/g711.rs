@@ -55,6 +55,61 @@ pub fn decode_alaw(byte: u8) -> i16 {
     }
 }
 
+/// Encodes one linear 16 bit sample as a µ-law byte.
+///
+/// The inverse of [`decode_ulaw`], and the same standard North American
+/// companding: clip to full scale, add the bias, then take the segment the
+/// sample falls in and the mantissa inside it.
+pub fn encode_ulaw(sample: i16) -> u8 {
+    const BIAS: i32 = 0x84;
+    const CLIP: i32 = 32_635;
+    let mut sample = i32::from(sample);
+    let sign = if sample < 0 {
+        sample = -sample;
+        0x80
+    } else {
+        0
+    };
+    sample = sample.min(CLIP) + BIAS;
+    let mut exponent = 7;
+    let mut mask = 0x4000;
+    while exponent > 0 && sample & mask == 0 {
+        exponent -= 1;
+        mask >>= 1;
+    }
+    let mantissa = (sample >> (exponent + 3)) & 0x0F;
+    (!(sign | (exponent << 4) | mantissa)) as u8
+}
+
+/// Encodes one linear 16 bit sample as an A-law byte.
+///
+/// The inverse of [`decode_alaw`]. The first segment is the flat one - 16
+/// steps of 16 covering everything below 256 - and above it the segment is
+/// the position of the highest set bit, as it is for µ-law.
+pub fn encode_alaw(sample: i16) -> u8 {
+    const CLIP: i32 = 32_635;
+    let mut sample = i32::from(sample);
+    let sign = if sample >= 0 {
+        0x80
+    } else {
+        sample = -sample;
+        0x00
+    };
+    sample = sample.min(CLIP);
+    let (exponent, mantissa) = if sample < 256 {
+        (0, (sample >> 4) & 0x0F)
+    } else {
+        let mut exponent = 7;
+        let mut mask = 0x4000;
+        while exponent > 0 && sample & mask == 0 {
+            exponent -= 1;
+            mask >>= 1;
+        }
+        (exponent, (sample >> (exponent + 3)) & 0x0F)
+    };
+    ((sign | (exponent << 4) | mantissa) as u8) ^ 0x55
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +151,42 @@ mod tests {
         assert_eq!(decode_alaw(0xD4), 24);
         assert_eq!(decode_alaw(0xD7), 40);
         assert_eq!(decode_alaw(0xD6), 56);
+    }
+
+    #[test]
+    fn ulaw_encodes_silence_to_the_silence_byte() {
+        assert_eq!(encode_ulaw(0), 0xFF);
+        // A-law's two zeros take the positive one: decode(encode(0)) is +8.
+        assert_eq!(encode_alaw(0), 0xD5);
+    }
+
+    #[test]
+    fn encoders_round_trip_within_a_quantisation_step() {
+        // The codecs are lossy by design; what matters is that a sample comes
+        // back inside its own step and with its sign, not that it is identical.
+        // The step of segment `e` is `1 << (e + 3)` for µ-law, so a third of
+        // the sample is a safe ceiling for everything below full scale.
+        for sample in (-32768i16..=32767).step_by(7) {
+            let back = decode_ulaw(encode_ulaw(sample));
+            let error = i32::from(back) - i32::from(sample);
+            assert!(
+                error.abs() <= (i32::from(sample).abs() / 3).max(8),
+                "ulaw {sample} -> {back}"
+            );
+            let back = decode_alaw(encode_alaw(sample));
+            let error = i32::from(back) - i32::from(sample);
+            assert!(
+                error.abs() <= (i32::from(sample).abs() / 3).max(8),
+                "alaw {sample} -> {back}"
+            );
+        }
+    }
+
+    #[test]
+    fn encoders_keep_the_sign() {
+        assert!(decode_ulaw(encode_ulaw(1000)) > 0);
+        assert!(decode_ulaw(encode_ulaw(-1000)) < 0);
+        assert!(decode_alaw(encode_alaw(1000)) > 0);
+        assert!(decode_alaw(encode_alaw(-1000)) < 0);
     }
 }
