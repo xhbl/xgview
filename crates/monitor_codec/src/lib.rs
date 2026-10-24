@@ -21,9 +21,11 @@ use std::fmt;
 
 use thiserror::Error;
 
+pub mod audio;
 pub mod fallback;
 #[cfg(all(not(target_os = "android"), feature = "ffmpeg"))]
 pub mod ffmpeg;
+pub mod g711;
 #[cfg(feature = "h264")]
 pub mod h264;
 pub mod jpeg;
