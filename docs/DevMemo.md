@@ -2069,13 +2069,11 @@ inset or resize paths points at it.*
 *All platforms — 2026-10-19, 1.4.85–1.4.87.*
 
 **What it is.** A small strip of controls drawn inside the magnified viewport:
-the picture fit, and (from the audio release, 1.5) a sound switch. It is not a
-panel and not a window; it is part of the wall's own picture, for the two things
-a viewer wants while reading a detail - the shape of the picture and whether it
-is heard - without leaving the magnification or waking the chrome. The sound
-control is compiled but hidden until then: `tilebar::SOUND` is `false`, and the
-icon drawing and the toggle stay in the code for the release that turns it on.
-See `docs/audio-plan.md` in the private tree.
+the picture fit, a sound switch, and (from 1.5) the microphone. It is not a
+panel and not a window; it is part of the wall's own picture, for the few things
+a viewer wants while reading a detail - the shape of the picture, whether it is
+heard, and whether they are talking to it - without leaving the magnification or
+waking the chrome.
 
 **Where it lives.** In the *picture's* frame, mapped onto the screen the way the
 picture is: a quarter turn clockwise for a portrait wall's landscape stream, so
@@ -2095,13 +2093,22 @@ from the same interaction that draws the picture. The alternatives - a widget, a
 `Area`, a modal - were rejected for that reason; each of them would take the
 press out of the wall's hands.
 
-**The strip.** A word's control is measured in the font the word is drawn with
-(monospace 14), the padding is added, and the result is bounded to 56..96 points
-- a shorter word does not leave a wide empty button, a longer one is not clipped
-before the bound. An icon's control is a square the depth of the strip, its glyph
-22 points, drawn from the icon set and turned with the picture. The words are
-language-pack keys through `tr`, so a language that writes "Strecken" instead of
-"stretch" gets the room; the key itself is never measured or drawn.
+**The strip.** Every control is a square the depth of the strip, its glyph 22
+points, drawn from the icon set and turned with the picture: the frame with the
+arrows is the picture fit, the speaker is sound, the microphone is talk-back, and
+a call replaces all three with the red handset. There used to be a word for the
+fit, measured in monospace 14 and bounded to 56..96 points; the icon took its
+place, so the width a control asks for is no longer a question and
+`Control::Text` went with it.
+
+**Where the fit says what it became.** An icon cannot name the fit it moved to,
+so the strip says it in a toast in the middle of the screen - `原始`, `拉伸`,
+`16:9` and the rest, through the same language-pack keys - while the corner OSD
+keeps naming it on the picture. It is the one toast placed at the centre rather
+than above the status bar: the news belongs to the picture the viewer is looking
+at, not to a channel. `Toast::center` carries that difference, and the label is
+drawn with `TextWrapMode::Extend` - an `Area` starts with no width of its own and
+a wrapped label stacked a two-character fit name one character per line.
 
 **The clock and the way out.** Eight seconds after the last press on it, or as
 soon as the picture is stepped, panned, or the wall is given to something else,
@@ -2133,11 +2140,10 @@ old edge and the next frame jumped to the new one. It is laid out again after th
 press, with the dock and the measured label it has now, so the opening frame is
 already in place.
 
-**Left open.** The sound control is compiled but hidden until 1.5: it is a
-switch only, the streams are taken for their picture, and the icon is where the
-audio is wired in when there is some. The 56..96 bounds are a judgement, not a
-measurement of every language; the word's control is bounded rather than allowed
-to grow without limit.
+**Left open.** The clock is still a flat eight seconds for every control; a call
+suspends it because the handset is the way out and must not leave. The centred
+toast is also used only by the fit so far - the other news has stayed where it
+was, above the status bar.
 
 ## 33. One damaged length, every picture after it: why a camera can be pulled over UDP
 

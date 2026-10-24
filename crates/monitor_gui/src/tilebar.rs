@@ -21,8 +21,7 @@
 
 use std::time::{Duration, Instant};
 
-use egui::epaint::TextShape;
-use egui::{Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Stroke, StrokeKind, vec2};
+use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Stroke, StrokeKind, vec2};
 
 use crate::icons::{self, Icon};
 use crate::theme;
@@ -68,14 +67,6 @@ pub const DEPTH: f32 = EDGE + THICK;
 /// Side of a control across the strip, and of a square icon control along it.
 const BUTTON_H: f32 = 44.0;
 
-/// The range a word's control is given along the strip.
-///
-/// A word is measured and its padding added, so a short one is not a wide empty
-/// button and a long one is not clipped; the ends keep the strip from becoming a
-/// speck or a scrollbar because one label happens to be short or long.
-const TEXT_MIN: f32 = 56.0;
-const TEXT_MAX: f32 = 96.0;
-
 /// Gap between two controls.
 const GAP: f32 = 8.0;
 
@@ -88,9 +79,7 @@ const CONTROL_RADIUS: u8 = 8;
 
 /// What one control of the bar carries.
 #[derive(Debug, Clone, Copy)]
-pub enum Control<'a> {
-    /// A word, drawn in the bar's font.
-    Text(&'a str),
+pub enum Control {
     /// A shape, drawn square.
     Icon(Icon),
     /// The one control a call has: a red button carrying the handset that ends
@@ -100,36 +89,9 @@ pub enum Control<'a> {
     Hangup,
 }
 
-/// How much room a word asks for, measured in the font it is drawn with.
-///
-/// The label is the caller's, so the geometry cannot measure it; this is the
-/// measurement, and the two must use the same font. The padding is added here
-/// and the result is kept within [`TEXT_MIN`] and [`TEXT_MAX`].
-pub fn text_width(ctx: &egui::Context, text: &str) -> f32 {
-    let galley = ctx.fonts(|fonts| {
-        fonts.layout_no_wrap(text.to_owned(), FontId::monospace(14.0), theme::TEXT)
-    });
-    (galley.size().x + 2.0 * PAD).clamp(TEXT_MIN, TEXT_MAX)
-}
-
 /// How much room an icon control asks for: square, the strip's depth.
 pub fn icon_width() -> f32 {
     BUTTON_H
-}
-
-impl Control<'_> {
-    /// How much room along the strip the control asks for.
-    ///
-    /// A word is measured in the font it is drawn with; an icon is square, so
-    /// the strip of them reads as a row of squares beside the words.
-    pub fn width(&self, ctx: &egui::Context) -> f32 {
-        match self {
-            Control::Text(text) => text_width(ctx, text),
-            // The handset is a square button like the icons beside it, so a bar
-            // holding only it is one square wide.
-            Control::Icon(_) | Control::Hangup => icon_width(),
-        }
-    }
 }
 
 /// Which edge of the picture the bar is docked to, in the picture's own frame.
@@ -318,12 +280,12 @@ impl Layout {
 
 /// Lays the bar out for `tile`, turned with the picture when `rotated`.
 ///
-/// `widths` is how much room each control asks for along the strip; a word
-/// through [`text_width`], an icon through [`icon_width`], so that the icons are
-/// square. The strip is centred along the picture's horizontal axis - the edge's
-/// whole length - and its thickness runs in from the edge by [`EDGE`]; both ends
-/// stay at least that far inside the picture except for a tile too small to hold
-/// it, which the caller declines to draw.
+/// `widths` is how much room each control asks for along the strip - an icon
+/// through [`icon_width`], so that the controls are square. The strip is centred
+/// along the picture's horizontal axis - the edge's whole length - and its
+/// thickness runs in from the edge by [`EDGE`]; both ends stay at least that far
+/// inside the picture except for a tile too small to hold it, which the caller
+/// declines to draw.
 ///
 /// `top_band` and `bottom_band` are how deep the activation bands are, in
 /// points. They are the heights of the bars the grid would have shown there -
@@ -439,7 +401,6 @@ pub fn paint(
         // run out over its neighbour.
         let clip = painter.with_clip_rect(rect.shrink(2.0));
         match controls.get(index) {
-            Some(Control::Text(text)) => label_text(&clip, *rect, text, rotated),
             Some(Control::Icon(icon)) => {
                 let glyph = Rect::from_center_size(rect.center(), vec2(BUTTON_H * 0.5, BUTTON_H * 0.5));
                 icons::paint_turned(&clip, glyph, *icon, Stroke::new(1.6_f32, theme::TEXT), rotated);
@@ -454,21 +415,6 @@ pub fn paint(
             }
             None => {}
         }
-    }
-}
-
-/// Draws `text` centred in `rect`, turned a quarter turn with the picture.
-fn label_text(painter: &Painter, rect: Rect, text: &str, rotated: bool) {
-    let font = FontId::monospace(14.0);
-    if rotated {
-        let galley = painter.layout_no_wrap(text.to_owned(), font, theme::TEXT);
-        let size = galley.size();
-        // A line turned 90° clockwise at `pos` occupies `(pos.x - h, pos.y)` to
-        // `(pos.x, pos.y + w)`; that box is centred on `rect`.
-        let pos = egui::pos2(rect.center().x + size.y * 0.5, rect.center().y - size.x * 0.5);
-        painter.add(TextShape::new(pos, galley, theme::TEXT).with_angle(std::f32::consts::FRAC_PI_2));
-    } else {
-        painter.text(rect.center(), Align2::CENTER_CENTER, text, font, theme::TEXT);
     }
 }
 
@@ -504,7 +450,7 @@ mod tests {
         for tile in [landscape(), portrait()] {
             for rotated in [false, true] {
                 for dock in [Dock::Top, Dock::Bottom] {
-                    let layout = placed(tile, rotated, dock, &[TEXT_MIN]);
+                    let layout = placed(tile, rotated, dock, &[icon_width()]);
                     assert!(inside(tile, layout.bar), "{tile:?} {rotated} {dock:?}: {:?}", layout.bar);
                     for button in &layout.buttons {
                         assert!(inside(layout.bar, *button), "{button:?} is not on the strip");
@@ -534,53 +480,35 @@ mod tests {
     /// right in the picture, which is the screen's top to bottom once turned.
     #[test]
     fn the_controls_run_from_the_pictures_left_to_its_right() {
-        let two = placed(landscape(), false, Dock::Top, &[TEXT_MIN, TEXT_MIN]);
+        let two = placed(landscape(), false, Dock::Top, &[icon_width(), icon_width()]);
         assert!(two.buttons[0].center().x < two.buttons[1].center().x);
 
-        let turned = placed(portrait(), true, Dock::Top, &[TEXT_MIN, TEXT_MIN]);
+        let turned = placed(portrait(), true, Dock::Top, &[icon_width(), icon_width()]);
         assert!(turned.buttons[0].center().y < turned.buttons[1].center().y, "the picture's left is the screen's top");
         assert!((turned.buttons[0].center().x - turned.buttons[1].center().x).abs() < 0.01);
     }
 
-    /// An icon control is square: beside a word it takes the strip's depth, not
-    /// another word's width, and the strip grows by exactly that.
+    /// Every control is square - the strip's depth across and along - so a row
+    /// of three is the three squares and their gaps, and nothing else.
     #[test]
-    fn an_icon_control_is_square() {
-        let level = placed(landscape(), false, Dock::Top, &[TEXT_MIN, BUTTON_H]);
-        let word = level.buttons[0];
-        let icon = level.buttons[1];
-        assert!((word.width() - TEXT_MIN).abs() < 0.01);
-        assert!((icon.width() - icon.height()).abs() < 0.01, "the icon is square");
-        assert!(
-            (level.bar.width() - (2.0 * PAD + TEXT_MIN + GAP + BUTTON_H)).abs() < 0.01,
-            "the strip is the two controls and the gaps"
-        );
+    fn every_control_is_a_square_the_depth_of_the_strip() {
+        let widths = [icon_width(); 3];
+        let row = placed(landscape(), false, Dock::Top, &widths);
+        for button in &row.buttons {
+            assert!((button.width() - button.height()).abs() < 0.01, "the control is square");
+            assert!((button.height() - BUTTON_H).abs() < 0.01);
+        }
+        let expected = 2.0 * PAD + 3.0 * BUTTON_H + 2.0 * GAP;
+        assert!((row.bar.width() - expected).abs() < 0.01, "the strip is the controls and the gaps");
     }
 
     /// The call's handset is a square button like the icons, so a bar holding
     /// only it is one square wide - the whole strip while a call is up.
     #[test]
     fn the_hangup_control_is_one_square() {
-        let ctx = egui::Context::default();
-        let _ = ctx.run(Default::default(), |_| {});
-        assert!((Control::Hangup.width(&ctx) - icon_width()).abs() < 0.01);
-
-        let call = placed(landscape(), false, Dock::Top, &[Control::Hangup.width(&ctx)]);
+        let call = placed(landscape(), false, Dock::Top, &[icon_width()]);
         assert_eq!(call.buttons.len(), 1);
         assert!((call.bar.width() - (2.0 * PAD + BUTTON_H)).abs() < 0.01);
-    }
-
-    /// A word's control is as wide as the word and its padding, and no wider or
-    /// narrower than the strip allows.
-    #[test]
-    fn a_word_is_measured_within_the_strips_limits() {
-        let ctx = egui::Context::default();
-        let _ = ctx.run(Default::default(), |_| {});
-        let short = text_width(&ctx, "4:3");
-        let long = text_width(&ctx, "stretch");
-        assert!(short >= TEXT_MIN && short <= TEXT_MAX, "{short}");
-        assert!(long >= TEXT_MIN && long <= TEXT_MAX, "{long}");
-        assert!(long > short, "{long} is not wider than {short}");
     }
 
     /// The bands lie along the picture's top and bottom edges: the screen's top
@@ -588,13 +516,13 @@ mod tests {
     /// picture is turned for a portrait one.
     #[test]
     fn the_bands_sit_on_the_pictures_top_and_bottom_edges() {
-        let level = placed(landscape(), false, Dock::Top, &[TEXT_MIN]);
+        let level = placed(landscape(), false, Dock::Top, &[icon_width()]);
         assert!((level.top.top() - landscape().top()).abs() < 0.01);
         assert!((level.top.height() - TOP_BAND).abs() < 0.01, "as deep as the toolbar");
         assert!((level.bottom.bottom() - landscape().bottom()).abs() < 0.01);
         assert!((level.bottom.height() - BOTTOM_BAND).abs() < 0.01, "as deep as the status bar");
 
-        let turned = placed(portrait(), true, Dock::Top, &[TEXT_MIN]);
+        let turned = placed(portrait(), true, Dock::Top, &[icon_width()]);
         assert!((turned.top.right() - portrait().right()).abs() < 0.01, "the picture's top is the screen's right");
         assert!((turned.top.width() - TOP_BAND).abs() < 0.01);
         assert!((turned.bottom.left() - portrait().left()).abs() < 0.01);
@@ -606,7 +534,7 @@ mod tests {
     #[test]
     fn a_press_is_read_by_what_it_landed_on() {
         let tile = landscape();
-        let level = placed(tile, false, Dock::Top, &[TEXT_MIN]);
+        let level = placed(tile, false, Dock::Top, &[icon_width()]);
 
         assert_eq!(level.hit(level.buttons[0].center()), Hit::Button(0));
         // The strip's padding, below the control.
@@ -625,7 +553,7 @@ mod tests {
         assert_eq!(level.hit(tile.center() + vec2(0.0, 100.0)), Hit::Outside);
         assert_eq!(level.band_at(tile.center() + vec2(0.0, 100.0)), None);
 
-        let turned = placed(portrait(), true, Dock::Bottom, &[TEXT_MIN]);
+        let turned = placed(portrait(), true, Dock::Bottom, &[icon_width()]);
         assert_eq!(turned.hit(turned.buttons[0].center()), Hit::Button(0));
         assert_eq!(turned.band_at(turned.buttons[0].center()), None, "the band is shallower than the control");
         assert_eq!(turned.band_at(egui::pos2(10.0, 960.0)), Some(Dock::Bottom), "the status bar's depth");

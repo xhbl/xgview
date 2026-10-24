@@ -294,6 +294,12 @@ struct Toast {
     text: String,
     kind: ToastKind,
     at: Instant,
+    /// Middle of the screen rather than the usual place above the status bar.
+    ///
+    /// The magnified bar's fit switch has no word left to read the new value
+    /// on, so it says it in the one place a viewer looking at the picture
+    /// already is; the news a channel reports stays where it has always been.
+    center: bool,
 }
 
 /// Page of the settings side panel.
@@ -1302,7 +1308,13 @@ impl XgViewApp {
     // ---------------------------------------------------------------- helpers
 
     fn flash(&mut self, text: impl Into<String>, kind: ToastKind) {
-        self.toast = Some(Toast { text: text.into(), kind, at: Instant::now() });
+        self.toast = Some(Toast { text: text.into(), kind, at: Instant::now(), center: false });
+    }
+
+    /// [`Self::flash`] in the middle of the screen, for news that belongs to the
+    /// picture rather than to a channel - the magnified bar's fit switch.
+    fn flash_centered(&mut self, text: impl Into<String>, kind: ToastKind) {
+        self.toast = Some(Toast { text: text.into(), kind, at: Instant::now(), center: true });
     }
 
     /// The control an open panel falls back to when nothing has the focus.
@@ -6934,16 +6946,11 @@ impl XgViewApp {
             .chrome
             .bars
             .map_or((44.0, 30.0), |(top, bottom)| (top.height(), bottom.height()));
-        // The word is measured, so the strip is as wide as the label it carries;
-        // it is read again below, after the press, so a press that changes the
-        // picture fit also resizes the control to its new value in the same
-        // frame it changes it.
-        let label = self.tile_bar_label(index);
-        let controls = self.tile_bar_controls(&label);
-        let widths: Vec<f32> = controls
-            .iter()
-            .map(|control| control.width(ui.ctx()))
-            .collect();
+        // The controls are read again below, after the press, so a press that
+        // changes the picture fit also redraws the bar with the set it has in the
+        // same frame it changes it. Every control is a square.
+        let controls = self.tile_bar_controls();
+        let widths = vec![tilebar::icon_width(); controls.len()];
         let layout = tilebar::layout(
             rect,
             rotated,
@@ -7017,16 +7024,13 @@ impl XgViewApp {
         }
 
         // The press may have opened the bar on the other edge than the one the
-        // last opening used, and it may have changed the word the strip carries:
-        // lay it out again with the dock and the width it has now, so this frame
-        // paints it there rather than at the old edge and then jumping over on
-        // the next one.
-        let label = self.tile_bar_label(index);
-        let controls = self.tile_bar_controls(&label);
-        let widths: Vec<f32> = controls
-            .iter()
-            .map(|control| control.width(ui.ctx()))
-            .collect();
+        // last opening used, and it may have changed the set of controls the
+        // strip carries - a call starting takes all of them away: lay it out
+        // again with the dock and the widths it has now, so this frame paints it
+        // there rather than at the old edge and then jumping over on the next
+        // one.
+        let controls = self.tile_bar_controls();
+        let widths = vec![tilebar::icon_width(); controls.len()];
         let layout = tilebar::layout(
             rect,
             rotated,
@@ -7063,25 +7067,6 @@ impl XgViewApp {
         consumed
     }
 
-    /// The word the bar's first control carries for the magnified camera.
-    ///
-    /// The magnified viewport's fit, not the wall's: `None` there is the
-    /// camera's own ratio, which is what the bar starts on. Read from the
-    /// configuration rather than from the snapshot the tiles were painted with:
-    /// a press that changes the fit has to label the control with its new value
-    /// in the same frame.
-    fn tile_bar_label(&self, index: usize) -> String {
-        let aspect = self
-            .config
-            .active_slots()
-            .get(index)
-            .copied()
-            .and_then(|slot| self.config.cameras.get(slot))
-            .and_then(|camera| camera.zoom_aspect)
-            .unwrap_or(TileAspect::Original);
-        monitor_i18n::tr(aspect.label())
-    }
-
     /// Whether the magnified camera has sound for the bar to switch.
     ///
     /// A camera that has not reported yet counts as having it: the switch shows
@@ -7109,14 +7094,15 @@ impl XgViewApp {
     ///
     /// A call in progress takes the bar over: it carries one control, the red
     /// handset that ends it, and nothing else can be pressed while the
-    /// microphone is open. Otherwise the picture fit is always there; the sound
-    /// switch for a camera that has sound, the microphone for one that offers a
-    /// back channel.
-    fn tile_bar_controls<'a>(&self, label: &'a str) -> Vec<tilebar::Control<'a>> {
+    /// microphone is open. Otherwise the picture fit - the icon rather than the
+    /// word, with the new fit named in a toast as it changes - is always there;
+    /// the sound switch for a camera that has sound, the microphone for one that
+    /// offers a back channel.
+    fn tile_bar_controls(&self) -> Vec<tilebar::Control> {
         if self.talking {
             return vec![tilebar::Control::Hangup];
         }
-        let mut controls = vec![tilebar::Control::Text(label)];
+        let mut controls = vec![tilebar::Control::Icon(Icon::AspectRatio)];
         if tilebar::SOUND && self.magnified_has_audio() {
             controls.push(tilebar::Control::Icon(if self.sound_on {
                 Icon::Sound
@@ -7133,7 +7119,7 @@ impl XgViewApp {
     /// How many controls the bar holds for the magnified camera, which is what
     /// the walk wraps at.
     fn tile_bar_buttons(&self) -> usize {
-        self.tile_bar_controls("").len()
+        self.tile_bar_controls().len()
     }
 
     /// Answers the control the bar is on: the handset that ends a call, the
@@ -7167,6 +7153,13 @@ impl XgViewApp {
             self.set_talking(!self.talking);
             return;
         }
+        // The fit this writes is the magnified viewport's own: it is kept per
+        // camera, and the wall's landscape and portrait fits - the pair the
+        // settings panel and the portrait aspect picker write - are not touched.
+        // Until the first press the fit is the camera's own ratio, `Original`.
+        //
+        // The control carries no word to read the value on, so the name of the
+        // fit it has just moved to is said in the middle of the screen.
         let Some(index) = self.scheduler.zoom() else {
             return;
         };
@@ -7179,6 +7172,7 @@ impl XgViewApp {
         let next = camera.zoom_aspect.unwrap_or(TileAspect::Original).next();
         camera.zoom_aspect = Some(next);
         self.mark_dirty();
+        self.flash_centered(monitor_i18n::tr(next.label()), ToastKind::Info);
     }
 
     /// The picker that offers the layouts with no button of their own.
@@ -7510,11 +7504,22 @@ impl XgViewApp {
             return;
         }
         let color = if toast.kind == ToastKind::Error { theme::ERROR } else { theme::LIVE };
+        let (anchor, offset) = if toast.center {
+            (egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        } else {
+            (egui::Align2::CENTER_BOTTOM, vec2(0.0, -56.0))
+        };
         egui::Area::new(Id::new("xgview-toast"))
-            .anchor(egui::Align2::CENTER_BOTTOM, vec2(0.0, -56.0))
+            .anchor(anchor, offset)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.label(RichText::new(&toast.text).color(color));
+                    // Never wrapped: an area starts with no width of its own, and
+                    // a label given one character's room stacks the rest under
+                    // it - which a two-word fit name and a longer sentence both
+                    // showed.
+                    let label = egui::Label::new(RichText::new(&toast.text).color(color))
+                        .wrap_mode(egui::TextWrapMode::Extend);
+                    ui.add(label);
                 });
             });
     }
