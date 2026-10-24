@@ -2246,8 +2246,20 @@ So `backchannel=1` cannot be added at `DESCRIBE`: it has to be on the URL the
 session opens with, before `OPTIONS`. And because `reqTrackID` reads a query
 when there is one, the `SETUP` control URI must carry none, or the track is
 looked up under the wrong id and the answer names another track's channels.
-`RtspClient` appends the flag once in `start_with_options` and `resolve_control`
-strips the query from the base before joining a relative control.
+`RtspClient` therefore puts the flag on the `OPTIONS` URL and only there, and
+`resolve_control` strips the query from the base before joining a relative
+control.
+
+**The query is not free on a camera.** The first version left it on every
+request and a Foscam direct (`192.168.27.40:88/videoMain`) answered `DESCRIBE`
+with `404 Stream Not Found` - the parameter made the path a stream it does not
+serve - so magnifying that camera lost the picture entirely. The flag is now
+taken off again before the `DESCRIBE`, and the back channel is asked for the way
+a camera reads it, with the `Require` header. A camera that will not take the
+header either - it answers `551 Option not supported`, or `400` / `404` - is
+asked once more plainly, without the header, and the session goes on with no
+back channel: the probe is allowed to fail, the picture is not. What the SDP
+says is the answer, whichever request produced it.
 
 **Sending is a clock, not a burst.** A 20 ms frame at 8 kHz mono is 160 samples:
 the worker takes one from the queue every 20 ms, encodes it as G.711 (PCMU or
