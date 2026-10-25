@@ -594,6 +594,14 @@ pub struct AppConfig {
     /// camera, and off by default: a wall that starts talking on its own is a
     /// surprise, so the switch is the user's to turn on.
     pub sound_on: bool,
+    /// Whether the sound is muted while the microphone is open.
+    ///
+    /// Off by default: a call is full duplex, and on Android the platform's echo
+    /// canceller is what makes that hold at the top of the volume scale. It is
+    /// the machine with the microphone beside its speaker that needs the other
+    /// arrangement - half duplex, the way a walkie-talkie is - and this is the
+    /// switch that gives it. See `XgViewApp::call_mutes_speaker`.
+    pub talk_mute: bool,
     /// Whether the magnified picture is turned a quarter turn on an upright
     /// wall.
     ///
@@ -654,6 +662,7 @@ impl Default for AppConfig {
             language: "auto".to_string(),
             prefer_hardware_decode: true,
             sound_on: false,
+            talk_mute: false,
             zoom_rotate: false,
             volume: 1.0,
             reconnect: ReconnectPolicy::default(),

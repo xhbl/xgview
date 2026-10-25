@@ -2442,17 +2442,19 @@ capture - the same shape as the storage permission an export asks for on Android
 9. After that the two failures are distinct again: no permission (the dialog
 path) and no device (`no microphone to talk into`).
 
-**The speaker is muted while the microphone is open, unless the platform cancels
-the echo.** On the OPPO the phone's own speaker came back through the microphone
-at a peak of 3003 while the room sat at 150-300: a speaker beside a live
-microphone is a loop, and it howls at some gain. The loop is broken at the sink -
-`sink.set_active(sound && !call_mutes_speaker())`, in `apply_audio` and
-`set_talking`, the sound switch itself left as the viewer set it - unless the
-capture came up with the platform's canceller, which is what `Mic::echo_cancelled`
-answers and `call_mutes_speaker` asks. Where there is one the call is full duplex
-and the camera keeps playing; where there is not it is half duplex, walkie-talkie
-style. The fallback is deliberate, because a cancelled loop that turns out not to
-be cancelled is a howl.
+**A call is full duplex, and the Audio tab can make it half duplex.** On the OPPO
+the phone's own speaker came back through the microphone at a peak of 3003 while
+the room sat at 150-300: a speaker beside a live microphone is a loop, and it
+howls at some gain. Android's platform canceller is what takes it out there - the
+capture and the playback both on the communication path, below - and a desktop's
+speaker and microphone are far enough apart that the loop is not audible at a
+normal volume, which is what `AppConfig::talk_mute` being off by default says.
+The switch is for the machine where the two are close: ticked,
+`call_mutes_speaker` silences the sound while the microphone is open - half
+duplex, walkie-talkie style - and the far end is heard between calls rather than
+during one. `sink.set_active(sound && !call_mutes_speaker())` in `apply_audio` and
+`set_talking` is the whole of it; the sound switch itself is left as the viewer
+set it, and the tab's hint says what the choice costs.
 
 **Android: the capture and the playback are both the activity's, both on the
 communication path.** `cpal` is no help for either half: an

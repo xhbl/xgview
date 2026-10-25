@@ -128,6 +128,8 @@ settings-audio = 音频
 streams-volume = 播放音量
 streams-sound = 声音开关
 streams-volume-hint = 声音仅在放大画面时播放。
+streams-talk-mute = 麦克风打开时播放静音
+streams-talk-mute-hint = 如果扬声器和麦克风距离过近导致啸叫，请启用此选项。通话期间将静音扬声器输出。
 
 ## 摄像头
 cameras-confirm-order = 确认顺序

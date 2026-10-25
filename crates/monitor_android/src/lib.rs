@@ -149,7 +149,7 @@ pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeResumed(
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeTalkPcm(
-    mut env: jni::JNIEnv,
+    env: jni::JNIEnv,
     _class: jni::objects::JClass,
     samples: jni::objects::JShortArray,
     count: jni::sys::jint,

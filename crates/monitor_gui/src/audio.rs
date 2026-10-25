@@ -109,6 +109,13 @@ impl AudioOutput for JavaOutput {
     }
 
     fn configure(&self, info: &AudioStreamInfo) {
+        // A track opened while the sound is off would be a call's audio path
+        // left open with nothing to play - the mute switch and the talk-back's
+        // mute both land here. Nothing to configure until it is wanted again,
+        // and the next block after that opens it.
+        if !self.is_active() {
+            return;
+        }
         let rate = info.sample_rate.max(1);
         let channels = info.channels.max(1) as u32;
         if self.rate.load(Ordering::Relaxed) == rate

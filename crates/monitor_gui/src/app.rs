@@ -1904,12 +1904,14 @@ impl XgViewApp {
 
     /// Whether the call in progress has to silence the speaker to keep it quiet.
     ///
-    /// Only a microphone whose platform cancels the echo can share the room with
-    /// the speaker: the Android capture says whether its canceller came up, and
-    /// no other platform has one, so the answer is `talking && !cancelled`.
-    /// See [`Self::apply_audio`].
+    /// A call is full duplex by default: the camera's sound keeps playing while
+    /// the microphone is open, which is what Android's processor does properly
+    /// and what a desktop's separated speaker and microphone manage without it.
+    /// A machine with the microphone beside its speaker can be made half duplex
+    /// instead - the sound stops while the viewer talks - and that is the
+    /// Audio tab's switch, `AppConfig::talk_mute`. See [`Self::apply_audio`].
     fn call_mutes_speaker(&self) -> bool {
-        self.talking && !self.mic.as_ref().is_some_and(|mic| mic.echo_cancelled())
+        self.talking && self.config.talk_mute
     }
 
 
@@ -5192,6 +5194,24 @@ impl XgViewApp {
             dirty = true;
         }
         ui.label(RichText::new(monitor_i18n::tr("streams-volume-hint")).small().color(theme::TEXT_DIM));
+
+        ui.add_space(theme::space::S);
+        let talk_mute = ui.checkbox(
+            &mut self.config.talk_mute,
+            monitor_i18n::tr("streams-talk-mute"),
+        );
+        self.nav.item(&talk_mute);
+        self.name(&talk_mute, "settings-talk-mute");
+        if talk_mute.changed() {
+            self.apply_audio();
+            self.mark_dirty();
+            dirty = true;
+        }
+        ui.label(
+            RichText::new(monitor_i18n::tr("streams-talk-mute-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
 
         dirty
     }
