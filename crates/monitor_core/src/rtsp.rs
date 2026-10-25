@@ -395,6 +395,20 @@ impl SdpTrack {
     }
 }
 
+/// What a session opened only for the talk-back carries back to its caller.
+///
+/// The interleaved pair is the server's to choose - the pair the answer names is
+/// the one to write on, not the one that was asked for - and the encoding is
+/// whatever the media advertised, for the caller to turn into a packetiser it
+/// can actually drive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TalkTrack {
+    /// The interleaved RTP channel the back channel was set up on.
+    pub channel: u8,
+    /// The encoding the media named, e.g. `PCMU`.
+    pub encoding: Option<String>,
+}
+
 /// Splits a `Session` header into its identifier and its timeout.
 ///
 /// Cameras answer `SETUP` with `Session: 12345678;timeout=60`, where the
@@ -1442,38 +1456,17 @@ impl RtspClient {
         }
     }
 
-    /// Convenience helper: `OPTIONS` + `DESCRIBE` + `SETUP` + `PLAY`.
+    /// `OPTIONS` and `DESCRIBE` - the half of a session that touches no track.
     ///
-    /// Returns the parsed SDP tracks of the session. The video track is always
-    /// set up. The camera's audio track is set up too, on its own interleaved
-    /// pair - a media the client *receives*, never the `sendonly` back channel -
-    /// but a failure there is not fatal: a camera that refuses the second
-    /// `SETUP` still gives a picture.
-    pub async fn start_with_transport(&mut self, transport: RtspTransport) -> Result<Vec<SdpTrack>> {
-        self.start_with_options(transport, false).await
-    }
-
-    /// [`RtspClient::start_with_transport`], asking for the talk-back track too
-    /// when `backchannel` is set.
-    ///
-    /// Two servers answer two different ways, and the session asks both in the
-    /// way each of them reads: go2rtc publishes the `a=sendonly` media when the
-    /// **first request** of the connection carries `backchannel=1`, and a camera
-    /// that implements ONVIF Profile T publishes it when the `DESCRIBE` carries
-    /// `Require: www.onvif.org/ver20/backchannel` (see
-    /// [`RtspClient::describe_backchannel`]). The query is therefore put on the
-    /// `OPTIONS` URL and taken off again before the `DESCRIBE`: a camera that
-    /// does not know it treats the path as a different stream and answers `404`,
-    /// which would otherwise cost the picture on every camera without go2rtc.
-    ///
-    /// A URL handed in that already carries the flag is cleaned the same way -
-    /// the parameter belongs to the probe and to nothing after it, whoever put
-    /// it there.
-    pub async fn start_with_options(
-        &mut self,
-        transport: RtspTransport,
-        backchannel: bool,
-    ) -> Result<Vec<SdpTrack>> {
+    /// Three callers share it: the picture's session, the probe that asks
+    /// whether a camera has a back channel at all, and a call's own session.
+    /// They share it because the two servers read `backchannel=1` in two
+    /// different places and only one piece of code should know that: go2rtc
+    /// keeps the session URL from the **first request** of the connection, while
+    /// a camera implementing ONVIF Profile T reads the header on the
+    /// `DESCRIBE`. See [`RtspClient::start_with_options`] for why the query is
+    /// put on the `OPTIONS` and taken off again before the `DESCRIBE`.
+    async fn open_and_describe(&mut self, backchannel: bool) -> Result<Vec<SdpTrack>> {
         self.backchannel_require = false;
         let clean_uri = strip_query_flag(&self.url.request_uri(), "backchannel");
         let probe_added = backchannel && !self.url.request_uri().contains("backchannel=");
@@ -1513,7 +1506,91 @@ impl RtspClient {
         } else {
             self.describe().await?
         };
-        let tracks = parse_sdp(&sdp);
+        Ok(parse_sdp(&sdp))
+    }
+
+    /// Asks whether this camera offers a talk-back media, and returns the
+    /// encoding it names.
+    ///
+    /// Only `OPTIONS` and `DESCRIBE`: with no `SETUP` there is no session for
+    /// the server to keep and nothing to tear down, so the caller simply drops
+    /// the client and the connection closes. That is what makes it safe to ask
+    /// a camera that is only being magnified, before anyone has pressed
+    /// anything - and it is why the answer is worth caching rather than asking
+    /// again on every frame.
+    ///
+    /// `Ok(None)` is an answer - this camera has no such media - and `Err` is
+    /// the absence of one; a caller that caches must not conflate them. Whether
+    /// the encoding can be sent is the talk layer's question: this reports what
+    /// the SDP says and nothing more.
+    pub async fn probe_backchannel(&mut self) -> Result<Option<String>> {
+        let tracks = self.open_and_describe(true).await?;
+        Ok(tracks
+            .iter()
+            .find(|track| track.is_audio() && track.is_sendonly())
+            .and_then(|track| track.encoding.clone()))
+    }
+
+    /// Opens a session that carries the talk-back media and nothing else.
+    ///
+    /// The picture's session is untouched: it does not ask for a back channel,
+    /// does not set one up, and sends nothing on it. This one exists only while
+    /// the viewer holds the microphone down, and [`RtspClient::teardown`] ends
+    /// it the moment they let go.
+    ///
+    /// `Ok(None)` is a camera that offers no such media - not a failure, and not
+    /// the caller's to report as one. A refusal of the track's `SETUP` or of the
+    /// `PLAY` is an `Err`, because that is a camera saying something about this
+    /// shape of session rather than about itself.
+    pub async fn start_talk_only(&mut self) -> Result<Option<TalkTrack>> {
+        let tracks = self.open_and_describe(true).await?;
+        let Some(track) = tracks.iter().find(|track| track.is_audio() && track.is_sendonly()) else {
+            return Ok(None);
+        };
+        let control = track.control.clone().unwrap_or_default();
+        self.stage = Some(RtspStage::Setup);
+        // The pair is a suggestion: a server numbers the channels by its own
+        // rule and the answer is what counts. Nothing else is set up here, so
+        // the lowest pair is free.
+        let channel = self.setup_talk_interleaved(&control, 0).await?;
+        self.stage = Some(RtspStage::Play);
+        self.play("npt=0.000-").await?;
+        Ok(Some(TalkTrack { channel, encoding: track.encoding.clone() }))
+    }
+
+    /// Convenience helper: `OPTIONS` + `DESCRIBE` + `SETUP` + `PLAY`.
+    ///
+    /// Returns the parsed SDP tracks of the session. The video track is always
+    /// set up. The camera's audio track is set up too, on its own interleaved
+    /// pair - a media the client *receives*, never the `sendonly` back channel -
+    /// but a failure there is not fatal: a camera that refuses the second
+    /// `SETUP` still gives a picture.
+    pub async fn start_with_transport(&mut self, transport: RtspTransport) -> Result<Vec<SdpTrack>> {
+        self.start_with_options(transport, false).await
+    }
+
+    /// [`RtspClient::start_with_transport`], asking for the talk-back track too
+    /// when `backchannel` is set.
+    ///
+    /// Two servers answer two different ways, and the session asks both in the
+    /// way each of them reads: go2rtc publishes the `a=sendonly` media when the
+    /// **first request** of the connection carries `backchannel=1`, and a camera
+    /// that implements ONVIF Profile T publishes it when the `DESCRIBE` carries
+    /// `Require: www.onvif.org/ver20/backchannel` (see
+    /// [`RtspClient::describe_backchannel`]). The query is therefore put on the
+    /// `OPTIONS` URL and taken off again before the `DESCRIBE`: a camera that
+    /// does not know it treats the path as a different stream and answers `404`,
+    /// which would otherwise cost the picture on every camera without go2rtc.
+    ///
+    /// A URL handed in that already carries the flag is cleaned the same way -
+    /// the parameter belongs to the probe and to nothing after it, whoever put
+    /// it there.
+    pub async fn start_with_options(
+        &mut self,
+        transport: RtspTransport,
+        backchannel: bool,
+    ) -> Result<Vec<SdpTrack>> {
+        let tracks = self.open_and_describe(backchannel).await?;
         let video = tracks
             .iter()
             .find(|track| track.is_video())
