@@ -33,30 +33,7 @@ use crate::model::{
 };
 use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtspStage, RtpHeader, SdpTrack};
 use crate::scheduler::ScheduleChange;
-use crate::talk::{TalkHub, TalkStream};
-
-/// How often the talk-back track is fed: one RTP packet every 20 ms, which is
-/// what the cameras send their own audio at and what their speakers expect.
-const TALK_INTERVAL: Duration = Duration::from_millis(20);
-
-/// How often a talk-back channel nobody is talking on is refreshed.
-///
-/// The same 20 ms as a spoken frame, and deliberately not slower. An idle rate
-/// of one a second was tried to save the 70 kbit/s of silence, and the cameras
-/// would not take it: with the audio stopping after a call, some of them stopped
-/// sending video too, and the session died of `no media data` thirty seconds
-/// later. The stream is therefore continuous, silence included, for as long as
-/// the back channel is open - what [`TalkStream::silence_after`] writes for the
-/// idle gap is a timestamp that matches the wall clock, not a slower cadence.
-const TALK_KEEPALIVE: Duration = Duration::from_millis(20);
-
-/// The gap between two packets on the talk-back track.
-///
-/// Kept as a function even though both arms are the same today: the cadence is
-/// the cameras' to decide, and it was once two values.
-fn talk_gap(talking: bool) -> Duration {
-    if talking { TALK_INTERVAL } else { TALK_KEEPALIVE }
-}
+use crate::talk::{talk_gap, TalkHub, TalkStream, FRAME_SAMPLES, TALK_INTERVAL};
 
 /// Time without any RTP payload after which the session is considered dead.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1540,7 +1517,7 @@ async fn run_session(
                     if elapsed > TALK_INTERVAL * 2 {
                         stream.skip(elapsed - TALK_INTERVAL);
                     }
-                    stream.packet(&talk.next_frame())
+                    stream.packet(&talk.take(FRAME_SAMPLES))
                 } else {
                     stream.silence_after(elapsed)
                 };

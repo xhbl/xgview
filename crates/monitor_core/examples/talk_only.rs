@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use monitor_core::rtsp::{MediaPacket, RtspClient};
-use monitor_core::talk::{TalkStream, FRAME_SAMPLES, RATE};
+use monitor_core::talk::{RtspTalkChannel, TalkChannel, RATE};
 
 #[tokio::main]
 async fn main() {
@@ -117,18 +117,11 @@ async fn main() {
     }
 
     // 3. A session of its own, carrying the back channel and nothing else.
-    let mut client = match RtspClient::connect_with_auth(&url, credentials).await {
-        Ok(client) => client,
-        Err(err) => {
-            eprintln!("reconnect failed: {err}");
-            return;
-        }
-    };
     let opened = Instant::now();
-    let track = match client.start_talk_only().await {
-        Ok(Some(track)) => track,
+    let mut channel = match RtspTalkChannel::open(&url, credentials).await {
+        Ok(Some(channel)) => channel,
         Ok(None) => {
-            eprintln!("the talk-only session found no back channel in the answer");
+            eprintln!("the talk-only session found no back channel it can encode");
             return;
         }
         Err(err) => {
@@ -137,25 +130,18 @@ async fn main() {
         }
     };
     println!(
-        "talk-only session live in {:?}: interleaved channel {}, encoding {:?}",
+        "talk-only session live in {:?}: interleaved channel {}, {:?} a packet",
         opened.elapsed(),
-        track.channel,
-        track.encoding
+        channel.channel(),
+        channel.interval()
     );
-
-    let codec =
-        monitor_codec::audio::AudioCodec::from_encoding(track.encoding.as_deref().unwrap_or("PCMU"));
-    let Some(mut stream) = TalkStream::new(codec) else {
-        eprintln!("the back channel offers {codec}, which this build cannot encode");
-        return;
-    };
 
     // A continuous tone for as long as `--seconds` asks - three seconds by
     // default, which is enough for a measurement, and minutes when a person is
-    // walking over to the camera to listen to it. The cadence is the media's:
-    // 20 ms of 8 kHz audio a packet, silence included.
+    // walking over to the camera to listen to it. The cadence and the packet
+    // length are the channel's: this loop only keeps the clock.
     let before = picture.as_ref().map_or(0, Picture::count);
-    let interval = Duration::from_millis(20);
+    let interval = channel.interval();
     let hold = Duration::from_secs(seconds);
     let mut phase = 0.0f64;
     let mut frames = 0u32;
@@ -164,14 +150,16 @@ async fn main() {
     let started = Instant::now();
     let mut next = Instant::now();
     while started.elapsed() < hold {
-        let samples: Vec<i16> = (0..FRAME_SAMPLES)
+        let samples: Vec<i16> = (0..channel.samples())
             .map(|_| {
                 phase += 660.0 / f64::from(RATE);
                 (f64::sin(phase * std::f64::consts::TAU) * 16_384.0) as i16
             })
             .collect();
-        let packet = stream.packet(&samples);
-        client.send_interleaved(track.channel, &packet);
+        if let Err(err) = channel.send(&samples) {
+            eprintln!("the channel stopped taking audio: {err}");
+            break;
+        }
         frames += 1;
         if frames == 1 {
             println!("first packet written after {:?}", first_packet.elapsed());
@@ -189,7 +177,7 @@ async fn main() {
     println!("sent {frames} frames over {seconds} s");
 
     let closing = Instant::now();
-    client.teardown().await;
+    channel.close().await;
     println!("teardown took {:?}", closing.elapsed());
 
     if let Some(picture) = picture.as_ref() {

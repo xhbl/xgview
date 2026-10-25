@@ -16,6 +16,8 @@
 //!   reassembly (RFC 7798).
 //! * [`mjpeg`]      – HTTP MJPEG (`multipart/x-mixed-replace`) client.
 //! * [`rtsp`]       – asynchronous RTSP (TCP interleaved) client.
+//! * [`talk`]       – talk-back: the microphone side, and the channel that
+//!   carries it to a camera's speaker.
 //! * [`pipeline`]   – non blocking per channel streaming supervisor with
 //!   exponential backoff reconnection.
 //! * [`autostart`]  – start-on-boot helpers for Windows / Linux / Android.

@@ -1416,6 +1416,19 @@ impl RtspClient {
         self.state = RtspSessionState::Closed;
     }
 
+    /// `TEARDOWN` written and left: the answer is not waited for.
+    ///
+    /// [`RtspClient::teardown`] waits for it, and a server that does not answer
+    /// costs the client's whole timeout - go2rtc answers none, which was ten
+    /// seconds of a hang-up button doing nothing (measured 2026-10-25). A
+    /// session belongs to its connection as much as to its identifier, so
+    /// writing the request and dropping the socket ends it either way.
+    pub async fn teardown_nowait(&mut self) {
+        let uri = self.session_uri();
+        let _ = self.send_request("TEARDOWN", &uri, &[], None).await;
+        self.state = RtspSessionState::Closed;
+    }
+
     /// URI a request that targets the whole session addresses.
     ///
     /// `PLAY` covers the presentation rather than one track, so it goes to the
