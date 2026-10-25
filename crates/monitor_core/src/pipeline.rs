@@ -33,7 +33,10 @@ use crate::model::{
 };
 use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtspStage, RtpHeader, SdpTrack};
 use crate::scheduler::ScheduleChange;
-use crate::talk::{talk_gap, TalkHub, TalkStream, FRAME_SAMPLES, TALK_INTERVAL};
+use crate::talk::{
+    talk_gap, TalkHub, TalkStream, TalkSupport, FRAME_SAMPLES, PROBE_DELAY, TALK_INTERVAL,
+    UNSUPPORTED_TTL,
+};
 
 /// Time without any RTP payload after which the session is considered dead.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -115,13 +118,25 @@ pub enum StreamEvent {
         /// The magnified bar offers its sound switch on this: a camera that is
         /// heard from nothing should not show a button that does nothing.
         audio: bool,
-        /// True when the session offers a talk-back media and set it up. The
-        /// magnified bar shows its microphone switch on this.
-        backchannel: bool,
         /// Frames per second measured on RTP marker bits.
         fps: f32,
         bitrate_kbps: f32,
         total_frames: u64,
+    },
+    /// Whether the camera behind a channel can be talked to.
+    ///
+    /// This is a camera's capability, not a session's state - the picture's
+    /// session never asks for a back channel - so it is keyed by the address a
+    /// call would be placed to, and it outlives any one session. The magnified
+    /// bar shows its microphone on it.
+    Talk {
+        /// The channel that asked. Only for routing; the answer is the
+        /// camera's, and a camera in two slots answers once.
+        index: usize,
+        camera_id: String,
+        /// The address the probe asked, and the one a call would go to.
+        uri: String,
+        support: TalkSupport,
     },
     /// The channel switched from one stream to another (main <-> sub). The last
     /// frame of `from` is kept until `to` delivers its first frame.
@@ -138,6 +153,7 @@ impl StreamEvent {
         match self {
             StreamEvent::State { index, .. }
             | StreamEvent::Stats { index, .. }
+            | StreamEvent::Talk { index, .. }
             | StreamEvent::Transition { index, .. } => *index,
         }
     }
@@ -146,6 +162,7 @@ impl StreamEvent {
         match self {
             StreamEvent::State { camera_id, .. }
             | StreamEvent::Stats { camera_id, .. }
+            | StreamEvent::Talk { camera_id, .. }
             | StreamEvent::Transition { camera_id, .. } => camera_id,
         }
     }
@@ -246,6 +263,15 @@ enum ChannelCommand {
     /// reopens the two channels it moves between - the one that loses the
     /// microphone and the one that gains it.
     Talk(Option<usize>),
+    /// Ask whether the camera behind this channel can be talked to.
+    ///
+    /// Answered from the cache when the answer is still fresh, and by a short
+    /// connection of its own otherwise - never by the picture's session, which
+    /// carries no back channel and asks for none.
+    ProbeTalk { index: usize },
+    /// A probe's answer, from the task that asked. The supervisor keeps the
+    /// cache, so the task only does the asking.
+    TalkProbed { uri: String, support: TalkSupport },
     Shutdown,
 }
 
@@ -278,6 +304,7 @@ impl ChannelManager {
         let talk = TalkHub::new();
         handle.spawn(supervisor(
             command_rx,
+            command_tx.clone(),
             event_tx,
             frames.clone(),
             audio.clone(),
@@ -329,6 +356,16 @@ impl ChannelManager {
     /// without having to be reopened.
     pub fn set_handshake_timeout(&self, timeout: Duration) {
         self.send(ChannelCommand::SetHandshakeTimeout(timeout));
+    }
+
+    /// Asks whether the camera behind a channel can be talked to.
+    ///
+    /// The answer arrives as [`StreamEvent::Talk`], and it is the camera's
+    /// rather than this session's: the picture never asks for a back channel.
+    /// A call while a probe is in flight, or once the answer is still fresh,
+    /// costs nothing - the caller may ask on every change of the viewport.
+    pub fn probe_talk(&self, index: usize) {
+        self.send(ChannelCommand::ProbeTalk { index });
     }
 
     /// The runtime used by the streaming tasks (the UI uses it to spawn the
@@ -524,8 +561,36 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize, talk: b
     }
 }
 
+/// What the supervisor knows about one camera's back channel.
+#[derive(Default)]
+struct TalkEntry {
+    support: TalkSupport,
+    /// When the answer was given; `None` until one is.
+    answered: Option<Instant>,
+    /// A probe is in flight for this address.
+    probing: bool,
+}
+
+impl TalkEntry {
+    /// Whether the answer is still worth answering with.
+    ///
+    /// A "no" is asked again after a while - a firmware or an account can
+    /// change it - while a "yes" is kept: it is the answer the microphone is
+    /// drawn on, and a camera that offered a back channel a minute ago still
+    /// does.
+    fn fresh(&self) -> bool {
+        let Some(at) = self.answered else { return false };
+        match self.support {
+            TalkSupport::Supported => true,
+            TalkSupport::Unsupported => at.elapsed() < UNSUPPORTED_TTL,
+            TalkSupport::Unknown => false,
+        }
+    }
+}
+
 async fn supervisor(
     mut commands: UnboundedReceiver<ChannelCommand>,
+    command_tx: UnboundedSender<ChannelCommand>,
     events: Sender<StreamEvent>,
     frames: Arc<FrameStore>,
     audio: Arc<AudioHub>,
@@ -539,6 +604,10 @@ async fn supervisor(
     // outlives the sessions it opens: a channel reopened for another reason
     // gets the back channel back if it is still the one magnified.
     let mut talk_target: Option<usize> = None;
+    // What is known about each camera's back channel, keyed by the address a
+    // call would be placed to. A camera sitting in two slots is one entry, and
+    // a channel that moves between streams asks about the stream it is on.
+    let mut talk_support: HashMap<String, TalkEntry> = HashMap::new();
 
     while let Some(command) = commands.recv().await {
         match command {
@@ -666,6 +735,123 @@ async fn supervisor(
                         talk.clone(),
                     ));
                     channels.insert(index, ChannelRuntime { endpoint, task });
+                }
+            }
+            ChannelCommand::ProbeTalk { index } => {
+                let Some(runtime) = channels.get(&index) else { continue };
+                let endpoint = runtime.endpoint.clone();
+                let uri = endpoint.uri.clone();
+                let answer = |support| StreamEvent::Talk {
+                    index,
+                    camera_id: endpoint.camera_id.clone(),
+                    uri: uri.clone(),
+                    support,
+                };
+                // MJPEG and the MSE fallback carry no media the client sends,
+                // so there is nothing to ask: the answer is known without a
+                // connection.
+                if endpoint.is_mjpeg() || endpoint.is_ws() {
+                    let _ = events.send(answer(TalkSupport::Unsupported));
+                    continue;
+                }
+                let entry = talk_support.entry(uri.clone()).or_default();
+                if entry.fresh() {
+                    let _ = events.send(answer(entry.support));
+                    continue;
+                }
+                // One probe per address at a time: the second caller would only
+                // ask the same camera the same question.
+                if entry.probing {
+                    continue;
+                }
+                entry.probing = true;
+                let timeout = {
+                    let settings = settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    settings.handshake_timeout
+                };
+                let credentials = endpoint.credentials.clone();
+                let camera_id = endpoint.camera_id.clone();
+                let commands = command_tx.clone();
+                handle.spawn(async move {
+                    // Late enough that the picture's own session - reopened for
+                    // the other stream at the same moment - is not still
+                    // connecting when this one arrives.
+                    tokio::time::sleep(PROBE_DELAY).await;
+                    let ask = async {
+                        let mut client = RtspClient::connect_with_auth(&uri, credentials).await?;
+                        client.probe_backchannel().await
+                    };
+                    let support = match tokio::time::timeout(timeout, ask).await {
+                        Ok(Ok(Some(encoding))) => {
+                            let codec = AudioCodec::from_encoding(&encoding);
+                            if TalkStream::new(codec).is_some() {
+                                tracing::debug!(
+                                    target: "xgview::talk",
+                                    camera = %camera_id,
+                                    encoding,
+                                    "the camera offers a back channel"
+                                );
+                                TalkSupport::Supported
+                            } else {
+                                tracing::debug!(
+                                    target: "xgview::talk",
+                                    camera = %camera_id,
+                                    encoding,
+                                    "the back channel carries an encoding this build cannot send"
+                                );
+                                TalkSupport::Unsupported
+                            }
+                        }
+                        Ok(Ok(None)) => {
+                            tracing::debug!(
+                                target: "xgview::talk",
+                                camera = %camera_id,
+                                "the camera offers no back channel"
+                            );
+                            TalkSupport::Unsupported
+                        }
+                        // A failure is not an answer: nothing is cached on it,
+                        // so the next magnification asks again.
+                        Ok(Err(err)) => {
+                            tracing::debug!(
+                                target: "xgview::talk",
+                                camera = %camera_id,
+                                error = %err,
+                                "the talk-back probe failed"
+                            );
+                            TalkSupport::Unknown
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                target: "xgview::talk",
+                                camera = %camera_id,
+                                timeout_s = timeout.as_secs(),
+                                "the talk-back probe timed out"
+                            );
+                            TalkSupport::Unknown
+                        }
+                    };
+                    let _ = commands.send(ChannelCommand::TalkProbed { uri, support });
+                });
+            }
+            ChannelCommand::TalkProbed { uri, support } => {
+                let entry = talk_support.entry(uri.clone()).or_default();
+                entry.probing = false;
+                if support != TalkSupport::Unknown {
+                    entry.support = support;
+                    entry.answered = Some(Instant::now());
+                }
+                // The answer is the camera's, so every channel showing that
+                // address hears it - not only the one that asked.
+                for (index, runtime) in &channels {
+                    if runtime.endpoint.uri == uri {
+                        let _ = events.send(StreamEvent::Talk {
+                            index: *index,
+                            camera_id: runtime.endpoint.camera_id.clone(),
+                            uri: uri.clone(),
+                            support: entry.support,
+                        });
+                    }
                 }
             }
             ChannelCommand::SetPolicy(new_policy) => {
@@ -1415,7 +1601,6 @@ async fn run_session(
             height,
             hardware: uses_hardware(&decoder),
             audio: audio_decoder.is_some(),
-            backchannel,
             fps: 0.0,
             bitrate_kbps: 0.0,
             total_frames: 0,
@@ -1927,7 +2112,6 @@ async fn run_session(
                     height,
                     hardware: uses_hardware(&decoder),
                     audio: audio_decoder.is_some(),
-                    backchannel,
                     fps: window_frames as f32 / seconds,
                     bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
                     total_frames,
@@ -2089,7 +2273,6 @@ async fn run_mjpeg_session(
             height,
             hardware: uses_hardware(&decoder),
             audio: false,
-            backchannel: false,
             fps: 0.0,
             bitrate_kbps: 0.0,
             total_frames: 0,
@@ -2167,7 +2350,6 @@ async fn run_mjpeg_session(
                     height,
                     hardware: uses_hardware(&decoder),
                     audio: false,
-                    backchannel: false,
                     fps,
                     bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
                     total_frames,
@@ -2527,7 +2709,6 @@ async fn run_ws_session(
                     height,
                     hardware: uses_hardware(&decoder),
                     audio: audio_decoder.is_some(),
-                    backchannel: false,
                     fps: 0.0,
                     bitrate_kbps: 0.0,
                     total_frames: 0,
@@ -2614,7 +2795,6 @@ async fn run_ws_session(
                     height,
                     hardware: uses_hardware(&decoder),
                     audio: audio_decoder.is_some(),
-                    backchannel: false,
                     fps,
                     bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
                     total_frames,
@@ -2735,6 +2915,27 @@ fn emit(events: &Sender<StreamEvent>, event: StreamEvent) {
 mod tests {
     use super::*;
     use crate::model::{CameraOrigin, TileAspect};
+
+    /// A "yes" is kept for the run and a "no" is asked again after a while; a
+    /// failure is not an answer at all, so the next magnification asks again.
+    #[test]
+    fn a_talk_answer_is_trusted_for_as_long_as_it_is_worth() {
+        let mut entry = TalkEntry::default();
+        assert!(!entry.fresh(), "nothing has been asked yet");
+
+        entry.support = TalkSupport::Supported;
+        entry.answered = Some(Instant::now());
+        assert!(entry.fresh(), "a camera that offered a back channel still does");
+
+        entry.support = TalkSupport::Unsupported;
+        assert!(entry.fresh(), "a fresh refusal is worth believing");
+        entry.answered = Some(Instant::now() - UNSUPPORTED_TTL - Duration::from_secs(1));
+        assert!(!entry.fresh(), "but it is asked again after a while");
+
+        entry.support = TalkSupport::Unknown;
+        entry.answered = None;
+        assert!(!entry.fresh(), "a failed probe caches nothing");
+    }
 
     fn camera(id: &str, uri: &str) -> CameraSource {
         CameraSource {

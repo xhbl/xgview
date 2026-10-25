@@ -25,6 +25,7 @@ use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{infer_sub_stream, ConnectionState, OsdItem, StreamKind, TileAspect};
 use monitor_core::pipeline::{ChannelManager, StreamEvent};
 use monitor_core::scheduler::Scheduler;
+use monitor_core::talk::TalkSupport;
 use monitor_core::{CameraSource, Direction};
 
 use crate::dialogs::{self, BackgroundEvent, CameraDraft, DiscoveryUi, Tab};
@@ -184,9 +185,6 @@ pub struct ChannelUi {
     /// True once the stream has proved to carry an audio track this build can
     /// decode. The magnified bar's sound switch is offered on it.
     pub audio: bool,
-    /// True when the channel's session offers a talk-back media. The magnified
-    /// bar's microphone switch is offered on it.
-    pub backchannel: bool,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub fps: f32,
@@ -206,7 +204,6 @@ impl Default for ChannelUi {
             codec: None,
             hardware: false,
             audio: false,
-            backchannel: false,
             width: None,
             height: None,
             fps: 0.0,
@@ -232,14 +229,13 @@ impl ChannelUi {
                     self.total_frames = 0;
                 }
             }
-            StreamEvent::Stats { stream, codec, width, height, hardware, audio, backchannel, fps, bitrate_kbps, total_frames, .. } => {
+            StreamEvent::Stats { stream, codec, width, height, hardware, audio, fps, bitrate_kbps, total_frames, .. } => {
                 self.stream = Some(stream);
                 if codec.is_some() {
                     self.codec = codec;
                 }
                 self.hardware = hardware;
                 self.audio = audio;
-                self.backchannel = backchannel;
                 if width.is_some() {
                     self.width = width;
                 }
@@ -261,6 +257,10 @@ impl ChannelUi {
                 self.bitrate_kbps = 0.0;
                 self.total_frames = 0;
             }
+            // A camera's capability, not this channel's state: the interface
+            // takes it before an event reaches a channel, and caches it by
+            // address. See `App::talk_support`.
+            StreamEvent::Talk { .. } => {}
         }
     }
 }
@@ -729,6 +729,13 @@ pub struct XgViewApp {
     manager: ChannelManager,
     handle: Handle,
     channels: HashMap<usize, ChannelUi>,
+    /// Whether a camera can be talked to, keyed by the address a call would be
+    /// placed to.
+    ///
+    /// A camera's capability rather than a channel's: the picture's session
+    /// carries no back channel, so the answer comes from a probe of its own and
+    /// belongs to the address, not to the slot the camera is shown in.
+    talk_support: HashMap<String, TalkSupport>,
     /// Decoded pictures currently on the GPU, keyed by channel index.
     textures: HashMap<usize, ChannelTexture>,
     /// Uploads the decoded planes and turns them into those pictures.
@@ -1218,6 +1225,7 @@ impl XgViewApp {
             manager,
             handle,
             channels: HashMap::new(),
+            talk_support: HashMap::new(),
             textures: HashMap::new(),
             video,
             vitals: monitor_core::vitals::Vitals::new(),
@@ -1440,6 +1448,14 @@ impl XgViewApp {
         if !changes.is_empty() {
             tracing::debug!(target: "xgview::gui", changes = changes.len(), "applying the channel schedule");
             self.manager.apply(&changes, &cameras);
+        }
+        // The capability question is asked after the schedule, never before:
+        // magnifying reopens that channel on the main stream, and the probe has
+        // to ask about the stream a call would go to. Both go down the same
+        // command channel in the order they are sent, so this one finds the
+        // channel already pulling it.
+        if let Some(index) = self.scheduler.zoom() {
+            self.manager.probe_talk(index);
         }
         self.channels.retain(|index, _| *index < count);
         // A channel beyond the grid is gone for good, and its textures with it.
@@ -2655,6 +2671,12 @@ impl XgViewApp {
 
     fn poll_events(&mut self) {
         for event in self.manager.poll() {
+            // A camera's answer, not a channel's: it is kept by address so that
+            // a camera shown in two slots, or magnified twice, is asked once.
+            if let StreamEvent::Talk { uri, support, .. } = &event {
+                self.talk_support.insert(uri.clone(), *support);
+                continue;
+            }
             let index = event.index();
             self.channels.entry(index).or_default().apply(event);
         }
@@ -7321,13 +7343,26 @@ impl XgViewApp {
 
     /// Whether the magnified camera offers a talk-back media.
     ///
-    /// Unlike the sound switch there is no optimistic default: a back channel
-    /// exists only once the session has asked for it and the answer carried it,
-    /// so the microphone appears when the stream says it can.
+    /// The answer comes from a probe of the camera, not from the picture's
+    /// session: that one carries no back channel and asks for none, which is
+    /// what keeps a magnified tile from holding a camera's speaker open while
+    /// nobody is talking. There is still no optimistic default - the microphone
+    /// appears when a camera has said yes - but the yes is the camera's, so it
+    /// survives the session being reopened under it.
     fn magnified_has_backchannel(&self) -> bool {
-        self.scheduler
-            .zoom()
-            .is_some_and(|index| self.channels.get(&index).is_some_and(|channel| channel.backchannel))
+        self.magnified_stream_uri()
+            .is_some_and(|uri| self.talk_support.get(&uri) == Some(&TalkSupport::Supported))
+    }
+
+    /// The address a call to the magnified camera would be placed to.
+    ///
+    /// The main stream, whichever one the grid is pulling: a call goes to what
+    /// the viewer is looking at, and that is the address the probe asked about.
+    fn magnified_stream_uri(&self) -> Option<String> {
+        let index = self.scheduler.zoom()?;
+        let slot = self.config.active_slots().get(index).copied()?;
+        let camera = self.config.cameras.get(slot)?;
+        Some(camera.stream_uri(StreamKind::Main).to_string())
     }
 
     /// The controls the magnified bar carries, with what each does, in walk

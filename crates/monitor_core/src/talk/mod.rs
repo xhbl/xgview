@@ -43,6 +43,21 @@ pub use rtsp::{
     talk_gap, RtspTalkChannel, TalkStream, FRAME_SAMPLES, TALK_INTERVAL, TALK_KEEPALIVE,
 };
 
+/// How long a "no" is trusted.
+///
+/// A camera does not grow a speaker inside a run, but a firmware update or a
+/// different account can change the answer, and asking again costs one short
+/// connection. A "yes" is kept for the whole run: it is the answer the picture
+/// depends on, and it is the one that cannot be stale in a way that matters.
+pub const UNSUPPORTED_TTL: Duration = Duration::from_secs(600);
+
+/// How long after a camera is magnified its capability is asked for.
+///
+/// Magnifying is also when the picture's session is reopened for the other
+/// stream, and a camera with a tight limit on concurrent sessions should not
+/// see both arrive at once.
+pub const PROBE_DELAY: Duration = Duration::from_secs(1);
+
 /// Sample rate of the back channel. Every camera measured takes 8 kHz mono,
 /// and speech needs nothing more.
 pub const RATE: u32 = 8_000;
@@ -56,6 +71,26 @@ const QUEUE_SAMPLES: usize = (RATE as usize) / 2;
 
 /// The value [`TalkHub::target`] carries when nothing is magnified.
 const NO_TARGET: usize = usize::MAX;
+
+/// Whether a camera can be talked to, as far as this process knows.
+///
+/// The question is the camera's, not a session's: the picture's session never
+/// asks for a back channel, so there is nothing in it to read the answer from.
+/// A probe asks on its own connection - `OPTIONS` and `DESCRIBE`, no `SETUP` -
+/// and what comes back is cached against the address a call would be placed to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TalkSupport {
+    /// Not asked yet, or asked and the answer was a failure rather than a
+    /// refusal. Nothing is drawn on this.
+    #[default]
+    Unknown,
+    /// The camera offers a back channel, and it carries an encoding this build
+    /// can send.
+    Supported,
+    /// The camera answered, and the answer was no: no such media, a header it
+    /// will not take, or a codec this build cannot encode.
+    Unsupported,
+}
 
 /// One channel to one camera, as the loop that feeds it sees it.
 ///
