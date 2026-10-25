@@ -17,10 +17,17 @@
 //! meet, so what this measures is whether the camera agrees - a device with a
 //! session limit would drop the picture the moment a call opened.
 //!
+//! `--restart-picture N` adds the fourth: at N seconds the picture's session is
+//! closed and opened again **while the call keeps running**. That is the one
+//! thing the split is supposed to survive, and the tone carries on being audible
+//! through it - if it does, the camera treats the two sessions as unrelated,
+//! which is what the whole arrangement rests on.
+//!
 //! ```text
 //! cargo run --example talk_only -- rtsp://192.168.17.88:8554/cam_doorbell_1 admin
 //! cargo run --example talk_only -- rtsp://192.168.27.49:554/Preview_01_main admin --probe-only
 //! cargo run --example talk_only -- rtsp://192.168.27.49:554/Preview_01_main admin --with-video
+//! cargo run --example talk_only -- rtsp://192.168.27.49:554/Preview_01_main admin --seconds 30 --restart-picture 5
 //! ```
 //!
 //! The password comes from the third argument or, when it is left out, from
@@ -45,6 +52,7 @@ async fn main() {
     let mut probe_only = false;
     let mut with_video = false;
     let mut seconds = 3u64;
+    let mut restart_picture: Option<u64> = None;
     let mut positional = Vec::new();
     let mut rest = std::env::args().skip(1);
     while let Some(arg) = rest.next() {
@@ -52,9 +60,16 @@ async fn main() {
             "--probe-only" => probe_only = true,
             "--with-video" => with_video = true,
             "--seconds" => seconds = rest.next().and_then(|value| value.parse().ok()).unwrap_or(3),
+            "--restart-picture" => {
+                restart_picture = rest.next().and_then(|value| value.parse().ok())
+            }
             _ => positional.push(arg),
         }
     }
+
+    // Dropping the picture and opening it again is a video reconnect with the
+    // call already up - the one thing the two sessions are supposed to survive.
+    with_video |= restart_picture.is_some();
 
     let mut positional = positional.into_iter();
     let Some(url) = positional.next() else {
@@ -100,8 +115,9 @@ async fn main() {
 
     // 2. The picture, when asked for: its own session, reading flat out on a
     // task of its own so that the call's 20 ms clock cannot starve it.
-    let picture = if with_video {
-        match open_picture(&url, credentials.clone()).await {
+    let picture_credentials = credentials.clone();
+    let mut picture = if with_video {
+        match open_picture(&url, picture_credentials.clone()).await {
             Ok(client) => Some(Picture::start(client)),
             Err(err) => {
                 eprintln!("the picture session failed: {err}");
@@ -130,10 +146,11 @@ async fn main() {
         }
     };
     println!(
-        "talk-only session live in {:?}: interleaved channel {}, {:?} a packet",
+        "talk-only session live in {:?}: interleaved channel {}, {:?} a packet, keep alive every {:?}",
         opened.elapsed(),
         channel.channel(),
-        channel.interval()
+        channel.interval(),
+        channel.keep_alive_interval()
     );
 
     // A continuous tone for as long as `--seconds` asks - three seconds by
@@ -146,10 +163,42 @@ async fn main() {
     let mut phase = 0.0f64;
     let mut frames = 0u32;
     let mut announced = 0u64;
+    let mut restarted = false;
+    let mut ended: Option<String> = None;
+    let keep_alive = channel.keep_alive_interval();
+    let mut next_keep_alive = Instant::now() + keep_alive;
     let first_packet = Instant::now();
     let started = Instant::now();
     let mut next = Instant::now();
     while started.elapsed() < hold {
+        // The picture is thrown away and opened again while the call keeps
+        // going: a reconnect of one session, with the other one live.
+        if let Some(at) = restart_picture {
+            if !restarted && started.elapsed() >= Duration::from_secs(at) {
+                restarted = true;
+                println!(
+                    "picture: {} packets, dropping the session now",
+                    picture.as_ref().map_or(0, Picture::count)
+                );
+                drop(picture.take());
+                match open_picture(&url, picture_credentials.clone()).await {
+                    Ok(client) => {
+                        picture = Some(Picture::start(client));
+                        println!("picture: the session is back");
+                    }
+                    Err(err) => eprintln!("picture: it did not come back: {err}"),
+                }
+            }
+        }
+        // A camera times a session out on its own clock, and the audio on the
+        // wire does not count: this is the `OPTIONS` that keeps it open.
+        if Instant::now() >= next_keep_alive {
+            if let Err(err) = channel.keep_alive().await {
+                ended = Some(format!("the keep alive failed: {err}"));
+                break;
+            }
+            next_keep_alive = Instant::now() + keep_alive;
+        }
         let samples: Vec<i16> = (0..channel.samples())
             .map(|_| {
                 phase += 660.0 / f64::from(RATE);
@@ -157,12 +206,19 @@ async fn main() {
             })
             .collect();
         if let Err(err) = channel.send(&samples) {
-            eprintln!("the channel stopped taking audio: {err}");
+            ended = Some(format!("the channel stopped taking audio: {err}"));
             break;
         }
         frames += 1;
         if frames == 1 {
             println!("first packet written after {:?}", first_packet.elapsed());
+        }
+        // A write into a socket the camera has closed still succeeds, so the
+        // call being alive is read from the socket rather than from the writes:
+        // this is what the worker does, and what makes "it held" mean anything.
+        if let Ok(Err(err)) = tokio::time::timeout(Duration::from_millis(1), channel.watch()).await {
+            ended = Some(format!("the camera closed the call: {err}"));
+            break;
         }
         if seconds > 5 && started.elapsed().as_secs() / 5 > announced {
             announced = started.elapsed().as_secs() / 5;
@@ -174,18 +230,26 @@ async fn main() {
             tokio::time::sleep(next - now).await;
         }
     }
-    println!("sent {frames} frames over {seconds} s");
+    match &ended {
+        Some(reason) => println!("sent {frames} frames before the call stopped: {reason}"),
+        None => println!("sent {frames} frames over {seconds} s, the call held throughout"),
+    }
 
     let closing = Instant::now();
     channel.close().await;
     println!("teardown took {:?}", closing.elapsed());
 
     if let Some(picture) = picture.as_ref() {
-        let during = picture.count() - before;
-        println!("picture during the call: {during} packets in {seconds} s");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        println!("picture after the call: {} packets in 1 s", picture.count() - before - during);
-        println!("picture session died during the run: {}", picture.died());
+        if restart_picture.is_some() {
+            println!("picture after the reconnect: {} packets", picture.count());
+            println!("picture session died since the restart: {}", picture.died());
+        } else {
+            let during = picture.count() - before;
+            println!("picture during the call: {during} packets in {seconds} s");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            println!("picture after the call: {} packets in 1 s", picture.count() - before - during);
+            println!("picture session died during the run: {}", picture.died());
+        }
     }
 }
 
