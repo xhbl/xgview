@@ -34,8 +34,8 @@ use crate::model::{
 use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtspStage, RtpHeader, SdpTrack};
 use crate::scheduler::ScheduleChange;
 use crate::talk::{
-    talk_gap, TalkHub, TalkStream, TalkSupport, FRAME_SAMPLES, PROBE_DELAY, TALK_INTERVAL,
-    UNSUPPORTED_TTL,
+    talk_gap, RtspTalkChannel, TalkChannel, TalkHub, TalkStream, TalkSupport, FRAME_SAMPLES,
+    PROBE_DELAY, TALK_INTERVAL, UNSUPPORTED_TTL,
 };
 
 /// Time without any RTP payload after which the session is considered dead.
@@ -92,6 +92,19 @@ struct SessionSettings {
     handshake_timeout: Duration,
 }
 
+/// Why a call was not placed, or did not last.
+///
+/// The two are worth telling apart: one is the camera saying it has nothing to
+/// talk into, which no retry will change, and the other is the network, which
+/// the next press may well get through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallFailure {
+    /// The camera answered, and has no back channel this build can send to.
+    NoBackChannel,
+    /// The camera could not be reached, or the session broke under the call.
+    Unreachable,
+}
+
 /// Everything a channel reports to the renderer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
@@ -138,6 +151,13 @@ pub enum StreamEvent {
         uri: String,
         support: TalkSupport,
     },
+    /// A call that could not be placed, or that ended without the viewer
+    /// hanging up. The interface ends the call and says why.
+    CallFailed {
+        index: usize,
+        camera_id: String,
+        reason: CallFailure,
+    },
     /// The channel switched from one stream to another (main <-> sub). The last
     /// frame of `from` is kept until `to` delivers its first frame.
     Transition {
@@ -154,6 +174,7 @@ impl StreamEvent {
             StreamEvent::State { index, .. }
             | StreamEvent::Stats { index, .. }
             | StreamEvent::Talk { index, .. }
+            | StreamEvent::CallFailed { index, .. }
             | StreamEvent::Transition { index, .. } => *index,
         }
     }
@@ -163,6 +184,7 @@ impl StreamEvent {
             StreamEvent::State { camera_id, .. }
             | StreamEvent::Stats { camera_id, .. }
             | StreamEvent::Talk { camera_id, .. }
+            | StreamEvent::CallFailed { camera_id, .. }
             | StreamEvent::Transition { camera_id, .. } => camera_id,
         }
     }
@@ -272,6 +294,13 @@ enum ChannelCommand {
     /// A probe's answer, from the task that asked. The supervisor keeps the
     /// cache, so the task only does the asking.
     TalkProbed { uri: String, support: TalkSupport },
+    /// Place a call: a session of its own that carries the microphone to the
+    /// camera behind this channel.
+    Call { index: usize },
+    /// The camera would not take a call of its own, so the media goes on the
+    /// picture's session instead - the way it was carried before the split.
+    /// Only used when a call has already been refused.
+    TalkFallback { index: usize },
     Shutdown,
 }
 
@@ -366,6 +395,15 @@ impl ChannelManager {
     /// costs nothing - the caller may ask on every change of the viewport.
     pub fn probe_talk(&self, index: usize) {
         self.send(ChannelCommand::ProbeTalk { index });
+    }
+
+    /// Places a call to the camera behind a channel.
+    ///
+    /// A session of its own, carrying the microphone and nothing else: the
+    /// picture's session is not touched, and hanging up is simply the hub's
+    /// target going quiet. A failure arrives as [`StreamEvent::CallFailed`].
+    pub fn call(&self, index: usize) {
+        self.send(ChannelCommand::Call { index });
     }
 
     /// The runtime used by the streaming tasks (the UI uses it to spawn the
@@ -527,7 +565,12 @@ fn credentials_of(source: &CameraSource) -> Option<(String, String)> {
 /// MSE. An `Auto` camera keeps the MSE address as the fallback, with Frigate's
 /// own login rather than the restream account; a forced protocol carries no
 /// fallback, so `Rtsp` means RTSP alone and `Mse` means MSE alone.
-fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize, talk: bool) -> Endpoint {
+///
+/// The session built from this carries the picture and nothing else: no back
+/// channel is asked for, so a magnified tile holds no camera's speaker open
+/// while nobody is talking. A camera that will not take a call on its own gets
+/// [`Endpoint::with_talk`] applied later - see `ChannelCommand::TalkFallback`.
+fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endpoint {
     let mse_primary = matches!(source.connect, ConnectionMode::Mse) && source.has_mse();
     let (uri, credentials) = if mse_primary {
         (source.active_uri(stream).to_string(), source.mse_credentials())
@@ -541,8 +584,7 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize, talk: b
         }),
         ConnectionMode::Rtsp | ConnectionMode::Mse => None,
     };
-    let is_rtsp = uri.to_ascii_lowercase().starts_with("rtsp");
-    let endpoint = Endpoint {
+    Endpoint {
         index,
         camera_id: source.id.clone(),
         uri,
@@ -551,13 +593,6 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize, talk: b
         transport: source.transport,
         talk: false,
         fallback,
-    };
-    // Only an RTSP session can carry a back channel; MSE and MJPEG have no
-    // media the client sends.
-    if talk && is_rtsp {
-        endpoint.with_talk(true)
-    } else {
-        endpoint
     }
 }
 
@@ -569,6 +604,10 @@ struct TalkEntry {
     answered: Option<Instant>,
     /// A probe is in flight for this address.
     probing: bool,
+    /// This camera would not take a call on a connection of its own, and the
+    /// media has to ride on the picture's session instead. Kept for the run:
+    /// asking again costs a reopen of that session every time.
+    refuses_call: bool,
 }
 
 impl TalkEntry {
@@ -608,6 +647,9 @@ async fn supervisor(
     // call would be placed to. A camera sitting in two slots is one entry, and
     // a channel that moves between streams asks about the stream it is on.
     let mut talk_support: HashMap<String, TalkEntry> = HashMap::new();
+    // The call in progress, if any. One at a time: the hub has a single target,
+    // and two workers would send the same microphone twice.
+    let mut call: Option<JoinHandle<()>> = None;
 
     while let Some(command) = commands.recv().await {
         match command {
@@ -621,7 +663,7 @@ async fn supervisor(
                     }
                     kind => kind,
                 };
-                let endpoint = endpoint_for(&source, stream, index, talk_target == Some(index));
+                let endpoint = endpoint_for(&source, stream, index);
                 if let Some(existing) = channels.get(&index) {
                     if existing.endpoint.is_same_stream(&endpoint) {
                         continue;
@@ -702,6 +744,13 @@ async fn supervisor(
                 // samples are pushed into the hub, but `TalkHub::talking_on`
                 // only answers for its target, and a target nobody sets is
                 // `None` for the life of the process. See `TalkHub::set_target`.
+                //
+                // Nothing about a session changes here, which is the point of
+                // the split: the picture never carried a back channel, so a
+                // change of viewport no longer reopens the channel it left or
+                // the one it arrived at. The call, when there is one, is on its
+                // own connection and ends by itself - `talking_on` goes false
+                // for the channel it belonged to.
                 talk.set_target(target);
                 debug_assert_eq!(
                     talk.target(),
@@ -713,29 +762,6 @@ async fn supervisor(
                     camera = ?target,
                     "the talk target moved"
                 );
-                // Only the sessions either side of the change need reopening:
-                // one gives the back channel up, the other takes it. A channel
-                // whose sessions are both without it is left alone.
-                let reopen: Vec<usize> = channels
-                    .iter()
-                    .filter(|(index, runtime)| runtime.endpoint.talk != target.is_some_and(|t| t == **index))
-                    .map(|(index, _)| *index)
-                    .collect();
-                for index in reopen {
-                    let Some(runtime) = channels.remove(&index) else { continue };
-                    runtime.task.abort();
-                    let endpoint = runtime.endpoint.with_talk(talk_target == Some(index));
-                    let task = handle.spawn(run_channel(
-                        endpoint.clone(),
-                        prefer_hardware,
-                        settings.clone(),
-                        events.clone(),
-                        frames.clone(),
-                        audio.clone(),
-                        talk.clone(),
-                    ));
-                    channels.insert(index, ChannelRuntime { endpoint, task });
-                }
             }
             ChannelCommand::ProbeTalk { index } => {
                 let Some(runtime) = channels.get(&index) else { continue };
@@ -853,6 +879,73 @@ async fn supervisor(
                         });
                     }
                 }
+            }
+            ChannelCommand::Call { index } => {
+                let Some(runtime) = channels.get(&index) else {
+                    // The channel went away between the press and this command.
+                    // Saying so beats a microphone that does nothing.
+                    let _ = events.send(StreamEvent::CallFailed {
+                        index,
+                        camera_id: String::new(),
+                        reason: CallFailure::Unreachable,
+                    });
+                    continue;
+                };
+                let endpoint = runtime.endpoint.clone();
+                // MJPEG and the MSE fallback carry no media the client sends.
+                // The probe already answers `Unsupported` for them, so this is
+                // only the case where the press beat the answer.
+                if endpoint.is_mjpeg() || endpoint.is_ws() {
+                    let _ = events.send(StreamEvent::CallFailed {
+                        index,
+                        camera_id: endpoint.camera_id.clone(),
+                        reason: CallFailure::NoBackChannel,
+                    });
+                    continue;
+                }
+                // This camera has already said it will not take a call of its
+                // own. Going straight to the session that can carry the media
+                // spares the viewer a wait for a refusal that is already known.
+                if talk_support.get(&endpoint.uri).is_some_and(|entry| entry.refuses_call) {
+                    let _ = command_tx.send(ChannelCommand::TalkFallback { index });
+                    continue;
+                }
+                if let Some(previous) = call.take() {
+                    previous.abort();
+                }
+                let timeout = {
+                    let settings = settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    settings.handshake_timeout
+                };
+                call = Some(handle.spawn(talk_worker(
+                    index,
+                    endpoint,
+                    talk.clone(),
+                    events.clone(),
+                    command_tx.clone(),
+                    timeout,
+                )));
+            }
+            ChannelCommand::TalkFallback { index } => {
+                let Some(runtime) = channels.remove(&index) else { continue };
+                runtime.task.abort();
+                let endpoint = runtime.endpoint.with_talk(true);
+                talk_support.entry(endpoint.uri.clone()).or_default().refuses_call = true;
+                tracing::debug!(
+                    target: "xgview::talk",
+                    camera = %endpoint.camera_id,
+                    "this camera takes the back channel on the picture's session"
+                );
+                let task = handle.spawn(run_channel(
+                    endpoint.clone(),
+                    prefer_hardware,
+                    settings.clone(),
+                    events.clone(),
+                    frames.clone(),
+                    audio.clone(),
+                    talk.clone(),
+                ));
+                channels.insert(index, ChannelRuntime { endpoint, task });
             }
             ChannelCommand::SetPolicy(new_policy) => {
                 match settings.lock() {
@@ -1462,6 +1555,137 @@ async fn negotiate(
     }
 }
 
+/// One call: a session of its own that carries the microphone and nothing else.
+///
+/// A task of its own rather than part of the picture's loop, for the two reasons
+/// the split exists: opening it takes a handshake, which must not hold up a
+/// frame, and a camera that breaks it must not be able to touch the picture.
+///
+/// It ends when the viewer hangs up, which is [`TalkHub::talking_on`] going
+/// false - no command is needed for that, and the three ways a call ends (the
+/// handset, the bar closing, the viewport moving) all reach it that way.
+async fn talk_worker(
+    index: usize,
+    endpoint: Endpoint,
+    talk: Arc<TalkHub>,
+    events: Sender<StreamEvent>,
+    commands: UnboundedSender<ChannelCommand>,
+    timeout: Duration,
+) {
+    let Endpoint { camera_id, uri, credentials, .. } = endpoint;
+    let failed = |reason| {
+        let _ = events.send(StreamEvent::CallFailed {
+            index,
+            camera_id: camera_id.clone(),
+            reason,
+        });
+    };
+
+    let mut channel = match tokio::time::timeout(timeout, RtspTalkChannel::open(&uri, credentials)).await {
+        Ok(Ok(Some(channel))) => channel,
+        Ok(Ok(None)) => {
+            tracing::debug!(
+                target: "xgview::talk",
+                camera = %camera_id,
+                "the camera has no back channel to call"
+            );
+            failed(CallFailure::NoBackChannel);
+            return;
+        }
+        Ok(Err(err)) => {
+            // A protocol refusal is the camera saying something about *this
+            // shape* of session, and the picture's own session can still carry
+            // the media - that is the fallback. A transport failure says nothing
+            // about the shape, and reopening would only repeat it.
+            if matches!(err, crate::error::CoreError::Rtsp(_)) {
+                tracing::debug!(
+                    target: "xgview::talk",
+                    camera = %camera_id,
+                    error = %err,
+                    "the camera refused a call of its own, falling back to the picture's session"
+                );
+                let _ = commands.send(ChannelCommand::TalkFallback { index });
+            } else {
+                tracing::debug!(
+                    target: "xgview::talk",
+                    camera = %camera_id,
+                    error = %err,
+                    "the call could not be opened"
+                );
+                failed(CallFailure::Unreachable);
+            }
+            return;
+        }
+        Err(_) => {
+            tracing::debug!(
+                target: "xgview::talk",
+                camera = %camera_id,
+                timeout_s = timeout.as_secs(),
+                "the call timed out opening"
+            );
+            failed(CallFailure::Unreachable);
+            return;
+        }
+    };
+
+    // The microphone has been pushing since the press, and the handshake left a
+    // backlog behind it. From here on the audio is consumed at the rate it is
+    // produced, so that backlog would stay for the whole call: it is cut back to
+    // two packets, which is what the camera's jitter buffer expects to see.
+    talk.trim(2 * channel.samples());
+    tracing::debug!(
+        target: "xgview::talk",
+        camera = %camera_id,
+        channel = channel.channel(),
+        "the call is live"
+    );
+
+    let interval = channel.interval();
+    let mut next_send = Instant::now();
+    let mut next_keep_alive = Instant::now() + channel.keep_alive_interval();
+    while talk.talking_on(index) {
+        let now = Instant::now();
+        if now >= next_keep_alive {
+            if channel.keep_alive().await.is_err() {
+                break;
+            }
+            next_keep_alive = now + channel.keep_alive_interval();
+        }
+        if now >= next_send {
+            let samples = talk.take(channel.samples());
+            if channel.send(&samples).is_err() {
+                break;
+            }
+            next_send += interval;
+            // A loop that fell well behind - a stalled socket, a suspended
+            // process - is not worth a burst of catch-up packets: the camera's
+            // speaker wants the present, not the backlog.
+            if next_send < now {
+                next_send = now + interval;
+            }
+        }
+        // One read, bounded by the time left before the next thing this loop has
+        // to do. It is what keeps the answers to the keep alive from piling up
+        // in the socket, and it is the only way a camera that has closed the
+        // session is noticed before the next packet goes nowhere.
+        let wait = next_send.min(next_keep_alive).saturating_duration_since(Instant::now());
+        if let Ok(Err(_)) = tokio::time::timeout(wait, channel.watch()).await {
+            break;
+        }
+    }
+
+    // Only a call the viewer did not end is worth a word: a hang-up arrives here
+    // as `talking_on` going false, and the interface has already said so.
+    let hung_up = !talk.talking_on(index);
+    channel.close().await;
+    if !hung_up {
+        tracing::debug!(target: "xgview::talk", camera = %camera_id, "the call was lost");
+        failed(CallFailure::Unreachable);
+    } else {
+        tracing::debug!(target: "xgview::talk", camera = %camera_id, "the call ended");
+    }
+}
+
 /// One RTSP session: negotiation then packet pumping.
 async fn run_session(
     endpoint: Endpoint,
@@ -1535,6 +1759,13 @@ async fn run_session(
         Some((stream, channel))
     });
     let backchannel = talk_sender.is_some();
+    if backchannel {
+        // This session is the one carrying the microphone, which only happens
+        // when the camera would not take a call of its own. The handshake took
+        // as long here as it would have there, so the backlog the microphone
+        // built up is cut back the same way - see `talk_worker`.
+        talk.trim(2 * FRAME_SAMPLES);
+    }
     if wants_talk && !backchannel {
         tracing::debug!(
             target: "xgview::pipeline",
@@ -2981,19 +3212,19 @@ mod tests {
         camera.mse_password = Some("pw".to_string());
 
         camera.connect = ConnectionMode::Auto;
-        let endpoint = endpoint_for(&camera, StreamKind::Main, 0, false);
+        let endpoint = endpoint_for(&camera, StreamKind::Main, 0);
         assert_eq!(endpoint.uri, "rtsp://10.0.0.1:8554/cam_1");
         let fallback = endpoint.fallback.expect("an auto camera keeps the mse address");
         assert_eq!(fallback.uri, "wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1");
         assert_eq!(fallback.credentials, Some(("frigate".to_string(), "pw".to_string())));
 
         camera.connect = ConnectionMode::Rtsp;
-        let endpoint = endpoint_for(&camera, StreamKind::Main, 0, false);
+        let endpoint = endpoint_for(&camera, StreamKind::Main, 0);
         assert_eq!(endpoint.uri, "rtsp://10.0.0.1:8554/cam_1");
         assert!(endpoint.fallback.is_none(), "a forced rtsp has no fallback");
 
         camera.connect = ConnectionMode::Mse;
-        let endpoint = endpoint_for(&camera, StreamKind::Main, 0, false);
+        let endpoint = endpoint_for(&camera, StreamKind::Main, 0);
         assert_eq!(endpoint.uri, "wss://10.0.0.1:8971/live/mse/api/ws?src=cam_1");
         assert_eq!(endpoint.credentials, Some(("frigate".to_string(), "pw".to_string())));
         assert!(endpoint.fallback.is_none(), "a forced mse has no fallback");

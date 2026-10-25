@@ -23,7 +23,7 @@ use monitor_core::reboot;
 use monitor_core::config::{AppConfig, Orientation};
 use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{infer_sub_stream, ConnectionState, OsdItem, StreamKind, TileAspect};
-use monitor_core::pipeline::{ChannelManager, StreamEvent};
+use monitor_core::pipeline::{CallFailure, ChannelManager, StreamEvent};
 use monitor_core::scheduler::Scheduler;
 use monitor_core::talk::TalkSupport;
 use monitor_core::{CameraSource, Direction};
@@ -261,6 +261,9 @@ impl ChannelUi {
             // takes it before an event reaches a channel, and caches it by
             // address. See `App::talk_support`.
             StreamEvent::Talk { .. } => {}
+            // Likewise a failed call, which ends the call rather than saying
+            // anything about the channel: see `App::poll_events`.
+            StreamEvent::CallFailed { .. } => {}
         }
     }
 }
@@ -1958,6 +1961,14 @@ impl XgViewApp {
         self.talking = on;
         self.talk_index = on.then(|| self.scheduler.zoom()).flatten();
         self.manager.talk().set_talking(on);
+        // The press is the call: a session of its own, opened while the
+        // microphone is already pushing. The hub was told first, so the worker
+        // that opens it finds a target and a queue to feed.
+        if on {
+            if let Some(index) = self.talk_index {
+                self.manager.call(index);
+            }
+        }
         // The speaker goes quiet while the microphone is open, unless the
         // platform's canceller came with the microphone: it is the same device,
         // and without a canceller the sound it makes comes straight back in
@@ -2675,6 +2686,17 @@ impl XgViewApp {
             // a camera shown in two slots, or magnified twice, is asked once.
             if let StreamEvent::Talk { uri, support, .. } = &event {
                 self.talk_support.insert(uri.clone(), *support);
+                continue;
+            }
+            // A call that did not come up ends the call the interface thought it
+            // had started: the bar goes back and the reason is said once.
+            if let StreamEvent::CallFailed { reason, .. } = &event {
+                let key = match reason {
+                    CallFailure::NoBackChannel => "toast-talk-unavailable",
+                    CallFailure::Unreachable => "toast-talk-failed",
+                };
+                self.flash(monitor_i18n::tr(key), ToastKind::Error);
+                self.set_talking(false);
                 continue;
             }
             let index = event.index();

@@ -180,6 +180,22 @@ impl RtspTalkChannel {
         self.client.send_keep_alive().await
     }
 
+    /// How often [`RtspTalkChannel::keep_alive`] is due.
+    pub fn keep_alive_interval(&self) -> Duration {
+        self.client.keep_alive_interval()
+    }
+
+    /// Reads whatever the camera says, and reports the session dying.
+    ///
+    /// The media is `sendonly`, so nothing of interest arrives on it - but the
+    /// socket still has to be read: the answers to the keep alive pile up
+    /// otherwise, and a camera that has closed the session is only visible as a
+    /// read that fails. `Ok(())` therefore means "nothing worth acting on",
+    /// which is the common case.
+    pub async fn watch(&mut self) -> Result<()> {
+        self.client.read_interleaved().await.map(|_| ())
+    }
+
     /// Ends the session without waiting for the camera to agree.
     ///
     /// A `TEARDOWN` the server answers costs one round trip; one it does not
