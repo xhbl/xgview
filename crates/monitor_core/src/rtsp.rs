@@ -1373,10 +1373,17 @@ impl RtspClient {
     /// `sendonly` media. The session that fell back to a plain `DESCRIBE` sends
     /// nothing, because that camera refused the header and would refuse the
     /// whole `PLAY` with it.
+    ///
+    /// The header is also tied to the media it was asked for: a camera that took
+    /// it on the `DESCRIBE` and then refused the talk-back track's `SETUP` is
+    /// left in a session with no such media, and repeating the header there
+    /// would ask it to open something it has already said it will not - the one
+    /// answer that costs the picture rather than the back channel. So the
+    /// request carries it only when the track really was set up.
     pub async fn play(&mut self, range: &str) -> Result<()> {
         let uri = self.session_uri();
         let mut headers = vec![("Range", range.to_string())];
-        if self.backchannel_require {
+        if self.backchannel_require && self.talk_interleaved.is_some() {
             headers.push(("Require", BACKCHANNEL_REQUIRE.to_string()));
         }
         let response = self.request("PLAY", &uri, &headers, None).await?;
@@ -2382,6 +2389,98 @@ a=sendonly\r\n";
         let tracks = client.start_with_options(RtspTransport::Tcp, true).await.unwrap();
         assert!(tracks.iter().any(|track| track.is_audio() && track.is_sendonly()));
         assert_eq!(client.talk_rtp_channel(), Some(4));
+        server.await.unwrap();
+    }
+
+    /// A camera may take the header on the `DESCRIBE` and still refuse the
+    /// `sendonly` track's `SETUP` - it has a back channel it will not open for
+    /// this client, or it wants the video set up first. That refusal is not
+    /// allowed to cost the picture, so the session carries video alone.
+    ///
+    /// The `PLAY` is where it could: a camera that has just refused to open the
+    /// media would answer a `Require` that asks for it again the same way, and
+    /// that refusal takes the whole presentation down. The header is therefore
+    /// sent only when the track really was set up.
+    #[tokio::test]
+    async fn a_play_asks_for_the_back_channel_only_when_the_track_was_set_up() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let sdp = "v=0\r\n\
+m=video 0 RTP/AVP 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=control:trackID=1\r\n\
+m=audio 0 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=control:trackID=2\r\n\
+a=sendonly\r\n";
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            loop {
+                let request = read_request(&mut reader).await;
+                if request.is_empty() {
+                    break;
+                }
+                let method = request[0].clone();
+                if method.starts_with("OPTIONS") {
+                    write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
+                } else if method.starts_with("DESCRIBE") {
+                    assert!(request.iter().any(|line| line.contains("ver20/backchannel")));
+                    write_response(
+                        &mut write_half,
+                        &format!(
+                            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
+                             Content-Length: {}\r\n\r\n{sdp}",
+                            sdp.len()
+                        ),
+                    )
+                    .await;
+                } else if method.starts_with("SETUP") {
+                    let transport = request
+                        .iter()
+                        .find(|line| line.starts_with("Transport:"))
+                        .cloned()
+                        .unwrap_or_default();
+                    if transport.contains("interleaved=4-5") {
+                        // The talk-back track: offered, asked for, refused.
+                        write_response(
+                            &mut write_half,
+                            "RTSP/1.0 461 Unsupported Transport\r\nCSeq: 3\r\n\r\n",
+                        )
+                        .await;
+                    } else {
+                        write_response(
+                            &mut write_half,
+                            "RTSP/1.0 200 OK\r\nCSeq: 4\r\nSession: 1234\r\n\
+                             Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+                        )
+                        .await;
+                    }
+                } else if method.starts_with("PLAY") {
+                    assert!(
+                        !request.iter().any(|line| line.contains("ver20/backchannel")),
+                        "the play asked for a track the setup refused: {request:?}"
+                    );
+                    write_response(
+                        &mut write_half,
+                        "RTSP/1.0 200 OK\r\nCSeq: 5\r\nSession: 1234\r\n\r\n",
+                    )
+                    .await;
+                    break;
+                } else {
+                    write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 6\r\n\r\n").await;
+                }
+            }
+        });
+
+        let url = format!("rtsp://127.0.0.1:{port}/cam");
+        let mut client = RtspClient::connect(&url).await.unwrap();
+        let tracks = client.start_with_options(RtspTransport::Tcp, true).await.unwrap();
+        assert!(tracks.iter().any(|track| track.is_video()));
+        assert_eq!(client.talk_rtp_channel(), None, "the refused track has no channel");
         server.await.unwrap();
     }
 
