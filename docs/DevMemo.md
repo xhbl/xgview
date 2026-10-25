@@ -2119,6 +2119,18 @@ the band outside the strip closes it too, because that part is outside the bar.
 The 300 ms guard after opening keeps the second press of the double press that
 opened it from pressing a control or shutting it.
 
+**When the selection is drawn.** The strip's ring is the remote's cursor, which
+is the reading §24 gives the wall's: a bar a finger opens carries none, because
+the finger presses the control it aimed at and watches the picture answer, and
+the press on the band lights nothing else either. A bar the confirm key opens
+comes up with its first control selected, and any arrow pressed while it is up
+lights the selection from then on - that is how a bar opened by touch gets one.
+A touch on a control neither lights it nor takes it away: the ring follows the
+remote, and only a key changes it. `Bar::armed` holds the answer, is written by
+`show` and `step`, and is cleared when the bar goes. Before that the strip
+painted a selection whenever it was up, which put a cursor on screen for a
+gesture that has no cursor.
+
 **The fits.** The wall dresses a tile with `aspect` in landscape and
 `portrait_aspect` upright - two choices, per camera, chosen by orientation. The
 magnified viewport is neither: a camera carries `zoom_aspect`, absent until the

@@ -3506,6 +3506,12 @@ impl XgViewApp {
                 // surface of its own; see `crate::tilebar`.
                 let mut touched = false;
                 let buttons = self.tile_bar_buttons();
+                // A key on the bar is the remote driving it, so the selection is
+                // drawn from here on - a bar a finger opened carries none. See
+                // `tilebar::Bar::armed`.
+                if keys.left || keys.right || keys.up || keys.down {
+                    self.tile_bar.arm();
+                }
                 if keys.left {
                     self.tile_bar.step(false, buttons);
                     touched = true;
@@ -3518,6 +3524,7 @@ impl XgViewApp {
                     touched = true;
                 }
                 if keys.enter && keys.enter_fresh {
+                    self.tile_bar.arm();
                     self.tile_bar_activate();
                     touched = true;
                 }
@@ -3543,9 +3550,10 @@ impl XgViewApp {
                 }
                 // The confirm key brings the viewport's bar up rather than
                 // unwinding the magnification: Back is the way out now, a layer
-                // at a time. A held key is not a second press.
+                // at a time. A held key is not a second press. It is the remote
+                // asking, so the bar comes up with its selection drawn.
                 if keys.enter && keys.enter_fresh {
-                    self.tile_bar.show(self.tile_bar.dock(), Instant::now());
+                    self.tile_bar.show(self.tile_bar.dock(), Instant::now(), true);
                 }
             }
         } else {
@@ -7014,11 +7022,11 @@ impl XgViewApp {
                 // control that had them: the next Enter presses the bar rather
                 // than the button the viewer was on before.
                 self.leave_controls(ui.ctx());
-                self.tile_bar.show(dock, now);
-                // Asking for the bar is aiming at the wall, so the ring that
-                // marks the picture comes with it.
-                self.ring_seen = Some(now);
-                self.ring_aimed = true;
+                // A finger on the band asks for the bar, and asks for nothing
+                // else: the selection is not drawn, and the wall's ring is not
+                // lit either - the ring is the remote's cursor, and a touch is
+                // not aiming with it. The first arrow lights both.
+                self.tile_bar.show(dock, now, false);
                 consumed = true;
             }
         }
@@ -7059,6 +7067,7 @@ impl XgViewApp {
                 &layout,
                 rotated,
                 self.tile_bar.focus(),
+                self.tile_bar.armed(),
                 hover,
                 &controls,
             );

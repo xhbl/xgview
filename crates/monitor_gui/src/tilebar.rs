@@ -129,6 +129,15 @@ pub struct Bar {
     focus: usize,
     seen: Instant,
     ignore_until: Option<Instant>,
+    /// Whether the selection is drawn, which is what a remote's viewer can see.
+    ///
+    /// A finger needs no ring - it presses what it aimed at and sees the
+    /// picture answer - so a bar opened by a touch carries none, and its
+    /// controls are pressed by touch without one being drawn. It appears when
+    /// the remote is driving the bar: an opening by the confirm key, or any
+    /// arrow pressed while it is up. That is the same rule the wall's own ring
+    /// follows for a tile. See [`Bar::arm`].
+    armed: bool,
 }
 
 impl Bar {
@@ -139,12 +148,23 @@ impl Bar {
             focus: 0,
             seen: Instant::now(),
             ignore_until: None,
+            armed: false,
         }
     }
 
     /// Whether the bar is on screen.
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Whether the selected control is drawn as selected.
+    pub fn armed(&self) -> bool {
+        self.armed
+    }
+
+    /// Lights the selection, for a key that is driving the bar.
+    pub fn arm(&mut self) {
+        self.armed = true;
     }
 
     /// The edge the bar is docked to, which is where the next opening puts it.
@@ -163,10 +183,14 @@ impl Bar {
     }
 
     /// Brings the bar up on `dock`, with its first control selected.
-    pub fn show(&mut self, dock: Dock, now: Instant) {
+    ///
+    /// `armed` is whether that selection is shown: the confirm key that opened
+    /// it wants to see where the remote landed, a finger on the band does not.
+    pub fn show(&mut self, dock: Dock, now: Instant, armed: bool) {
         self.open = true;
         self.dock = dock;
         self.focus = 0;
+        self.armed = armed;
         self.touch(now);
         self.ignore_until = Some(now + GUARD);
     }
@@ -174,6 +198,7 @@ impl Bar {
     /// Takes the bar down.
     pub fn hide(&mut self) {
         self.open = false;
+        self.armed = false;
         self.ignore_until = None;
     }
 
@@ -188,10 +213,14 @@ impl Bar {
     }
 
     /// Moves the selection one control forward or back, stopping at the ends.
+    ///
+    /// An arrow is the remote walking the bar, so it also lights the selection:
+    /// this is how a bar opened by a finger gets one.
     pub fn step(&mut self, forward: bool, count: usize) {
         if count == 0 {
             return;
         }
+        self.armed = true;
         self.focus = if forward {
             (self.focus + 1).min(count - 1)
         } else {
@@ -358,15 +387,18 @@ fn to_screen_rect(rect: Rect, tile: Rect, rotated: bool) -> Rect {
 /// Paints the bar: its backdrop, its controls, and the selection among them.
 ///
 /// `hover` is the control under the pointer, if any; `focus` is the one the
-/// remote is on. Both are drawn, and both are told apart from a control that is
-/// merely there by the same colours the rest of the interface uses. `controls`
-/// carries one entry per control, in the same order as the layout's buttons; a
-/// control with no entry keeps its shape and its selection ring.
+/// remote is on, and `armed` is whether that is drawn at all - a finger needs no
+/// cursor, a remote does, and [`Bar::armed`] says which is driving. Both rings
+/// are told apart from a control that is merely there by the same colours the
+/// rest of the interface uses. `controls` carries one entry per control, in the
+/// same order as the layout's buttons; a control with no entry keeps its shape
+/// and its selection ring.
 pub fn paint(
     painter: &Painter,
     layout: &Layout,
     rotated: bool,
     focus: usize,
+    armed: bool,
     hover: Option<usize>,
     controls: &[Control],
 ) {
@@ -378,7 +410,7 @@ pub fn paint(
         StrokeKind::Inside,
     );
     for (index, rect) in layout.buttons.iter().enumerate() {
-        let selected = index == focus;
+        let selected = armed && index == focus;
         let hangup = matches!(controls.get(index), Some(Control::Hangup));
         // The backdrop is painted before the focus ring, so that the ring of the
         // call's red button is drawn over its colour rather than under it.
@@ -579,7 +611,7 @@ mod tests {
         let now = Instant::now();
         let mut bar = Bar::new();
         assert!(!bar.is_open());
-        bar.show(Dock::Bottom, now);
+        bar.show(Dock::Bottom, now, false);
         assert!(bar.is_open());
         assert_eq!(bar.dock(), Dock::Bottom);
         assert!(bar.ignoring(now + Duration::from_millis(100)));
@@ -599,5 +631,30 @@ mod tests {
         bar.hide();
         assert!(!bar.is_open());
         assert!(bar.remaining(now).is_none());
+    }
+
+    /// The selection is the remote's cursor: an opening by a finger carries
+    /// none, the confirm key opens with it drawn, an arrow lights it, and it
+    /// stays down with the bar.
+    #[test]
+    fn the_selection_is_drawn_only_while_the_remote_drives_the_bar() {
+        let now = Instant::now();
+        let mut bar = Bar::new();
+
+        bar.show(Dock::Top, now, false);
+        assert!(!bar.armed(), "a touch asks for the bar, not for a cursor");
+
+        bar.step(true, 3);
+        assert!(bar.armed(), "an arrow is the remote walking the bar");
+
+        bar.hide();
+        assert!(!bar.armed(), "nothing to draw while the bar is down");
+
+        bar.show(Dock::Top, now, true);
+        assert!(bar.armed(), "the confirm key opens with the selection drawn");
+
+        bar.arm();
+        bar.show(Dock::Top, now, false);
+        assert!(!bar.armed(), "a later touch opening starts without it again");
     }
 }
