@@ -20,19 +20,34 @@
 //! a join of an audio thread that is already gone, inside a destructor that
 //! cannot unwind, which aborts the process instead of exiting it.
 
+#[cfg(not(target_os = "android"))]
 use std::cell::RefCell;
 use std::sync::Arc;
 
+#[cfg(not(target_os = "android"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(not(target_os = "android"))]
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 
 use monitor_core::talk::TalkHub;
 
+#[cfg(not(target_os = "android"))]
 thread_local! {
     /// The live input stream, parked on the thread that opened the device, for
     /// the reason [`crate::audio`] parks the output one.
     static INPUT_STREAM: RefCell<Option<cpal::Stream>> = const { RefCell::new(None) };
 }
+
+/// The Android capture's sink: the hub the activity's thread pushes into, and the
+/// downsampler that turns the device's rate into the back channel's 8 kHz.
+///
+/// Android's capture is the activity's rather than this module's - it has to be
+/// an `AudioRecord`, the only stream an `AcousticEchoCanceler` can be attached
+/// to - so the samples arrive here through `MainActivity.nativeTalkPcm` instead
+/// of a `cpal` callback. See [`android_push`].
+#[cfg(target_os = "android")]
+static ANDROID_CAPTURE: std::sync::Mutex<Option<(Arc<TalkHub>, Downsampler)>> =
+    std::sync::Mutex::new(None);
 
 /// Captures audio into the talk hub.
 ///
@@ -43,6 +58,9 @@ thread_local! {
 pub struct Mic {
     /// Rate the device runs at, in Hz.
     rate: u32,
+    /// Whether the platform's canceller is subtracting what the speaker plays
+    /// from what the microphone hears; only Android's capture can say yes.
+    echo_cancelled: bool,
 }
 
 /// Why the microphone could not be opened.
@@ -58,62 +76,105 @@ pub enum MicError {
 }
 
 impl Mic {
-    /// Opens the default input device, or says why it could not.
-    ///
-    /// On Android the record permission comes first: Oboe refuses an input
-    /// stream without it, and a refused stream looks exactly like a machine with
-    /// no microphone - so the two are told apart here, where the dialog can be
-    /// asked for, rather than reported as one failure further up.
+    /// Opens the microphone, or says why it could not.
     ///
     /// Missing is not fatal anywhere: the picture carries on and the talk switch
     /// simply stays off.
+    ///
+    /// On Android the capture is the activity's rather than this module's: the
+    /// source there is an `AudioRecord` on `VOICE_COMMUNICATION`, the one the
+    /// platform processes for speech, and its samples come back through
+    /// [`android_push`], so this side keeps only the downmix and the
+    /// hub. The permission is answered by the same call: `-1` means the dialog
+    /// has just been asked for, and a refused capture looks exactly like a machine
+    /// with no microphone, so the two are told apart here. See
+    /// `MainActivity.startTalkCapture`.
     pub fn open(hub: Arc<TalkHub>) -> Result<Arc<Self>, MicError> {
         #[cfg(target_os = "android")]
-        if !crate::android::request_record_audio() {
-            return Err(MicError::Permission);
-        }
-        let device = cpal::default_host()
-            .default_input_device()
-            .ok_or(MicError::NoDevice)?;
-        let supported = device.default_input_config().map_err(|err| {
-            tracing::warn!(target: "xgview::mic", error = %err, "no usable input configuration");
-            MicError::NoDevice
-        })?;
-        let sample_format = supported.sample_format();
-        let config: cpal::StreamConfig = supported.config();
-        let rate = config.sample_rate.0.max(1);
-        let channels = (config.channels as usize).max(1);
-
-        let stream = match sample_format {
-            SampleFormat::F32 => build_stream::<f32>(&device, &config, hub, rate, channels),
-            SampleFormat::I16 => build_stream::<i16>(&device, &config, hub, rate, channels),
-            SampleFormat::U16 => build_stream::<u16>(&device, &config, hub, rate, channels),
-            SampleFormat::I32 => build_stream::<i32>(&device, &config, hub, rate, channels),
-            other => {
-                tracing::warn!(target: "xgview::mic", ?other, "unsupported input sample format");
-                None
+        {
+            match crate::android::start_talk_capture() {
+                crate::android::TalkCapture::Permission => Err(MicError::Permission),
+                crate::android::TalkCapture::NoDevice => Err(MicError::NoDevice),
+                crate::android::TalkCapture::Opened { cancelled } => {
+                    // Forty-four point one kilohertz is the rate every phone
+                    // records at; the blocks say their own rate, and the
+                    // downsampler is rebuilt when one disagrees.
+                    if let Ok(mut slot) = ANDROID_CAPTURE.lock() {
+                        *slot = Some((hub, Downsampler::new(44_100)));
+                    }
+                    tracing::debug!(
+                        target: "xgview::mic",
+                        "microphone opened on the platform capture"
+                    );
+                    Ok(Arc::new(Self { rate: 44_100, echo_cancelled: cancelled }))
+                }
             }
         }
-        .ok_or(MicError::NoDevice)?;
-        if let Err(err) = stream.play() {
-            tracing::warn!(target: "xgview::mic", error = %err, "could not start the microphone");
-            return Err(MicError::NoDevice);
+        #[cfg(not(target_os = "android"))]
+        {
+            let device = cpal::default_host()
+                .default_input_device()
+                .ok_or(MicError::NoDevice)?;
+            let supported = device.default_input_config().map_err(|err| {
+                tracing::warn!(target: "xgview::mic", error = %err, "no usable input configuration");
+                MicError::NoDevice
+            })?;
+            let sample_format = supported.sample_format();
+            let config: cpal::StreamConfig = supported.config();
+            let rate = config.sample_rate.0.max(1);
+            let channels = (config.channels as usize).max(1);
+
+            let stream = match sample_format {
+                SampleFormat::F32 => build_stream::<f32>(&device, &config, hub, rate, channels),
+                SampleFormat::I16 => build_stream::<i16>(&device, &config, hub, rate, channels),
+                SampleFormat::U16 => build_stream::<u16>(&device, &config, hub, rate, channels),
+                SampleFormat::I32 => build_stream::<i32>(&device, &config, hub, rate, channels),
+                other => {
+                    tracing::warn!(target: "xgview::mic", ?other, "unsupported input sample format");
+                    None
+                }
+            }
+            .ok_or(MicError::NoDevice)?;
+            if let Err(err) = stream.play() {
+                tracing::warn!(target: "xgview::mic", error = %err, "could not start the microphone");
+                return Err(MicError::NoDevice);
+            }
+            INPUT_STREAM.with(|slot| *slot.borrow_mut() = Some(stream));
+            tracing::debug!(target: "xgview::mic", rate, channels, "microphone opened");
+            Ok(Arc::new(Self { rate, echo_cancelled: false }))
         }
-        INPUT_STREAM.with(|slot| *slot.borrow_mut() = Some(stream));
-        tracing::debug!(target: "xgview::mic", rate, channels, "microphone opened");
-        Ok(Arc::new(Self { rate }))
     }
 
     /// Rate the device was opened at, in Hz.
     pub fn rate(&self) -> u32 {
         self.rate
     }
+
+    /// Whether the platform's echo canceller came with the microphone.
+    ///
+    /// True on an Android call whose canceller the platform said was on: the
+    /// speaker can then keep playing, because what it plays is subtracted from
+    /// what the microphone hears. False everywhere else, and there the call is
+    /// half duplex. See [`crate::app::XgViewApp::apply_audio`].
+    pub fn echo_cancelled(&self) -> bool {
+        self.echo_cancelled
+    }
+
+
 }
 
 /// Stops the microphone and lets the input device go, on the way out of the
 /// window - see [`crate::audio::shutdown`] for why leaving it to the thread
 /// local is not enough.
 pub fn shutdown() {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::stop_talk_capture();
+        if let Ok(mut slot) = ANDROID_CAPTURE.lock() {
+            *slot = None;
+        }
+    }
+    #[cfg(not(target_os = "android"))]
     INPUT_STREAM.with(|slot| {
         let stream = match slot.borrow_mut().take() {
             Some(stream) => stream,
@@ -128,6 +189,36 @@ pub fn shutdown() {
     });
 }
 
+/// One block of Android's capture, as the activity's thread recorded it.
+///
+/// The samples are 16 bit mono at `rate`; the same [`Downsampler`] the `cpal`
+/// path uses brings them to the back channel's 8 kHz, so a phone that records at
+/// 44.1, 48 or 16 kHz all reach the camera identical. Nothing is pushed while the
+/// viewer is not talking - the device keeps running, as the other platforms'
+/// capture does, and the samples are dropped rather than queued.
+#[cfg(target_os = "android")]
+pub fn android_push(samples: &[i16], rate: u32) {
+    let Ok(mut slot) = ANDROID_CAPTURE.lock() else {
+        return;
+    };
+    let Some((hub, downsampler)) = slot.as_mut() else {
+        return;
+    };
+    if !hub.is_talking() {
+        return;
+    }
+    if downsampler.from_rate() != rate {
+        *downsampler = Downsampler::new(rate.max(1));
+    }
+    let mut mono: Vec<i16> = Vec::with_capacity(samples.len() / 6 + 1);
+    for sample in samples {
+        downsampler.push(f32::from(*sample) / 32_768.0, &mut mono);
+    }
+    if !mono.is_empty() {
+        hub.push(&mono);
+    }
+}
+
 /// Mixes `channels` interleaved samples down to mono and resamples the result
 /// to [`monitor_core::talk::RATE`], appending 16 bit samples.
 ///
@@ -136,6 +227,10 @@ pub fn shutdown() {
 /// filter and the downmix; at the 8 kHz a device may already run at, it is the
 /// input sample itself.
 struct Downsampler {
+    /// Rate the input runs at, in Hz. Read on Android only, where the capture
+    /// reports the rate with every block.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    from_rate: u32,
     /// Input samples per output sample.
     step: f64,
     /// Position inside the current window, in input samples.
@@ -148,7 +243,13 @@ struct Downsampler {
 impl Downsampler {
     fn new(from_rate: u32) -> Self {
         let step = (f64::from(from_rate) / f64::from(monitor_core::talk::RATE)).max(1.0);
-        Self { step, phase: 0.0, sum: 0.0, count: 0.0 }
+        Self { from_rate, step, phase: 0.0, sum: 0.0, count: 0.0 }
+    }
+
+    /// Rate the input runs at, in Hz.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    fn from_rate(&self) -> u32 {
+        self.from_rate
     }
 
     /// Feeds one mono sample, pushing a converted sample for every output
@@ -169,6 +270,7 @@ impl Downsampler {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 /// Builds the input stream for one device sample type.
 ///
 /// The callback runs on the platform's own audio thread, so it does as little

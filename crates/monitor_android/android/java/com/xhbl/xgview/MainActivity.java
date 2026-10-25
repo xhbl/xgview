@@ -19,7 +19,14 @@ import android.database.Cursor;
 import android.graphics.Insets;
 import android.graphics.Point;
 import android.hardware.display.DisplayManager;
+import android.media.AudioAttributes;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioRecord;
+import android.media.AudioTrack;
+import android.media.MediaRecorder;
 import android.media.MediaScannerConnection;
+import android.media.audiofx.AcousticEchoCanceler;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -1313,6 +1320,282 @@ public class MainActivity extends NativeActivity {
         return false;
     }
 
+    /** The call's capture, its canceller, and the thread draining it. */
+    private static AudioRecord talkRecord;
+    private static AcousticEchoCanceler talkCanceller;
+    private static Thread talkThread;
+    private static volatile boolean talkRunning;
+
+    /** The audio mode and the speakerphone state a call has to put back. */
+    private static int talkSavedMode = -1;
+    private static boolean talkSavedSpeaker;
+
+    /** The playback a call's sound leaves through, and the volume the call found. */
+    private static AudioTrack talkOutput;
+    private static int talkSavedVoiceVolume = -1;
+
+    /**
+     * Puts the device into the communication audio mode with the speakerphone on.
+     *
+     * <p>Both matter, and the speakerphone is the one that is easy to get wrong:
+     * in {@code MODE_IN_COMMUNICATION} a voice-communication track is routed to
+     * the earpiece unless the speakerphone is forced on, and the earpiece is
+     * quiet enough that a conversation at full volume is barely possible. It is
+     * therefore set again when the playback is opened, not only when the capture
+     * is: the mode can be dropped between the two, and the routing with it.
+     *
+     * <p>The call volume is remembered on the first call and put back on the
+     * last, like the mode.
+     */
+    private static void enterTalkAudio(final AudioManager audio) {
+        if (audio == null) {
+            return;
+        }
+        if (talkSavedMode < 0) {
+            talkSavedMode = audio.getMode();
+        }
+        if (talkSavedVoiceVolume < 0) {
+            talkSavedVoiceVolume = audio.getStreamVolume(AudioManager.STREAM_VOICE_CALL);
+            audio.setStreamVolume(
+                    AudioManager.STREAM_VOICE_CALL,
+                    audio.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
+                    0);
+        }
+        audio.setMode(AudioManager.MODE_IN_COMMUNICATION);
+        audio.setSpeakerphoneOn(true);
+    }
+
+    /** Puts the audio mode, the speakerphone and the call volume back. */
+    private static void leaveTalkAudio(final AudioManager audio) {
+        if (audio != null) {
+            audio.setSpeakerphoneOn(talkSavedSpeaker);
+            if (talkSavedMode >= 0) {
+                audio.setMode(talkSavedMode);
+            }
+            if (talkSavedVoiceVolume >= 0) {
+                audio.setStreamVolume(
+                        AudioManager.STREAM_VOICE_CALL, talkSavedVoiceVolume, 0);
+            }
+        }
+        talkSavedMode = -1;
+        talkSavedVoiceVolume = -1;
+    }
+
+    /**
+     * Opens the microphone for a call, on the source Android's echo canceller is
+     * made for.
+     *
+     * <p>An {@code AudioRecord} on {@link MediaRecorder.AudioSource#VOICE_COMMUNICATION}
+     * with an {@link AcousticEchoCanceler} attached to its session is the pair a
+     * VoIP application uses: the platform subtracts what the device's speaker is
+     * playing from what the microphone hears, so the camera's sound keeps playing
+     * while the viewer talks.
+     *
+     * <p>Called from the native side. Answers -1 when the microphone permission
+     * has just been asked for and the viewer has to press again, -2 when the
+     * capture could not be opened at all, 0 when it opened without a canceller
+     * (the call then stays half duplex, as everywhere else) and 1 with one.
+     */
+    public static int startTalkCapture() {
+        final MainActivity self = instance;
+        if (self == null) {
+            return -2;
+        }
+        if (!requestRecordAudio()) {
+            return -1;
+        }
+        stopTalkCapture();
+
+        final AudioManager audio =
+                (AudioManager) self.getSystemService(Context.AUDIO_SERVICE);
+        enterTalkAudio(audio);
+
+        final AudioRecord record = openTalkRecord();
+        if (record == null) {
+            leaveTalkAudio(audio);
+            return -2;
+        }
+        boolean cancelled = false;
+        if (AcousticEchoCanceler.isAvailable()) {
+            talkCanceller = AcousticEchoCanceler.create(record.getAudioSessionId());
+            if (talkCanceller != null) {
+                talkCanceller.setEnabled(true);
+                cancelled = talkCanceller.getEnabled();
+            }
+        }
+        talkRecord = record;
+        record.startRecording();
+        talkRunning = true;
+        talkThread = new Thread(() -> {
+            final int rate = record.getSampleRate();
+            final short[] block = new short[Math.max(320, rate / 50)];
+            while (talkRunning) {
+                final int read = record.read(block, 0, block.length);
+                if (read > 0) {
+                    nativeTalkPcm(block, read, rate);
+                }
+            }
+        }, "xgview-talk");
+        talkThread.start();
+        android.util.Log.i("xgview", "talk capture opened rate=" + record.getSampleRate()
+                + " echo cancelled=" + cancelled);
+        return cancelled ? 1 : 0;
+    }
+
+    /**
+     * An input record at the first rate the platform will take, or null.
+     *
+     * <p>Forty-four point one kilohertz first: it is what every phone records at,
+     * and the downmix to the back channel's 8 kHz is the native side's.
+     */
+    private static AudioRecord openTalkRecord() {
+        final int[] rates = { 44100, 48000, 16000 };
+        for (final int rate : rates) {
+            final int min = AudioRecord.getMinBufferSize(
+                    rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            if (min <= 0) {
+                continue;
+            }
+            final AudioRecord record = new AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    rate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    Math.max(min, rate / 10 * 2));
+            if (record.getState() == AudioRecord.STATE_INITIALIZED) {
+                return record;
+            }
+            record.release();
+        }
+        return null;
+    }
+
+    /**
+     * Stops a call's capture and puts the audio mode back. Called from the native
+     * side, and safe when no call is up.
+     */
+    public static void stopTalkCapture() {
+        talkRunning = false;
+        final Thread thread = talkThread;
+        talkThread = null;
+        if (thread != null) {
+            try {
+                thread.join(250);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (talkRecord != null) {
+            try {
+                talkRecord.stop();
+            } catch (IllegalStateException ignored) {
+                // Already stopped, or never started.
+            }
+            talkRecord.release();
+            talkRecord = null;
+        }
+        if (talkCanceller != null) {
+            talkCanceller.setEnabled(false);
+            talkCanceller.release();
+            talkCanceller = null;
+        }
+        stopTalkPlayback();
+        final MainActivity self = instance;
+        leaveTalkAudio(self == null
+                ? null
+                : (AudioManager) self.getSystemService(Context.AUDIO_SERVICE));
+    }
+
+    /**
+     * Opens the playback the camera's sound leaves through, on the voice path the
+     * platform's echo canceller has a reference signal for.
+     *
+     * <p>An {@code AudioTrack} with {@link AudioAttributes#USAGE_VOICE_COMMUNICATION},
+     * at the source's own rate (a camera's audio is 8 or 16 kHz mono). The
+     * speakerphone is forced on again here - see {@link #enterTalkAudio} - and it
+     * is what keeps the sound on the loudspeaker rather than in the earpiece.
+     */
+    public static boolean startTalkPlayback(final int rate, final int channels) {
+        stopTalkPlayback();
+        final MainActivity self = instance;
+        final AudioManager audio =
+                self == null ? null : (AudioManager) self.getSystemService(Context.AUDIO_SERVICE);
+        enterTalkAudio(audio);
+        final int channelMask =
+                channels >= 2 ? AudioFormat.CHANNEL_OUT_STEREO : AudioFormat.CHANNEL_OUT_MONO;
+        final int min = AudioTrack.getMinBufferSize(
+                rate, channelMask, AudioFormat.ENCODING_PCM_16BIT);
+        if (min <= 0) {
+            return false;
+        }
+        final AudioTrack track = new AudioTrack.Builder()
+                .setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build())
+                .setAudioFormat(new AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(rate)
+                        .setChannelMask(channelMask)
+                        .build())
+                .setBufferSizeInBytes(Math.max(min, rate / 2 * 2 * channels))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build();
+        if (track.getState() != AudioTrack.STATE_INITIALIZED) {
+            track.release();
+            return false;
+        }
+        track.play();
+        talkOutput = track;
+        // Again, after the track exists: the routing follows the mode, and the
+        // mode is the thing that drifts.
+        if (audio != null) {
+            audio.setMode(AudioManager.MODE_IN_COMMUNICATION);
+            audio.setSpeakerphoneOn(true);
+        }
+        android.util.Log.i("xgview", "talk playback opened rate=" + rate + " channels=" + channels);
+        return true;
+    }
+
+    /**
+     * Writes one block of interleaved 16 bit samples, with the makeup gain.
+     *
+     * <p>The voice path's gain staging is a call's, which leaves speech a little
+     * quieter than the media path at the same volume; {@link #TALK_GAIN} is what
+     * buys that back. Non-blocking: a full track drops the block rather than
+     * stalling the native worker that pushed it, and that worker is also pumping
+     * the picture.
+     */
+    public static void pushTalkPlayback(final short[] samples, final int count) {
+        final AudioTrack track = talkOutput;
+        if (track == null) {
+            return;
+        }
+        track.write(samples, 0, count, AudioTrack.WRITE_NON_BLOCKING);
+    }
+
+    /** The playback's volume, {@code 0.0..=1.0}. */
+    public static void setTalkPlaybackVolume(final float volume) {
+        final AudioTrack track = talkOutput;
+        if (track != null) {
+            track.setVolume(volume);
+        }
+    }
+
+    /** Closes the playback. Safe when nothing is playing. */
+    public static void stopTalkPlayback() {
+        if (talkOutput != null) {
+            try {
+                talkOutput.stop();
+            } catch (IllegalStateException ignored) {
+                // Never started.
+            }
+            talkOutput.release();
+            talkOutput = null;
+        }
+    }
+
+
     /**
      * Writes the exported configuration into {@link #EXPORT_FOLDER} and returns
      * the path to show the viewer.
@@ -1635,6 +1918,13 @@ public class MainActivity extends NativeActivity {
      * figure per edge. Which edge it lies on belongs to the device.
      */
     private static native void nativeInsets(int left, int top, int right, int bottom);
+
+    /**
+     * The call's capture, handed back as it was recorded: PCM, how many samples
+     * are valid, and the rate they were recorded at. See
+     * `monitor_gui::mic::android_push`.
+     */
+    private static native void nativeTalkPcm(short[] samples, int count, int rate);
 
     /**
      * Moves the native window's buffer geometry to a new size, in pixels; see

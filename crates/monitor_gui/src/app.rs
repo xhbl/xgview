@@ -84,6 +84,8 @@ const EXIT_WINDOW: Duration = Duration::from_secs(2);
 /// [`XgViewApp::ring_follows_bars`].
 const RING_IDLE: Duration = Duration::from_secs(8);
 
+
+
 /// How long a pointer press may last and still be a tap, in seconds.
 ///
 /// A finger rests on the glass while the viewer reads the picture, and a press
@@ -926,7 +928,7 @@ pub struct XgViewApp {
     mic: Option<Arc<crate::mic::Mic>>,
     /// The audio sink, `None` when this machine has no output device. The core
     /// only ever sees it through the audio hub, as an `AudioOutput`.
-    audio: Option<Arc<crate::audio::CpalOutput>>,
+    audio: Option<Arc<crate::audio::Sink>>,
     /// Who answered the last frame's direction presses.
     owner: Owner,
     /// Explicit directional navigation for the windows that opted into it.
@@ -1162,7 +1164,7 @@ impl XgViewApp {
         // The audio sink, opened once. A machine without an output device leaves
         // `None` here, and the sound switch has nothing to drive - not a failure:
         // the picture carries on.
-        let audio = crate::audio::CpalOutput::open();
+        let audio = crate::audio::Sink::open();
         if let Some(sink) = &audio {
             sink.set_volume(config.volume);
             manager.audio().set_output(Some(sink.clone()));
@@ -1873,18 +1875,24 @@ impl XgViewApp {
     /// back channel, so naming the camera here is what opens one there - and a
     /// microphone left open on the camera the viewer just left is closed.
     ///
-    /// **A call mutes the speaker.** The speaker and the microphone are one
-    /// device, and a speaker playing into the microphone beside it is a loop:
-    /// measured on a phone, the speaker came back through the microphone at a
-    /// peak of 3003 while the room sat at 150-300, which is the howl an echo
-    /// canceller exists to break. There is none here, so the loop is broken the
-    /// other way round - half duplex, the way a walkie-talkie is: while the
-    /// microphone is open the camera's sound is muted, and hanging up brings it
-    /// back. The sound switch is left as the viewer set it; this is the sink
-    /// alone. See [`Self::set_talking`].
+    /// **A call mutes the speaker, unless the platform cancels the echo.** The
+    /// speaker and the microphone are one device, and a speaker playing into the
+    /// microphone beside it is a loop: measured on a phone, the speaker came back
+    /// through the microphone at a peak of 3003 while the room sat at 150-300,
+    /// which is the howl an echo canceller exists to break. Where the platform
+    /// has one and the capture came up with it - Android's `AudioRecord` on
+    /// `VOICE_COMMUNICATION` with the mode in `MODE_IN_COMMUNICATION` and the
+    /// speakerphone forced on, playing back through an `AudioTrack` on the same
+    /// path - the camera keeps playing and the call is full duplex;
+    /// [`Self::call_mutes_speaker`] is what says so. Everywhere else the loop is
+    /// broken the other way round - half duplex, the way a walkie-talkie is:
+    /// while the microphone is open the camera's sound is muted, and hanging up
+    /// brings it back. The sound switch is left as the viewer set it. See
+    /// [`Self::set_talking`].
     fn apply_audio(&mut self) {
         if let Some(sink) = &self.audio {
-            sink.set_active(self.sound_on && !self.talking);
+            sink.set_active(self.sound_on && !self.call_mutes_speaker());
+            sink.set_volume(self.config.volume);
         }
         let index = self.scheduler.zoom();
         self.manager.audio().set_index(index);
@@ -1893,6 +1901,18 @@ impl XgViewApp {
             self.set_talking(false);
         }
     }
+
+    /// Whether the call in progress has to silence the speaker to keep it quiet.
+    ///
+    /// Only a microphone whose platform cancels the echo can share the room with
+    /// the speaker: the Android capture says whether its canceller came up, and
+    /// no other platform has one, so the answer is `talking && !cancelled`.
+    /// See [`Self::apply_audio`].
+    fn call_mutes_speaker(&self) -> bool {
+        self.talking && !self.mic.as_ref().is_some_and(|mic| mic.echo_cancelled())
+    }
+
+
 
     /// Switches the microphone on or off.
     ///
@@ -1920,11 +1940,13 @@ impl XgViewApp {
         self.talking = on;
         self.talk_index = on.then(|| self.scheduler.zoom()).flatten();
         self.manager.talk().set_talking(on);
-        // The speaker goes quiet while the microphone is open: it is the same
-        // device, and without echo cancellation the sound it makes comes
-        // straight back in through the microphone. See `apply_audio`.
+        // The speaker goes quiet while the microphone is open, unless the
+        // platform's canceller came with the microphone: it is the same device,
+        // and without a canceller the sound it makes comes straight back in
+        // through the microphone. See `apply_audio`.
         if let Some(sink) = &self.audio {
-            sink.set_active(self.sound_on && !on);
+            sink.set_active(self.sound_on && !self.call_mutes_speaker());
+            sink.set_volume(self.config.volume);
         }
         tracing::debug!(target: "xgview::talk", on, "the talk-back changed");
         // The bar now carries the one control that ends the call instead of the
@@ -8487,6 +8509,7 @@ impl eframe::App for XgViewApp {
         if self.talking && !self.tile_bar.is_open() {
             self.set_talking(false);
         }
+
 
         // The magnified viewport's bar keeps a clock of its own, and the repaint
         // is asked for against it: a wall showing no live picture is not

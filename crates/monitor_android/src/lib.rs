@@ -139,3 +139,34 @@ pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeResumed(
 ) {
     monitor_gui::android::reset_orientation();
 }
+
+/// A block of a call's capture, handed back by the activity's record thread.
+///
+/// `samples` is 16 bit mono PCM, `count` how many of it are valid and `rate` the
+/// rate the device recorded at; the downmix to the back channel's 8 kHz is
+/// `monitor_gui::mic`'s, the same one the other platforms' capture goes through.
+/// See `MainActivity.startTalkCapture` and `monitor_gui::mic::android_push`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeTalkPcm(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    samples: jni::objects::JShortArray,
+    count: jni::sys::jint,
+    rate: jni::sys::jint,
+) {
+    // A block is a fiftieth of a second; anything far larger is a caller that
+    // went wrong, and is refused rather than allocated.
+    let count = count.clamp(0, 96_000) as usize;
+    if count == 0 {
+        return;
+    }
+    let mut block = vec![0i16; count];
+    if env.get_short_array_region(&samples, 0, &mut block).is_err() {
+        // A pending exception aborts the next JNI call - see the note on the
+        // keyboard's entry points - so it is cleared here.
+        let _ = env.exception_clear();
+        return;
+    }
+    monitor_gui::mic::android_push(&block, rate.max(0) as u32);
+}

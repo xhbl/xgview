@@ -478,6 +478,121 @@ pub fn request_record_audio() -> bool {
     call_bool("requestRecordAudio")
 }
 
+/// What the activity's capture answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TalkCapture {
+    /// The microphone permission is not granted yet; the dialog has been asked
+    /// for, and the viewer presses the switch again once it is answered.
+    Permission,
+    /// The capture could not be opened: no device, or the audio service refused.
+    NoDevice,
+    /// The capture is open. `cancelled` says whether the platform's echo
+    /// canceller came with it.
+    Opened { cancelled: bool },
+}
+
+/// Opens the microphone for a call, with Android's own echo canceller.
+///
+/// The capture itself is Java's: an `AudioRecord` on the `VOICE_COMMUNICATION`
+/// source, the one a device processes for speech, drained by a thread that hands
+/// its samples back through `MainActivity.nativeTalkPcm` and into
+/// [`crate::mic`], which pushes them into the talk hub exactly as the `cpal`
+/// capture does elsewhere. See `MainActivity.startTalkCapture`.
+pub fn start_talk_capture() -> TalkCapture {
+    match call_int("startTalkCapture") {
+        Some(-1) => TalkCapture::Permission,
+        Some(answer) if answer >= 0 => TalkCapture::Opened { cancelled: answer > 0 },
+        _ => TalkCapture::NoDevice,
+    }
+}
+
+/// Stops a call's capture. Safe when no call is up.
+pub fn stop_talk_capture() {
+    call_void("stopTalkCapture");
+}
+
+/// Opens the playback the camera's sound leaves through, on the path the
+/// platform's echo canceller has a reference signal for.
+///
+/// An `AudioTrack` with `USAGE_VOICE_COMMUNICATION`, at the source's own rate and
+/// channel count: the other half of the arrangement [`start_talk_capture`] makes
+/// on the input side. See `MainActivity.startTalkPlayback`.
+pub fn start_playback(rate: u32, channels: u32) -> bool {
+    call_bool_int_int("startTalkPlayback", rate as i32, channels as i32)
+}
+
+/// Hands one block of 16 bit interleaved samples to the track. Non-blocking on
+/// the Java side: a full track drops the block rather than stalling the worker,
+/// which is also pumping the picture.
+pub fn push_playback(samples: &[i16]) {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return;
+    };
+    let count = samples.len().min(i32::MAX as usize);
+    let Ok(array) = env.new_short_array(count as i32) else {
+        clear_exception(&mut env);
+        return;
+    };
+    if env.set_short_array_region(&array, 0, &samples[..count]).is_err() {
+        clear_exception(&mut env);
+        return;
+    }
+    let _ = env.call_static_method(
+        class,
+        "pushTalkPlayback",
+        "([SI)V",
+        &[JValue::Object(&array), JValue::Int(count as i32)],
+    );
+    clear_exception(&mut env);
+}
+
+/// The playback's volume, `0.0..=1.0`.
+pub fn set_playback_volume(volume: f32) {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return;
+    };
+    let _ = env.call_static_method(
+        class,
+        "setTalkPlaybackVolume",
+        "(F)V",
+        &[JValue::Float(volume.clamp(0.0, 1.0))],
+    );
+    clear_exception(&mut env);
+}
+
+/// Closes the playback.
+pub fn stop_playback() {
+    call_void("stopTalkPlayback");
+}
+
+/// Calls a Java static method taking two `int`s and answering a `boolean`.
+fn call_bool_int_int(method: &str, first: i32, second: i32) -> bool {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return false;
+    };
+    let answer = env
+        .call_static_method(class, method, "(II)Z", &[JValue::Int(first), JValue::Int(second)])
+        .and_then(|value| value.z())
+        .unwrap_or(false);
+    clear_exception(&mut env);
+    answer
+}
+
+/// Calls a Java static method taking nothing and answering an `int`.
+fn call_int(method: &str) -> Option<i32> {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return None;
+    };
+    let answer = env
+        .call_static_method(class, method, "()I", &[])
+        .and_then(|value| value.i())
+        .ok();
+    // Cleared, as everywhere here: an exception left pending aborts the next
+    // JNI call.
+    clear_exception(&mut env);
+    answer
+}
+
 /// The message of a pending Java exception, taken out of the way.
 ///
 /// A pending exception aborts the process on the next JNI call - see the note

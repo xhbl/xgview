@@ -104,6 +104,7 @@ impl TalkHub {
         self.target() == Some(index) && self.is_talking()
     }
 
+
     /// Adds captured audio, dropping the oldest when the queue is full.
     pub fn push(&self, samples: &[i16]) {
         let Ok(mut queue) = self.pcm.lock() else { return };

@@ -11,12 +11,14 @@
 //! through [`crate::digest`] and the request replayed once.
 
 use std::fmt;
+use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::AsyncWrite;
 use tokio::net::{TcpStream, UdpSocket};
 
 use crate::digest::{self, Challenge};
@@ -621,6 +623,11 @@ pub fn parse_rtp_header(data: &[u8]) -> Option<RtpHeader> {
     })
 }
 
+/// How many interleaved frames may wait for the socket. A call sends fifty a
+/// second, so this is about two seconds of audio: past it the oldest frame is
+/// dropped rather than growing the queue.
+const OUTBOX_FRAMES: usize = 100;
+
 /// Receive buffer requested for an RTP or RTCP socket, in bytes.
 ///
 /// A camera, or the relay in front of it, hands a high bitrate stream over in
@@ -729,6 +736,11 @@ pub struct RtspClient {
     url: RtspUrl,
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
+    /// Interleaved frames waiting for the socket, with how far each was written.
+    ///
+    /// See [`RtspClient::send_interleaved`]: writing them inline would block the
+    /// loop that reads the picture.
+    outbox: VecDeque<(Vec<u8>, usize)>,
     cseq: u32,
     session: Option<String>,
     /// Silence the server tolerates before it drops the session, as announced by
@@ -836,6 +848,7 @@ impl RtspClient {
             url: parsed,
             reader: BufReader::with_capacity(64 * 1024, read_half),
             writer: write_half,
+            outbox: VecDeque::new(),
             cseq: 0,
             session: None,
             session_timeout: None,
@@ -1580,36 +1593,62 @@ impl RtspClient {
     /// Media and control share the connection in this transport, and control is
     /// what the client has to put back on it: a receiver report is the only way
     /// to tell a camera the stream is arriving.
-    pub async fn send_interleaved(&mut self, channel: u8, payload: &[u8]) -> Result<()> {
+    pub fn send_interleaved(&mut self, channel: u8, payload: &[u8]) {
         let mut frame = Vec::with_capacity(payload.len() + 4);
         frame.push(b'$');
         frame.push(channel);
         frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
         frame.extend_from_slice(payload);
-        self.writer
-            .write_all(&frame)
-            .await
-            .map_err(|err| CoreError::rtsp(format!("write interleaved failed: {err}")))?;
-        self.writer
-            .flush()
-            .await
-            .map_err(|err| CoreError::rtsp(format!("flush interleaved failed: {err}")))?;
-        Ok(())
+        self.outbox.push_back((frame, 0));
+        // Audio is worth less than the picture: a queue the camera is not
+        // draining loses its oldest frames rather than growing without bound.
+        while self.outbox.len() > OUTBOX_FRAMES {
+            self.outbox.pop_front();
+        }
+        self.flush_outbox();
+    }
+
+    /// Writes as much of the queued bytes as the socket takes right now.
+    ///
+    /// This is the point of the queue: the talk-back's audio is written from the
+    /// same loop that reads the picture, and a camera that stops draining its
+    /// socket would otherwise stall that read - the picture stops arriving, the
+    /// read times out, and the session reconnects. Polling the write instead of
+    /// waiting for it keeps the read going; see [`Self::send_interleaved`].
+    pub fn flush_outbox(&mut self) {
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        while let Some((frame, offset)) = self.outbox.front_mut() {
+            match std::pin::Pin::new(&mut self.writer).poll_write(&mut cx, &frame[*offset..]) {
+                std::task::Poll::Ready(Ok(0)) => break,
+                std::task::Poll::Ready(Ok(written)) => {
+                    *offset += written;
+                    if *offset >= frame.len() {
+                        self.outbox.pop_front();
+                    }
+                }
+                std::task::Poll::Ready(Err(_)) => {
+                    self.outbox.clear();
+                    break;
+                }
+                std::task::Poll::Pending => break,
+            }
+        }
     }
 
     /// Sends a control packet (a receiver report) on whichever transport is in
     /// use: the RTCP socket on UDP, the `SETUP`-confirmed RTCP interleaved
     /// channel on TCP.
-    pub async fn send_rtcp(&mut self, payload: &[u8]) -> Result<()> {
+    pub fn send_rtcp(&mut self, payload: &[u8]) {
         match (self.rtcp.as_ref(), self.rtcp_server) {
-            (Some(socket), Some(target)) => socket
-                .send_to(payload, target)
-                .await
-                .map(|_| ())
-                .map_err(|err| CoreError::rtsp(format!("send rtcp failed: {err}"))),
+            (Some(socket), Some(target)) => {
+                // Fire and forget, as everywhere else here: a report that did not
+                // leave is worth less than the loop it would hold up.
+                let _ = socket.try_send_to(payload, target);
+            }
             _ => {
                 let channel = self.rtcp_channel();
-                self.send_interleaved(channel, payload).await
+                self.send_interleaved(channel, payload);
             }
         }
     }

@@ -71,6 +71,14 @@
          the first time the microphone is switched on. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- A call has to put the device into the communication audio mode and force
+         the speakerphone on; both are refused without this permission, and
+         silently so - `setMode` is logged as a permission denial and the mode
+         stays NORMAL, where a voice-communication track is routed to the
+         earpiece and sounds a fraction of the volume it should. It is a normal
+         permission, granted at install time. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
     <!-- Android TV / leanback is optional, the app also runs on phones and
          on the plain Android launcher. -->
     <uses-feature

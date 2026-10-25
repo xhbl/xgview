@@ -2442,33 +2442,81 @@ capture - the same shape as the storage permission an export asks for on Android
 9. After that the two failures are distinct again: no permission (the dialog
 path) and no device (`no microphone to talk into`).
 
-**The call is half duplex, because there is no echo cancellation.** On the OPPO
-the phone's own speaker came back through the microphone at a peak of 3003 while
-the room sat at 150-300: a speaker beside a live microphone is a loop, and it
-howls at some gain. Turning the sound off while the microphone is open breaks the
-loop the other way round - walkie-talkie, not telephone - and that is one line in
-`apply_audio`/`set_talking`: `sink.set_active(sound && !talking)`, the sound
-switch itself left as the viewer set it. A call is therefore one-way: the viewer
-hears the camera between calls and talks during one, which is what the red
-handset is for. True full duplex needs the echo canceller, and it is a step of
-its own: on Android the platform has one (`AcousticEchoCanceler`, and Oboe's
-`VoiceCommunication` input preset, which `cpal` does not expose today - the
-capture would have to go through Oboe directly or through a JNI hook), and on the
-desktop it means WebRTC's AEC3 with the playback as its reference signal - a C++
-dependency and an audio graph that keeps the two in step, which is why the
-half-duplex answer is the one in the build.
+**The speaker is muted while the microphone is open, unless the platform cancels
+the echo.** On the OPPO the phone's own speaker came back through the microphone
+at a peak of 3003 while the room sat at 150-300: a speaker beside a live
+microphone is a loop, and it howls at some gain. The loop is broken at the sink -
+`sink.set_active(sound && !call_mutes_speaker())`, in `apply_audio` and
+`set_talking`, the sound switch itself left as the viewer set it - unless the
+capture came up with the platform's canceller, which is what `Mic::echo_cancelled`
+answers and `call_mutes_speaker` asks. Where there is one the call is full duplex
+and the camera keeps playing; where there is not it is half duplex, walkie-talkie
+style. The fallback is deliberate, because a cancelled loop that turns out not to
+be cancelled is a howl.
 
-**If full duplex is ever wanted, the phone is where to start.** It is the device
-the howl was measured on - a speaker two centimetres from its own microphone -
-and Android already has the canceller as a platform call: the capture has to go
-through Oboe with the `VoiceCommunication` input preset (or an
-`AcousticEchoCanceler` attached to the same stream) instead of `cpal`'s default,
-which is a JNI hook and an Oboe stream on the Android side, no new dependency and
-no audio graph of our own. The desktop's AEC3 is the larger step and can wait
-until the phone proves the feature is wanted; the half-duplex rule above stays
-the fallback wherever no canceller is available, because a cancelled loop that
-turns out not to be cancelled is a howl.
+**Android: the capture and the playback are both the activity's, both on the
+communication path.** `cpal` is no help for either half: an
+`AcousticEchoCanceler` attaches to an `AudioRecord` session, and a media stream's
+sound is not part of the canceller's reference signal - it only cancels what the
+device plays as a voice call. So `MainActivity` opens both.
 
+`startTalkCapture` opens an `AudioRecord` on `VOICE_COMMUNICATION`, attaches
+`AcousticEchoCanceler` when `isAvailable()` says it can, and reads 16 bit mono
+blocks on a thread of its own. The blocks come back through `nativeTalkPcm` into
+`monitor_gui::mic::android_push`, which downsamples them with the same
+`Downsampler` the `cpal` capture uses, rebuilt when a block reports a different
+rate - so a phone recording at 44.1, 48 or 16 kHz reaches the camera as 8 kHz
+either way. `startTalkPlayback` opens an `AudioTrack` with
+`USAGE_VOICE_COMMUNICATION` and `CONTENT_TYPE_SPEECH` at the source's own rate (a
+camera's audio is 8 or 16 kHz mono, and `AudioTrack` takes either, so nothing is
+resampled here either), written non-blocking from the channel worker so a full
+track drops a block rather than stalling the worker, which is also pumping the
+picture. `monitor_gui::audio::Sink` is that track on Android and `cpal`'s stream
+everywhere else, and the app only knows the name.
+
+**The mode, the speakerphone, and the permission that makes them stick.** The
+canceller is engaged by `MODE_IN_COMMUNICATION`, and in that mode a
+voice-communication track is routed to the *earpiece* unless the speakerphone is
+forced on - which is where the sound went for two rounds of this work, and why it
+was barely audible at full volume. Both calls need
+`android.permission.MODIFY_AUDIO_SETTINGS`, which the manifest did not declare:
+`setMode` was refused with a line in logcat and nothing else, the mode stayed
+`NORMAL`, and the track played into the earpiece. With the permission declared,
+`enterTalkAudio` sets the mode and forces the speakerphone on, `leaveTalkAudio`
+puts both back with the call volume it found, and the pairing is re-asserted when
+the playback is opened as well, because the mode can be dropped between the
+capture and the track. `startTalkCapture` answers -1 (the permission dialog is
+up), -2 (no device) or 0/1 (opened, without/with the canceller), and the bar's
+microphone is drawn from that answer - no guessing, no optimistic icon.
+
+**The voice path is a call's, so the volume is too.** A voice-communication track
+follows `STREAM_VOICE_CALL`, not the media volume the viewer turns up, and
+`enterTalkAudio` puts that stream at its maximum for the call and
+`leaveTalkAudio` restores it - which is what makes "the volume is already at
+maximum" true on the path that matters. No makeup gain: with the routing fixed the
+speaker is loud enough at 1.0, and a gain that clips a loud camera buys nothing.
+
+**The back channel is fed continuously, not kept warm.** An idle talk channel was
+tried at one packet a second to save the 70 kbit/s of silence (1.5.33), and the
+cameras did not take it: after a call ended, the audio stopping was enough for the
+camera to stop sending video, and thirty seconds later the session was reconnecting
+with `no media data`. The 20 ms cadence is therefore kept while the back channel
+is open, silence included; only the queue and the loop's budget are the picture's
+business. See [`crate::pipeline`]'s `talk_gap`.
+
+**The desktop still has no canceller.** WebRTC's AEC3 with the playback as its
+reference signal is the step there - a C++ dependency and an audio graph that
+keeps the two in step - and until it lands the half-duplex rule above is what the
+desktop does.
+
+**A camera can stall the picture with the talk-back's own transport, so the
+transport never waits.** The talk-back shares the video's TCP connection, and a
+write that blocks there blocks the loop that reads the picture: the camera stops
+being read, the picture stops arriving, and the session reconnects. `RtspClient`
+therefore queues interleaved frames and writes what the socket will take
+(`flush_outbox`, polled non-blocking), dropping the oldest of a hundred frames
+when the camera will not drain them, and RTCP goes out the same way. Audio is
+worth less than the picture, and the picture is what the queue protects.
 **Measured on the OPPO PBAM00** (Android 8.1, API 27, 2026-10-24). The wall was
 started, the doorbell magnified, and the bar's microphone tapped: the permission
 dialog came up, the grant was accepted, and the next press logged

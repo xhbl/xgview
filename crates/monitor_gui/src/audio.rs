@@ -23,6 +23,119 @@ use cpal::{FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
 use monitor_codec::audio::AudioStreamInfo;
 use monitor_core::audio::AudioOutput;
 
+/// The sink this platform plays through.
+///
+/// `cpal`'s, except on Android, where the sound has to leave on the
+/// voice-communication path for the platform's echo canceller to have a
+/// reference signal: see [`JavaOutput`].
+#[cfg(not(target_os = "android"))]
+pub type Sink = CpalOutput;
+#[cfg(target_os = "android")]
+pub type Sink = JavaOutput;
+
+/// The sink on Android: the activity's `AudioTrack`, not a `cpal` stream.
+///
+/// The reason is the echo canceller. `cpal` opens a media stream, and the
+/// platform's canceller only knows what the device is playing when that playing
+/// goes out on the voice-communication path - `USAGE_VOICE_COMMUNICATION`, with
+/// the audio mode in `MODE_IN_COMMUNICATION` and the speakerphone forced on
+/// (that last one is what keeps a communication track out of the earpiece). The
+/// capture is already an `AudioRecord` on `VOICE_COMMUNICATION`; this is the
+/// other half.
+///
+/// The track is opened by the activity at the source's own rate - a camera's
+/// audio is 8 or 16 kHz mono and `AudioTrack` takes either - so no resampling is
+/// done here. Writes are non-blocking: a full track drops the block rather than
+/// stalling the channel worker that pushed it, because that worker is also
+/// pumping the picture.
+#[cfg(target_os = "android")]
+pub struct JavaOutput {
+    /// Whether sound is wanted; the sound switch drives this.
+    active: AtomicBool,
+    /// Volume as `0.0..=1.0`, kept as bits so the atomic carries an `f32`.
+    volume: AtomicU32,
+    /// Rate the track was opened at, 0 while it is not open.
+    rate: AtomicU32,
+    /// Channel count the track was opened at.
+    channels: AtomicU32,
+}
+
+#[cfg(target_os = "android")]
+impl JavaOutput {
+    /// The sink. There is nothing to probe on the device side: the track is
+    /// opened when the first block is configured, and a device without a speaker
+    /// simply never plays.
+    pub fn open() -> Option<Arc<Self>> {
+        Some(Arc::new(Self {
+            active: AtomicBool::new(false),
+            volume: AtomicU32::new(1.0f32.to_bits()),
+            rate: AtomicU32::new(0),
+            channels: AtomicU32::new(0),
+        }))
+    }
+
+    /// Turns the sound on or off, the switch in the magnified bar driving this.
+    pub fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Relaxed);
+        if !active {
+            self.close();
+        }
+    }
+
+    /// Sets the volume, `0.0..=1.0`.
+    pub fn set_volume(&self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        self.volume.store(volume.to_bits(), Ordering::Relaxed);
+        crate::android::set_playback_volume(volume);
+    }
+
+    /// The last volume set.
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+
+    /// Closes the track, so a resume does not play stale audio.
+    fn close(&self) {
+        self.rate.store(0, Ordering::Relaxed);
+        self.channels.store(0, Ordering::Relaxed);
+        crate::android::stop_playback();
+    }
+}
+
+#[cfg(target_os = "android")]
+impl AudioOutput for JavaOutput {
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::Relaxed)
+    }
+
+    fn configure(&self, info: &AudioStreamInfo) {
+        let rate = info.sample_rate.max(1);
+        let channels = info.channels.max(1) as u32;
+        if self.rate.load(Ordering::Relaxed) == rate
+            && self.channels.load(Ordering::Relaxed) == channels
+        {
+            return;
+        }
+        self.close();
+        if crate::android::start_playback(rate, channels) {
+            self.rate.store(rate, Ordering::Relaxed);
+            self.channels.store(channels, Ordering::Relaxed);
+            crate::android::set_playback_volume(self.volume());
+        }
+    }
+
+    fn push(&self, samples: &[i16]) {
+        if !self.is_active() || samples.is_empty() || self.rate.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        crate::android::push_playback(samples);
+    }
+
+    fn stop(&self) {
+        self.close();
+    }
+}
+
 /// How much audio the ring buffer is allowed to hold, in seconds. Past this the
 /// oldest samples are dropped rather than growing the delay: a live view wants
 /// to stay close to the picture, not to a backlog.

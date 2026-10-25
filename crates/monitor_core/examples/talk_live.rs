@@ -83,10 +83,7 @@ async fn main() {
         };
         hub.push(&samples);
         let packet = stream.packet(&samples);
-        if let Err(err) = client.send_interleaved(channel, &packet).await {
-            eprintln!("write failed: {err}");
-            break;
-        }
+        client.send_interleaved(channel, &packet);
         frames += 1;
         next += Duration::from_millis(20);
         let now = Instant::now();

@@ -49,7 +49,7 @@ const TALK_INTERVAL: Duration = Duration::from_millis(20);
 /// stream that went quiet rather than one running at a fiftieth of real time,
 /// and the first spoken frame lands where the clock says it should. See
 /// [`TalkStream::silence_after`] and [`talk_gap`].
-const TALK_KEEPALIVE: Duration = Duration::from_secs(1);
+const TALK_KEEPALIVE: Duration = Duration::from_millis(20);
 
 /// The gap between two packets on the talk-back track, which depends on whether
 /// the viewer is talking into it.
@@ -1527,7 +1527,7 @@ async fn run_session(
                 } else {
                     stream.silence_after(elapsed)
                 };
-                client.send_interleaved(*channel, &packet).await?;
+                client.send_interleaved(*channel, &packet);
                 if talking {
                     last_talk += TALK_INTERVAL;
                 } else {
@@ -1595,7 +1595,7 @@ async fn run_session(
                 total_lost.min(i32::MAX as u64) as i32,
                 jitter.round() as u32,
             );
-            client.send_rtcp(&report).await?;
+            client.send_rtcp(&report);
             last_report = Instant::now();
         }
 
