@@ -6658,24 +6658,13 @@ impl XgViewApp {
     ///
     /// Upright, a landscape stream used to be turned to fill the screen. It is
     /// drawn as the camera sends it now - letterboxed - until the bar's rotate
-    /// control asks for the turn, and the choice is the camera's own
-    /// (`zoom_rotate`), like its magnified fit. A landscape wall never turns a
-    /// picture: there is nothing to fill, and the control that would ask for it
-    /// is not on the bar there.
+    /// control asks for the turn. The choice is the configuration's own
+    /// (`zoom_rotate`), one answer for every camera, because it is the wall's
+    /// orientation that makes it a question and the viewer who wants it filled.
+    /// A landscape wall never turns a picture: there is nothing to fill, and the
+    /// control that would ask for it is not on the bar there.
     fn magnified_rotated(&self) -> bool {
-        if !self.is_portrait() || !self.scheduler.is_zoomed() {
-            return false;
-        }
-        let Some(index) = self.scheduler.zoom() else {
-            return false;
-        };
-        let Some(slot) = self.config.active_slots().get(index).copied() else {
-            return false;
-        };
-        self.config
-            .cameras
-            .get(slot)
-            .is_some_and(|camera| camera.zoom_rotate.unwrap_or(false))
+        self.is_portrait() && self.scheduler.is_zoomed() && self.config.zoom_rotate
     }
 
     fn magnified_area(
@@ -7256,22 +7245,13 @@ impl XgViewApp {
 
     /// Turns the magnified picture a quarter turn, or back.
     ///
-    /// The choice is the camera's own and is kept with its magnified fit
-    /// (`zoom_rotate`), so stepping to another camera and back finds the picture
-    /// as it was left. Only the magnified picture is turned: the wall's tiles are
-    /// drawn upright whatever this says, and a landscape wall never turns one.
+    /// The choice is the configuration's own, one answer for every camera: the
+    /// viewer who wants an upright screen filled wants it filled for whatever
+    /// they step to next, and the letterbox is not a property of a camera. Only
+    /// the magnified picture is turned: the wall's tiles are drawn upright
+    /// whatever this says, and a landscape wall never turns one.
     fn toggle_zoom_rotate(&mut self) {
-        let Some(index) = self.scheduler.zoom() else {
-            return;
-        };
-        let Some(slot) = self.config.active_slots().get(index).copied() else {
-            return;
-        };
-        let Some(camera) = self.config.cameras.get_mut(slot) else {
-            return;
-        };
-        let turned = !camera.zoom_rotate.unwrap_or(false);
-        camera.zoom_rotate = Some(turned);
+        self.config.zoom_rotate = !self.config.zoom_rotate;
         self.mark_dirty();
     }
 

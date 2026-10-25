@@ -594,6 +594,15 @@ pub struct AppConfig {
     /// camera, and off by default: a wall that starts talking on its own is a
     /// surprise, so the switch is the user's to turn on.
     pub sound_on: bool,
+    /// Whether the magnified picture is turned a quarter turn on an upright
+    /// wall.
+    ///
+    /// Global, like the sound switch, and off by default: upright, the picture is
+    /// drawn as the camera sends it - a landscape stream keeps the letterbox it
+    /// has - until the viewer asks for the turn on the magnified bar. The control
+    /// is only on that bar upright, where there is a screen to fill; a landscape
+    /// wall never turns a picture.
+    pub zoom_rotate: bool,
     /// Playback volume, `0.0..=1.0`, global like the switch. The magnified bar's
     /// switch decides whether anything plays, this decides how loud.
     pub volume: f32,
@@ -645,6 +654,7 @@ impl Default for AppConfig {
             language: "auto".to_string(),
             prefer_hardware_decode: true,
             sound_on: false,
+            zoom_rotate: false,
             volume: 1.0,
             reconnect: ReconnectPolicy::default(),
             handshake_timeout_ms: 15_000,

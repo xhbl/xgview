@@ -498,16 +498,6 @@ pub struct CameraSource {
     /// `aspect` and `portrait_aspect`, which fit the tile on the wall.
     #[serde(default)]
     pub zoom_aspect: Option<TileAspect>,
-    /// Whether the magnified picture is turned a quarter turn on a portrait
-    /// wall.
-    ///
-    /// `None` until the rotate control at the head of that viewport's bar is
-    /// used, which means *not* turned: upright, the picture is drawn as the
-    /// camera sends it - a landscape stream keeps the letterbox it has - rather
-    /// than turned to fill the screen. Turning it is a per-camera choice, like
-    /// `zoom_aspect`, and independent of it.
-    #[serde(default)]
-    pub zoom_rotate: Option<bool>,
     /// ONVIF profile token of the main stream, kept for later re-negotiation.
     #[serde(default)]
     pub main_profile: Option<String>,
@@ -551,7 +541,6 @@ impl CameraSource {
             aspect: TileAspect::default(),
             portrait_aspect: TileAspect::default(),
             zoom_aspect: None,
-            zoom_rotate: None,
             main_profile: None,
             sub_profile: None,
             group: 0,
@@ -1091,15 +1080,12 @@ mod tests {
         )
         .expect("a camera saved before the zoom fit existed");
         assert_eq!(camera.zoom_aspect, None);
-        assert_eq!(camera.zoom_rotate, None);
 
         let mut camera = camera;
         camera.zoom_aspect = Some(TileAspect::Ratio16x9);
-        camera.zoom_rotate = Some(true);
         let text = serde_json::to_string(&camera).expect("written");
         let back: CameraSource = serde_json::from_str(&text).expect("read back");
         assert_eq!(back.zoom_aspect, Some(TileAspect::Ratio16x9));
-        assert_eq!(back.zoom_rotate, Some(true));
     }
 
     /// The OSD enum is stored in `xgvconfig.json` by variant name, so a corner
