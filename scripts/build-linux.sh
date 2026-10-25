@@ -258,7 +258,14 @@ build_hwcodecs() {
 # run time. The codecs it maps an SDP encoding name onto are h264, hevc and
 # mjpeg (crates/monitor_codec/src/lib.rs, `Codec::from_encoding`); mpeg4 is
 # kept beside them because it costs little and a camera that announces it
-# should still decode. `swscale` (the NV12 conversion) and `swresample` stay
+# should still decode.
+#
+# `aac` is the audio one, and it is the only decoder here that is not video:
+# G.711 needs nothing from FFmpeg (`monitor_codec::g711` is the tables), but a
+# camera that sends AAC - which is most of them, the doorbells included - goes
+# through `monitor_codec::ffmpeg`, and a libavcodec built without it drops the
+# track. The sound switch is drawn from that track, so the symptom is not
+# silence: it is a magnified picture with no speaker on its bar. `swscale` (the NV12 conversion) and `swresample` stay
 # on: the first is used on every frame, the second only has to exist.
 #
 # libavformat / libavfilter / libavdevice carry no component at all but are
@@ -293,7 +300,13 @@ build_ffmpeg() {
     # gained a codec's hwaccel has to rebuild, or the marker would keep libraries
     # that cannot decode it on the GPU however `prefer_hardware` reads.
     local hwaccels="vaapi+nvdec:h264,hevc"
-    build_id="$FFMPEG_VERSION $asm_state libva-$LIBVA_VERSION $NVCODEC_VERSION $hwaccels"
+    # The decoder set is part of the key for the same reason the hwaccels are,
+    # and it is here because it was forgotten once: `aac` was added for the
+    # camera's audio and the tree already in the cache kept serving a libavcodec
+    # without it, which reads as "this camera has no sound" rather than as a
+    # stale build.
+    local decoders="h264,hevc,mjpeg,mpeg4,aac"
+    build_id="$FFMPEG_VERSION $asm_state libva-$LIBVA_VERSION $NVCODEC_VERSION $hwaccels decoders:$decoders"
 
     if [[ -f "$PREFIX/lib/libavcodec.so" && -f "$PREFIX/include/libavcodec/avcodec.h" \
           && -f "$PREFIX/.xgview-ffmpeg-version" \
@@ -342,6 +355,7 @@ build_ffmpeg() {
         --enable-decoder=hevc \
         --enable-decoder=mjpeg \
         --enable-decoder=mpeg4 \
+        --enable-decoder=aac \
         --enable-vaapi \
         --enable-ffnvcodec \
         --enable-nvdec \
@@ -519,6 +533,10 @@ verify_package() {
         'libvulkan.so*' 'libwayland-*' 'libX11*' 'libxcb*' 'libxkbcommon*'
         'libGL*' 'libEGL*' 'libGLX*' 'libGLdispatch*' 'libdrm*' 'libgbm*'
         'libz.so*' 'libzstd*' 'libbz2*' 'liblzma*'
+        # The audio path links ALSA on Linux (cpal's own backend), which every
+        # machine with a sound card has and a kiosk box may not: it is named in
+        # the README's package list for that reason.
+        'libasound*'
     )
     is_allowed() {
         local name="$1" pattern

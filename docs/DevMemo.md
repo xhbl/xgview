@@ -2601,3 +2601,104 @@ bar carried no microphone at all, while entering the same camera from the grid
 did. The talk target and the sink index are now moved by `apply_audio` on that
 step as well, and it is the one place a new camera can enter the viewport
 without going through `zoom_in`.
+
+---
+
+## 35. A call is a session of its own: the picture carries the picture, and RTP is not a heartbeat
+
+*Landed 2026-10-25, in 1.5.45. Supersedes the last two paragraphs of §34: the
+back channel is no longer taken when the picture is magnified, and the rule that
+ends a call is no longer "the bar has gone".*
+
+**What was wrong with the old shape.** The magnified session asked for the back
+channel, set the `sendonly` track up and wrote a silence packet every 20 ms for
+as long as the tile stayed magnified. Two costs, and the second is the one that
+mattered: 70 kbit/s of nothing on a wall that may be magnified for hours, and a
+camera's speaker held by a viewer who is not talking - a resource a camera may
+only have one of. It also made the picture and the call the same session, so
+anything that broke the call was a picture problem and anything that reopened
+the picture was a call problem: magnifying reopened the session to add the
+track, and stepping to the next camera reopened two.
+
+**Three things replaced it, and each is independently testable.** The picture's
+session asks for nothing (§34's header rules now apply only to the fallback
+path). Whether a camera can be talked to is a question asked on a short
+connection of its own: `OPTIONS` with `?backchannel=1`, `DESCRIBE` with the
+Profile T header, the SDP read, the connection closed. A call is a third
+connection, opened when the microphone is pressed and closed when it is released.
+
+**The probe is `OPTIONS` and `DESCRIBE` and nothing else.** No `SETUP` means no
+session identifier, which means there is nothing on the server to leave behind
+and no `TEARDOWN` to send: the connection closing is the whole of the cleanup.
+That is what makes it safe to ask a camera that is only being magnified, before
+anyone has pressed anything - and it is why the answer is cached rather than
+asked again on every frame.
+
+**The answer belongs to an address, not to a camera or a channel.** A camera's
+main and sub streams are two streams, and a back channel may be offered on one
+of them; behind go2rtc the address is a stream name. So the cache is keyed by
+the URL a call would be placed to, the interface resolves the magnified camera's
+main stream to look it up, and a camera sitting in two slots is asked once. A
+"no" expires after ten minutes, because a firmware or an account can change it;
+a "yes" is kept for the run, because it is the answer the microphone is drawn on.
+
+**Asking is not free of order.** The probe is sent after the schedule, never
+before: magnifying reopens that channel on the main stream, and both commands go
+down the same channel in the order they are sent. Sent first - from the same
+place the talk target is set - the probe asks about the *sub* stream, the cache
+key does not match the one the interface looks up, and the microphone never
+appears. It is one line of ordering and it cost an afternoon.
+
+**A call keeps itself alive, and this was the surprise.** The worker sends one
+G.711 packet every 20 ms, and the first version of the stand-alone tool sent
+exactly that and nothing else - the call died at thirty-two seconds with the
+camera closing the connection under it. RTP is not a heartbeat: a camera times a
+session out on its own clock and expects a *request*. `RtspClient::keep_alive`
+sends a fire-and-forget `OPTIONS` at half the timeout the camera announced -
+fifteen seconds on the D340W, thirty behind go2rtc - and a call then lasts as
+long as the viewer wants it. The same worker reads the socket, because the
+answers to those `OPTIONS` would otherwise pile up in the receive buffer and a
+camera that has closed the session is only visible as a read that fails.
+
+**Hanging up does not wait for an answer.** `TEARDOWN` is written and the
+connection dropped: go2rtc does not answer it, and `RtspClient::teardown` waits
+for the reply up to the client's own timeout, so a hang-up button took ten
+seconds to do nothing. A session belongs to its connection as much as to its
+identifier, so dropping the socket ends it either way - 283 µs, measured.
+
+**Two sessions that must not interfere should not share one.** With the call on
+its own connection, the picture's session can be thrown away and opened again
+while the call keeps running, and a camera that closes one leaves the other
+alone. That is now a mode of the stand-alone tool
+(`talk_only --restart-picture N`) rather than a UI gesture, because the gesture
+that used to force a reopen - opening a panel - is one the interface has since
+made harmless. Both paths were measured on the fleet: forty-five seconds, the
+picture's session dropped and reopened at ten, the call sent 2250 frames without
+a gap.
+
+**A camera that will not take a call gets the old arrangement.** `SETUP` of the
+`sendonly` track alone, or the `PLAY` that follows, is refused by some devices -
+they want the video set up first. That is a refusal of *this shape* of session,
+not of the camera, and the picture's own session can still carry the media: the
+worker hands the decision back to the supervisor, which reopens that channel with
+`Endpoint::talk` set, and the old path feeds the audio as it always did. A
+transport failure is the other case and gets no fallback - reopening would only
+repeat it. The refusal is remembered for the run, so the next press goes straight
+to the fallback instead of making the viewer wait for it again.
+
+**The bar is the call, and a call makes the bar modal.** §34's rule - a bar that
+has gone has ended the call, stated once at the end of the frame - was right
+about the invisible call and wrong about everything else: a press on the picture,
+a key that opens a panel, or reaching for the settings gear all took the bar
+down, and with it the call. It is now the other way round: while the microphone
+is open the bar stays where it is, a press that would put it away leaves it, a
+panel opening over the wall no longer takes it down (the panel takes the focus,
+not the strip), and a call ends on the handset, on `Esc` / `BACK`, or by leaving
+the camera - which `set_target` already reaches from every direction.
+
+**What the next protocol will need.** The channel is a trait with three methods
+- how often, how many samples, and send - so a camera reached some other way
+(Foscam's own TCP protocol is the one waiting, `talk/foscam.rs`) implements those
+and nothing above it changes. The lifecycle deliberately stayed out of the trait:
+`keep_alive` and `close` are asynchronous, an `async fn` in a public trait is not
+object safe, and nothing here needs a second implementation to share them yet.

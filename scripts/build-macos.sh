@@ -200,6 +200,13 @@ place_executable() {
 # and that it is an application rather than a folder. `LSMinimumSystemVersion`
 # is the floor the toolkit asks for; `NSHighResolutionCapable` keeps it sharp on
 # a Retina display.
+#
+# `NSMicrophoneUsageDescription` is not cosmetic: macOS terminates a process that
+# opens the microphone without it, which is the talk-back switch doing nothing
+# at all. The signature is ad-hoc, so no entitlement is needed on top of it -
+# but the first press still asks the viewer, once, and a refusal is remembered
+# until System Settings (or `tccutil reset Microphone com.xhbl.xgview`) is told
+# otherwise.
 write_info_plist() {
     cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -228,6 +235,8 @@ write_info_plist() {
     <string>11.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>XGView uses the microphone to talk back through a camera's speaker.</string>
 </dict>
 </plist>
 PLIST

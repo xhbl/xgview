@@ -3,6 +3,84 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.5.45
+
+Changes since 1.4.98. **You can hear the camera, and talk back to it.** The
+magnified picture's bar gained a sound switch and a microphone: the camera's
+audio is decoded - G.711 everywhere, AAC through FFmpeg on the desktop and
+`AMediaCodec` on Android - and the microphone is sent to the camera as G.711.
+The bar itself was rebuilt on egui's own buttons so a remote can walk it, and
+gained the picture fit and the quarter turn.
+
+### Hearing the camera
+
+- **The audible channel's track is decoded and played through the machine's own
+  output**, once, for the channel that is magnified: the `AudioDecoder` trait,
+  G.711 µ-law and A-law first, then AAC over FFmpeg, `AMediaCodec` on Android,
+  and the camera's audio read out of an MSE stream as well as an RTSP one.
+- **The sound switch appears only for a camera that reports an audio track**,
+  and the settings volume row drives the same switch. Off until it is turned on.
+- **On Android a call takes the voice-communication path**, so the platform's
+  echo canceller has the reference signal it needs. Elsewhere a call is full
+  duplex unless the Audio tab makes it half duplex - the camera's sound muted
+  while the microphone is open, for a machine whose microphone sits beside its
+  speaker.
+- **The Linux package links ALSA** (`libasound2`) now that there is an audio
+  path, so the viewer will not start on a machine that does not have it. Every
+  desktop does; a box built from a minimal image may not, so `install.sh` asks
+  the loader what the executable needs and installs the package through `apt`,
+  `dnf`, `yum`, `pacman` or `zypper` before it copies anything. A machine with
+  no sound *card* is unaffected - it has the library and simply has nothing to
+  play through.
+
+### Talking back to it
+
+- **The picture's session no longer carries the back channel.** It used to ask
+  for it the moment a tile was magnified, set the `sendonly` track up and write a
+  silence packet every 20 ms for as long as the picture stayed magnified - 70
+  kbit/s of nothing, and the camera's speaker held whether or not anyone was
+  talking. The picture's session now carries the picture.
+- **A camera's capability is a question asked on its own connection**:
+  `OPTIONS` with `?backchannel=1`, a `DESCRIBE` carrying the Profile T header,
+  the SDP read, the connection closed. No `SETUP`, so the server keeps no session
+  and nothing has to be torn down. The answer is cached against the address a
+  call would be placed to, so the microphone appears without the picture having
+  asked anything - and magnifying a camera no longer reopens its session.
+- **A call is a session of its own**, opened when the microphone is pressed and
+  ended when it is released: the `sendonly` track set up alone, `PLAY`, then one
+  G.711 packet every 20 ms, silence included. A camera that refuses that shape of
+  session gets the old arrangement instead - the back channel carried by the
+  picture's session - and that is remembered for the run.
+- **A call keeps itself alive with `OPTIONS`.** RTP does not count as the client
+  being there: a camera drops a session that sends no request, which on the
+  D340W is thirty seconds.
+- **`TEARDOWN` is written and the connection dropped rather than waited on.**
+  go2rtc answers none, and the client's own timeout made hanging up a ten-second
+  affair.
+- **A call ends on the handset, on `Esc` / `BACK`, or by leaving the camera**,
+  and the bar is modal while the microphone is open: a press that would put it
+  away leaves it, a panel opening over the wall no longer takes it down, and the
+  picture keeps playing under all of it.
+- **The first press asks the system for the microphone** - `RECORD_AUDIO` on
+  Android, the privacy prompt on macOS, where the bundle now declares what it
+  wants it for. A device with none says so and the picture carries on.
+
+### The magnified picture's bar
+
+- **Rebuilt on egui's own buttons**, so the navigation layer walks it like any
+  other row of controls - the seat it opens on, the arrows that step onto the
+  first control, the selection ring drawn only while the remote drives it.
+- **The picture fit is cycled from an icon** and named in the middle of the
+  picture; the wall's own landscape and portrait fits are untouched.
+- **The quarter turn is the configuration's**, not the camera's: the picture
+  stays upright until the bar turns it, and the choice is remembered per
+  configuration.
+- **Up and away on a tap.** Upright and unturned the bar is up from the start and
+  stays; turned, or in landscape, it is asked for. A press that lingers, a drag
+  that does not turn the page and a pinch leave it alone, and a double press is
+  still the way back to the grid.
+- **The wall's own bars stay away while the magnified bar is in use.**
+
 ## 1.4.98
 
 Changes since 1.4.90. **The settings list edits and removes the camera it

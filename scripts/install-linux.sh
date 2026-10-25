@@ -17,6 +17,8 @@
 #   * writes a desktop entry, so XGView appears in the application grid
 #   * links the executable onto `PATH`
 #   * refreshes the desktop and icon caches, where those tools are installed
+#   * makes sure the ALSA library is there, installing it if it is not: the
+#     executable links it, so without it the viewer does not start at all
 #
 # An uninstall undoes exactly that - the application directory, the icons, the
 # desktop entry and the link - and leaves the configuration in
@@ -122,11 +124,76 @@ if [[ "$UNINSTALL" == 1 ]]; then
     exit 0
 fi
 
+# ---------------------------------------------------------------- audio
+#
+# The executable links ALSA - `cpal`'s Linux backend - and the dynamic loader
+# resolves that before `main` runs. A machine without alsa-lib therefore does not
+# get a viewer without sound, it gets no viewer at all, with an error message
+# that names a library and nothing about what to do with it. Every desktop has
+# it already; a box built from a minimal image may not, which is the case this
+# step is for.
+audio_present() {
+    local trace
+    if ! trace="$(LD_TRACE_LOADED_OBJECTS=1 "$1" 2>/dev/null)"; then
+        # A loader that will not trace: ask the cache instead.
+        ldconfig -p 2>/dev/null | grep -q 'libasound\.so\.2'
+        return
+    fi
+    # The trace names a missing library too, as `libasound.so.2 => not found`.
+    ! printf '%s\n' "$trace" | grep -q 'libasound\.so[^ ]* *=> *not found'
+}
+
+ensure_audio() {
+    if audio_present "$1"; then
+        return 0
+    fi
+    echo "==> This machine has no ALSA library, which the viewer links against"
+
+    local sudo=""
+    if [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+        sudo="sudo"
+    fi
+
+    local install="" package=""
+    if command -v apt-get >/dev/null 2>&1; then
+        package="libasound2"; install="apt-get install -y $package"
+    elif command -v dnf >/dev/null 2>&1; then
+        package="alsa-lib"; install="dnf install -y $package"
+    elif command -v yum >/dev/null 2>&1; then
+        package="alsa-lib"; install="yum install -y $package"
+    elif command -v pacman >/dev/null 2>&1; then
+        package="alsa-lib"; install="pacman -S --noconfirm $package"
+    elif command -v zypper >/dev/null 2>&1; then
+        package="alsa-lib"; install="zypper --non-interactive install $package"
+    fi
+
+    if [[ -z "$install" ]]; then
+        echo "error: no package manager this script knows; install alsa-lib by hand" >&2
+        return 1
+    fi
+
+    echo "==> Installing $package"
+    # Word splitting on `$sudo` is the point: an empty value means the package
+    # manager runs as it is, which is the `--system` case.
+    if ! $sudo $install; then
+        echo "error: could not install $package" >&2
+        echo "       the viewer will not start until it is there" >&2
+        return 1
+    fi
+    if ! audio_present "$1"; then
+        echo "error: $package was installed but the library is still not found" >&2
+        return 1
+    fi
+    echo "==> $package is in place"
+}
+
 # ---------------------------------------------------------------- install
 if [[ ! -x "$HERE/xgview" ]]; then
     echo "error: $HERE does not look like an XGView bundle (no ./xgview in it)" >&2
     exit 1
 fi
+
+ensure_audio "$HERE/xgview"
 
 # The bundle, copied as it is rather than taken apart file by file: the
 # libraries have to travel with the executable, and the icons and this script

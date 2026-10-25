@@ -191,6 +191,7 @@ apt-get install -y --no-install-recommends \
   openbox x11-xserver-utils \
   libgl1-mesa-dri libegl1 mesa-vulkan-drivers \
   libxkbcommon-x11-0 libxcursor1 libxi6 libxrandr2 \
+  libasound2 \
   fonts-dejavu-core fonts-noto-cjk
 
 if [ $IS_VM -eq 1 ]; then
