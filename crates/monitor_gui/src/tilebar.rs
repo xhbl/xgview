@@ -12,19 +12,28 @@
 //! with it the same layout, hit test and painting serve both. If the turned bar
 //! ever wants to be the level one, the switch is made in one place.
 //!
-//! The bar keeps its own state - whether it is up, which edge it is docked to,
-//! which of its controls is selected and when it was last operated - and the
-//! application owns an instance of [`Bar`]. Nothing here takes egui's focus: the
-//! bar is part of the wall rather than one of its panels, and a wall that woke
-//! its top and bottom bars every time the viewer touched this one would resize
-//! the picture under their finger.
+//! The controls themselves are egui's: each is
+//! [`crate::icons::button_in`], a button the caller places rather than one egui
+//! lays out, and only the glyph inside it is drawn by hand - the same bargain
+//! the toolbar's icon buttons make. That is what makes the bar behave like the
+//! rest of the interface for free: a press lights its control while the pointer
+//! is down, the keyboard's focus draws the ring, and the confirm key reaches it
+//! because egui turns a press of it into a click on whatever has the focus. The
+//! bar keeps only what is its own - whether it is up, which edge it is docked
+//! to, and when it was last operated.
+//!
+//! It opens on a *seat*: a focusable, invisible, non-interactive widget that
+//! draws nothing and answers nothing - the same trick the portrait picture fit
+//! picker uses for its hint. The remote's first arrow walks off the seat into
+//! the controls, and the ring appears then; until it does, the bar is on screen
+//! without a cursor, and the confirm key has nothing to press.
 
 use std::time::{Duration, Instant};
 
-use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Stroke, StrokeKind, vec2};
+use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Stroke, StrokeKind, vec2};
 
 use crate::icons::{self, Icon};
-use crate::theme;
+use crate::nav::Nav;
 
 /// How long the bar stays after the last operation on it.
 ///
@@ -73,9 +82,8 @@ const GAP: f32 = 8.0;
 /// Padding between the controls and the strip's rounded end.
 const PAD: f32 = 6.0;
 
-/// Corner radius of the strip and of a control.
+/// Corner radius of the strip.
 const RADIUS: u8 = 12;
-const CONTROL_RADIUS: u8 = 8;
 
 /// What one control of the bar carries.
 #[derive(Debug, Clone, Copy)]
@@ -94,6 +102,15 @@ pub fn icon_width() -> f32 {
     BUTTON_H
 }
 
+/// How many controls the bar can carry at once: the picture fit, the sound
+/// switch and the microphone. A call takes all of them away and leaves the
+/// handset in the first place.
+///
+/// A focus on any of these ids is a focus the bar owns, whether or not that
+/// control is on screen this frame - the microphone a call has just turned into
+/// the handset is one, and the handset it becomes is another.
+pub const CONTROLS: usize = 3;
+
 /// Which edge of the picture the bar is docked to, in the picture's own frame.
 ///
 /// `Top` is the edge the picture's own top is on, which is the screen's right
@@ -107,7 +124,9 @@ pub enum Dock {
 /// Where a press landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
-    /// On one of the bar's controls.
+    /// On one of the bar's controls. These are egui's buttons now, so the press
+    /// itself is theirs; the answer is here for the caller's reading of a press
+    /// that reached the picture underneath.
     Button(usize),
     /// On the strip, but not on a control.
     Inside,
@@ -121,23 +140,14 @@ pub enum Hit {
 ///
 /// `open` and the clock behind it are the whole of its life. The dock is
 /// remembered across openings so a second press brings the bar back where it
-/// was left; the selection starts at the first control each time.
+/// was left; which control has the remote's focus is egui's, and the bar opens
+/// with none - see the module's note on the seat.
 #[derive(Debug)]
 pub struct Bar {
     open: bool,
     dock: Dock,
-    focus: usize,
     seen: Instant,
     ignore_until: Option<Instant>,
-    /// Whether the selection is drawn, which is what a remote's viewer can see.
-    ///
-    /// A finger needs no ring - it presses what it aimed at and sees the
-    /// picture answer - so a bar opened by a touch carries none, and its
-    /// controls are pressed by touch without one being drawn. It appears when
-    /// the remote is driving the bar: an opening by the confirm key, or any
-    /// arrow pressed while it is up. That is the same rule the wall's own ring
-    /// follows for a tile. See [`Bar::arm`].
-    armed: bool,
 }
 
 impl Bar {
@@ -145,10 +155,8 @@ impl Bar {
         Self {
             open: false,
             dock: Dock::Top,
-            focus: 0,
             seen: Instant::now(),
             ignore_until: None,
-            armed: false,
         }
     }
 
@@ -157,48 +165,29 @@ impl Bar {
         self.open
     }
 
-    /// Whether the selected control is drawn as selected.
-    pub fn armed(&self) -> bool {
-        self.armed
-    }
-
-    /// Lights the selection, for a key that is driving the bar.
-    pub fn arm(&mut self) {
-        self.armed = true;
-    }
-
     /// The edge the bar is docked to, which is where the next opening puts it.
     pub fn dock(&self) -> Dock {
         self.dock
     }
 
-    /// The control the remote is on.
-    pub fn focus(&self) -> usize {
-        self.focus
-    }
-
-    /// Moves the selection to `index`.
-    pub fn set_focus(&mut self, index: usize) {
-        self.focus = index;
-    }
-
-    /// Brings the bar up on `dock`, with its first control selected.
+    /// Brings the bar up on `dock`, its controls unselected.
     ///
-    /// `armed` is whether that selection is shown: the confirm key that opened
-    /// it wants to see where the remote landed, a finger on the band does not.
-    pub fn show(&mut self, dock: Dock, now: Instant, armed: bool) {
+    /// The caller hands the focus to [`seat`]: the bar appears without a cursor,
+    /// and the first arrow is what puts one on a control.
+    pub fn show(&mut self, dock: Dock, now: Instant) {
         self.open = true;
         self.dock = dock;
-        self.focus = 0;
-        self.armed = armed;
         self.touch(now);
         self.ignore_until = Some(now + GUARD);
+        tracing::debug!(target: "xgview::tilebar", ?dock, "the magnified bar is up");
     }
 
     /// Takes the bar down.
     pub fn hide(&mut self) {
+        if self.open {
+            tracing::debug!(target: "xgview::tilebar", "the magnified bar is down");
+        }
         self.open = false;
-        self.armed = false;
         self.ignore_until = None;
     }
 
@@ -210,22 +199,6 @@ impl Bar {
     /// Whether a press on the bar is part of the gesture that opened it.
     pub fn ignoring(&self, now: Instant) -> bool {
         self.ignore_until.is_some_and(|until| now < until)
-    }
-
-    /// Moves the selection one control forward or back, stopping at the ends.
-    ///
-    /// An arrow is the remote walking the bar, so it also lights the selection:
-    /// this is how a bar opened by a finger gets one.
-    pub fn step(&mut self, forward: bool, count: usize) {
-        if count == 0 {
-            return;
-        }
-        self.armed = true;
-        self.focus = if forward {
-            (self.focus + 1).min(count - 1)
-        } else {
-            self.focus.saturating_sub(1)
-        };
     }
 
     /// How long the bar has left, or `None` while it is down.
@@ -246,6 +219,46 @@ impl Default for Bar {
 /// Whether the bar is still standing `now`, given when it was last operated.
 pub fn standing(seen: Instant, now: Instant) -> bool {
     now.saturating_duration_since(seen) < IDLE
+}
+
+/// The seat the bar opens on: focusable, invisible, and not a control.
+///
+/// Nothing is drawn for it and nothing can be pressed on it - a confirm key there
+/// is spent, which is the point: the ring is the arrows' cursor, and a bar that
+/// has not been walked carries none.
+pub fn seat() -> Id {
+    Id::new(("xgview-tile-bar", "seat"))
+}
+
+/// The id of the control at `index`.
+///
+/// It is derived from the place in the strip rather than from the glyph, so a
+/// control that changes its shape in place - the sound switch, the microphone
+/// that becomes a call - keeps the remote's focus across the change.
+pub fn control(index: usize) -> Id {
+    Id::new(("xgview-tile-bar", index))
+}
+
+/// Whether `id` is one of the bar's own: its seat or one of its controls.
+///
+/// The seat is not a member of the navigation layer, so asking that layer where
+/// an id belongs says nothing about it; this is the question the application
+/// asks instead - is this focus the bar's, or has something else taken it. A
+/// control that is not drawn this frame is still the bar's: the microphone a
+/// call has just turned into the handset is one, and the handset it becomes is
+/// another.
+pub fn owns(id: Id) -> bool {
+    id == seat() || (0..CONTROLS).any(|index| id == control(index))
+}
+
+/// The navigation scope the controls register under.
+///
+/// A row when the bar lies across the wall, a column when the picture has been
+/// turned and the strip runs down the screen; the arrows that walk it are the
+/// scope's axis and no others. Neither has an exit: a strip has nothing above or
+/// below it to walk to, and `Back` is the way out.
+pub fn scope(rotated: bool) -> &'static str {
+    if rotated { "tile-bar-column" } else { "tile-bar-row" }
 }
 
 /// The bar and its two activation bands, in screen coordinates.
@@ -384,24 +397,24 @@ fn to_screen_rect(rect: Rect, tile: Rect, rotated: bool) -> Rect {
     Rect::from_two_pos(to_screen(rect.min, tile, rotated), to_screen(rect.max, tile, rotated))
 }
 
-/// Paints the bar: its backdrop, its controls, and the selection among them.
+/// Draws the bar over the picture and answers the control it was pressed on.
 ///
-/// `hover` is the control under the pointer, if any; `focus` is the one the
-/// remote is on, and `armed` is whether that is drawn at all - a finger needs no
-/// cursor, a remote does, and [`Bar::armed`] says which is driving. Both rings
-/// are told apart from a control that is merely there by the same colours the
-/// rest of the interface uses. `controls` carries one entry per control, in the
-/// same order as the layout's buttons; a control with no entry keeps its shape
-/// and its selection ring.
-pub fn paint(
-    painter: &Painter,
+/// The strip's backdrop is painted here, and the controls are egui buttons
+/// placed where [`layout`] put them - their lit look, their ring and their
+/// answer to the confirm key are all egui's. `rotated` turns their glyphs with
+/// the picture, the way the picture itself is drawn.
+///
+/// The bar opens on [`seat`]: it is registered as the scope's first member so
+/// the arrows have somewhere to stand before the first control, and so the
+/// confirm key on it is spent rather than pressing the first control unseen.
+pub fn draw(
+    ui: &mut egui::Ui,
+    nav: &mut Nav,
     layout: &Layout,
     rotated: bool,
-    focus: usize,
-    armed: bool,
-    hover: Option<usize>,
     controls: &[Control],
-) {
+) -> Option<usize> {
+    let painter = ui.painter();
     painter.rect_filled(layout.bar, CornerRadius::same(RADIUS), Color32::from_black_alpha(190));
     painter.rect_stroke(
         layout.bar,
@@ -409,45 +422,40 @@ pub fn paint(
         Stroke::new(1.0_f32, Color32::from_white_alpha(28)),
         StrokeKind::Inside,
     );
+
+    nav.open(scope(rotated));
+    // The seat is a focus target, not a stop of the walk: it is claimed (as
+    // nothing) so the focus can be put on it, but it is not registered with the
+    // navigation layer. A member would be reachable from the first control by
+    // the arrow that walks back, and the remote would step off the strip onto a
+    // control that answers nothing; the application maps the first arrow off the
+    // seat onto the first control instead. See `app::handle_keys`.
+    let _seat = ui.interact(
+        Rect::from_min_size(layout.bar.min, vec2(0.0, 0.0)),
+        seat(),
+        Sense::focusable_noninteractive(),
+    );
+
+    let mut pressed = None;
     for (index, rect) in layout.buttons.iter().enumerate() {
-        let selected = armed && index == focus;
-        let hangup = matches!(controls.get(index), Some(Control::Hangup));
-        // The backdrop is painted before the focus ring, so that the ring of the
-        // call's red button is drawn over its colour rather than under it.
-        if hangup {
-            painter.rect_filled(*rect, CornerRadius::same(CONTROL_RADIUS), theme::ERROR);
-        } else if selected {
-            painter.rect_filled(*rect, CornerRadius::same(CONTROL_RADIUS), theme::FOCUS_FILL);
-        } else if hover == Some(index) {
-            painter.rect_filled(*rect, CornerRadius::same(CONTROL_RADIUS), Color32::from_white_alpha(22));
-        }
-        if selected {
-            painter.rect_stroke(
-                *rect,
-                CornerRadius::same(CONTROL_RADIUS),
-                Stroke::new(theme::FOCUS_WIDTH, theme::FOCUS),
-                StrokeKind::Inside,
-            );
-        }
-        // Clipped to the control: a label that grew with a translation must not
-        // run out over its neighbour.
-        let clip = painter.with_clip_rect(rect.shrink(2.0));
-        match controls.get(index) {
-            Some(Control::Icon(icon)) => {
-                let glyph = Rect::from_center_size(rect.center(), vec2(BUTTON_H * 0.5, BUTTON_H * 0.5));
-                icons::paint_turned(&clip, glyph, *icon, Stroke::new(1.6_f32, theme::TEXT), rotated);
+        let Some(control) = controls.get(index) else {
+            continue;
+        };
+        let response = match control {
+            Control::Icon(icon) => {
+                icons::button_in(ui, *rect, self::control(index), *icon, false, false, "", rotated)
             }
-            Some(Control::Hangup) => {
-                // White on the red: the handset is the label, and the colour is
-                // the state - a call is up, and this is the way out of it.
-                let side = BUTTON_H * 0.62;
-                let glyph = Rect::from_center_size(rect.center(), vec2(side, side));
-                let stroke = Stroke::new(1.8_f32, Color32::WHITE);
-                icons::paint_turned(&clip, glyph, Icon::Hangup, stroke, rotated);
+            Control::Hangup => {
+                icons::danger_in(ui, *rect, self::control(index), Icon::Hangup, "", rotated)
             }
-            None => {}
+        };
+        nav.item(&response);
+        if response.clicked() {
+            pressed = Some(index);
         }
     }
+    nav.close();
+    pressed
 }
 
 #[cfg(test)]
@@ -527,105 +535,45 @@ mod tests {
         let widths = [icon_width(); 3];
         let row = placed(landscape(), false, Dock::Top, &widths);
         for button in &row.buttons {
-            assert!((button.width() - button.height()).abs() < 0.01, "the control is square");
+            assert!((button.width() - BUTTON_H).abs() < 0.01);
             assert!((button.height() - BUTTON_H).abs() < 0.01);
         }
-        let expected = 2.0 * PAD + 3.0 * BUTTON_H + 2.0 * GAP;
-        assert!((row.bar.width() - expected).abs() < 0.01, "the strip is the controls and the gaps");
+        let span = row.buttons.last().unwrap().right() - row.buttons[0].left();
+        assert!((span - (3.0 * BUTTON_H + 2.0 * GAP)).abs() < 0.01);
     }
 
-    /// The call's handset is a square button like the icons, so a bar holding
-    /// only it is one square wide - the whole strip while a call is up.
+    /// A press on a control is that control's, then the strip's, then the band
+    /// it is docked in, and anything else is the picture's.
     #[test]
-    fn the_hangup_control_is_one_square() {
-        let call = placed(landscape(), false, Dock::Top, &[icon_width()]);
-        assert_eq!(call.buttons.len(), 1);
-        assert!((call.bar.width() - (2.0 * PAD + BUTTON_H)).abs() < 0.01);
+    fn a_press_is_read_from_the_control_outwards() {
+        let one = [icon_width()];
+        let layout = placed(landscape(), false, Dock::Top, &one);
+        let button = layout.buttons[0].center();
+        assert_eq!(layout.hit(button), Hit::Button(0));
+        // The padding between the strip's edge and the control is the strip's.
+        let padding = Pos2::new(layout.bar.left() + 2.0, layout.bar.center().y);
+        assert_eq!(layout.hit(padding), Hit::Inside);
+        // The band runs the width of the picture, and the strip lies inside it;
+        // the edge of the strip is the strip's, not the band's.
+        let band = layout.top;
+        assert_eq!(layout.hit(Pos2::new(band.center().x, EDGE)), Hit::Inside);
+        assert_eq!(layout.hit(Pos2::new(band.left() + 4.0, EDGE)), Hit::Band(Dock::Top));
+        assert_eq!(layout.hit(Pos2::new(960.0, 540.0)), Hit::Outside);
     }
 
-    /// The bands lie along the picture's top and bottom edges: the screen's top
-    /// and bottom on a landscape wall, and the screen's right and left once the
-    /// picture is turned for a portrait one.
+    /// The bar opens on the seat and carries no cursor: nothing to press until
+    /// an arrow walks into the controls, and then the bar's clock is the only
+    /// thing that can take it down.
     #[test]
-    fn the_bands_sit_on_the_pictures_top_and_bottom_edges() {
-        let level = placed(landscape(), false, Dock::Top, &[icon_width()]);
-        assert!((level.top.top() - landscape().top()).abs() < 0.01);
-        assert!((level.top.height() - TOP_BAND).abs() < 0.01, "as deep as the toolbar");
-        assert!((level.bottom.bottom() - landscape().bottom()).abs() < 0.01);
-        assert!((level.bottom.height() - BOTTOM_BAND).abs() < 0.01, "as deep as the status bar");
-
-        let turned = placed(portrait(), true, Dock::Top, &[icon_width()]);
-        assert!((turned.top.right() - portrait().right()).abs() < 0.01, "the picture's top is the screen's right");
-        assert!((turned.top.width() - TOP_BAND).abs() < 0.01);
-        assert!((turned.bottom.left() - portrait().left()).abs() < 0.01);
-        assert!((turned.bottom.width() - BOTTOM_BAND).abs() < 0.01);
-    }
-
-    /// A press is read as the control it is on, the strip's background, the band
-    /// that asked for it, or the picture - in that order.
-    #[test]
-    fn a_press_is_read_by_what_it_landed_on() {
-        let tile = landscape();
-        let level = placed(tile, false, Dock::Top, &[icon_width()]);
-
-        assert_eq!(level.hit(level.buttons[0].center()), Hit::Button(0));
-        // The strip's padding, below the control.
-        let inside = egui::pos2(level.bar.center().x, level.buttons[0].bottom() + 3.0);
-        assert!(level.bar.contains(inside), "{inside:?} in {:?}", level.bar);
-        assert_eq!(level.hit(inside), Hit::Inside);
-        // The band, above the strip.
-        assert_eq!(level.hit(egui::pos2(tile.center().x, 8.0)), Hit::Band(Dock::Top));
-        // A bar that is down has no controls to take a press, and the part of
-        // the band a control will be drawn over is still the band asking for
-        // the bar. The band is only as deep as the toolbar that used to be
-        // there, so it stops short of the control's middle.
-        assert_eq!(level.band_at(egui::pos2(level.buttons[0].center().x, 30.0)), Some(Dock::Top));
-        assert_eq!(level.band_at(level.buttons[0].center()), None, "the band is shallower than the control");
-        // The picture, away from both.
-        assert_eq!(level.hit(tile.center() + vec2(0.0, 100.0)), Hit::Outside);
-        assert_eq!(level.band_at(tile.center() + vec2(0.0, 100.0)), None);
-
-        let turned = placed(portrait(), true, Dock::Bottom, &[icon_width()]);
-        assert_eq!(turned.hit(turned.buttons[0].center()), Hit::Button(0));
-        assert_eq!(turned.band_at(turned.buttons[0].center()), None, "the band is shallower than the control");
-        assert_eq!(turned.band_at(egui::pos2(10.0, 960.0)), Some(Dock::Bottom), "the status bar's depth");
-        assert_eq!(turned.hit(egui::pos2(20.0, 400.0)), Hit::Band(Dock::Bottom), "the picture's bottom is the screen's left");
-    }
-
-    /// The bar keeps its own clock: eight seconds after the last operation, and
-    /// not at the moment the idle itself arrives.
-    #[test]
-    fn the_bar_stands_for_eight_seconds_after_the_last_operation() {
-        let now = Instant::now();
-        assert!(standing(now, now));
-        assert!(standing(now - IDLE + Duration::from_millis(100), now));
-        assert!(!standing(now - IDLE, now), "the idle itself");
-        assert!(!standing(now - IDLE - Duration::from_secs(1), now));
-    }
-
-    /// Opening ignores presses on the bar for the double-click delay, so the
-    /// second click of a double click in the band cannot press a control; the
-    /// selection walks its controls and stops at the ends.
-    #[test]
-    fn the_open_gesture_cannot_press_the_bar_and_the_selection_stops_at_its_ends() {
+    fn the_bar_opens_without_a_cursor_and_closes_when_told() {
         let now = Instant::now();
         let mut bar = Bar::new();
         assert!(!bar.is_open());
-        bar.show(Dock::Bottom, now, false);
+        bar.show(Dock::Bottom, now);
         assert!(bar.is_open());
         assert_eq!(bar.dock(), Dock::Bottom);
         assert!(bar.ignoring(now + Duration::from_millis(100)));
         assert!(!bar.ignoring(now + GUARD + Duration::from_millis(1)));
-
-        bar.step(false, 1);
-        assert_eq!(bar.focus(), 0, "nothing before the first control");
-        bar.step(true, 1);
-        assert_eq!(bar.focus(), 0, "nothing after the last one");
-
-        bar.step(true, 3);
-        assert_eq!(bar.focus(), 1);
-        bar.step(false, 3);
-        assert_eq!(bar.focus(), 0);
 
         assert!(bar.remaining(now).is_some());
         bar.hide();
@@ -633,28 +581,24 @@ mod tests {
         assert!(bar.remaining(now).is_none());
     }
 
-    /// The selection is the remote's cursor: an opening by a finger carries
-    /// none, the confirm key opens with it drawn, an arrow lights it, and it
-    /// stays down with the bar.
+    /// The idle is the bar's own clock and it is what takes it down; a call's
+    /// bar is kept up by the caller touching it, see `app`.
     #[test]
-    fn the_selection_is_drawn_only_while_the_remote_drives_the_bar() {
+    fn the_idle_ends_the_bar() {
         let now = Instant::now();
-        let mut bar = Bar::new();
+        assert!(standing(now, now));
+        assert!(standing(now - IDLE + Duration::from_millis(100), now));
+        assert!(!standing(now - IDLE, now), "the idle itself");
+        assert!(!standing(now - IDLE - Duration::from_secs(1), now));
+    }
 
-        bar.show(Dock::Top, now, false);
-        assert!(!bar.armed(), "a touch asks for the bar, not for a cursor");
-
-        bar.step(true, 3);
-        assert!(bar.armed(), "an arrow is the remote walking the bar");
-
-        bar.hide();
-        assert!(!bar.armed(), "nothing to draw while the bar is down");
-
-        bar.show(Dock::Top, now, true);
-        assert!(bar.armed(), "the confirm key opens with the selection drawn");
-
-        bar.arm();
-        bar.show(Dock::Top, now, false);
-        assert!(!bar.armed(), "a later touch opening starts without it again");
+    /// The scope is a row across the wall and a column down a turned picture, so
+    /// that the arrows which walk the strip are the ones the viewer would push.
+    #[test]
+    fn the_scope_turns_with_the_picture() {
+        assert_eq!(scope(false), "tile-bar-row");
+        assert_eq!(scope(true), "tile-bar-column");
+        assert_ne!(seat(), control(0), "the seat is not a control");
+        assert_ne!(control(0), control(1));
     }
 }

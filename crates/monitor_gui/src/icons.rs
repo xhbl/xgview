@@ -10,7 +10,7 @@
 //! it is asked for, which is what lets one definition serve the bar and anything
 //! else that needs it.
 
-use egui::{CornerRadius, Id, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, vec2};
+use egui::{Color32, CornerRadius, Id, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, vec2};
 
 use crate::theme;
 
@@ -120,8 +120,8 @@ pub fn button_sized_glyph(
     glyph: f32,
 ) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
-    paint_button(ui, rect, &response, icon, selected, muted, side, glyph);
-    response.on_hover_text(tooltip)
+    paint_button(ui, rect, &response, icon, selected, muted, side, glyph, false, None);
+    hover_text(response, tooltip)
 }
 
 /// [`button_sized`] carrying an explicit [`Id`].
@@ -143,19 +143,70 @@ pub fn button_at(
     // The space is allocated first - it is what lays the row out - and the
     // interaction is then claimed under the caller's id.
     let (_auto, rect) = ui.allocate_space(Vec2::splat(side));
+    button_in(ui, rect, id, icon, selected, muted, tooltip, false)
+}
+
+/// A button drawn in a rectangle the caller has placed.
+///
+/// The magnified viewport's bar lays its controls out in the picture's own
+/// frame, so their rectangles are known before egui's layout runs; everything
+/// else about the button - the interaction, the frame, the focus ring - is
+/// egui's own. `turned` draws the glyph with the picture, see [`paint_turned`].
+pub fn button_in(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    icon: Icon,
+    selected: bool,
+    muted: bool,
+    tooltip: &str,
+    turned: bool,
+) -> Response {
     // A muted button is inert: drawn so the row keeps its shape, but nothing
     // can land on it - the pointer cannot click it and the keyboard walk cannot
     // focus it, because there is nothing it could do. `Sense::hover` keeps it
     // out of both, while `Sense::click` would put it in the focus order.
     let sense = if muted { Sense::hover() } else { Sense::click() };
     let response = ui.interact(rect, id, sense);
-    paint_button(ui, rect, &response, icon, selected, muted, side, GLYPH);
-    response.on_hover_text(tooltip)
+    paint_button(ui, rect, &response, icon, selected, muted, rect.width(), GLYPH, turned, None);
+    hover_text(response, tooltip)
+}
+
+/// The red control a call ends with: [`button_in`] painted in the colour the
+/// bars use for danger.
+///
+/// The frame is the warning red rather than the widget's fill, so the one
+/// control a call has cannot be mistaken for another; the lit look a press and
+/// the focus give it are still egui's.
+pub fn danger_in(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    icon: Icon,
+    tooltip: &str,
+    turned: bool,
+) -> Response {
+    let response = ui.interact(rect, id, Sense::click());
+    paint_button(ui, rect, &response, icon, false, false, rect.width(), GLYPH, turned, Some(theme::ERROR));
+    hover_text(response, tooltip)
+}
+
+/// [`Response::on_hover_text`], with an empty tooltip meaning none: the bar's
+/// controls carry no word of their own, and an empty box would still be drawn.
+fn hover_text(response: Response, tooltip: &str) -> Response {
+    if tooltip.is_empty() {
+        response
+    } else {
+        response.on_hover_text(tooltip)
+    }
 }
 
 /// Draws a button's frame and glyph; the allocation is the caller's, so that
 /// the automatic and the explicit id forms share one painting. `glyph` is the
-/// share of the button the drawing takes, see [`button_sized_glyph`].
+/// share of the button the drawing takes, see [`button_sized_glyph`]; `turned`
+/// draws the glyph with the picture, and `fill` overrides the frame's colour for
+/// the one button that is a warning rather than a control.
+#[allow(clippy::too_many_arguments)]
 fn paint_button(
     ui: &Ui,
     rect: Rect,
@@ -165,6 +216,8 @@ fn paint_button(
     muted: bool,
     side: f32,
     glyph: f32,
+    turned: bool,
+    fill: Option<Color32>,
 ) {
     if !ui.is_rect_visible(rect) {
         return;
@@ -172,7 +225,12 @@ fn paint_button(
     let visuals = ui.style().interact_selectable(response, selected);
     let corner = CornerRadius::same(theme::radius::M);
     let frame = rect.expand(visuals.expansion);
-    ui.painter().rect_filled(frame, corner, visuals.weak_bg_fill);
+    ui.painter().rect_filled(frame, corner, fill.unwrap_or(visuals.weak_bg_fill));
+    if fill.is_some() && (response.hovered() || response.is_pointer_button_down_on()) {
+        // A filled button still answers the pointer: the frame's colour is the
+        // button's own, so the light a hover and a press give it is laid over it.
+        ui.painter().rect_filled(frame, corner, Color32::from_white_alpha(18));
+    }
     if visuals.bg_stroke.width > 0.0 {
         // The focus ring arrives this way: egui paints `widgets.active` for
         // whatever has the keyboard focus, and that state carries a stroke.
@@ -184,19 +242,44 @@ fn paint_button(
     // project's text colour; egui's text widgets take it too, so an icon that
     // sits beside a text button has to as well, or it reads as a dimmer kind of
     // button. `muted` is the one case that is deliberately dim.
-    let color = if muted {
+    let color = if fill.is_some() {
+        Color32::WHITE
+    } else if muted {
         theme::TEXT_DIM
     } else {
         ui.visuals()
             .override_text_color
             .unwrap_or_else(|| visuals.text_color())
     };
-    paint(ui.painter(), glyph_rect, icon, Stroke::new(stroke_width(extent), color));
+    paint_turned(ui.painter(), glyph_rect, icon, Stroke::new(stroke_width(extent), color), turned);
 }
 
 /// Draws `icon` filling `rect`.
 pub fn paint(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke) {
     paint_turned(painter, rect, icon, stroke, false);
+}
+
+/// A point of the unit square placed on `rect`, turned with the picture when
+/// `turned`.
+fn unit_at(rect: Rect, turned: bool, x: f32, y: f32) -> Pos2 {
+    if turned {
+        Pos2::new(rect.right() - y * rect.height(), rect.top() + x * rect.width())
+    } else {
+        Pos2::new(rect.left() + x * rect.width(), rect.top() + y * rect.height())
+    }
+}
+
+/// The unit square's \((x_0, y_0) - (x_1, y_1)\) placed on `rect`, turned with
+/// the picture when `turned`.
+///
+/// The two corners are normalized rather than taken as minimum and maximum: a
+/// quarter turn swaps the direction of both axes, so the corner that was the
+/// square's top-left is the screen's top-right once it is turned, and
+/// `Rect::from_min_max` would build an inverted, empty rectangle. That is how
+/// the microphone lost its capsule and the picture fit its frame once the bar
+/// turned with a portrait wall.
+fn unit_rect(rect: Rect, turned: bool, x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
+    Rect::from_two_pos(unit_at(rect, turned, x0, y0), unit_at(rect, turned, x1, y1))
 }
 
 /// Draws `icon` filling `rect`, turned a quarter turn clockwise when `turned`.
@@ -205,13 +288,8 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke) {
 /// left edge becomes the screen's top edge. A bar that turns with the picture
 /// carries its icons turned the same way.
 pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, turned: bool) {
-    let at = |x: f32, y: f32| {
-        if turned {
-            Pos2::new(rect.right() - y * rect.height(), rect.top() + x * rect.width())
-        } else {
-            Pos2::new(rect.left() + x * rect.width(), rect.top() + y * rect.height())
-        }
-    };
+    let at = |x: f32, y: f32| unit_at(rect, turned, x, y);
+    let square = |x0: f32, y0: f32, x1: f32, y1: f32| unit_rect(rect, turned, x0, y0, x1, y1);
     let line = |points: &[Pos2]| Shape::line(points.to_vec(), stroke);
     // The speaker both sound icons carry, so the two read as one control.
     let speaker = || {
@@ -233,7 +311,7 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
         }
         Icon::Grid => {
             for (x, y) in [(0.04, 0.04), (0.54, 0.04), (0.04, 0.54), (0.54, 0.54)] {
-                let tile = Rect::from_min_max(at(x, y), at(x + 0.42, y + 0.42));
+                let tile = square(x, y, x + 0.42, y + 0.42);
                 painter.rect_stroke(tile, CornerRadius::same(1), stroke, StrokeKind::Inside);
             }
         }
@@ -300,16 +378,16 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
         Icon::Portrait => {
             // A tall viewport, 9:16 - the shape the wall takes once the button
             // is pressed.
-            let body = Rect::from_min_max(at(0.247, 0.05), at(0.753, 0.95));
+            let body = square(0.247, 0.05, 0.753, 0.95);
             painter.rect_stroke(body, CornerRadius::same(1), stroke, StrokeKind::Inside);
         }
         Icon::Landscape => {
             // A wide viewport, 16:9.
-            let body = Rect::from_min_max(at(0.05, 0.247), at(0.95, 0.753));
+            let body = square(0.05, 0.247, 0.95, 0.753);
             painter.rect_stroke(body, CornerRadius::same(1), stroke, StrokeKind::Inside);
         }
         Icon::AspectRatio => {
-            painter.rect_stroke(Rect::from_min_max(at(0.05, 0.20), at(0.95, 0.80)), CornerRadius::same(1), stroke, StrokeKind::Inside);
+            painter.rect_stroke(square(0.05, 0.20, 0.95, 0.80), CornerRadius::same(1), stroke, StrokeKind::Inside);
             painter.add(line(&[at(0.27, 0.52), at(0.27, 0.40), at(0.41, 0.40)]));
             painter.add(line(&[at(0.73, 0.48), at(0.73, 0.60), at(0.59, 0.60)]));
         }
@@ -325,7 +403,7 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
         }
         Icon::Mic => {
             // The capsule, its yoke and its stand.
-            let capsule = Rect::from_min_max(at(0.36, 0.06), at(0.64, 0.56));
+            let capsule = square(0.36, 0.06, 0.64, 0.56);
             painter.rect_stroke(capsule, CornerRadius::same(6), stroke, StrokeKind::Inside);
             painter.add(line(&[at(0.22, 0.44), at(0.22, 0.56), at(0.50, 0.74), at(0.78, 0.56), at(0.78, 0.44)]));
             painter.add(line(&[at(0.50, 0.74), at(0.50, 0.92)]));
@@ -399,5 +477,25 @@ mod tests {
         };
 
         assert_eq!(run(&["a", "b", "c"]), run(&["c", "a", "b"]));
+    }
+
+    /// A turned icon is still drawn inside its square and is not inverted: the
+    /// rectangles the microphone's capsule and the picture fit's frame are made
+    /// of have to come out with a positive size whichever way the picture is
+    /// drawn, and the turn swaps their axes.
+    #[test]
+    fn a_turned_rectangle_is_normalized_and_stays_on_its_icon() {
+        let square = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::splat(40.0));
+        for turned in [false, true] {
+            // The microphone's capsule: 0.28 wide and 0.50 tall in the square.
+            let capsule = unit_rect(square, turned, 0.36, 0.06, 0.64, 0.56);
+            assert!(capsule.width() > 0.0 && capsule.height() > 0.0, "inverted with turned={turned}");
+            assert!(square.contains_rect(capsule), "outside its icon with turned={turned}");
+            if turned {
+                assert!(capsule.width() > capsule.height(), "the capsule lies down when turned");
+            } else {
+                assert!(capsule.height() > capsule.width(), "and stands up when not");
+            }
+        }
     }
 }

@@ -2064,9 +2064,9 @@ the system has already moved.
 start with ten channels. It did not reproduce on relaunch, and nothing in the
 inset or resize paths points at it.*
 
-## 32. The magnified viewport's bar: the wall answers for a strip of its own
+## 32. The magnified viewport's bar: a strip of the interface's own buttons
 
-*All platforms — 2026-10-19, 1.4.85–1.4.87.*
+*All platforms — 2026-10-19, 1.4.85–1.4.87; egui's own buttons, 2026-10-25.*
 
 **What it is.** A small strip of controls drawn inside the magnified viewport:
 the picture fit, a sound switch, and (from 1.5) the microphone. It is not a
@@ -2086,12 +2086,68 @@ they were, so the press that used to summon them summons the strip; while they
 are up the wall is between them and the same depth is just inside the tile. No
 separate offset is computed: the tile's edge is the offset.
 
-**Who answers it.** The wall, never egui. The bar is painted on the wall's own
-painter, read from the tile's `Response`, and `owner` stays `Grid`: the bars are
-not woken, the wall is not resized under the finger, and the press is answered
-from the same interaction that draws the picture. The alternatives - a widget, an
-`Area`, a modal - were rejected for that reason; each of them would take the
-press out of the wall's hands.
+**Who answers it.** Since 1.5 the strip is a row of egui's own buttons -
+`icons::button_in`, a button placed where the picture puts it rather than one
+egui lays out - registered with the navigation layer under a scope of its own
+(`tile-bar-row`, or `tile-bar-column` once the picture is turned). Only the
+glyphs are drawn by hand, the same bargain the toolbar's icon buttons make. That
+is what makes the bar behave like the rest of the interface for free: a press
+lights the control it went down on, from the press and not the release (egui's
+`widgets.active`), the ring is the focus the arrows walk, and the confirm key is
+egui's own click on whatever has that focus. Until then the strip was answered
+from the wall's painter and the tile's `Response`, with `Bar::armed` tracking a
+cursor by hand, and the viewer saw a strip that looked like the bars and
+behaved unlike them: a press that lit nothing until the finger came up, a ring
+that could not be walked, a focus that was not egui's at all.
+
+**The seat.** The bar opens on a *seat*: a focusable, invisible, non-interactive
+widget laid at the strip's first point - the trick the portrait fit picker uses
+for its hint. It draws nothing and answers nothing, and it is a focus target
+rather than a stop of the walk: it is not registered with the navigation layer,
+so no arrow can walk back onto it, and `handle_keys` maps the first arrow off it
+onto the first control (the handset while a call is up). A confirm key on the
+seat is therefore spent, which is the rule the ring follows everywhere - it is
+the arrows' cursor, and a bar nobody has walked carries none.
+
+**Keyboard opens it at the bottom.** The confirm key brings the strip up along
+the bottom edge: the remote is not pointing at an edge, and the status side is
+where a strip of controls is expected. A press in a band still opens it on that
+band's side, and `Bar::dock` remembers the side the last opening used.
+
+**The clock and the way out.** Eight seconds after the last operation on it, or
+as soon as the picture is stepped, panned, or the wall is given to something
+else, the strip goes. Every key it answers counts as an operation, not only the
+presses - the early `return` of the controls branch used to leave the bar's clock
+counting from the opening, so a viewer walking it saw it vanish mid-walk. `Back`
+takes it down and the magnification after it, which means `Back` is the bar's
+before it is the panels': the controls branch hands the focus back to the wall
+and hides the strip, and the next press is the wall's. A press on the picture
+closes it; a press on the strip itself (the padding included) does not, so
+aiming at a control cannot dismiss it by grazing the strip; a press in the band
+outside the strip closes it too, because that part is outside the bar. The 300 ms
+guard after opening keeps the second press of the double press that opened it
+from pressing a control or shutting it.
+
+**The ring and the press.** A press lights the control under the pointer for as
+long as it is held, and nothing after it: that is egui's `widgets.active`, the
+same look the buttons of the bars give a press. The ring is the focus, so only an
+arrow puts it on a control and only an arrow moves it; a touch never does. A call
+started by the remote keeps the ring: the microphone it was on has become the
+handset, so the focus is moved into that control rather than being lost with the
+old one - the press that started the call from the keyboard is the press that can
+end it. A focus that no longer names a control of the bar goes back to the seat.
+
+**Turning the glyphs.** The portraits' bar carries its icons turned with the
+picture, and a turned rectangle has to be built from its two corners rather than
+from a minimum and a maximum: a quarter turn swaps the direction of both axes, so
+the corner that was the icon's top-left is the screen's top-right and
+`Rect::from_min_max` produced an inverted, empty rectangle. That is how the
+microphone lost its capsule (the head, the part that was a rectangle) and the
+picture fit its outer frame, while the strokes that draw the yoke, the stand and
+the corner ticks came out whole. `icons::unit_rect` builds them with
+`Rect::from_two_pos` now, and a test holds the turned capsule to a positive size
+inside its square.
+
 
 **The strip.** Every control is a square the depth of the strip, its glyph 22
 points, drawn from the icon set and turned with the picture: the frame with the
@@ -2109,27 +2165,6 @@ than above the status bar: the news belongs to the picture the viewer is looking
 at, not to a channel. `Toast::center` carries that difference, and the label is
 drawn with `TextWrapMode::Extend` - an `Area` starts with no width of its own and
 a wrapped label stacked a two-character fit name one character per line.
-
-**The clock and the way out.** Eight seconds after the last press on it, or as
-soon as the picture is stepped, panned, or the wall is given to something else,
-the strip goes. `Back` takes it down and the magnification after it. A press on
-the picture closes it; a press on the strip itself (the padding included) does
-not, so aiming at a control cannot dismiss it by grazing the strip; a press in
-the band outside the strip closes it too, because that part is outside the bar.
-The 300 ms guard after opening keeps the second press of the double press that
-opened it from pressing a control or shutting it.
-
-**When the selection is drawn.** The strip's ring is the remote's cursor, which
-is the reading §24 gives the wall's: a bar a finger opens carries none, because
-the finger presses the control it aimed at and watches the picture answer, and
-the press on the band lights nothing else either. A bar the confirm key opens
-comes up with its first control selected, and any arrow pressed while it is up
-lights the selection from then on - that is how a bar opened by touch gets one.
-A touch on a control neither lights it nor takes it away: the ring follows the
-remote, and only a key changes it. `Bar::armed` holds the answer, is written by
-`show` and `step`, and is cleared when the bar goes. Before that the strip
-painted a selection whenever it was up, which put a cursor on screen for a
-gesture that has no cursor.
 
 **The fits.** The wall dresses a tile with `aspect` in landscape and
 `portrait_aspect` upright - two choices, per camera, chosen by orientation. The

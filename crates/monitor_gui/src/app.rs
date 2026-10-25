@@ -1149,6 +1149,11 @@ impl XgViewApp {
             ("passphrase-body", ScopeDef::new(Axis::Column)),
             ("juanz-row", ScopeDef::new(Axis::Row)),
             ("aspect-picker", ScopeDef::new(Axis::Column)),
+            // The magnified viewport's bar: a row across the wall, a column down
+            // a turned picture. No exits - a strip has nothing above or below it
+            // to walk to, and Back is the way out.
+            ("tile-bar-row", ScopeDef::new(Axis::Row)),
+            ("tile-bar-column", ScopeDef::new(Axis::Column)),
         ];
 
         let mut app = Self {
@@ -1849,11 +1854,11 @@ impl XgViewApp {
         self.talking = on;
         self.talk_index = on.then(|| self.scheduler.zoom()).flatten();
         self.manager.talk().set_talking(on);
-        // The bar holds one control while the call is up, so the remote's place
-        // in it is the first - the fit it was on before has gone.
-        if on {
-            self.tile_bar.set_focus(0);
-        }
+        tracing::debug!(target: "xgview::talk", on, "the talk-back changed");
+        // The bar now carries the one control that ends the call instead of the
+        // microphone the press landed on, so the focus it had is gone with it;
+        // the bar's seat puts the remote back on the strip without a ring, and
+        // the first arrow is what reaches the handset. See `tilebar`.
     }
 
     fn set_fullscreen(&mut self, ctx: &egui::Context, enabled: bool) {
@@ -3308,6 +3313,17 @@ impl XgViewApp {
             self.ring_aimed = true;
         }
 
+        // The magnified viewport's bar goes when the viewer stops using it, not
+        // eight seconds after it opened: every key it answers keeps its clock
+        // running. This is done here, before any of the branches below can
+        // return - the bar's own keys are the navigation layer's, and that path
+        // leaves this function early.
+        if self.tile_bar.is_open()
+            && (keys.left || keys.right || keys.up || keys.down || keys.enter || keys.back)
+        {
+            self.tile_bar.touch(Instant::now());
+        }
+
         // The reorder mode owns Back: it drops the arrangement and nothing
         // else, so a press that means "never mind" cannot also close the panel
         // behind it.
@@ -3436,23 +3452,39 @@ impl XgViewApp {
                 }
             };
             if let (Some(dir), Some(focused)) = (dir, ctx.memory(|memory| memory.focused())) {
-                if let Some(target) = self.nav.step(focused, dir) {
-                    ctx.memory_mut(|memory| memory.request_focus(target));
-                } else if dir == Dir::Down && self.nav.scope_of(focused) == Some("settings-body") {
-                    // The press had nowhere to move the focus, which is the
-                    // case at the end of a tab: what follows the last control -
-                    // the adb line, the table of keys - is text and has no
-                    // control to be walked onto. A remote has no wheel, so the
-                    // press moves the body instead. Asked for here rather than
-                    // applied here: only a scroll area that is being drawn reads
-                    // a scroll request, and this runs before anything is drawn.
-                    let points = ctx.screen_rect().height() * REMOTE_SCROLL_FRACTION;
-                    self.body_scroll = Some(points);
+                match self.nav.step(focused, dir) {
+                    Some(target) => {
+                        ctx.memory_mut(|memory| memory.request_focus(target));
+                    }
+                    None => {
+                        if dir == Dir::Down && self.nav.scope_of(focused) == Some("settings-body") {
+                            // The press had nowhere to move the focus, which is
+                            // the case at the end of a tab: what follows the last
+                            // control - the adb line, the table of keys - is text
+                            // and has no control to be walked onto. A remote has
+                            // no wheel, so the press moves the body instead.
+                            // Asked for here rather than applied here: only a
+                            // scroll area that is being drawn reads a scroll
+                            // request, and this runs before anything is drawn.
+                            let points = ctx.screen_rect().height() * REMOTE_SCROLL_FRACTION;
+                            self.body_scroll = Some(points);
+                        }
+                    }
                 }
             }
         }
 
         if !grid_owns {
+            // The magnified viewport's bar opens on its seat, which is not one
+            // of its controls: the first arrow is what steps off it, onto the
+            // first control - the handset while a call is up - and no arrow ever
+            // walks back onto it. See `tilebar::seat`.
+            if self.tile_bar.is_open()
+                && ctx.memory(|memory| memory.focused()) == Some(tilebar::seat())
+                && (keys.left || keys.right || keys.up || keys.down)
+            {
+                ctx.memory_mut(|memory| memory.request_focus(tilebar::control(0)));
+            }
             // egui has walked the focus already - and dropped it, if this was
             // Escape. Back is therefore one step out of the controls and not
             // two: a panel opened over the wall closes, and otherwise the wall
@@ -3462,7 +3494,14 @@ impl XgViewApp {
                 if crate::juanz::close(ctx) {
                     return;
                 }
-                if self.layout_picker {
+                // Back unwinds one layer at a time, and the magnified viewport's
+                // bar is a layer: it goes first, before the panels behind it and
+                // long before the magnification. The focus goes back to the wall
+                // with it, or the next press would be read by nothing at all.
+                if self.tile_bar.is_open() {
+                    self.tile_bar.hide();
+                    self.leave_controls(ctx);
+                } else if self.layout_picker {
                     self.layout_picker = false;
                     self.restore_focus = self.layout_picker_from.take();
                 } else if self.portrait_aspect_picker {
@@ -3497,41 +3536,13 @@ impl XgViewApp {
         }
 
         if self.scheduler.is_zoomed() {
-            if self.tile_bar.is_open() {
-                // The bar owns the remote while it is up: the arrows move its
-                // selection, the confirm key presses the selected control, and
-                // Up and Down are spent - a strip of controls has nothing above
-                // or below it to walk to. The channel step is not reachable
-                // until the bar is down, which is the point of it being a
-                // surface of its own; see `crate::tilebar`.
-                let mut touched = false;
-                let buttons = self.tile_bar_buttons();
-                // A key on the bar is the remote driving it, so the selection is
-                // drawn from here on - a bar a finger opened carries none. See
-                // `tilebar::Bar::armed`.
-                if keys.left || keys.right || keys.up || keys.down {
-                    self.tile_bar.arm();
-                }
-                if keys.left {
-                    self.tile_bar.step(false, buttons);
-                    touched = true;
-                }
-                if keys.right {
-                    self.tile_bar.step(true, buttons);
-                    touched = true;
-                }
-                if keys.up || keys.down {
-                    touched = true;
-                }
-                if keys.enter && keys.enter_fresh {
-                    self.tile_bar.arm();
-                    self.tile_bar_activate();
-                    touched = true;
-                }
-                if touched {
-                    self.tile_bar.touch(Instant::now());
-                }
-            } else {
+            // With the bar up its controls are egui's own buttons, registered
+            // with the navigation layer above: the arrows walk them and the
+            // confirm key presses the one the ring is on, which is not the wall's
+            // business. The channel step is not reachable until the bar is down,
+            // which is the point of it being a layer of its own, and the bar's
+            // clock is kept with the rest of the keys above.
+            if !self.tile_bar.is_open() {
                 // A magnified viewport is one channel, not a grid: Right and
                 // Left are the next and previous channel in channel order, and
                 // Up and Down have no grid to walk, so they go straight to the
@@ -3550,10 +3561,17 @@ impl XgViewApp {
                 }
                 // The confirm key brings the viewport's bar up rather than
                 // unwinding the magnification: Back is the way out now, a layer
-                // at a time. A held key is not a second press. It is the remote
-                // asking, so the bar comes up with its selection drawn.
+                // at a time. A held key is not a second press. The bar appears
+                // without its selection drawn - the focus is put on its seat, not
+                // on a control - and the first arrow is what lights it.
+                //
+                // It comes up along the bottom: the remote asks for it without
+                // pointing at an edge, and the status side is where the hand and
+                // the eye expect a strip of controls. A press in a band still
+                // opens it on that band's side - the finger has said which.
                 if keys.enter && keys.enter_fresh {
-                    self.tile_bar.show(self.tile_bar.dock(), Instant::now(), true);
+                    self.tile_bar.show(tilebar::Dock::Bottom, Instant::now());
+                    ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
                 }
             }
         } else {
@@ -6793,8 +6811,14 @@ impl XgViewApp {
         // The fingers are the wall's on the same terms as the keys: while
         // something else owns them - a panel, a window, or the black - a gesture
         // made over the wall is the panel's to answer, and the picture keeps the
-        // window it has. See `handle_keys`, which runs on the same answer.
-        if self.scheduler.is_zoomed() && !self.blackout_on && self.owner == Owner::Grid {
+        // window it has. See `handle_keys`, which runs on the same answer. The
+        // magnified viewport's bar is the wall's own surface even though its
+        // controls hold the focus, so a gesture over the picture still reaches
+        // the picture - and puts the bar away doing it.
+        if self.scheduler.is_zoomed()
+            && !self.blackout_on
+            && (self.owner == Owner::Grid || self.tile_bar.is_open())
+        {
             if let Some(dest) = self.magnified_area(&cameras, &view, wall, dx) {
                 // A pinch or a wheel pushes the picture in about where it is
                 // aimed; a drag moves it. The first two are one gesture or the
@@ -6983,27 +7007,10 @@ impl XgViewApp {
                     // does: its second press lands on the picture after the bar
                     // is down.
                     self.tile_bar.hide();
-                } else if !self.tile_bar.ignoring(now) {
-                    match hit {
-                        tilebar::Hit::Button(button) => {
-                            // The wall answers for the bar, so whatever control
-                            // of the bars was holding the remote's focus gives
-                            // it up - the same hand-over a press on a tile
-                            // makes.
-                            self.leave_controls(ui.ctx());
-                            self.tile_bar.set_focus(button);
-                            self.tile_bar_activate();
-                            self.tile_bar.touch(now);
-                        }
-                        tilebar::Hit::Inside => self.tile_bar.touch(now),
-                        // The band is the edge the bar came from, and the part
-                        // of it outside the strip is outside the bar: a press
-                        // there takes the bar down like a press on the picture.
-                        // The guard keeps the second press of a double press
-                        // that opened the bar from shutting it again.
-                        tilebar::Hit::Band(_) => self.tile_bar.hide(),
-                        tilebar::Hit::Outside => unreachable!("handled above"),
-                    }
+                } else {
+                    // A press on the strip that did not land on a control - the
+                    // padding between them - is still the bar being used.
+                    self.tile_bar.touch(now);
                 }
                 consumed = true;
             } else if let Some(dock) = layout.band_at(pos) {
@@ -7018,15 +7025,12 @@ impl XgViewApp {
                 // control will be drawn still asks for the bar - though the
                 // band stops short of the control's middle, so only the edge
                 // is being tapped.
-                // The bar is the wall's, so it takes the keys back from any
-                // control that had them: the next Enter presses the bar rather
-                // than the button the viewer was on before.
-                self.leave_controls(ui.ctx());
-                // A finger on the band asks for the bar, and asks for nothing
-                // else: the selection is not drawn, and the wall's ring is not
-                // lit either - the ring is the remote's cursor, and a touch is
-                // not aiming with it. The first arrow lights both.
-                self.tile_bar.show(dock, now, false);
+                self.tile_bar.show(dock, now);
+                // The bar is the wall's surface, so the focus comes off whatever
+                // control had it and lands on the bar's seat: a bar opened by a
+                // finger carries no cursor either, and the first arrow is what
+                // walks into its controls.
+                ui.ctx().memory_mut(|memory| memory.request_focus(tilebar::seat()));
                 consumed = true;
             }
         }
@@ -7058,19 +7062,34 @@ impl XgViewApp {
         }
 
         if self.tile_bar.is_open() {
-            let hover = actions.hover_pos.and_then(|pos| match layout.hit(pos) {
-                tilebar::Hit::Button(button) => Some(button),
-                _ => None,
-            });
-            tilebar::paint(
-                &ui.painter_at(rect),
-                &layout,
-                rotated,
-                self.tile_bar.focus(),
-                self.tile_bar.armed(),
-                hover,
-                &controls,
-            );
+            // The controls are egui's own buttons, placed in the picture's own
+            // frame: a press lights the one it went down on, the ring is the
+            // focus the navigation layer puts there, and the confirm key reaches
+            // it as a click on that focus. What is left here is the guard - the
+            // gesture that opened the bar must not also press it - and the act.
+            if let Some(control) = tilebar::draw(ui, &mut self.nav, &layout, rotated, &controls) {
+                if !self.tile_bar.ignoring(now) {
+                    // Was the ring on a control, or still on the seat? The
+                    // difference is whether the remote is driving the bar.
+                    let driven = ui
+                        .ctx()
+                        .memory(|memory| memory.focused())
+                        .is_some_and(|id| id != tilebar::seat());
+                    let talking = self.talking;
+                    self.tile_bar.touch(now);
+                    self.tile_bar_activate(control);
+                    if self.talking != talking {
+                        // The microphone has become the handset and the ring goes
+                        // with it: a call the remote started is hung up by the
+                        // same key, without a walk. A press that started it is
+                        // not aiming with a ring, and keeps the cursor on the
+                        // seat. See `tilebar::seat`.
+                        let target =
+                            if driven { tilebar::control(0) } else { tilebar::seat() };
+                        ui.ctx().memory_mut(|memory| memory.request_focus(target));
+                    }
+                }
+            }
         }
 
         consumed
@@ -7125,40 +7144,36 @@ impl XgViewApp {
         controls
     }
 
-    /// How many controls the bar holds for the magnified camera, which is what
-    /// the walk wraps at.
-    fn tile_bar_buttons(&self) -> usize {
-        self.tile_bar_controls().len()
-    }
-
-    /// Answers the control the bar is on: the handset that ends a call, the
+    /// Answers the control at `control`: the handset that ends a call, the
     /// picture fit, the sound switch when the camera has sound, or the
     /// microphone when it has a back channel.
+    ///
+    /// It is the cursor's index for a key and the pressed control's for a finger
+    /// - a press acts on what it landed on without moving the cursor. See
+    /// `tilebar::Bar::flash`.
     ///
     /// The fit this writes is the magnified viewport's own: it is kept per
     /// camera, and the wall's landscape and portrait fits - the pair the settings
     /// panel and the portrait aspect picker write - are not touched. Until the
     /// first press the fit is the camera's own ratio, `Original`, which is where
     /// the walk starts.
-    fn tile_bar_activate(&mut self) {
+    fn tile_bar_activate(&mut self, control: usize) {
         // A call is up, so the bar holds one control and it is the way out.
         if self.talking {
             self.set_talking(false);
             return;
         }
         // The controls after the picture fit are the sound switch and then the
-        // microphone, each present only when the camera earns it. The index is
-        // the one the press or the walk left the bar on.
+        // microphone, each present only when the camera earns it.
         let sound = tilebar::SOUND && self.magnified_has_audio();
-        let focus = self.tile_bar.focus();
-        if sound && focus == 1 {
+        if sound && control == 1 {
             self.sound_on = !self.sound_on;
             self.config.sound_on = self.sound_on;
             self.apply_audio();
             self.mark_dirty();
             return;
         }
-        if self.magnified_has_backchannel() && focus == 1 + usize::from(sound) {
+        if self.magnified_has_backchannel() && control == 1 + usize::from(sound) {
             self.set_talking(!self.talking);
             return;
         }
@@ -7636,10 +7651,17 @@ impl eframe::App for XgViewApp {
         // back to the grid, a step to the next channel, the blank, a panel over
         // the wall - takes the bar with it. The step and the two zooms also
         // close it where they happen; this is the net under all of them.
+        //
+        // The focus is the bar's own while it is up - its seat or one of its
+        // controls - so that is not something else having taken the wall.
+        // Anything else that holds the focus (a button of the bars, a panel) is.
+        let bar_has_focus = ctx
+            .memory(|memory| memory.focused())
+            .is_some_and(tilebar::owns);
         if !self.scheduler.is_zoomed()
             || self.blackout_on
             || self.panel_anchor().is_some()
-            || self.owner != Owner::Grid
+            || (self.owner != Owner::Grid && !bar_has_focus)
         {
             self.tile_bar.hide();
         }
@@ -8157,6 +8179,24 @@ impl eframe::App for XgViewApp {
                 if let Some(target) = target {
                     ctx.memory_mut(|memory| memory.request_focus(target));
                 }
+            }
+        }
+
+        // The bar is a layer of the interface, and its focus lives with its
+        // controls: one that changes under the focus - the microphone a call
+        // turns into the handset - leaves the remote with nothing, and the wall
+        // behind the bar must not take the arrows back. A focus that is no
+        // longer one of the bar's own controls goes to the bar's seat, where it
+        // draws nothing until an arrow walks it. See `tilebar`.
+        if self.tile_bar.is_open() {
+            // A focus on one of the bar's ids is the bar's, whether or not that
+            // control is drawn this frame: the microphone a call turns into the
+            // handset is one, and the handset it becomes is another. Anything
+            // else goes back to the seat, where it draws nothing until an arrow
+            // walks it off.
+            let focused = ctx.memory(|memory| memory.focused());
+            if !focused.is_some_and(tilebar::owns) {
+                ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
             }
         }
 
