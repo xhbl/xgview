@@ -2098,7 +2098,10 @@ egui's own click on whatever has that focus. Until then the strip was answered
 from the wall's painter and the tile's `Response`, with `Bar::armed` tracking a
 cursor by hand, and the viewer saw a strip that looked like the bars and
 behaved unlike them: a press that lit nothing until the finger came up, a ring
-that could not be walked, a focus that was not egui's at all.
+that could not be walked, a focus that was not egui's at all. Using it is also
+not a request for the wall's bars - `viewer_active` answers false while it is up,
+where the focus being on a control would otherwise hold the bars woken - so a
+press on a control cannot slide the chrome back over the picture it belongs to.
 
 **The seat.** The bar opens on a *seat*: a focusable, invisible, non-interactive
 widget laid at the strip's first point - the trick the portrait fit picker uses

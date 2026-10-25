@@ -2068,6 +2068,13 @@ impl XgViewApp {
     /// away again 3.5 seconds later. See [`Self::wall_event`] for the whole of
     /// the decision, one event at a time.
     fn viewer_active(&self, ctx: &egui::Context) -> bool {
+        // The magnified viewport's bar is the picture's own surface, not one of
+        // the wall's bars: using it is the viewer at the picture. Waking the
+        // bars for it would take the next press out of the strip's hands - and
+        // move the wall under it - so none of it counts as asking for them.
+        if self.tile_bar.is_open() {
+            return false;
+        }
         // The remote's focus is in a bar, in the settings panel or in a window:
         // the viewer is in the menus, and everything they do belongs to them.
         if self.owner != Owner::Grid {
