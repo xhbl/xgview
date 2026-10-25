@@ -135,7 +135,10 @@ streams-volume = Playback volume
 streams-sound = Sound on or off
 streams-volume-hint = Sound plays for the magnified camera only.
 streams-talk-mute = Mute the sound while the microphone is open
-streams-talk-mute-hint = Enable if the speaker and microphone are close enough to cause feedback. Mutes speaker output during calls.
+streams-talk-mute-hint = Enable if the speaker and microphone are close enough to cause feedback. Mutes speaker output during calls.streams-talk-mute-hint = Enable if the speaker and microphone are close enough to cause feedback. Mutes speaker output during calls.
+streams-audio-output = Output device
+streams-audio-input = Microphone
+streams-audio-system = System default
 
 ## Cameras
 cameras-confirm-order = Confirm order

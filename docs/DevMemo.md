@@ -2702,3 +2702,55 @@ the camera - which `set_target` already reaches from every direction.
 and nothing above it changes. The lifecycle deliberately stayed out of the trait:
 `keep_alive` and `close` are asynchronous, an `async fn` in a public trait is not
 object safe, and nothing here needs a second implementation to share them yet.
+
+---
+
+## 36. The speaker is chosen, and a stream that never asks for data is not kept
+
+*Landed 2026-10-25, in 1.5.46.*
+
+**A machine with two outputs has no "the" output.** A Debian kiosk here has a USB
+audio dongle on card 0 and a television on HDMI at card 1 device 3. ALSA's
+`default` is card 0, so the viewer played into a dongle with nothing plugged into
+it while the picture was on the television - and there was no way to say
+otherwise, because the sink asked `default_output_device()` and nothing else.
+The settings panel now lists the platform's own devices next to a "system
+default", stores the chosen name in the configuration, and reopens the sink when
+it changes. The microphone gets the same list, for the same reason. Android is
+left out: its capture runs on the voice-communication path the platform's echo
+canceller needs, and there is no device there to name.
+
+**The names are the platform's, and they go stale.** `plughw:CARD=PCH,DEV=3` on
+Linux, `Speakers (Realtek(R) Audio)` on Windows, a device's own name on macOS.
+None of them is stable against a driver update, a language change or a device
+unplugged between two runs, so a name that no longer opens falls back to the
+default and says so in the log. Storing an index instead would be worse: indices
+move when a device is added.
+
+**A stream can be playing and write nothing at all.** This one cost an afternoon
+and is worth writing down. On this kiosk the sound was silent with no error
+anywhere: the PCM reported `state: RUNNING`, and `avail` grew by exactly 3 s of
+frames per 3 s of wall clock - the hardware consuming, the application writing
+nothing. The cause is in how ALSA reports readiness for a `dmix` PCM: `poll`
+returns `POLLIN`, where a device backed by `hw:` or `plughw:` returns `POLLOUT`,
+and `cpal`'s worker matches `Flags::OUT` exactly - anything else falls through to
+`PollDescriptorsFlow::Continue`, which polls again and writes nothing. `default`
+on a machine without PulseAudio or PipeWire is `dmix`, and that is exactly what a
+minimal kiosk is. The measurements, from a `ctypes` probe that opens each device
+the way `cpal` does:
+
+| device | poll events | revents |
+| --- | --- | --- |
+| `default` (dmix) | 41 | 1 = `POLLIN` |
+| `sysdefault` | 41 | 1 = `POLLIN` |
+| `plughw:CARD=Audio,DEV=0` | 44 | 4 = `POLLOUT` |
+| `hw:CARD=PCH,DEV=3` | 44 | 4 = `POLLOUT` |
+
+So the sink counts callbacks and expects one *after* the stream has settled: a
+device that keeps asking for data - every period, twenty-odd milliseconds - is
+kept, and one that has stopped asking is dropped with a warning. That is a guard,
+not a fix, and it does not catch this case on its own: the dmix stream here does
+call back (the guard passes) and still writes nothing, so the write path is where
+that one is lost. **The real answer is to choose the device** - `hw:CARD=PCH,DEV=3`
+measured `avail` going *down*, which is a stream being fed - which is why the two
+changes landed together.

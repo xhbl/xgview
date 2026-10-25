@@ -3,7 +3,7 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 1.5.45
+## 1.5.46
 
 Changes since 1.4.98. **You can hear the camera, and talk back to it.** The
 magnified picture's bar gained a sound switch and a microphone: the camera's
@@ -25,6 +25,20 @@ gained the picture fit and the quarter turn.
   duplex unless the Audio tab makes it half duplex - the camera's sound muted
   while the microphone is open, for a machine whose microphone sits beside its
   speaker.
+- **The output device and the microphone can be chosen.** A machine with one
+  sound card needs nothing; a kiosk with a USB dongle and a television on HDMI
+  does, because the system's default is card 0 and that is not always the one
+  with a speaker behind it. Settings → Streams lists the platform's own devices
+  beside a "system default", the choice is remembered, and a device that is no
+  longer there falls back to the default rather than leaving the viewer silent.
+  Android has no such list - its routing is the system's, on the
+  voice-communication path the echo canceller needs - so the rows are not drawn
+  there.
+- **A stream that has stopped asking for data is not kept.** A sink that is
+  opened and then never fed looks like a working device from the outside, which
+  is how a `dmix` PCM on a kiosk without a sound server plays silence with no
+  error anywhere: the sink now expects a callback after the stream has settled
+  and leaves the sound off, with a line in the log, when one never comes.
 - **The Linux package links ALSA** (`libasound2`) now that there is an audio
   path, so the viewer will not start on a machine that does not have it. Every
   desktop does; a box built from a minimal image may not, so `install.sh` asks

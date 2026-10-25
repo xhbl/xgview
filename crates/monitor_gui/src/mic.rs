@@ -75,6 +75,27 @@ pub enum MicError {
     Permission,
 }
 
+/// The capture devices this machine offers, named the way the platform names
+/// them.
+///
+/// Empty on Android, where capture runs on the voice-communication path the
+/// platform's echo canceller needs: there is no device to name, so the settings
+/// panel does not offer one.
+#[cfg(not(target_os = "android"))]
+pub fn input_devices() -> Vec<crate::audio::AudioDevice> {
+    let host = cpal::default_host();
+    let Ok(devices) = host.input_devices() else { return Vec::new() };
+    let mut names: Vec<String> = devices.filter_map(|device| device.name().ok()).collect();
+    names.sort();
+    names.dedup();
+    crate::audio::labelled(crate::audio::useful_devices(names), false)
+}
+
+#[cfg(target_os = "android")]
+pub fn input_devices() -> Vec<crate::audio::AudioDevice> {
+    Vec::new()
+}
+
 impl Mic {
     /// Opens the microphone, or says why it could not.
     ///
@@ -89,7 +110,7 @@ impl Mic {
     /// has just been asked for, and a refused capture looks exactly like a machine
     /// with no microphone, so the two are told apart here. See
     /// `MainActivity.startTalkCapture`.
-    pub fn open(hub: Arc<TalkHub>) -> Result<Arc<Self>, MicError> {
+    pub fn open(hub: Arc<TalkHub>, name: Option<&str>) -> Result<Arc<Self>, MicError> {
         #[cfg(target_os = "android")]
         {
             match crate::android::start_talk_capture() {
@@ -112,9 +133,29 @@ impl Mic {
         }
         #[cfg(not(target_os = "android"))]
         {
-            let device = cpal::default_host()
-                .default_input_device()
-                .ok_or(MicError::NoDevice)?;
+            // The chosen device by name, or the system's default. A name that
+            // is no longer there is not an error either: microphones are
+            // unplugged, and the default is the better answer than a viewer
+            // that says it has none.
+            let host = cpal::default_host();
+            let device = match name {
+                Some(wanted) => host
+                    .input_devices()
+                    .ok()
+                    .and_then(|mut devices| {
+                        devices.find(|device| device.name().ok().as_deref() == Some(wanted))
+                    })
+                    .or_else(|| {
+                        tracing::warn!(
+                            target: "xgview::mic",
+                            device = wanted,
+                            "the configured microphone is not there, using the default"
+                        );
+                        host.default_input_device()
+                    })
+                    .ok_or(MicError::NoDevice)?,
+                None => host.default_input_device().ok_or(MicError::NoDevice)?,
+            };
             let supported = device.default_input_config().map_err(|err| {
                 tracing::warn!(target: "xgview::mic", error = %err, "no usable input configuration");
                 MicError::NoDevice

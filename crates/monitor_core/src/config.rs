@@ -614,6 +614,23 @@ pub struct AppConfig {
     /// Playback volume, `0.0..=1.0`, global like the switch. The magnified bar's
     /// switch decides whether anything plays, this decides how loud.
     pub volume: f32,
+    /// The output device to play through, named the way the platform names it.
+    ///
+    /// `None` is the system's default, which is what a configuration written
+    /// before this existed means, and what a machine with one sound card wants.
+    /// A machine with two - a kiosk with a USB dongle and a television on HDMI -
+    /// needs to say which one, because the system's choice is card 0 and that is
+    /// not always the one with a speaker behind it. The name can go stale (a
+    /// device unplugged, a driver renamed), so a name that no longer opens falls
+    /// back to the default rather than leaving the viewer silent.
+    pub audio_output: Option<String>,
+    /// The capture device talk-back listens to, named the same way.
+    ///
+    /// `None` is the system's default microphone. Android has no such thing to
+    /// name - its capture runs on the voice-communication path, which is what
+    /// the platform's echo canceller needs - so the setting is not offered
+    /// there and this stays `None`.
+    pub audio_input: Option<String>,
     pub reconnect: ReconnectPolicy,
     /// How long a session has to establish itself before the attempt is written
     /// off and retried: the `OPTIONS` / `DESCRIBE` / `SETUP` / `PLAY` exchange,
@@ -665,6 +682,8 @@ impl Default for AppConfig {
             talk_mute: false,
             zoom_rotate: false,
             volume: 1.0,
+            audio_output: None,
+            audio_input: None,
             reconnect: ReconnectPolicy::default(),
             handshake_timeout_ms: 15_000,
             discovery: DiscoveryConfig::default(),
@@ -1275,6 +1294,25 @@ mod tests {
         assert!(AppConfig::from_json(r#"{"name":"thing","version":3}"#).is_err());
         assert!(AppConfig::from_json(r#"[1, 2, 3]"#).is_err());
         assert!(AppConfig::from_json(r#""config.json""#).is_err());
+    }
+
+    #[test]
+    /// The two audio device names are the only place a machine's own hardware
+    /// is written down, and a configuration from before they existed has
+    /// neither: both must read back as "the system's default".
+    #[test]
+    fn the_audio_devices_default_to_the_system() {
+        let config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.audio_output, None);
+        assert_eq!(config.audio_input, None);
+
+        let mut config = AppConfig::default();
+        config.audio_output = Some("plughw:CARD=PCH,DEV=3".to_string());
+        config.audio_input = Some("KT USB Audio".to_string());
+        let text = serde_json::to_string(&config).unwrap();
+        let back: AppConfig = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.audio_output.as_deref(), Some("plughw:CARD=PCH,DEV=3"));
+        assert_eq!(back.audio_input.as_deref(), Some("KT USB Audio"));
     }
 
     #[test]

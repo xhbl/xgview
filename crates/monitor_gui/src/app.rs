@@ -1173,8 +1173,13 @@ impl XgViewApp {
         );
         // The audio sink, opened once. A machine without an output device leaves
         // `None` here, and the sound switch has nothing to drive - not a failure:
-        // the picture carries on.
-        let audio = crate::audio::Sink::open();
+        // the picture carries on. The device is the one the configuration names,
+        // or the system's default when it names none.
+        let audio = crate::audio::Sink::open(config.audio_output.as_deref());
+        // The list the settings panel will offer, once, so a machine whose
+        // devices come back unexpected says so in the log rather than only in a
+        // picture of the panel.
+        let _ = crate::audio::output_devices();
         if let Some(sink) = &audio {
             sink.set_volume(config.volume);
             manager.audio().set_output(Some(sink.clone()));
@@ -1945,7 +1950,10 @@ impl XgViewApp {
     fn set_talking(&mut self, on: bool) {
         if on {
             if self.mic.is_none() {
-                match crate::mic::Mic::open(self.manager.talk().clone()) {
+                match crate::mic::Mic::open(
+                    self.manager.talk().clone(),
+                    self.config.audio_input.as_deref(),
+                ) {
                     Ok(mic) => self.mic = Some(mic),
                     Err(crate::mic::MicError::Permission) => {
                         self.flash(monitor_i18n::tr("toast-microphone-permission"), ToastKind::Error);
@@ -5268,7 +5276,118 @@ impl XgViewApp {
                 .color(theme::TEXT_DIM),
         );
 
+        // Which device the sound leaves through, and which one the microphone
+        // listens to. A machine with one sound card never needs this; a kiosk
+        // with a USB dongle and a television on HDMI does, because the system's
+        // default is card 0 and that is not always the one with a speaker behind
+        // it. The rows are left out entirely when the platform has nothing to
+        // list - Android, whose audio routing is the system's, and a machine that
+        // reports no devices at all.
+        dirty |= self.audio_device_rows(ui);
+
         dirty
+    }
+
+    /// The output and input device choices, and whether either changed.
+    ///
+    /// The names are the platform's own and are not translated: `plughw:CARD=PCH,DEV=3`
+    /// is a fact about the machine, not a word in a language. The first entry of
+    /// each list is the system's default, which is what a configuration written
+    /// before this existed means.
+    fn audio_device_rows(&mut self, ui: &mut egui::Ui) -> bool {
+        /// The values the control cycles through: the system's default, every
+        /// device the platform lists, and the configured one even when the list
+        /// has lost it - a device that is open can drop out of the enumeration,
+        /// and the one in use has to stay reachable to be cycled away from.
+        fn options_for(
+            devices: &[crate::audio::AudioDevice],
+            current: Option<&str>,
+        ) -> Vec<Option<String>> {
+            let mut options: Vec<Option<String>> = std::iter::once(None)
+                .chain(devices.iter().map(|device| Some(device.name.clone())))
+                .collect();
+            if let Some(current) = current {
+                if !options.iter().any(|option| option.as_deref() == Some(current)) {
+                    options.push(Some(current.to_string()));
+                }
+            }
+            options
+        }
+
+        let mut changed = false;
+        let outputs = crate::audio::output_devices();
+        let inputs = crate::mic::input_devices();
+        let system = monitor_i18n::tr("streams-audio-system");
+
+        // A cycling button, not a drop-down: the popup a `ComboBox` opens is
+        // egui's own and the navigation layer cannot walk into it, so a remote
+        // would reach the control and then have no way to choose. Left and Right
+        // - or Enter, or a click - step to the next device and wrap at the ends,
+        // which is how the language picker and the OSD corners already work.
+        if !outputs.is_empty() {
+            ui.add_space(theme::space::S);
+            ui.label(monitor_i18n::tr("streams-audio-output"));
+            let mut choice = self.config.audio_output.clone();
+            let options = options_for(&outputs, self.config.audio_output.as_deref());
+            let button = controls::cycle_button(&mut self.nav, ui, &options, &mut choice, |choice| {
+                match choice {
+                    None => system.clone(),
+                    Some(name) => crate::audio::device_label(name, true),
+                }
+            });
+            self.focus_names.insert(button.id, "settings-audio-output");
+            if button.changed() {
+                self.config.audio_output = choice;
+                self.reopen_audio_sink();
+                changed = true;
+            }
+        }
+
+        if !inputs.is_empty() {
+            ui.add_space(theme::space::S);
+            ui.label(monitor_i18n::tr("streams-audio-input"));
+            let mut choice = self.config.audio_input.clone();
+            let options = options_for(&inputs, self.config.audio_input.as_deref());
+            let button = controls::cycle_button(&mut self.nav, ui, &options, &mut choice, |choice| {
+                match choice {
+                    None => system.clone(),
+                    Some(name) => crate::audio::device_label(name, false),
+                }
+            });
+            self.focus_names.insert(button.id, "settings-audio-input");
+            if button.changed() {
+                self.config.audio_input = choice;
+                // The capture is opened on the press, so a call in progress is
+                // ended here rather than left listening to the old device: the
+                // microphone is reopened, on the new one, at the next press.
+                if self.talking {
+                    self.set_talking(false);
+                }
+                self.mic = None;
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.mark_dirty();
+        }
+        changed
+    }
+
+    /// Reopens the sink after the output device changed.
+    ///
+    /// The old one is dropped with the new one's arrival: a stream is not
+    /// reopened in place, and the ring buffer it was draining goes with it.
+    fn reopen_audio_sink(&mut self) {
+        self.audio = crate::audio::Sink::open(self.config.audio_output.as_deref());
+        match &self.audio {
+            Some(sink) => {
+                sink.set_volume(self.config.volume);
+                self.manager.audio().set_output(Some(sink.clone()));
+            }
+            None => self.manager.audio().set_output(None),
+        }
+        self.apply_audio();
     }
 
     /// The cameras the wall shows, and the way to add more.

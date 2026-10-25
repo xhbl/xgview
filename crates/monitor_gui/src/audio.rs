@@ -14,8 +14,9 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
@@ -64,8 +65,9 @@ pub struct JavaOutput {
 impl JavaOutput {
     /// The sink. There is nothing to probe on the device side: the track is
     /// opened when the first block is configured, and a device without a speaker
-    /// simply never plays.
-    pub fn open() -> Option<Arc<Self>> {
+    /// simply never plays. The name is taken and ignored: Android has no device
+    /// to choose, and the call site is the same one the desktops use.
+    pub fn open(_name: Option<&str>) -> Option<Arc<Self>> {
         Some(Arc::new(Self {
             active: AtomicBool::new(false),
             volume: AtomicU32::new(1.0f32.to_bits()),
@@ -148,6 +150,15 @@ impl AudioOutput for JavaOutput {
 /// to stay close to the picture, not to a backlog.
 const RING_SECONDS: f32 = 1.0;
 
+/// How long a freshly started stream is given to ask for its first block.
+///
+/// One period is twenty-odd milliseconds on every device measured, so this is
+/// only ever spent in full by a device that is not going to work at all.
+const CALLBACK_GRACE: Duration = Duration::from_millis(500);
+
+/// How long the stream is left alone to prime itself before the counting starts.
+const CALLBACK_SETTLE: Duration = Duration::from_millis(100);
+
 thread_local! {
     /// A live cpal stream is `!Send` - the crate marks it so on purpose - and so
     /// cannot sit in [`CpalOutput`], which is shared with the channel workers.
@@ -207,12 +218,193 @@ pub struct CpalOutput {
     buffer: Arc<Mutex<VecDeque<f32>>>,
 }
 
+/// The output devices this machine offers, named the way the platform names
+/// them.
+///
+/// The list is what the settings panel shows: a kiosk with a USB dongle and a
+/// television on HDMI has two, and the system's default is card 0, which is not
+/// always the one with a speaker behind it. Names are the platform's own and are
+/// not translated - `plughw:CARD=PCH,DEV=3` is a fact, not a word.
+pub fn output_devices() -> Vec<AudioDevice> {
+    let host = cpal::default_host();
+    let Ok(devices) = host.output_devices() else { return Vec::new() };
+    let mut names: Vec<String> = devices.filter_map(|device| device.name().ok()).collect();
+    names.sort();
+    names.dedup();
+    let devices = labelled(useful_devices(names), true);
+    // Once, at the first ask: what this machine offers and what each entry reads
+    // as, which is the line a report about "the list is wrong" needs.
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let listing: Vec<(&str, &str)> =
+            devices.iter().map(|device| (device.name.as_str(), device.label.as_str())).collect();
+        tracing::debug!(target: "xgview::audio", ?listing, "the output devices this machine offers");
+    });
+    devices
+}
+
+/// One entry of the settings panel's device list.
+///
+/// `name` is what the configuration stores - the platform's own string, which is
+/// what opens the device again. `label` is what a person reads: ALSA's own words
+/// where it has them, the name itself elsewhere.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AudioDevice {
+    pub name: String,
+    pub label: String,
+}
+
+/// Names on every platform but Linux, which knows more about them.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn labelled(names: Vec<String>, _playback: bool) -> Vec<AudioDevice> {
+    names.into_iter().map(|name| AudioDevice { label: name.clone(), name }).collect()
+}
+
+/// The same, with ALSA's own description of each device.
+///
+/// `/proc/asound/card1/pcm3p/info` carries the name ALSA gives a device, and for
+/// an HDMI output that name is the monitor's: `HDMI 0 [E65-C3]` for the port the
+/// television is on, `HDMI 1 [HDMI 1]` for one with nothing plugged in. That is
+/// the difference a person needs to see in a list, and `plughw:CARD=PCH,DEV=3`
+/// is not it. A device whose entry cannot be read keeps its name.
+#[cfg(target_os = "linux")]
+pub(crate) fn labelled(names: Vec<String>, playback: bool) -> Vec<AudioDevice> {
+    names
+        .into_iter()
+        .map(|name| {
+            let label = alsa_label(&name, playback).unwrap_or_else(|| name.clone());
+            AudioDevice { name, label }
+        })
+        .collect()
+}
+
+/// What one device reads as, whether or not the platform still lists it.
+///
+/// A device that is open - the one the sound is going through - can drop out of
+/// the enumeration, and the settings panel still has to show what it is: the
+/// entry that is not in the list is the one the viewer is listening to.
+pub fn device_label(name: &str, playback: bool) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        alsa_label(name, playback).unwrap_or_else(|| name.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = playback;
+        name.to_string()
+    }
+}
+
+/// What ALSA calls one PCM device, read out of `/proc`.
+///
+/// The name is `plughw:CARD=<card id>,DEV=<n>`. The card's line in
+/// `/proc/asound/cards` carries its description - `HDA Intel PCH`, `KT USB Audio`
+/// - and `pcm<n>p/info` carries the port's own name, `HDMI 0` or `USB Audio`.
+/// Together they read as a device: two cards both reporting `USB Audio` are told
+/// apart by the first half, and one card's four HDMI ports by the second.
+#[cfg(target_os = "linux")]
+fn alsa_label(name: &str, playback: bool) -> Option<String> {
+    let rest = name.strip_prefix("plughw:CARD=")?;
+    let (card, device) = rest.split_once(",DEV=")?;
+    let device: u32 = device.parse().ok()?;
+    let cards = std::fs::read_to_string("/proc/asound/cards").ok()?;
+    let (index, card_name) = cards.lines().find_map(|line| {
+        let (head, tail) = line.split_once('[')?;
+        let id = tail.split_once(']')?.0.trim();
+        if id != card {
+            return None;
+        }
+        let index = head.trim().parse::<u32>().ok()?;
+        // ` 1 [PCH            ]: HDA-Intel - HDA Intel PCH`
+        let name = tail.split_once(" - ").map(|(_, name)| name.trim().to_string());
+        Some((index, name))
+    })?;
+    let stream = if playback { 'p' } else { 'c' };
+    let info =
+        std::fs::read_to_string(format!("/proc/asound/card{index}/pcm{device}{stream}/info")).ok()?;
+    let port = info.lines().find_map(|line| line.strip_prefix("name: "))?.trim().to_string();
+    Some(match card_name {
+        Some(card_name) if !card_name.is_empty() => format!("{card_name} · {port}"),
+        _ => port,
+    })
+}
+
+/// The names a person would recognise in a list.
+///
+/// ALSA publishes every PCM its configuration defines - `default`, `sysdefault`,
+/// `front`, `surround51`, `iec958`, `dmix`, `null`, `pulse`, and an `hw:` and a
+/// `plughw:` for every device on every card. Most are aliases of the same
+/// hardware, and a list of them is a puzzle rather than a choice. What is kept
+/// is one `plughw:` per device: the hardware with its rate and format converted
+/// for us. A machine whose ALSA configuration names things differently keeps the
+/// unfiltered list rather than losing the setting altogether.
+#[cfg(target_os = "linux")]
+pub(crate) fn useful_devices(names: Vec<String>) -> Vec<String> {
+    let filtered: Vec<String> =
+        names.iter().filter(|name| name.starts_with("plughw:")).cloned().collect();
+    if filtered.is_empty() {
+        names
+    } else {
+        filtered
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn useful_devices(names: Vec<String>) -> Vec<String> {
+    names
+}
+
 impl CpalOutput {
-    /// Opens the default output device, or `None` when there is none (a headless
-    /// box, a kiosk without a sound card). A missing device is not a failure:
-    /// the picture carries on and the sound switch simply has nothing to drive.
-    pub fn open() -> Option<Arc<Self>> {
-        let device = cpal::default_host().default_output_device()?;
+    /// Opens an output device by the name the platform gave it, or the system's
+    /// default when `name` is `None`.
+    ///
+    /// `None` back means there is nothing to play through - a headless box, a
+    /// kiosk without a sound card, or a device that will not start - and is not
+    /// a failure: the picture carries on and the sound switch has nothing to
+    /// drive. A name that no longer exists falls back to the default rather than
+    /// leaving the viewer silent, because a device can be unplugged between two
+    /// runs.
+    pub fn open(name: Option<&str>) -> Option<Arc<Self>> {
+        let host = cpal::default_host();
+        let device = match name {
+            Some(wanted) => {
+                // One pass, logging what the platform offered: when a saved name
+                // does not come back, the list is what says why - a device that
+                // was unplugged, or a name this build spells differently.
+                let mut found = None;
+                let mut names = Vec::new();
+                if let Ok(devices) = host.output_devices() {
+                    for device in devices {
+                        let Ok(name) = device.name() else { continue };
+                        if name == wanted {
+                            found = Some(device);
+                            names.push(name);
+                            break;
+                        }
+                        names.push(name);
+                    }
+                }
+                tracing::debug!(
+                    target: "xgview::audio",
+                    wanted,
+                    ?names,
+                    "looking for the configured output device"
+                );
+                match found {
+                    Some(device) => device,
+                    None => {
+                        tracing::warn!(
+                            target: "xgview::audio",
+                            device = wanted,
+                            "the configured output device is not there, using the default"
+                        );
+                        host.default_output_device()?
+                    }
+                }
+            }
+            None => host.default_output_device()?,
+        };
+        let name = device.name().unwrap_or_else(|_| "?".to_string());
         let supported = device.default_output_config().ok()?;
         let sample_format = supported.sample_format();
         let config: StreamConfig = supported.config();
@@ -231,11 +423,18 @@ impl CpalOutput {
             buffer: buffer.clone(),
         });
 
+        // A stream that plays but is never asked for data is a state a device can
+        // be left in by a backend that does not recognise the events it reports:
+        // `cpal`'s ALSA worker on a dmix PCM spins at 100% CPU and never calls
+        // the callback at all (measured on a kiosk, 2026-10-25). Silence with a
+        // line in the log is a better answer than a core burnt for nothing, so
+        // the stream has to prove itself before it is kept.
+        let callbacks = Arc::new(AtomicU64::new(0));
         let stream = match sample_format {
-            SampleFormat::F32 => build_stream::<f32>(&device, &config, buffer),
-            SampleFormat::I16 => build_stream::<i16>(&device, &config, buffer),
-            SampleFormat::U16 => build_stream::<u16>(&device, &config, buffer),
-            SampleFormat::I32 => build_stream::<i32>(&device, &config, buffer),
+            SampleFormat::F32 => build_stream::<f32>(&device, &config, buffer, callbacks.clone()),
+            SampleFormat::I16 => build_stream::<i16>(&device, &config, buffer, callbacks.clone()),
+            SampleFormat::U16 => build_stream::<u16>(&device, &config, buffer, callbacks.clone()),
+            SampleFormat::I32 => build_stream::<i32>(&device, &config, buffer, callbacks.clone()),
             other => {
                 tracing::warn!(target: "xgview::audio", ?other, "unsupported output sample format");
                 None
@@ -245,11 +444,20 @@ impl CpalOutput {
             tracing::warn!(target: "xgview::audio", error = %err, "could not start the audio stream");
             return None;
         }
+        if !asks_for_data(&callbacks) {
+            tracing::warn!(
+                target: "xgview::audio",
+                device = %name,
+                "the output device never asked for data, leaving the sound off"
+            );
+            return None;
+        }
         OUTPUT_STREAM.with(|slot| *slot.borrow_mut() = Some(stream));
         tracing::debug!(
             target: "xgview::audio",
             rate = device_rate,
             channels = device_channels,
+            device = %name,
             "audio sink opened"
         );
         Some(sink)
@@ -372,16 +580,37 @@ fn resample_into(
 }
 
 /// Builds the output stream for one device sample type.
+/// Waits a moment for the stream to keep asking for its data.
+///
+/// A stream is primed as it starts: a few callbacks arrive before it has settled,
+/// and a worker that is not going to work stops after them. So what counts is a
+/// callback that arrives *after* the settle - a working device asks every period,
+/// twenty-odd milliseconds, and answers within one of them.
+fn asks_for_data(callbacks: &AtomicU64) -> bool {
+    std::thread::sleep(CALLBACK_SETTLE);
+    let before = callbacks.load(Ordering::Relaxed);
+    let deadline = Instant::now() + CALLBACK_GRACE;
+    while Instant::now() < deadline {
+        if callbacks.load(Ordering::Relaxed) > before {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    false
+}
+
 fn build_stream<T>(
     device: &cpal::Device,
     config: &StreamConfig,
     buffer: Arc<Mutex<VecDeque<f32>>>,
+    callbacks: Arc<AtomicU64>,
 ) -> Option<Stream>
 where
     T: Sample + SizedSample + FromSample<f32>,
 {
     let error = |err| tracing::warn!(target: "xgview::audio", error = %err, "audio stream error");
     let data = move |out: &mut [T], _: &cpal::OutputCallbackInfo| {
+        callbacks.fetch_add(1, Ordering::Relaxed);
         let mut ring = buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for sample in out.iter_mut() {
             // The ring is interleaved the same way the device is, so it is drained
