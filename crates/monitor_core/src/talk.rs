@@ -210,10 +210,12 @@ impl TalkStream {
     /// A silence packet after an idle stretch, its timestamp moved on by the
     /// time that actually passed.
     ///
-    /// This is what makes a packet a second enough to keep the channel warm: the
-    /// camera reads a stream that went quiet rather than one running at a
-    /// fiftieth of real time, and the first spoken frame lands where the clock
-    /// says it should. See [`crate::pipeline`]'s `talk_gap`.
+    /// The idle cadence is the spoken one today - the cameras stopped sending
+    /// video when the audio did, so the track is never left quiet for long - but
+    /// the clock is carried by the timestamp rather than by the packet count, so
+    /// a loop that fell behind, or a rate that is changed once more, does not
+    /// leave the camera reading a stream that runs at the wrong speed. See
+    /// [`crate::pipeline`]'s `talk_gap`.
     pub fn silence_after(&mut self, elapsed: Duration) -> Vec<u8> {
         let frame = Duration::from_secs_f64(FRAME_SAMPLES as f64 / RATE as f64);
         self.skip(elapsed.saturating_sub(frame));

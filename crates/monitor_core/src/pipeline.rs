@@ -39,20 +39,21 @@ use crate::talk::{TalkHub, TalkStream};
 /// what the cameras send their own audio at and what their speakers expect.
 const TALK_INTERVAL: Duration = Duration::from_millis(20);
 
-/// How often a talk-back channel nobody is talking on is refreshed, and how far
-/// its clock is moved on when it is.
+/// How often a talk-back channel nobody is talking on is refreshed.
 ///
-/// A back channel that stops can be torn down by the camera or the NAT in
-/// between, so it is never left with an empty socket - but fifty silence packets
-/// a second is 70 kbit/s of nothing, and one a second is enough to keep it warm.
-/// The packet's timestamp carries the time that passed, so the camera reads a
-/// stream that went quiet rather than one running at a fiftieth of real time,
-/// and the first spoken frame lands where the clock says it should. See
-/// [`TalkStream::silence_after`] and [`talk_gap`].
+/// The same 20 ms as a spoken frame, and deliberately not slower. An idle rate
+/// of one a second was tried to save the 70 kbit/s of silence, and the cameras
+/// would not take it: with the audio stopping after a call, some of them stopped
+/// sending video too, and the session died of `no media data` thirty seconds
+/// later. The stream is therefore continuous, silence included, for as long as
+/// the back channel is open - what [`TalkStream::silence_after`] writes for the
+/// idle gap is a timestamp that matches the wall clock, not a slower cadence.
 const TALK_KEEPALIVE: Duration = Duration::from_millis(20);
 
-/// The gap between two packets on the talk-back track, which depends on whether
-/// the viewer is talking into it.
+/// The gap between two packets on the talk-back track.
+///
+/// Kept as a function even though both arms are the same today: the cadence is
+/// the cameras' to decide, and it was once two values.
 fn talk_gap(talking: bool) -> Duration {
     if talking { TALK_INTERVAL } else { TALK_KEEPALIVE }
 }
@@ -650,6 +651,22 @@ async fn supervisor(
                     continue;
                 }
                 talk_target = target;
+                // The hub the captured audio arrives on has to name the same
+                // channel, or the worker below keeps writing silence: the mic
+                // samples are pushed into the hub, but `TalkHub::talking_on`
+                // only answers for its target, and a target nobody sets is
+                // `None` for the life of the process. See `TalkHub::set_target`.
+                talk.set_target(target);
+                debug_assert_eq!(
+                    talk.target(),
+                    target,
+                    "the hub has to follow the session's talk target"
+                );
+                tracing::debug!(
+                    target: "xgview::pipeline",
+                    camera = ?target,
+                    "the talk target moved"
+                );
                 // Only the sessions either side of the change need reopening:
                 // one gives the back channel up, the other takes it. A channel
                 // whose sessions are both without it is left alone.

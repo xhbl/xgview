@@ -2412,16 +2412,17 @@ channel, advancing the sequence number and the timestamp by 160 a packet. A queu
 more than four frames behind is emptied instead of sent as a burst - the camera's
 speaker wants the last 300 ms, not a backlog. Interleaved only: the back channel
 is set up on the `TCP` transport, where the video's connection already carries
-control. While the viewer is not talking the track is still refreshed rather than
-left with an empty socket - a back channel that stops can be torn down by the
-camera or the NAT in between - but at **one packet a second** instead of fifty:
-`talk_gap` is the frame rate while the viewer talks and `TALK_KEEPALIVE` while
-nobody does, and the idle packet's timestamp is moved on by the time that passed
-(`TalkStream::silence_after`), so the camera reads a stream that went quiet rather
-than one running at a fiftieth of real time, and the first spoken frame lands
-where the clock says it should. Fifty silence packets a second is 70 kbit/s of
-nothing, and a phone that has magnified a camera with a back channel would be
-paying it for as long as the picture stays magnified.
+control.
+
+**The track is fed continuously, silence included.** One packet a second was tried
+while nobody talks, to save the 70 kbit/s of silence (1.5.33), and it was reverted:
+with the audio going quiet after a call, some cameras stopped sending video too and
+the session died of `no media data` thirty seconds later. `talk_gap` is therefore
+the 20 ms frame rate on both arms today, and `TalkStream::silence_after` keeps the
+timestamp on the wall clock rather than on the packet count, so the silence is the
+camera's own speech path running - not a stream limping at a fiftieth of real time.
+The cost is the 70 kbit/s while a camera with a back channel is magnified; the
+alternative cost a black screen.
 
 **What reaches the queue.** `cpal`'s input side runs at whatever rate and channel
 count the device prefers; its callback mixes to mono and box-averages each
@@ -2498,6 +2499,17 @@ follows `STREAM_VOICE_CALL`, not the media volume the viewer turns up, and
 maximum" true on the path that matters. No makeup gain: with the routing fixed the
 speaker is loud enough at 1.0, and a gain that clips a loud camera buys nothing.
 
+**The hub's target is what turns the microphone on, and it has to be set.** The
+capture pushes into `TalkHub` unconditionally while the viewer is talking, but
+the worker only sends those samples when `talk.talking_on(index)` answers - and
+that answers `target == Some(index) && talking`. The target is set by the
+`ChannelCommand::Talk` handler in the pipeline, which is also what reopens the
+sessions either side of a move; a version of that handler that only moved the
+session's `talk` flag left the hub's target at `None`, so every packet went out
+as silence and the camera never heard the viewer - one-way talk, from the day
+the feature landed until it was noticed. The two must move together:
+`talk.set_target(target)` sits beside `talk_target = target`.
+
 **The back channel is fed continuously, not kept warm.** An idle talk channel was
 tried at one packet a second to save the 70 kbit/s of silence (1.5.33), and the
 cameras did not take it: after a call ended, the audio stopping was enough for the
@@ -2548,8 +2560,9 @@ above flows, whether or not anyone presses the microphone. Pressing it only
 decides what goes into the packets. That is deliberate for now: the microphone
 control is drawn from the answer the session really gave - no guessing, no
 optimistic icon - and the press costs no negotiation at all, which is what makes
-a press-to-talk button feel like a button. The price is the held channel plus
-about 3.5 kbit/s while magnified and idle.
+a press-to-talk button feel like a button. The price is the held channel plus the
+continuous 70 kbit/s of silence while the picture is magnified - the idle rate
+above is the spoken one, because the cameras wanted it that way.
 
 The step that would remove the price is to acquire and release the *track* inside
 the live session instead of reopening the session around it. The client already
