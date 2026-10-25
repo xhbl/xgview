@@ -2612,7 +2612,13 @@ impl XgViewApp {
             // Back unwinds the magnification a layer at a time: the bar the
             // viewport carries, and then the magnification itself. It is the one
             // key that gets out of it now - the confirm key is the bar's.
-            if self.tile_bar.is_open() {
+            //
+            // A call is a layer of its own and Back is its way out, the same as
+            // the handset: it goes before the bar, because the bar is what is
+            // showing the handset.
+            if self.talking {
+                self.set_talking(false);
+            } else if self.tile_bar.is_open() {
                 self.tile_bar.hide();
             } else {
                 self.zoom_out();
@@ -3698,7 +3704,12 @@ impl XgViewApp {
                 // bar is a layer: it goes first, before the panels behind it and
                 // long before the magnification. The focus goes back to the wall
                 // with it, or the next press would be read by nothing at all.
-                if self.tile_bar.is_open() {
+                //
+                // A call is a layer of its own, above the bar: Back ends it, the
+                // same as the handset, and leaves the picture where it is.
+                if self.talking {
+                    self.set_talking(false);
+                } else if self.tile_bar.is_open() {
                     self.tile_bar.hide();
                     self.leave_controls(ctx);
                 } else if self.layout_picker {
@@ -7261,7 +7272,12 @@ impl XgViewApp {
                     // click of a double press on the picture - a tap that opened
                     // the bar and then closed it would otherwise put the
                     // magnification back.
-                    if tap.is_some() && !self.tile_bar.ignoring(now) {
+                    // A tap on the picture takes the bar down - unless a call is
+                    // up, which makes the bar modal: the handset is the way out
+                    // of a call, and the microphone being open has to stay on
+                    // screen. The press is still spent here, so it does not
+                    // reach the wall behind.
+                    if tap.is_some() && !self.tile_bar.ignoring(now) && !self.talking {
                         self.tile_bar.hide();
                     }
                     // A double press out here is the way back to the grid: the
@@ -7942,6 +7958,12 @@ impl eframe::App for XgViewApp {
         // the wall - takes the bar with it. The step and the two zooms also
         // close it where they happen; this is the net under all of them.
         //
+        // A call is the exception, and the reason it is written here: the
+        // microphone being open has to stay on screen, so a panel opening over
+        // the wall leaves the bar where it is. It is drawn beside the panel, not
+        // over it, and the focus goes with the panel - see the focus hand-off
+        // below.
+        //
         // What the focus is doing is not part of it. The bar takes the focus
         // itself, and an arrow, a press on the picture or a frame in which egui
         // has just dropped it would otherwise read as "something else has the
@@ -7949,7 +7971,7 @@ impl eframe::App for XgViewApp {
         // does take it down, and `panel_anchor` for the panels that do.
         if !self.scheduler.is_zoomed()
             || self.blackout_on
-            || self.panel_anchor().is_some()
+            || (self.panel_anchor().is_some() && !self.talking)
         {
             self.tile_bar.hide();
         }
@@ -8494,7 +8516,11 @@ impl eframe::App for XgViewApp {
         // behind the bar must not take the arrows back. A focus that is no
         // longer one of the bar's own controls goes to the bar's seat, where it
         // draws nothing until an arrow walks it. See `tilebar`.
-        if self.tile_bar.is_open() {
+        //
+        // Not while a panel is up, though: a panel owns the keys while it is
+        // open, and a call keeps the bar on screen behind it - taking the focus
+        // back every frame would leave the panel's form impossible to walk.
+        if self.tile_bar.is_open() && self.panel_anchor().is_none() {
             // A focus on one of the bar's ids is the bar's, whether or not that
             // control is drawn this frame: the microphone a call turns into the
             // handset is one, and the handset it becomes is another. Anything
@@ -8578,13 +8604,19 @@ impl eframe::App for XgViewApp {
             self.ring_aimed,
         );
 
-        // The call lives in the bar, so a bar that has gone has ended it. The
-        // strip carries the one control that hangs up, and every way of putting
-        // it away - a press on the picture, Back, a pinch or a wheel, a step to
-        // another camera - is also a way out of the call. Stated once, here,
-        // rather than each of those paths remembering to stop talking.
-        if self.talking && !self.tile_bar.is_open() {
-            self.set_talking(false);
+        // The call lives in the bar, and the handset is the way out of it, so a
+        // call in progress makes the bar modal: a press that would put it away
+        // leaves it where it is. A panel is the exception - it needs the keys,
+        // and a strip lying over a form is in the way - so it takes the bar down
+        // while it is up and the bar comes back when it goes.
+        //
+        // What ends a call is the handset, or leaving this camera: `set_target`
+        // turns the microphone off for every way of leaving - the grid, another
+        // group, another layout, a double press on the picture - so that half of
+        // the rule is stated once, there, rather than here.
+        if self.talking && !self.tile_bar.is_open() && self.panel_anchor().is_none() {
+            let dock = self.tile_bar.dock();
+            self.tile_bar.show(dock, Instant::now());
         }
 
 
