@@ -39,6 +39,24 @@ use crate::talk::{TalkHub, TalkStream};
 /// what the cameras send their own audio at and what their speakers expect.
 const TALK_INTERVAL: Duration = Duration::from_millis(20);
 
+/// How often a talk-back channel nobody is talking on is refreshed, and how far
+/// its clock is moved on when it is.
+///
+/// A back channel that stops can be torn down by the camera or the NAT in
+/// between, so it is never left with an empty socket - but fifty silence packets
+/// a second is 70 kbit/s of nothing, and one a second is enough to keep it warm.
+/// The packet's timestamp carries the time that passed, so the camera reads a
+/// stream that went quiet rather than one running at a fiftieth of real time,
+/// and the first spoken frame lands where the clock says it should. See
+/// [`TalkStream::silence_after`] and [`talk_gap`].
+const TALK_KEEPALIVE: Duration = Duration::from_secs(1);
+
+/// The gap between two packets on the talk-back track, which depends on whether
+/// the viewer is talking into it.
+fn talk_gap(talking: bool) -> Duration {
+    if talking { TALK_INTERVAL } else { TALK_KEEPALIVE }
+}
+
 /// Time without any RTP payload after which the session is considered dead.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bounds on the deadline a running session is held to. See [`StallDeadline`].
@@ -1495,14 +1513,26 @@ async fn run_session(
         // Talk-back, before waiting on the picture: the session's clock is the
         // RTP clock, and it must not be tied to how often a camera sends video.
         if let Some((stream, channel)) = talk_sender.as_mut() {
-            while last_talk.elapsed() >= TALK_INTERVAL {
-                let packet = if talk.talking_on(index) {
+            while last_talk.elapsed() >= talk_gap(talk.talking_on(index)) {
+                let talking = talk.talking_on(index);
+                let elapsed = last_talk.elapsed();
+                let packet = if talking {
+                    // A gap left by the idle rate is silence the speaker never
+                    // heard: the clock is moved over it before the voice starts,
+                    // so the talk does not begin a second in the past.
+                    if elapsed > TALK_INTERVAL * 2 {
+                        stream.skip(elapsed - TALK_INTERVAL);
+                    }
                     stream.packet(&talk.next_frame())
                 } else {
-                    stream.silence()
+                    stream.silence_after(elapsed)
                 };
                 client.send_interleaved(*channel, &packet).await?;
-                last_talk += TALK_INTERVAL;
+                if talking {
+                    last_talk += TALK_INTERVAL;
+                } else {
+                    last_talk = Instant::now();
+                }
                 // A loop that fell well behind - a stalled socket, a suspended
                 // process - is not worth a burst of catch-up packets: the
                 // camera's speaker wants the present, not the backlog.
@@ -1589,10 +1619,11 @@ async fn run_session(
         };
         // A session feeding a camera's speaker has one more clock to honour:
         // the wait is cut so that the next talk packet is written on time even
-        // while the picture keeps the loop from ever timing out.
+        // while the picture keeps the loop from ever timing out. Idle, that
+        // clock is the keepalive's, not the frame rate's.
         let talk_wait = talk_sender
             .as_ref()
-            .map(|_| TALK_INTERVAL.saturating_sub(last_talk.elapsed()));
+            .map(|_| talk_gap(talk.talking_on(index)).saturating_sub(last_talk.elapsed()));
         let wait = match talk_wait {
             Some(talk_wait) => wait.min(talk_wait),
             None => wait,
@@ -1601,7 +1632,7 @@ async fn run_session(
             Ok(result) => result?,
             Err(_) => {
                 // The talk clock waking the loop is not silence on the wire.
-                if talk_sender.is_some() && last_talk.elapsed() >= TALK_INTERVAL {
+                if talk_sender.is_some() && last_talk.elapsed() >= talk_gap(talk.talking_on(index)) {
                     continue;
                 }
                 // A wait that the picture deadline cut short is not silence on

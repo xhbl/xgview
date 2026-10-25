@@ -25,6 +25,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use monitor_codec::audio::AudioCodec;
 use monitor_codec::g711;
@@ -197,6 +198,26 @@ impl TalkStream {
         let silence = vec![0i16; FRAME_SAMPLES];
         self.packet(&silence)
     }
+
+    /// Moves the clock on without sending anything: the samples the camera's
+    /// speaker never heard.
+    pub fn skip(&mut self, elapsed: Duration) {
+        let samples = (elapsed.as_secs_f64() * RATE as f64).round() as u32;
+        self.timestamp = self.timestamp.wrapping_add(samples);
+    }
+
+    /// A silence packet after an idle stretch, its timestamp moved on by the
+    /// time that actually passed.
+    ///
+    /// This is what makes a packet a second enough to keep the channel warm: the
+    /// camera reads a stream that went quiet rather than one running at a
+    /// fiftieth of real time, and the first spoken frame lands where the clock
+    /// says it should. See [`crate::pipeline`]'s `talk_gap`.
+    pub fn silence_after(&mut self, elapsed: Duration) -> Vec<u8> {
+        let frame = Duration::from_secs_f64(FRAME_SAMPLES as f64 / RATE as f64);
+        self.skip(elapsed.saturating_sub(frame));
+        self.silence()
+    }
 }
 
 #[cfg(test)]
@@ -224,6 +245,27 @@ mod tests {
         assert!(hub.next_frame().iter().all(|sample| *sample == 0));
     }
 
+    /// An idle keepalive says a second has passed, not 20 ms: the camera's
+    /// jitter buffer has to read the gap as silence, not as a stream running at a
+    /// fiftieth of real time.
+    #[test]
+    fn an_idle_packet_moves_the_clock_by_the_time_that_passed() {
+        let mut stream = TalkStream::new(AudioCodec::Pcmu).unwrap();
+        let first = stream.silence();
+        let stamp = |packet: &[u8]| u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+        assert_eq!(stamp(&first), 0);
+        assert_eq!(&first[2..4], &0u16.to_be_bytes());
+
+        let second = stream.silence_after(Duration::from_secs(1));
+        assert_eq!(&second[2..4], &1u16.to_be_bytes(), "one packet, one sequence number");
+        assert_eq!(stamp(&second), 8_000, "one second of 8 kHz");
+
+        // Talking again continues from there: the clock is continuous across the
+        // idle stretch, not reset by it.
+        let voice = stream.packet(&[0i16; FRAME_SAMPLES]);
+        assert_eq!(stamp(&voice), 8_160);
+    }
+
     #[test]
     fn switching_the_target_stops_the_talk() {
         let hub = TalkHub::new();
@@ -248,6 +290,13 @@ mod tests {
         let packet = stream.packet(&[0i16; FRAME_SAMPLES]);
         assert_eq!(&packet[2..4], &1u16.to_be_bytes());
         assert_eq!(&packet[4..8], &160u32.to_be_bytes());
+
+        // A skip moves the clock with nothing on the wire: the samples a gap
+        // between two packets stands for. The header carries the timestamp the
+        // packet starts at, so this one is written at 320 + 4000.
+        stream.skip(Duration::from_millis(500));
+        let packet = stream.packet(&[0i16; FRAME_SAMPLES]);
+        assert_eq!(&packet[4..8], &4_320u32.to_be_bytes());
 
         let mut stream = TalkStream::new(AudioCodec::Pcma).unwrap();
         let packet = stream.packet(&[0i16; FRAME_SAMPLES]);

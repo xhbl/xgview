@@ -2408,13 +2408,20 @@ picture is not. What the SDP says is the answer, whichever request produced it.
 **Sending is a clock, not a burst.** A 20 ms frame at 8 kHz mono is 160 samples:
 the worker takes one from the queue every 20 ms, encodes it as G.711 (PCMU or
 PCMA, whichever the track's `rtpmap` names) and writes it on the negotiated
-channel, advancing the sequence number and the timestamp by 160 a packet. While
-the viewer is not talking it sends that codec's silence byte rather than nothing:
-a back channel that stops can be torn down by the camera or the NAT in between,
-and the packets also keep the timestamp continuous. A queue more than four frames
-behind is emptied instead of sent as a burst - the camera's speaker wants the
-last 300 ms, not a backlog. Interleaved only: the back channel is set up on the
-`TCP` transport, where the video's connection already carries control.
+channel, advancing the sequence number and the timestamp by 160 a packet. A queue
+more than four frames behind is emptied instead of sent as a burst - the camera's
+speaker wants the last 300 ms, not a backlog. Interleaved only: the back channel
+is set up on the `TCP` transport, where the video's connection already carries
+control. While the viewer is not talking the track is still refreshed rather than
+left with an empty socket - a back channel that stops can be torn down by the
+camera or the NAT in between - but at **one packet a second** instead of fifty:
+`talk_gap` is the frame rate while the viewer talks and `TALK_KEEPALIVE` while
+nobody does, and the idle packet's timestamp is moved on by the time that passed
+(`TalkStream::silence_after`), so the camera reads a stream that went quiet rather
+than one running at a fiftieth of real time, and the first spoken frame lands
+where the clock says it should. Fifty silence packets a second is 70 kbit/s of
+nothing, and a phone that has magnified a camera with a back channel would be
+paying it for as long as the picture stays magnified.
 
 **What reaches the queue.** `cpal`'s input side runs at whatever rate and channel
 count the device prefers; its callback mixes to mono and box-averages each
@@ -2461,6 +2468,33 @@ strip eight seconds in; hanging up puts the fit, the sound switch and the
 microphone back and the clock resumes from that press. Enter on the remote is
 that press, and the selection is put back to the first control when the call
 starts, since the fit it stood on before has gone.
+
+**Idle cost, and the way it would go to nothing.** The back channel is acquired
+with the session, not with the press: magnifying a camera whose media carries an
+`audioback` track renegotiates that channel's session and SETUPs the track at
+once, and from then on the camera's speaker is held open and the idle keepalive
+above flows, whether or not anyone presses the microphone. Pressing it only
+decides what goes into the packets. That is deliberate for now: the microphone
+control is drawn from the answer the session really gave - no guessing, no
+optimistic icon - and the press costs no negotiation at all, which is what makes
+a press-to-talk button feel like a button. The price is the held channel plus
+about 3.5 kbit/s while magnified and idle.
+
+The step that would remove the price is to acquire and release the *track* inside
+the live session instead of reopening the session around it. The client already
+has the pieces - `describe_backchannel` (the DESCRIBE that carries the ONVIF
+header) and `setup_talk_interleaved` - and a TEARDOWN of the track's URL alone
+leaves the picture's media untouched, so the video never blinks. The shape would
+be: probe with the header when the camera is magnified and keep the SDP without
+SETUPping the talk track (that answer is what can draw the microphone honestly),
+SETUP the track on the press - one round trip, tens of milliseconds, no
+renegotiation of the picture - and TEARDOWN it on hang-up or when the bar goes.
+Cameras that refuse a mid-session SETUP would fall back to the present behaviour,
+acquiring with the session. What keeps this out of the build for now is that it
+moves a command into the pump loop that owns the client, and that a mid-session
+SETUP after PLAY has to be verified against real cameras - the ones that answer
+`551 Option not supported` are already known to need a fallback, and those are
+exactly the ones a second SETUP would meet first.
 
 **A bar that has gone is a call that has ended.** The strip is the call's whole
 surface, so it is the call's existence: a press on the picture, `Back`, a pinch
