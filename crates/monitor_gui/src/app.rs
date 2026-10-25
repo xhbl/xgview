@@ -732,6 +732,15 @@ pub struct XgViewApp {
     manager: ChannelManager,
     handle: Handle,
     channels: HashMap<usize, ChannelUi>,
+    /// The audio devices this machine offered when the viewer started.
+    ///
+    /// Read once, before the sink opens, and never again: opening a device makes
+    /// it exclusive, which takes it out of the platform's own list - so a list
+    /// read while the sound is playing is missing exactly the device in use, and
+    /// one read after every change would move the choice under the remote. A
+    /// device plugged in later is picked up by the next start.
+    audio_outputs: Vec<crate::audio::AudioDevice>,
+    audio_inputs: Vec<crate::audio::AudioDevice>,
     /// Whether a camera can be talked to, keyed by the address a call would be
     /// placed to.
     ///
@@ -1171,15 +1180,17 @@ impl XgViewApp {
             Duration::from_millis(config.handshake_timeout_ms),
             config.prefer_hardware_decode,
         );
+        // The devices are listed before anything opens one: a device that is
+        // open is exclusive, and the platform stops listing it - which would
+        // leave the settings panel offering everything except the one it is
+        // playing through.
+        let audio_outputs = crate::audio::output_devices();
+        let audio_inputs = crate::mic::input_devices();
         // The audio sink, opened once. A machine without an output device leaves
         // `None` here, and the sound switch has nothing to drive - not a failure:
         // the picture carries on. The device is the one the configuration names,
         // or the system's default when it names none.
         let audio = crate::audio::Sink::open(config.audio_output.as_deref());
-        // The list the settings panel will offer, once, so a machine whose
-        // devices come back unexpected says so in the log rather than only in a
-        // picture of the panel.
-        let _ = crate::audio::output_devices();
         if let Some(sink) = &audio {
             sink.set_volume(config.volume);
             manager.audio().set_output(Some(sink.clone()));
@@ -1233,6 +1244,8 @@ impl XgViewApp {
             manager,
             handle,
             channels: HashMap::new(),
+            audio_outputs,
+            audio_inputs,
             talk_support: HashMap::new(),
             textures: HashMap::new(),
             video,
@@ -5315,8 +5328,8 @@ impl XgViewApp {
         }
 
         let mut changed = false;
-        let outputs = crate::audio::output_devices();
-        let inputs = crate::mic::input_devices();
+        let outputs = self.audio_outputs.clone();
+        let inputs = self.audio_inputs.clone();
         let system = monitor_i18n::tr("streams-audio-system");
 
         // A cycling button, not a drop-down: the popup a `ComboBox` opens is
