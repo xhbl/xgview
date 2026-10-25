@@ -2079,12 +2079,10 @@ waking the chrome.
 picture is: a quarter turn clockwise for a portrait wall's landscape stream, so
 the strip turns with the picture and its words come out upright to the viewer.
 The strip keeps 24 points from the picture edge and is centred along the edge's
-whole length; its thickness is 56 and its controls are 44 deep. The activation
-band is the one the top and bottom bars use - `Chrome::bars`' heights, read from
-the last frame they were drawn in. While the bars are away it is exactly where
-they were, so the press that used to summon them summons the strip; while they
-are up the wall is between them and the same depth is just inside the tile. No
-separate offset is computed: the tile's edge is the offset.
+whole length; its thickness is 56 and its controls are 44 deep. It used to have
+activation bands - the depth the wall's own bars occupy, so the press that
+summoned them summoned it - and those are gone: it is put up by a tap, wherever
+on the picture the tap lands.
 
 **Who answers it.** Since 1.5 the strip is a row of egui's own buttons -
 `icons::button_in`, a button placed where the picture puts it rather than one
@@ -2099,9 +2097,10 @@ from the wall's painter and the tile's `Response`, with `Bar::armed` tracking a
 cursor by hand, and the viewer saw a strip that looked like the bars and
 behaved unlike them: a press that lit nothing until the finger came up, a ring
 that could not be walked, a focus that was not egui's at all. Using it is also
-not a request for the wall's bars - `viewer_active` answers false while it is up,
-where the focus being on a control would otherwise hold the bars woken - so a
-press on a control cannot slide the chrome back over the picture it belongs to.
+not a request for the wall's bars - `viewer_active` answers false while the remote
+is in it, where the focus being on a control would otherwise hold the bars
+woken - so a press on a control cannot slide the chrome back over the picture it
+belongs to.
 
 **The seat.** The bar opens on a *seat*: a focusable, invisible, non-interactive
 widget laid at the strip's first point - the trick the portrait fit picker uses
@@ -2112,10 +2111,25 @@ onto the first control (the handset while a call is up). A confirm key on the
 seat is therefore spent, which is the rule the ring follows everywhere - it is
 the arrows' cursor, and a bar nobody has walked carries none.
 
-**Keyboard opens it at the bottom.** The confirm key brings the strip up along
-the bottom edge: the remote is not pointing at an edge, and the status side is
-where a strip of controls is expected. A press in a band still opens it on that
-band's side, and `Bar::dock` remembers the side the last opening used.
+**Opened at the bottom.** The confirm key, and a tap, bring the strip up along the
+bottom edge: neither is pointing at an edge, and the status side is where a strip
+of controls is expected. `Bar::dock` still names the side - the side a bar is
+drawn on is a property of the picture's frame, and the turned picture puts it
+down the screen's side.
+
+**Where it stands by default.** Upright and not turned, the strip is up from the
+moment the picture is magnified and stays: `tile_bar_pinned` answers the state and
+`settle_tile_bar` is what a change of picture consults - a magnification, a
+channel step, the quarter turn - so turning the picture takes the strip with it
+and turning back brings it again. The clock is kept up by the pin rather than
+stopped, which is what keeps a call's handset up for the same reason. Turned, or
+in landscape, the picture is asked for the strip: it fills the screen and a strip
+along its side would be in the way. A bar that is already up - the upright default
+or one a tap put there - is entered with the confirm key, which puts the focus on
+its seat so the ring stays off until an arrow walks it. Until it is entered the
+keys are still the wall's: the arrows step the channel, and Up and Down walk off
+to the wall's own bars - a strip that is merely up is not the remote's surface
+yet, which is what `bar_owns_keys` asks in `handle_keys`.
 
 **The clock and the way out.** Eight seconds after the last operation on it, or
 as soon as the picture is stepped, panned, or the wall is given to something
@@ -2124,12 +2138,38 @@ presses - the early `return` of the controls branch used to leave the bar's cloc
 counting from the opening, so a viewer walking it saw it vanish mid-walk. `Back`
 takes it down and the magnification after it, which means `Back` is the bar's
 before it is the panels': the controls branch hands the focus back to the wall
-and hides the strip, and the next press is the wall's. A press on the picture
-closes it; a press on the strip itself (the padding included) does not, so
-aiming at a control cannot dismiss it by grazing the strip; a press in the band
-outside the strip closes it too, because that part is outside the bar. The 300 ms
-guard after opening keeps the second press of the double press that opened it
-from pressing a control or shutting it.
+and hides the strip, and the next press is the wall's. A tap on the picture
+closes it; a tap on the strip itself (the padding included) does not, so aiming
+at a control cannot dismiss it by grazing the strip. The 300 ms guard after
+opening keeps the second tap of the double press that opened it from pressing a
+control or shutting it.
+
+**The tap.** One rule for the pointer, both ways: the strip is put up by a tap
+and put away by one. A tap is a press that came up quickly - 0.3 s, well inside
+the 0.8 s egui gives a click - stayed where it went down (4 points, tighter than
+egui's own 6), and was the only finger on the glass. Everything else the pointer
+can do over the picture is the picture's: a press that lingered is a thumb left
+on the glass and does nothing, a drag that does not turn the page pans or does
+nothing and leaves the strip standing, a pinch or a wheel pushes the picture in
+and leaves it standing too. Only two things take it away besides a tap: the
+picture changing - a page or a channel step, the magnification ending - and the
+wall being given to something else. The earliest version of this closed the strip
+on any click egui reported, which a slow touch and a finger that slid by a few
+points both produce; the bands it used to be opened from are what the tap
+replaced.
+
+**A double press is still the way back to the grid**, and it is what makes the
+tap a question with two answers. The first press of a double press is a tap, so a
+tap that opened the strip would put it on screen for a moment on the way to the
+grid - and a strip that was already up would be put away and asked for again.
+The ask is therefore held: a tap stores when the strip may go up - immediately
+plus egui's own double-click delay - and the frame that reaches that time is the
+one that puts it up, unless the second press arrived first and dropped it. The
+close has no such ambiguity and stays immediate: while the strip is up, a tap
+puts it away, and a double press puts it away and then goes back to the grid. The
+cost is the delay on opening a strip by touch - 0.3 s, the same window the
+double press itself is measured in, and the same one egui makes any other
+double-clickable control wait.
 
 **The ring and the press.** A press lights the control under the pointer for as
 long as it is held, and nothing after it: that is egui's `widgets.active`, the

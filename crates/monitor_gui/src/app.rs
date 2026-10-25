@@ -84,6 +84,20 @@ const EXIT_WINDOW: Duration = Duration::from_secs(2);
 /// [`XgViewApp::ring_follows_bars`].
 const RING_IDLE: Duration = Duration::from_secs(8);
 
+/// How long a pointer press may last and still be a tap, in seconds.
+///
+/// A finger rests on the glass while the viewer reads the picture, and a press
+/// that lingers is not a press on anything: the magnified viewport's bar is put
+/// away by a tap, not by every press that happens to end over the picture.
+const TAP_SECS: f64 = 0.3;
+
+/// How far a pointer press may slide and still be a tap, in points.
+///
+/// Tighter than egui's own click distance (6 points): a grip that slid while it
+/// pressed is a gesture in the making - the viewer reaching for a pan - and the
+/// picture treats it as one, so it must not also press the bar away.
+const TAP_POINTS: f32 = 4.0;
+
 /// Width of the settings side panel, and the narrowest it may be dragged to.
 ///
 /// A phone in landscape is barely wider than the panel at its default, which is
@@ -864,6 +878,23 @@ pub struct XgViewApp {
     /// and turns the page itself - so the cursor is compared against this. See
     /// [`XgViewApp::ring_follows_cursor`].
     ring_aimed: bool,
+    /// Where the pointer went down, and when, while a press is in flight.
+    ///
+    /// egui forgets a press's start time on the frame it ends, so the release is
+    /// read against this instead: see [`XgViewApp::tap_release`].
+    tap_press: Option<(egui::Pos2, f64)>,
+    /// Whether a second finger was down during the press in flight.
+    ///
+    /// A pinch is not a tap: the touches are gone by the frame the release is
+    /// read on, so the fact has to be remembered while it is happening.
+    tap_multi: bool,
+    /// When the strip the last tap asked for may be put up.
+    ///
+    /// A tap opens the strip, and two taps in quick succession are the way back
+    /// to the grid. The first of those two must not put the strip on screen on
+    /// its way to the second, so the asking is held here for egui's own
+    /// double-click window and dropped if the second tap arrives.
+    tap_open_at: Option<Instant>,
     /// What the magnified viewport shows of its picture: the whole of it, or the
     /// window a pinch and a drag have left it at.
     ///
@@ -1250,6 +1281,9 @@ impl XgViewApp {
             grid_focus_x: None,
             ring_seen: None,
             ring_aimed: false,
+            tap_press: None,
+            tap_multi: false,
+            tap_open_at: None,
             picture_zoom: PictureZoom::FULL,
             tile_bar: tilebar::Bar::new(),
             sound_on,
@@ -1697,6 +1731,7 @@ impl XgViewApp {
         // its session for a back channel, so its bar carried no microphone, and
         // the sound stayed on the camera that was left.
         self.apply_audio();
+        self.settle_tile_bar();
         true
     }
 
@@ -1798,7 +1833,6 @@ impl XgViewApp {
     }
 
     fn zoom_in(&mut self) {
-        self.tile_bar.hide();
         if self.scheduler.zoom_in() {
             // The viewport comes up whole: the window the last one was left at is
             // a part of another picture, and there is none of this one to keep.
@@ -1807,15 +1841,16 @@ impl XgViewApp {
             self.mark_dirty();
             self.apply_audio();
         }
+        self.settle_tile_bar();
     }
 
     fn zoom_out(&mut self) {
-        self.tile_bar.hide();
         if self.scheduler.zoom_out() {
             self.needs_sync = true;
             self.mark_dirty();
             self.apply_audio();
         }
+        self.settle_tile_bar();
     }
 
     fn zoom_to(&mut self, index: usize) {
@@ -2071,8 +2106,13 @@ impl XgViewApp {
         // The magnified viewport's bar is the picture's own surface, not one of
         // the wall's bars: using it is the viewer at the picture. Waking the
         // bars for it would take the next press out of the strip's hands - and
-        // move the wall under it - so none of it counts as asking for them.
-        if self.tile_bar.is_open() {
+        // move the wall under it - so none of it counts as asking for them. That
+        // holds while the remote is *in* the strip: a strip that is merely up,
+        // the upright default, leaves the remote on the wall, and an arrow off
+        // it is still a press that asks for the bars.
+        if self.tile_bar.is_open()
+            && ctx.memory(|memory| memory.focused()).is_some_and(tilebar::owns)
+        {
             return false;
         }
         // The remote's focus is in a bar, in the settings panel or in a window:
@@ -2090,6 +2130,54 @@ impl XgViewApp {
             input.events.iter().any(|event| {
                 Self::wall_event(self.chrome.bars, self.back_is_a_door(), band_is_a_door, event)
             })
+        })
+    }
+
+    /// Remembers where a press went down, so the release can be read as a tap.
+    ///
+    /// egui forgets a press's start time on the frame the press ends, which is
+    /// exactly the frame the answer is needed on; the press is therefore kept
+    /// here while it lasts. A second finger while the press is down is a pinch -
+    /// or the beginning of one - and is remembered too, because the touches are
+    /// gone by the release.
+    fn track_tap(&mut self, ctx: &egui::Context) {
+        ctx.input(|input| {
+            if input.pointer.any_pressed() {
+                if let Some(origin) = input.pointer.press_origin() {
+                    self.tap_press = Some((origin, input.time));
+                    self.tap_multi = false;
+                }
+            }
+            if input.multi_touch().is_some() {
+                self.tap_multi = true;
+            }
+        });
+    }
+
+    /// Where a tap ended this frame, if the press was one.
+    ///
+    /// A tap is a press that came up quickly, stayed where it went down, and was
+    /// the only finger on the glass. A press that lingered is a thumb resting on
+    /// the picture, one that slid is a pan being reached for, and a pinch is two
+    /// fingers: the magnified viewport's bar goes on none of them. See
+    /// [`TAP_SECS`] and [`TAP_POINTS`].
+    fn tap_release(&mut self, ctx: &egui::Context) -> Option<egui::Pos2> {
+        let (origin, started) = self.tap_press?;
+        let released = ctx.input(|input| input.pointer.any_released());
+        if !released {
+            return None;
+        }
+        // The press is over either way, so it is never read twice.
+        self.tap_press = None;
+        let multi = std::mem::take(&mut self.tap_multi);
+        if multi {
+            return None;
+        }
+        ctx.input(|input| {
+            let at = input.pointer.interact_pos()?;
+            let quick = input.time - started <= TAP_SECS;
+            let still = (at - origin).length() <= TAP_POINTS;
+            (quick && still).then_some(at)
         })
     }
 
@@ -3564,13 +3652,15 @@ impl XgViewApp {
         }
 
         if self.scheduler.is_zoomed() {
-            // With the bar up its controls are egui's own buttons, registered
-            // with the navigation layer above: the arrows walk them and the
-            // confirm key presses the one the ring is on, which is not the wall's
-            // business. The channel step is not reachable until the bar is down,
-            // which is the point of it being a layer of its own, and the bar's
-            // clock is kept with the rest of the keys above.
-            if !self.tile_bar.is_open() {
+            // The strip owns the keys only where the remote is in it: its
+            // controls are egui's own buttons on the navigation layer, and the
+            // arrows walk them. A strip that is merely up - the upright default,
+            // or one a tap put there - leaves the remote on the wall, so the
+            // arrows keep stepping channels and the confirm key is what walks
+            // into the strip.
+            let bar_owns_keys = self.tile_bar.is_open()
+                && ctx.memory(|memory| memory.focused()).is_some_and(tilebar::owns);
+            if !bar_owns_keys {
                 // A magnified viewport is one channel, not a grid: Right and
                 // Left are the next and previous channel in channel order, and
                 // Up and Down have no grid to walk, so they go straight to the
@@ -3591,14 +3681,17 @@ impl XgViewApp {
                 // unwinding the magnification: Back is the way out now, a layer
                 // at a time. A held key is not a second press. The bar appears
                 // without its selection drawn - the focus is put on its seat, not
-                // on a control - and the first arrow is what lights it.
+                // on a control - and the first arrow is what lights it. A bar
+                // that is already up is entered the same way, without being
+                // shown again.
                 //
                 // It comes up along the bottom: the remote asks for it without
                 // pointing at an edge, and the status side is where the hand and
-                // the eye expect a strip of controls. A press in a band still
-                // opens it on that band's side - the finger has said which.
+                // the eye expect a strip of controls.
                 if keys.enter && keys.enter_fresh {
-                    self.tile_bar.show(tilebar::Dock::Bottom, Instant::now());
+                    if !self.tile_bar.is_open() {
+                        self.tile_bar.show(tilebar::Dock::Bottom, Instant::now());
+                    }
                     ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
                 }
             }
@@ -6674,6 +6767,36 @@ impl XgViewApp {
         self.is_portrait() && self.scheduler.is_zoomed() && self.config.zoom_rotate
     }
 
+    /// Whether the magnified bar is the picture's own default: up, and staying.
+    ///
+    /// A portrait wall that is not turned shows the strip from the moment the
+    /// picture is magnified and leaves it there. Upright, the strip lies across
+    /// the bottom of a letterboxed picture and the controls - the quarter turn
+    /// above all - are what the viewer is looking for; a strip on its own clock
+    /// would be one more thing to ask for. Turned, the picture fills the screen
+    /// and the strip would lie along its side, in the way of it: it is asked for
+    /// there, exactly as in landscape. See [`Self::settle_tile_bar`].
+    fn tile_bar_pinned(&self) -> bool {
+        self.is_portrait() && self.scheduler.is_zoomed() && !self.magnified_rotated()
+    }
+
+    /// Gives the bar the state the picture asks for: up while pinned, away
+    /// otherwise.
+    ///
+    /// Called where the picture changes - a magnification, a channel step, the
+    /// quarter turn, the orientation - and not every frame, so a viewer who taps
+    /// the strip away is not overruled by the next frame.
+    fn settle_tile_bar(&mut self) {
+        // The picture has changed under the question: whatever a tap was asking
+        // for, it was asking of the picture that has just gone.
+        self.tap_open_at = None;
+        if self.tile_bar_pinned() {
+            self.tile_bar.show(tilebar::Dock::Bottom, Instant::now());
+        } else {
+            self.tile_bar.hide();
+        }
+    }
+
     fn magnified_area(
         &self,
         cameras: &[CameraSource],
@@ -6855,7 +6978,9 @@ impl XgViewApp {
         // window it has. See `handle_keys`, which runs on the same answer. The
         // magnified viewport's bar is the wall's own surface even though its
         // controls hold the focus, so a gesture over the picture still reaches
-        // the picture - and puts the bar away doing it.
+        // the picture. The bar stays through it: a pinch, a wheel and a pan leave
+        // the viewer on the same picture, and only a tap or a change of picture
+        // takes the strip away. See [`Self::tap_release`].
         if self.scheduler.is_zoomed()
             && !self.blackout_on
             && (self.owner == Owner::Grid || self.tile_bar.is_open())
@@ -6867,16 +6992,14 @@ impl XgViewApp {
                 // the mouse - and neither is a drag, because a pinch's pointer
                 // follows the first finger and a wheel has no pointer of its own.
                 if let Some((delta, at)) = pinched.or(wheeled) {
-                    // Pushing the picture in or out is the viewer at the
-                    // picture; a control strip left standing over it would take
-                    // the next press meant for the gesture.
-                    self.tile_bar.hide();
+                    // Pushing the picture in or out is the viewer at the same
+                    // picture: the strip keeps its place while it happens.
                     self.picture_zoom = self.picture_zoom.zoomed(delta, at, dest);
                 } else if self.picture_zoom.magnified() {
                     // A drag on the picture moves it; one that starts on the bar
-                    // is the bar's. A finger's tap carries a little movement,
-                    // and taking that as a pan would put the bar away before
-                    // the touch could press it.
+                    // is the bar's. A finger's tap carries a little movement, and
+                    // taking that as a pan would move the picture under the
+                    // press that was meant for the strip.
                     let drag = ui.ctx().input(|input| {
                         drag_frame(input, area).map(|delta| (delta, input.pointer.press_origin()))
                     });
@@ -6891,7 +7014,6 @@ impl XgViewApp {
                                 )
                             });
                         if !on_bar {
-                            self.tile_bar.hide();
                             self.picture_zoom = self.picture_zoom.panned(delta, dest);
                         }
                     }
@@ -6966,13 +7088,16 @@ impl XgViewApp {
         }
     }
 
-    /// Answers the magnified viewport's bar and paints it.
+    /// Answers the magnified viewport's bar, draws it, and reads the tap that
+    /// puts it up or away.
     ///
-    /// The bar is part of the wall rather than one of its panels: it is drawn on
-    /// the wall's own painter, it never takes egui's focus, and the pointer is
-    /// read from the tile's own interaction - the tile covers the whole wall in
-    /// this view, so there is nothing else to read. Returns whether the press
-    /// belonged to the bar, in which case the wall does not also act on it.
+    /// A tap - quick, still, one finger - is the whole of the pointer's part in
+    /// it: one on the picture brings the strip up along the bottom, and one on
+    /// the picture while it is up takes it away. Everything else the pointer can
+    /// do there - a press that lingered, a drag, a pinch - belongs to the
+    /// picture, which stays as it was. A double press is still the way back to
+    /// the grid: the first press opens the strip, so the second is let through
+    /// to the wall and the zoom closes the strip with it.
     ///
     /// Its shape comes from [`crate::tilebar`], which lays it out in the
     /// picture's frame and maps that onto the screen, so a picture drawn turned
@@ -6989,10 +7114,11 @@ impl XgViewApp {
             return false;
         }
         // A page or a channel sliding under the viewer is not the moment to
-        // bring the bar up, and one that is up belongs to the picture that is
-        // leaving: the step closed it already, and this keeps a press during the
-        // slide from bringing it back over a moving picture.
-        if self.slide.offset != 0.0 || self.slide.dragging {
+        // bring the bar up: a press that lands during a slide belongs to the
+        // slide. A bar that is already up stays drawn through the drag - it
+        // belongs to the picture under it and moves with it - so only the closed
+        // case is held back.
+        if !self.tile_bar.is_open() && (self.slide.offset != 0.0 || self.slide.dragging) {
             return false;
         }
         let Some(index) = self.scheduler.zoom() else {
@@ -7010,69 +7136,59 @@ impl XgViewApp {
         }
 
         let rotated = self.magnified_rotated();
-        // The band is the one the bars use, and the magnified viewport's bar
-        // takes it over: while the bars are away it is where they would have
-        // been, and while they are on screen it is the same depth just inside
-        // the tile. The heights are the ones the bars were last drawn at; before
-        // that has happened once, roughly what a toolbar and a status bar are.
-        let (top_band, bottom_band) = self
-            .chrome
-            .bars
-            .map_or((44.0, 30.0), |(top, bottom)| (top.height(), bottom.height()));
         // The controls are read again below, after the press, so a press that
         // changes the picture fit also redraws the bar with the set it has in the
         // same frame it changes it. Every control is a square.
         let controls = self.tile_bar_controls();
         let widths = vec![tilebar::icon_width(); controls.len()];
-        let layout = tilebar::layout(
-            rect,
-            rotated,
-            self.tile_bar.dock(),
-            &widths,
-            top_band,
-            bottom_band,
-        );
+        let layout = tilebar::layout(rect, rotated, self.tile_bar.dock(), &widths);
         let now = Instant::now();
         let mut consumed = false;
 
+        // A press on the picture closes the bar only when it was a tap: quick,
+        // still, and the only finger down. A press that lingered is a thumb left
+        // on the glass, one that slid is a pan being reached for, and a pinch is
+        // two fingers - the bar stays through all of them. See `tap_release`.
+        let tap = self.tap_release(ui.ctx());
         if let Some(pos) = actions.click_pos {
             let hit = layout.hit(pos);
             if self.tile_bar.is_open() {
                 if matches!(hit, tilebar::Hit::Outside) {
-                    // A press on the picture takes the bar down, and does so at
-                    // once: it is the way out of the bar that a finger has. The
-                    // bar takes this press with it, so one press outside is not
-                    // also the first click of a double press on the picture - a
-                    // tap that opened the bar and then closed it would otherwise
-                    // put the magnification back. A double press out here still
-                    // does: its second press lands on the picture after the bar
-                    // is down.
-                    self.tile_bar.hide();
+                    // A tap on the picture takes the bar down. The bar takes this
+                    // press with it, so one press outside is not also the first
+                    // click of a double press on the picture - a tap that opened
+                    // the bar and then closed it would otherwise put the
+                    // magnification back.
+                    if tap.is_some() && !self.tile_bar.ignoring(now) {
+                        self.tile_bar.hide();
+                    }
+                    // A double press out here is the way back to the grid: the
+                    // first press opened the strip, so the second is the wall's,
+                    // and the zoom closes the strip as it goes.
+                    consumed = actions.double_click_pos.is_none();
                 } else {
                     // A press on the strip that did not land on a control - the
                     // padding between them - is still the bar being used.
                     self.tile_bar.touch(now);
+                    consumed = true;
                 }
-                consumed = true;
-            } else if let Some(dock) = layout.band_at(pos) {
-                // A press on the band while the bar is down asks for it. A
-                // double press in the band opens with its first press, and the
-                // bar's own guard then keeps the second from shutting it - no
-                // double-click check is needed here, and one would refuse to
-                // reopen the bar after a press on the picture had just taken it
-                // down.
-                // A bar that is down has no controls to take the press: the
-                // band is read on its own, so a press on the band where a
-                // control will be drawn still asks for the bar - though the
-                // band stops short of the control's middle, so only the edge
-                // is being tapped.
-                self.tile_bar.show(dock, now);
-                // The bar is the wall's surface, so the focus comes off whatever
-                // control had it and lands on the bar's seat: a bar opened by a
-                // finger carries no cursor either, and the first arrow is what
-                // walks into its controls.
-                ui.ctx().memory_mut(|memory| memory.request_focus(tilebar::seat()));
-                consumed = true;
+            } else if tap.is_some() {
+                // A tap anywhere on the picture asks for the strip, along the
+                // bottom where a strip of controls belongs - but it is asked for
+                // after egui's double-click window, because the second tap of a
+                // double press is the way back to the grid and the first must not
+                // flash the strip on its way there. See `tap_open_at`.
+                if actions.double_click_pos.is_some() {
+                    // This is the second tap: the wall's, and no strip.
+                    self.tap_open_at = None;
+                    consumed = false;
+                } else {
+                    let delay = ui
+                        .ctx()
+                        .options(|options| options.input_options.max_double_click_delay);
+                    self.tap_open_at = Some(now + Duration::from_secs_f64(delay.max(0.0)));
+                    consumed = true;
+                }
             }
         }
 
@@ -7084,14 +7200,7 @@ impl XgViewApp {
         // one.
         let entries = self.tile_bar_entries();
         let widths = vec![tilebar::icon_width(); entries.len()];
-        let layout = tilebar::layout(
-            rect,
-            rotated,
-            self.tile_bar.dock(),
-            &widths,
-            top_band,
-            bottom_band,
-        );
+        let layout = tilebar::layout(rect, rotated, self.tile_bar.dock(), &widths);
 
         // A double press in the band is the bar being asked for, not the
         // viewport being put back: its first press has already opened the bar,
@@ -7260,6 +7369,9 @@ impl XgViewApp {
     fn toggle_zoom_rotate(&mut self) {
         self.config.zoom_rotate = !self.config.zoom_rotate;
         self.mark_dirty();
+        // The picture's shape is the bar's default too: turned, it goes; back
+        // upright, it comes.
+        self.settle_tile_bar();
     }
 
     /// The picker that offers the layouts with no button of their own.
@@ -7715,16 +7827,14 @@ impl eframe::App for XgViewApp {
         // the wall - takes the bar with it. The step and the two zooms also
         // close it where they happen; this is the net under all of them.
         //
-        // The focus is the bar's own while it is up - its seat or one of its
-        // controls - so that is not something else having taken the wall.
-        // Anything else that holds the focus (a button of the bars, a panel) is.
-        let bar_has_focus = ctx
-            .memory(|memory| memory.focused())
-            .is_some_and(tilebar::owns);
+        // What the focus is doing is not part of it. The bar takes the focus
+        // itself, and an arrow, a press on the picture or a frame in which egui
+        // has just dropped it would otherwise read as "something else has the
+        // wall" and take the strip away mid-gesture. See `tap_release` for what
+        // does take it down, and `panel_anchor` for the panels that do.
         if !self.scheduler.is_zoomed()
             || self.blackout_on
             || self.panel_anchor().is_some()
-            || (self.owner != Owner::Grid && !bar_has_focus)
         {
             self.tile_bar.hide();
         }
@@ -7793,6 +7903,24 @@ impl eframe::App for XgViewApp {
         // a viewer was there. What counts as asking for them is the whole of
         // `viewer_active`.
         self.chrome.input_seen = self.viewer_active(ctx);
+        // And the press in flight is tracked before anything is drawn: the
+        // release that closes the magnified viewport's bar is read against it.
+        self.track_tap(ctx);
+        // A tap asks for the strip, but only once egui's double-click window has
+        // passed: the second tap of a double press is the way back to the grid,
+        // and the first must not put the strip on screen on its way there. See
+        // `tile_bar_overlay`.
+        if let Some(at) = self.tap_open_at {
+            let now = Instant::now();
+            if now >= at {
+                self.tap_open_at = None;
+                if self.scheduler.is_zoomed() && !self.tile_bar.is_open() {
+                    self.tile_bar.show(tilebar::Dock::Bottom, now);
+                }
+            } else {
+                ctx.request_repaint_after(at - now);
+            }
+        }
 
         self.poll_events();
         self.poll_sealing();
@@ -8352,7 +8480,7 @@ impl eframe::App for XgViewApp {
         // that ends it, so it stays up for as long as the microphone is open
         // rather than going down on the idle the viewer last touched it at.
         if let Some(left) = self.tile_bar.remaining(Instant::now()) {
-            if self.talking {
+            if self.talking || self.tile_bar_pinned() {
                 self.tile_bar.touch(Instant::now());
             } else if left.is_zero() {
                 self.tile_bar.hide();

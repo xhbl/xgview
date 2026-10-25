@@ -130,9 +130,7 @@ pub enum Hit {
     Button(usize),
     /// On the strip, but not on a control.
     Inside,
-    /// In the band along one picture edge, which is how the bar is asked for.
-    Band(Dock),
-    /// On the picture, away from all of it.
+    /// On the picture, away from the bar.
     Outside,
 }
 
@@ -261,33 +259,25 @@ pub fn scope(rotated: bool) -> &'static str {
     if rotated { "tile-bar-column" } else { "tile-bar-row" }
 }
 
-/// The bar and its two activation bands, in screen coordinates.
+/// The bar, in screen coordinates.
+///
+/// It used to carry the two activation bands as well - the strips along the
+/// picture's edges a press opened the bar from. A tap now opens it anywhere on
+/// the picture, so the bands are gone; what the bar answers is where it is.
 #[derive(Debug, Clone)]
 pub struct Layout {
     /// The strip itself.
     pub bar: Rect,
     /// One rectangle per control, in the picture's left-to-right order.
     pub buttons: Vec<Rect>,
-    /// The band along the picture's top edge.
-    pub top: Rect,
-    /// The band along the picture's bottom edge.
-    pub bottom: Rect,
 }
 
 impl Layout {
-    /// The band along `dock`.
-    pub fn band(&self, dock: Dock) -> Rect {
-        match dock {
-            Dock::Top => self.top,
-            Dock::Bottom => self.bottom,
-        }
-    }
-
     /// Where a press at `pos` landed.
     ///
-    /// The controls come before the strip and the strip before the bands: the
-    /// strip lies inside a band, and a press on it is the strip's even though
-    /// it is also in the band that asked for it.
+    /// The controls come before the strip: a press on a control is that
+    /// control's, the strip's padding is the strip's, and anything else is the
+    /// picture's.
     pub fn hit(&self, pos: Pos2) -> Hit {
         if let Some(index) = self.buttons.iter().position(|rect| rect.contains(pos)) {
             return Hit::Button(index);
@@ -295,28 +285,7 @@ impl Layout {
         if self.bar.contains(pos) {
             return Hit::Inside;
         }
-        if let Some(dock) = self.band_at(pos) {
-            return Hit::Band(dock);
-        }
         Hit::Outside
-    }
-
-    /// The band along the picture edge `pos` is in, if it is in one.
-    ///
-    /// Read on its own, without the strip or its controls: a bar that is down
-    /// has no controls to take a press, and the part of the band a control will
-    /// be drawn over is still the band asking for the bar. The band is
-    /// shallower than the strip, so it stops short of a control's middle - it
-    /// is the edge that is being tapped, not the picture. See [`hit`](Self::hit)
-    /// for the order a bar that *is* up is read in.
-    pub fn band_at(&self, pos: Pos2) -> Option<Dock> {
-        if self.top.contains(pos) {
-            Some(Dock::Top)
-        } else if self.bottom.contains(pos) {
-            Some(Dock::Bottom)
-        } else {
-            None
-        }
     }
 }
 
@@ -329,19 +298,10 @@ impl Layout {
 /// inside the picture except for a tile too small to hold it, which the caller
 /// declines to draw.
 ///
-/// `top_band` and `bottom_band` are how deep the activation bands are, in
-/// points. They are the heights of the bars the grid would have shown there -
-/// the top toolbar and the bottom status bar - so the press that used to summon
-/// a bar summons this one, in the same place and of the same depth. See
-/// [`crate::app::XgViewApp`], which reads them from `Chrome::bars`.
-pub fn layout(
-    tile: Rect,
-    rotated: bool,
-    dock: Dock,
-    widths: &[f32],
-    top_band: f32,
-    bottom_band: f32,
-) -> Layout {
+/// The side it is docked to is the picture's own: `Dock::Bottom` is the edge the
+/// status bar would be on in a landscape wall, and the screen's left edge once
+/// the picture is turned.
+pub fn layout(tile: Rect, rotated: bool, dock: Dock, widths: &[f32]) -> Layout {
     let local = if rotated { vec2(tile.height(), tile.width()) } else { tile.size() };
     let length = widths.iter().sum::<f32>()
         + widths.len().saturating_sub(1) as f32 * GAP
@@ -363,17 +323,9 @@ pub fn layout(
             rect
         })
         .collect();
-    let top = Rect::from_min_size(Pos2::ZERO, vec2(local.x, top_band.max(0.0)));
-    let bottom = Rect::from_min_size(
-        egui::pos2(0.0, local.y - bottom_band.max(0.0)),
-        vec2(local.x, bottom_band.max(0.0)),
-    );
-
     Layout {
         bar: to_screen_rect(bar, tile, rotated),
         buttons: buttons.into_iter().map(|rect| to_screen_rect(rect, tile, rotated)).collect(),
-        top: to_screen_rect(top, tile, rotated),
-        bottom: to_screen_rect(bottom, tile, rotated),
     }
 }
 
@@ -430,11 +382,12 @@ pub fn draw(
     // the arrow that walks back, and the remote would step off the strip onto a
     // control that answers nothing; the application maps the first arrow off the
     // seat onto the first control instead. See `app::handle_keys`.
-    let _seat = ui.interact(
-        Rect::from_min_size(layout.bar.min, vec2(0.0, 0.0)),
-        seat(),
-        Sense::focusable_noninteractive(),
-    );
+    // A real rectangle, small as it is: egui leaves a zero-area widget out of the
+    // widgets the pointer can reach, and a focus asked for an id that is not
+    // among them does not stick - the bar then loses its seat on the next frame
+    // and the focus goes with it.
+    let seat_rect = Rect::from_min_size(layout.bar.min + vec2(PAD * 0.5, PAD * 0.5), vec2(2.0, 2.0));
+    let _seat = ui.interact(seat_rect, seat(), Sense::focusable_noninteractive());
 
     let mut pressed = None;
     for (index, rect) in layout.buttons.iter().enumerate() {
@@ -474,13 +427,8 @@ mod tests {
         outer.contains(inner.min) && outer.contains(inner.max)
     }
 
-    /// The bands a landscape wall shows: the toolbar over the picture and the
-    /// status bar under it, at their drawn heights.
-    const TOP_BAND: f32 = 33.0;
-    const BOTTOM_BAND: f32 = 25.0;
-
     fn placed(tile: Rect, rotated: bool, dock: Dock, widths: &[f32]) -> Layout {
-        layout(tile, rotated, dock, widths, TOP_BAND, BOTTOM_BAND)
+        layout(tile, rotated, dock, widths)
     }
 
     /// The strip is inside the tile and against the picture edge it was docked
@@ -542,8 +490,9 @@ mod tests {
         assert!((span - (3.0 * BUTTON_H + 2.0 * GAP)).abs() < 0.01);
     }
 
-    /// A press on a control is that control's, then the strip's, then the band
-    /// it is docked in, and anything else is the picture's.
+    /// A press on a control is that control's, the strip's padding is the
+    /// strip's, and anything else is the picture's - the tap that opens and
+    /// closes the bar is read from there.
     #[test]
     fn a_press_is_read_from_the_control_outwards() {
         let one = [icon_width()];
@@ -553,12 +502,10 @@ mod tests {
         // The padding between the strip's edge and the control is the strip's.
         let padding = Pos2::new(layout.bar.left() + 2.0, layout.bar.center().y);
         assert_eq!(layout.hit(padding), Hit::Inside);
-        // The band runs the width of the picture, and the strip lies inside it;
-        // the edge of the strip is the strip's, not the band's.
-        let band = layout.top;
-        assert_eq!(layout.hit(Pos2::new(band.center().x, EDGE)), Hit::Inside);
-        assert_eq!(layout.hit(Pos2::new(band.left() + 4.0, EDGE)), Hit::Band(Dock::Top));
         assert_eq!(layout.hit(Pos2::new(960.0, 540.0)), Hit::Outside);
+        // The old bands are the picture's now: a press there is a tap on the
+        // picture, which is what opens the strip.
+        assert_eq!(layout.hit(Pos2::new(4.0, EDGE)), Hit::Outside);
     }
 
     /// The bar opens on the seat and carries no cursor: nothing to press until
