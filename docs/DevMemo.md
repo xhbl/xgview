@@ -2442,11 +2442,32 @@ capture - the same shape as the storage permission an export asks for on Android
 9. After that the two failures are distinct again: no permission (the dialog
 path) and no device (`no microphone to talk into`).
 
-**What is not here.** There is no echo cancellation, and that is the deliberate
-scope of this step: on the OPPO the phone's own speaker came back through the
-microphone at a peak of 3003 while the room sat at 150-300, which is exactly the
-loop an AEC exists to break. A speaker beside a live microphone will howl at some
-gain.
+**The call is half duplex, because there is no echo cancellation.** On the OPPO
+the phone's own speaker came back through the microphone at a peak of 3003 while
+the room sat at 150-300: a speaker beside a live microphone is a loop, and it
+howls at some gain. Turning the sound off while the microphone is open breaks the
+loop the other way round - walkie-talkie, not telephone - and that is one line in
+`apply_audio`/`set_talking`: `sink.set_active(sound && !talking)`, the sound
+switch itself left as the viewer set it. A call is therefore one-way: the viewer
+hears the camera between calls and talks during one, which is what the red
+handset is for. True full duplex needs the echo canceller, and it is a step of
+its own: on Android the platform has one (`AcousticEchoCanceler`, and Oboe's
+`VoiceCommunication` input preset, which `cpal` does not expose today - the
+capture would have to go through Oboe directly or through a JNI hook), and on the
+desktop it means WebRTC's AEC3 with the playback as its reference signal - a C++
+dependency and an audio graph that keeps the two in step, which is why the
+half-duplex answer is the one in the build.
+
+**If full duplex is ever wanted, the phone is where to start.** It is the device
+the howl was measured on - a speaker two centimetres from its own microphone -
+and Android already has the canceller as a platform call: the capture has to go
+through Oboe with the `VoiceCommunication` input preset (or an
+`AcousticEchoCanceler` attached to the same stream) instead of `cpal`'s default,
+which is a JNI hook and an Oboe stream on the Android side, no new dependency and
+no audio graph of our own. The desktop's AEC3 is the larger step and can wait
+until the phone proves the feature is wanted; the half-duplex rule above stays
+the fallback wherever no canceller is available, because a cancelled loop that
+turns out not to be cancelled is a howl.
 
 **Measured on the OPPO PBAM00** (Android 8.1, API 27, 2026-10-24). The wall was
 started, the doorbell magnified, and the bar's microphone tapped: the permission

@@ -1872,9 +1872,19 @@ impl XgViewApp {
     /// The talk-back target moves with it: only the magnified session asks for a
     /// back channel, so naming the camera here is what opens one there - and a
     /// microphone left open on the camera the viewer just left is closed.
+    ///
+    /// **A call mutes the speaker.** The speaker and the microphone are one
+    /// device, and a speaker playing into the microphone beside it is a loop:
+    /// measured on a phone, the speaker came back through the microphone at a
+    /// peak of 3003 while the room sat at 150-300, which is the howl an echo
+    /// canceller exists to break. There is none here, so the loop is broken the
+    /// other way round - half duplex, the way a walkie-talkie is: while the
+    /// microphone is open the camera's sound is muted, and hanging up brings it
+    /// back. The sound switch is left as the viewer set it; this is the sink
+    /// alone. See [`Self::set_talking`].
     fn apply_audio(&mut self) {
         if let Some(sink) = &self.audio {
-            sink.set_active(self.sound_on);
+            sink.set_active(self.sound_on && !self.talking);
         }
         let index = self.scheduler.zoom();
         self.manager.audio().set_index(index);
@@ -1910,6 +1920,12 @@ impl XgViewApp {
         self.talking = on;
         self.talk_index = on.then(|| self.scheduler.zoom()).flatten();
         self.manager.talk().set_talking(on);
+        // The speaker goes quiet while the microphone is open: it is the same
+        // device, and without echo cancellation the sound it makes comes
+        // straight back in through the microphone. See `apply_audio`.
+        if let Some(sink) = &self.audio {
+            sink.set_active(self.sound_on && !on);
+        }
         tracing::debug!(target: "xgview::talk", on, "the talk-back changed");
         // The bar now carries the one control that ends the call instead of the
         // microphone the press landed on, so the focus it had is gone with it;
