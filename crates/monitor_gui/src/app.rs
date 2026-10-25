@@ -359,6 +359,27 @@ enum Owner {
     Controls,
 }
 
+/// What one of the magnified bar's controls does.
+///
+/// The bar is a list of controls in walk order, and a press - by the remote's
+/// confirm key or by a finger - answers the one it landed on. Naming the act
+/// rather than the place keeps the two apart: the quarter turn is only on the
+/// bar upright, so an index would mean one thing in one orientation and another
+/// in the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TileBarAction {
+    /// Turn the picture a quarter turn, or back.
+    Rotate,
+    /// Move the picture fit on to the next one.
+    Fit,
+    /// Turn the sound on or off.
+    Sound,
+    /// Start or end the talk-back.
+    Mic,
+    /// End the call the bar has taken over for.
+    Hangup,
+}
+
 /// Detects the frame a panel appears on.
 ///
 /// The remote's focus starts on the wall, and a panel that opens without taking
@@ -6633,6 +6654,30 @@ impl XgViewApp {
         }
     }
 
+    /// Whether the magnified picture is drawn a quarter turn on an upright wall.
+    ///
+    /// Upright, a landscape stream used to be turned to fill the screen. It is
+    /// drawn as the camera sends it now - letterboxed - until the bar's rotate
+    /// control asks for the turn, and the choice is the camera's own
+    /// (`zoom_rotate`), like its magnified fit. A landscape wall never turns a
+    /// picture: there is nothing to fill, and the control that would ask for it
+    /// is not on the bar there.
+    fn magnified_rotated(&self) -> bool {
+        if !self.is_portrait() || !self.scheduler.is_zoomed() {
+            return false;
+        }
+        let Some(index) = self.scheduler.zoom() else {
+            return false;
+        };
+        let Some(slot) = self.config.active_slots().get(index).copied() else {
+            return false;
+        };
+        self.config
+            .cameras
+            .get(slot)
+            .is_some_and(|camera| camera.zoom_rotate.unwrap_or(false))
+    }
+
     fn magnified_area(
         &self,
         cameras: &[CameraSource],
@@ -6646,9 +6691,9 @@ impl XgViewApp {
         let camera = cameras.get(index)?;
         let size = self.textures.get(&index)?.surface.size;
         let aspect = self.tile_aspect(camera);
-        // Upright, the magnified picture is the one drawn sideways - the same
-        // answer the tile is drawn with. See `paint_view`.
-        Some(grid::picture_area(size, rect, aspect, self.is_portrait()))
+        // Upright, the magnified picture is the one that may be drawn sideways -
+        // the same answer the tile is drawn with. See `paint_view`.
+        Some(grid::picture_area(size, rect, aspect, self.magnified_rotated()))
     }
 
     fn paint_view(
@@ -6702,7 +6747,7 @@ impl XgViewApp {
                     .and_then(|index| cameras.get(index))
                     .map(|camera| self.tile_aspect(camera))
                     .unwrap_or_default(),
-                rotated: self.is_portrait() && self.scheduler.is_zoomed(),
+                rotated: self.magnified_rotated(),
                 // The magnified viewport is the one picture that can be pushed
                 // in - it is the whole wall while it stands - and it is the only
                 // tile that carries the window. Nothing else is zoomable, so
@@ -6845,7 +6890,7 @@ impl XgViewApp {
                                 in_tile_bar_strip(
                                     origin,
                                     wall,
-                                    self.is_portrait(),
+                                    self.magnified_rotated(),
                                     self.tile_bar.dock(),
                                 )
                             });
@@ -6968,7 +7013,7 @@ impl XgViewApp {
             return false;
         }
 
-        let rotated = self.is_portrait();
+        let rotated = self.magnified_rotated();
         // The band is the one the bars use, and the magnified viewport's bar
         // takes it over: while the bars are away it is where they would have
         // been, and while they are on screen it is the same depth just inside
@@ -7041,8 +7086,8 @@ impl XgViewApp {
         // again with the dock and the widths it has now, so this frame paints it
         // there rather than at the old edge and then jumping over on the next
         // one.
-        let controls = self.tile_bar_controls();
-        let widths = vec![tilebar::icon_width(); controls.len()];
+        let entries = self.tile_bar_entries();
+        let widths = vec![tilebar::icon_width(); entries.len()];
         let layout = tilebar::layout(
             rect,
             rotated,
@@ -7067,7 +7112,9 @@ impl XgViewApp {
             // focus the navigation layer puts there, and the confirm key reaches
             // it as a click on that focus. What is left here is the guard - the
             // gesture that opened the bar must not also press it - and the act.
-            if let Some(control) = tilebar::draw(ui, &mut self.nav, &layout, rotated, &controls) {
+            let controls: Vec<tilebar::Control> =
+                entries.iter().map(|(control, _)| *control).collect();
+            if let Some(index) = tilebar::draw(ui, &mut self.nav, &layout, rotated, &controls) {
                 if !self.tile_bar.ignoring(now) {
                     // Was the ring on a control, or still on the seat? The
                     // difference is whether the remote is driving the bar.
@@ -7077,7 +7124,9 @@ impl XgViewApp {
                         .is_some_and(|id| id != tilebar::seat());
                     let talking = self.talking;
                     self.tile_bar.touch(now);
-                    self.tile_bar_activate(control);
+                    if let Some((_, action)) = entries.get(index) {
+                        self.tile_bar_activate(*action);
+                    }
                     if self.talking != talking {
                         // The microphone has become the handset and the ring goes
                         // with it: a call the remote started is hung up by the
@@ -7118,72 +7167,100 @@ impl XgViewApp {
             .is_some_and(|index| self.channels.get(&index).is_some_and(|channel| channel.backchannel))
     }
 
-    /// The controls the magnified bar carries, in walk order.
+    /// The controls the magnified bar carries, with what each does, in walk
+    /// order.
     ///
     /// A call in progress takes the bar over: it carries one control, the red
     /// handset that ends it, and nothing else can be pressed while the
-    /// microphone is open. Otherwise the picture fit - the icon rather than the
-    /// word, with the new fit named in a toast as it changes - is always there;
-    /// the sound switch for a camera that has sound, the microphone for one that
-    /// offers a back channel.
-    fn tile_bar_controls(&self) -> Vec<tilebar::Control> {
+    /// microphone is open. Upright, the quarter turn comes first - the one
+    /// control that changes the shape of the picture before anything is fitted
+    /// into it. Then the picture fit - the icon rather than the word, with the
+    /// new fit named in a toast as it changes - is always there; the sound switch
+    /// for a camera that has sound, the microphone for one that offers a back
+    /// channel.
+    fn tile_bar_entries(&self) -> Vec<(tilebar::Control, TileBarAction)> {
         if self.talking {
-            return vec![tilebar::Control::Hangup];
+            return vec![(tilebar::Control::Hangup, TileBarAction::Hangup)];
         }
-        let mut controls = vec![tilebar::Control::Icon(Icon::AspectRatio)];
+        let mut entries = Vec::new();
+        if self.is_portrait() {
+            entries.push((tilebar::Control::Icon(Icon::Rotate), TileBarAction::Rotate));
+        }
+        entries.push((tilebar::Control::Icon(Icon::AspectRatio), TileBarAction::Fit));
         if tilebar::SOUND && self.magnified_has_audio() {
-            controls.push(tilebar::Control::Icon(if self.sound_on {
-                Icon::Sound
-            } else {
-                Icon::Mute
-            }));
+            let icon = if self.sound_on { Icon::Sound } else { Icon::Mute };
+            entries.push((tilebar::Control::Icon(icon), TileBarAction::Sound));
         }
         if self.magnified_has_backchannel() {
-            controls.push(tilebar::Control::Icon(Icon::Mic));
+            entries.push((tilebar::Control::Icon(Icon::Mic), TileBarAction::Mic));
         }
-        controls
+        entries
     }
 
-    /// Answers the control at `control`: the handset that ends a call, the
-    /// picture fit, the sound switch when the camera has sound, or the
-    /// microphone when it has a back channel.
+    /// The controls alone, which is what the layout and the paint need.
+    fn tile_bar_controls(&self) -> Vec<tilebar::Control> {
+        self.tile_bar_entries().into_iter().map(|(control, _)| control).collect()
+    }
+
+    /// Answers a control of the magnified bar: the handset that ends a call, the
+    /// quarter turn, the picture fit, the sound switch when the camera has sound,
+    /// or the microphone when it has a back channel.
     ///
-    /// It is the cursor's index for a key and the pressed control's for a finger
-    /// - a press acts on what it landed on without moving the cursor. See
-    /// `tilebar::Bar::flash`.
+    /// It is the action of the control the cursor is on for a key and of the one
+    /// a finger landed on - a press acts on what it hit without moving the
+    /// cursor.
+    fn tile_bar_activate(&mut self, action: TileBarAction) {
+        match action {
+            TileBarAction::Hangup => {
+                // A call is up, and its one control is the way out.
+                self.set_talking(false);
+            }
+            TileBarAction::Rotate => {
+                self.toggle_zoom_rotate();
+            }
+            TileBarAction::Sound => {
+                self.sound_on = !self.sound_on;
+                self.config.sound_on = self.sound_on;
+                self.apply_audio();
+                self.mark_dirty();
+            }
+            TileBarAction::Mic => {
+                self.set_talking(!self.talking);
+            }
+            TileBarAction::Fit => {
+                // The fit this writes is the magnified viewport's own: it is kept
+                // per camera, and the wall's landscape and portrait fits - the
+                // pair the settings panel and the portrait aspect picker write -
+                // are not touched. Until the first press the fit is the camera's
+                // own ratio, `Original`.
+                //
+                // The control carries no word to read the value on, so the name
+                // of the fit it has just moved to is said in the middle of the
+                // screen.
+                let Some(index) = self.scheduler.zoom() else {
+                    return;
+                };
+                let Some(slot) = self.config.active_slots().get(index).copied() else {
+                    return;
+                };
+                let Some(camera) = self.config.cameras.get_mut(slot) else {
+                    return;
+                };
+                let next = camera.zoom_aspect.unwrap_or(TileAspect::Original).next();
+                camera.zoom_aspect = Some(next);
+                self.mark_dirty();
+                self.flash_centered(monitor_i18n::tr(next.label()), ToastKind::Info);
+            }
+        }
+    }
+
+    /// Turns the magnified picture a quarter turn, or back.
     ///
-    /// The fit this writes is the magnified viewport's own: it is kept per
-    /// camera, and the wall's landscape and portrait fits - the pair the settings
-    /// panel and the portrait aspect picker write - are not touched. Until the
-    /// first press the fit is the camera's own ratio, `Original`, which is where
-    /// the walk starts.
-    fn tile_bar_activate(&mut self, control: usize) {
-        // A call is up, so the bar holds one control and it is the way out.
-        if self.talking {
-            self.set_talking(false);
-            return;
-        }
-        // The controls after the picture fit are the sound switch and then the
-        // microphone, each present only when the camera earns it.
-        let sound = tilebar::SOUND && self.magnified_has_audio();
-        if sound && control == 1 {
-            self.sound_on = !self.sound_on;
-            self.config.sound_on = self.sound_on;
-            self.apply_audio();
-            self.mark_dirty();
-            return;
-        }
-        if self.magnified_has_backchannel() && control == 1 + usize::from(sound) {
-            self.set_talking(!self.talking);
-            return;
-        }
-        // The fit this writes is the magnified viewport's own: it is kept per
-        // camera, and the wall's landscape and portrait fits - the pair the
-        // settings panel and the portrait aspect picker write - are not touched.
-        // Until the first press the fit is the camera's own ratio, `Original`.
-        //
-        // The control carries no word to read the value on, so the name of the
-        // fit it has just moved to is said in the middle of the screen.
+    /// The choice is the camera's own and is kept with its magnified fit
+    /// (`zoom_rotate`), so stepping to another camera and back finds the picture
+    /// as it was left. Only the magnified picture is turned: the wall's tiles are
+    /// drawn upright whatever this says, and a landscape wall never turns one.
+    fn toggle_zoom_rotate(&mut self) {
         let Some(index) = self.scheduler.zoom() else {
             return;
         };
@@ -7193,10 +7270,9 @@ impl XgViewApp {
         let Some(camera) = self.config.cameras.get_mut(slot) else {
             return;
         };
-        let next = camera.zoom_aspect.unwrap_or(TileAspect::Original).next();
-        camera.zoom_aspect = Some(next);
+        let turned = !camera.zoom_rotate.unwrap_or(false);
+        camera.zoom_rotate = Some(turned);
         self.mark_dirty();
-        self.flash_centered(monitor_i18n::tr(next.label()), ToastKind::Info);
     }
 
     /// The picker that offers the layouts with no button of their own.

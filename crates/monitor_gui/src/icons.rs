@@ -55,6 +55,9 @@ pub enum Icon {
     Mic,
     /// End the call: a handset put down, the shape a phone's hang-up key carries.
     Hangup,
+    /// Turn the magnified picture a quarter turn: an arrow curving round a
+    /// square, the shape a phone means by "rotate".
+    Rotate,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -408,6 +411,34 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
             painter.add(line(&[at(0.22, 0.44), at(0.22, 0.56), at(0.50, 0.74), at(0.78, 0.56), at(0.78, 0.44)]));
             painter.add(line(&[at(0.50, 0.74), at(0.50, 0.92)]));
             painter.add(line(&[at(0.34, 0.92), at(0.66, 0.92)]));
+        }
+        Icon::Rotate => {
+            // A circular arrow: an arc most of the way round, a head that says
+            // which way it turns, and the picture's frame in the middle.
+            let (radius, from, to) = (0.38_f32, 200.0_f32.to_radians(), 0.0_f32);
+            let on_arc = |a: f32| (0.5 + radius * a.cos(), 0.5 - radius * a.sin());
+            let arc: Vec<Pos2> = (0..=16)
+                .map(|i| {
+                    let (x, y) = on_arc(from + (to - from) * i as f32 / 16.0);
+                    at(x, y)
+                })
+                .collect();
+            painter.add(Shape::line(arc, stroke));
+            let (head_len, head_wing) = (0.13_f32, 0.09_f32);
+            let (tx, ty) = on_arc(to);
+            // The point a chord of the head's length falls back to, on the arc.
+            let (bx, by) = on_arc(to + head_len / radius);
+            let (cx, cy) = (tx - bx, ty - by);
+            let norm = (cx * cx + cy * cy).sqrt();
+            let (dx, dy) = (cx / norm, cy / norm);
+            let (px, py) = (dy, -dx);
+            painter.add(line(&[
+                at(bx - px * head_wing, by - py * head_wing),
+                at(tx, ty),
+                at(bx + px * head_wing, by + py * head_wing),
+            ]));
+            let body = square(0.33, 0.33, 0.67, 0.67);
+            painter.rect_stroke(body, CornerRadius::same(1), stroke, StrokeKind::Inside);
         }
         Icon::Hangup => {
             // The handset laid down, drawn as the phone's own call-end key has

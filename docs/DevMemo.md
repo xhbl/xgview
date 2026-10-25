@@ -2176,6 +2176,21 @@ portrait aspect picker write the wall's pair; only the strip writes the
 viewport's. A configuration written before the field existed reads it as absent,
 so a camera's first magnification is its own ratio.
 
+**The quarter turn.** Upright, the magnified picture used to be turned a quarter
+turn to fill the screen - which is what a landscape stream needs on a phone held
+the right way up, and what many viewers do not want, because a camera that sees
+the world sideways then has to be read sideways too. It is drawn as the camera
+sends it now, letterboxed, and the strip's first control turns it when the
+viewer wants the screen filled: `zoom_rotate`, the camera's own choice, kept with
+its magnified fit and absent - not turned - until the control is pressed. The
+control is only there upright, where there is a screen to fill; a landscape wall
+never turns a picture. Everything the strip does follows the answer: the ring,
+the layout and the activation bands are read in the picture's frame, so a turned
+picture carries a strip down the screen's side and an upright one a strip across
+its bottom, and the arrow that walks the strip is the one pointing along it. The
+glyph is `Icon::Rotate`: an arc most of the way round with a head on its end, and
+the picture's frame in the middle.
+
 **Two faults found on the way.** The hidden bars leave two invisible `Area`s over
 their bands (`xgview-toolbar-band` and `xgview-status-band`) whose job is to keep
 the summoning press off the tile. Magnified, that is exactly the press the strip
