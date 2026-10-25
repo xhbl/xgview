@@ -116,7 +116,8 @@ it in sensitive setups.
 | Portrait            | Where the device can stand upright - a phone or a tablet, not a television - the wall turns: four stacked grids, the on-screen display rotated with the video, a picture fit of its own per camera, and the page arrows floated at the screen edges. The settings panel is reached in landscape, and the choice is remembered across restarts - the wall comes up already turned |
 | Pagination          | Channels beyond the grid's capacity are paged; swipe, `PageUp` / `PageDown` or the toolbar slides between pages                                                                                                                                                                                                                                                                  |
 | Focus navigation    | A 2 px cyan focus ring walks the tiles with the arrow keys or a TV remote's DPAD; the sideways arrows turn the page at the left and right edges, and the vertical ones stop at the top and bottom, where the wall hands the keys to the bars. It is the remote's cursor: a press of the mouse or a finger does not move it, and it is drawn only while that cursor is being handled - a key that walks it, or a click on a tile, brings it back and it goes again eight seconds later, on its own clock rather than the bars'. A page turn is never one of those: the page keys, the toolbar's page arrows and a swipe all move the picture rather than the ring, so all three behave alike - and a page turn, like a layout that moves the cursor under the viewer, takes a ring that is showing down with it. The bars are the other thing it has to do with: it is taken down as they hide and brought back as they appear, and a wall driven in full screen with the bars away keeps its ring |
-| Temporary zoom      | Double click, `DPAD_CENTER`, `Enter` or `Space` magnifies a viewport to 1x1; inside it a press in the top or bottom band - or the confirm key - brings up a floating bar with the picture fit, laid out on the picture's own frame. `Esc` / `BACK` takes the bar down first and the grid after it. The magnified view has a picture fit of its own, set from that bar and remembered per camera; the wall's landscape and portrait fits are untouched |
+| Temporary zoom      | Double click, `DPAD_CENTER`, `Enter` or `Space` magnifies a viewport to 1x1, and a double press or `Esc` / `BACK` puts it back. The magnified picture carries a floating bar of its own along the bottom, laid out on the picture's own frame: the picture fit, the sound switch, the microphone where the camera takes a talk-back, and - held upright - the quarter turn. A quick tap anywhere on the picture brings the bar up and another puts it away; a press that lingers, a drag that does not turn the page and a pinch leave it as it was, and a double press is still the way back to the grid. Upright and not turned, the bar is up from the start and stays; turned, or in landscape, it is asked for. The magnified view has a picture fit of its own, set from that bar and remembered per camera; the wall's landscape and portrait fits are untouched. Upright, the picture is drawn as the camera sends it - a landscape stream keeps its letterbox - until the quarter turn fills the screen, and that choice is one for the whole configuration |
+| Audio               | The magnified camera's sound plays through the machine's own output, off until the bar's speaker switch turns it on. Where a camera's session carries a back channel, that bar also carries a microphone: pressing it captures the machine's microphone and sends it to the camera as G.711 (PCMU / PCMA) over the same interleaved RTSP connection, and the strip becomes one red handset while the call is up - which ends it, as does leaving the view. The microphone is opened on first use, and Android asks for `RECORD_AUDIO` there; a device with none says so. There is no echo cancellation |
 | Stream switching    | Every layout pulls the cheap sub stream (360P / 480P), the 1x1 grid included; a tile can be pinned to its main stream (1080P / 4K) from its row in Cameras, for the camera worth watching closely while the wall stays a wall - and a magnified viewport always pulls the main stream |
 | Seamless transition | The frame a tile was showing is held until the new stream delivers its first keyframe - no black or green frames                                                                                                                                                                                                                                                                 |
 | Suspend             | Channels on a non-visible page are suspended to save bandwidth, CPU and decoder handles                                                                                                                                                                                                                                                                                          |
@@ -411,25 +412,36 @@ reached from the toolbar's arrows or the page keys, or by closing the fingers ba
 to whole first. Leaving the magnified view, or stepping to another channel, gives
 the picture back whole.
 
+The bar belongs to the picture rather than to the wall's bars: a quick tap on the
+picture puts it up and another puts it away, and nothing else the pointer can do
+there - a press that lingers, a drag, a pinch - does either. The arrow keys walk
+its controls once the confirm key has entered it, `Esc` / `BACK` puts it away
+before the magnification, and a double press still goes back to the grid. Held
+upright and not turned, it is up from the moment the picture is magnified and
+stays; turned, or in landscape, it is asked for. The quarter turn is its first
+control upright: the picture is drawn as the camera sends it - a landscape stream
+keeps its letterbox - until the turn fills the screen, and the choice is one for
+the whole configuration rather than per camera.
+
 ### Keyboard and remote control
 
 | Key                                     | Action                                                                                                                                     |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Arrow keys / DPAD                       | Move the focus between viewports (turns the page at the edges)                                                                             |
-| `Enter` / `Space` / `DPAD_CENTER`       | Magnify the focused viewport to 1x1, press again to return                                                                                 |
-| `Esc` / `Backspace` / `BACK`            | Leave the magnified view                                                                                                                   |
+| Arrow keys / DPAD                       | Move the focus between viewports (turns the page at the edges); with the magnified bar entered, walk its controls                          |
+| `Enter` / `Space` / `DPAD_CENTER`       | Magnify the focused viewport to 1x1; with the magnified bar up, walk into it, and press the control the ring is on when it is entered      |
+| `Esc` / `Backspace` / `BACK`            | Close the magnified bar, or leave the magnified view                                                                                       |
 | `PageUp` / `PageDown`                   | Previous / next page                                                                                                                       |
 | `1` `2` `3` `4` `5` `6` `7` `8` `9` `0` | Select the layout by cell count (see [Grid layouts and paging](#grid-layouts-and-paging)); upright, `1`–`4` pick the stacked grids instead |
 | `F1`                                    | Settings panel                                                                                                                             |
 | `F2`                                    | Camera discovery / management window                                                                                                       |
 | `F11`                                   | Toggle full screen                                                                                                                         |
 
-`BACK` is layered: it first leaves a magnified view, then closes a window, then
-closes the settings panel, then brings the bar back - and only a second press on
-an otherwise idle wall asks whether to quit, so one accidental press never drops
-the wall. Under a supervisor (`--supervise`, including the start-on-boot entry)
-that last step is held: `Back` cannot end the program, only the exit button in
-the settings can.
+`BACK` is layered: it first closes the magnified view's bar, then leaves the
+magnified view, then closes a window, then closes the settings panel, then brings
+the bar back - and only a second press on an otherwise idle wall asks whether to
+quit, so one accidental press never drops the wall. Under a supervisor
+(`--supervise`, including the start-on-boot entry) that last step is held: `Back`
+cannot end the program, only the exit button in the settings can.
 
 Mouse and touch dragging horizontally over the grid also turns the page. The
 toolbar across the top offers the same layout, paging, full screen, settings and
