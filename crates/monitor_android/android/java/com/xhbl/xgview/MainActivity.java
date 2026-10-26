@@ -1335,6 +1335,16 @@ public class MainActivity extends NativeActivity {
     private static int talkSavedVoiceVolume = -1;
 
     /**
+     * The makeup gain applied to the call's playback, in linear terms.
+     *
+     * <p>The voice path's gain staging is a call's, which leaves speech quieter
+     * than the media path at the same volume; this buys that back. It is {@code
+     * 10^(dB/20)}: {@code 1.995f} is +6 dB. Applied as a per-sample multiply in
+     * {@link #pushTalkPlayback}, with a soft clip so a loud frame does not ring.
+     */
+    private static final float TALK_GAIN = 1.995f;
+
+    /**
      * Puts the device into the communication audio mode with the speakerphone on.
      *
      * <p>Both matter, and the speakerphone is the one that is easy to get wrong:
@@ -1570,6 +1580,15 @@ public class MainActivity extends NativeActivity {
         final AudioTrack track = talkOutput;
         if (track == null) {
             return;
+        }
+        // The voice path runs quieter than the media path, so the samples are
+        // lifted by {@link #TALK_GAIN} before they leave. In place: each block is
+        // its own array, and what the caller handed over is not read again. A soft
+        // clip keeps a frame the gain pushes past full scale from ringing.
+        for (int i = 0; i < count; i++) {
+            final double normalised = samples[i] / 32768.0 * TALK_GAIN;
+            final int lifted = (int) (32767.0 * Math.tanh(normalised));
+            samples[i] = (short) lifted;
         }
         track.write(samples, 0, count, AudioTrack.WRITE_NON_BLOCKING);
     }
