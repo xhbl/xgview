@@ -166,6 +166,26 @@ pub enum ConnectionMode {
     Mse,
 }
 
+/// How a camera's speaker is reached, when it has one.
+///
+/// Not a capability: a camera cannot say whether a speaker is connected behind
+/// its jack, and will happily play into an empty one. So the choice is the
+/// user's, and `Auto` means "the way this maker's protocol is known to work".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TalkMode {
+    /// The maker's own protocol when the camera names a maker this build
+    /// speaks, otherwise the standard back channel when there is one.
+    #[default]
+    Auto,
+    /// Nothing at all: the microphone is not drawn, whatever the camera offers.
+    Off,
+    /// The ONVIF Profile T back channel only.
+    Standard,
+    /// The maker's own protocol only.
+    Vendor,
+}
+
 /// One stop of the per-camera connection switch.
 ///
 /// The switch folds the protocol and the RTSP transport into one walk: a camera
@@ -453,6 +473,9 @@ pub struct CameraSource {
     /// How the channel reaches this camera. See [`ConnectionMode`].
     #[serde(default)]
     pub connect: ConnectionMode,
+    /// How this camera's speaker is reached. See [`TalkMode`].
+    #[serde(default)]
+    pub talk: TalkMode,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -532,6 +555,7 @@ impl CameraSource {
             mse_username: None,
             mse_password: None,
             connect: ConnectionMode::default(),
+            talk: TalkMode::default(),
             enabled: true,
             tags: Vec::new(),
             origin: CameraOrigin::Manual,

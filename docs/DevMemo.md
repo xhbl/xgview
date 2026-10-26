@@ -2829,3 +2829,53 @@ than a distribution - enough to tell "under the budget" from "over it", not enou
 to say what the ninety-ninth percentile is. A run that wants the distribution
 sets the threshold to 1 ms, which on this hardware reports very nearly every
 frame, and keeps the log.
+
+---
+
+## 38. A maker's own protocol, and the one number that was wrong in the notes
+
+*Landed 2026-10-25, in 1.5.52.*
+
+**Why a second way in at all.** Nine Foscam cameras here, and the standard back
+channel serves none of them: eight answer a `DESCRIBE` with no `sendonly` media,
+and the ninth - the MGS5030, `.42` - offers it, negotiates the track, and then
+plays silence. A camera agreeing to a back channel is not a camera with a
+speaker behind it, which is why the maker's own protocol is preferred wherever
+one is known: it is the only route measured to be *heard*.
+
+**Which way in is decided from what the camera calls itself**, not from what it
+answers: an `OPTIONS` comes back with no `Server` header at all, but the `401`
+that answers a `DESCRIBE` carries the maker in its realm - `Foscam IPCam Living
+Video` on eight of them, `Foscam` on the one with other firmware - and that
+arrives before any credentials are sent, so identifying costs nothing extra. The
+choice is a small pure function (`talk::route_from`), which is what makes it
+testable without a camera.
+
+**The protocol is TCP on the camera's own port**, the same 88 its RTSP lives on:
+a `SERVERPUSH` request, a login block with the credentials in clear, and then
+976-byte frames of 8 kHz 16-bit PCM every 60 ms. Nothing is encoded and nothing
+is resampled - the talk hub already produces exactly the payload - so the channel
+is a packetiser and a socket.
+
+**The one number that was wrong.** The private notes said the login block carried
+thirty-two bytes per credential. It carries **sixty-four**, and with thirty-two
+the password lands sixteen bytes early, the camera answers `01` where a good
+login answers `00`, and then drops every frame in silence. Two rounds of "the
+tone is not audible" went into that; the fix is four bytes of arithmetic in a
+struct.
+
+**What finally settled it was a capture of the camera's own client**, and how to
+get one is worth writing down because the obvious routes all fail: PCAPdroid's
+adb control intents are ignored on 2.0.2, `run-as` needs a debuggable app, and
+`/sdcard/Android/data/<package>` is unreadable to the shell. What works is
+switching its dump mode to **HTTP server** in the app, starting the capture by
+hand, and `curl -L http://<phone>:8080/` from the machine - it answers `302` to
+`/PCAPdroid_<date>.pcap` and streams. The capture is `LINKTYPE_RAW`, which is
+thirty lines of Python to walk.
+
+**And the protocol has exactly one piece of feedback**, which is worth knowing
+before reaching for a speaker: the fourth word of the login reply. `00 00 00 00`
+is accepted, `01 00 00 00` is refused. Everything after that is silent whatever
+happens - a wrong password looks exactly like a right one, and a frame is never
+acknowledged. Which is why the settings gain a test tone: it is the only way a
+person can tell whether the far end of this is a speaker or an empty jack.

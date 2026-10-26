@@ -29,6 +29,7 @@ use crate::h264::{nal_unit_type, AccessUnit, H264Depacketizer, START_CODE};
 use crate::hevc::{nal_unit_type as hevc_nal_unit_type, HevcDepacketizer};
 use crate::mjpeg::{JpegDepacketizer, MjpegClient};
 use crate::model::{
+    TalkMode,
     is_http_url, is_ws_url, CameraSource, ConnectionMode, ConnectionState, RtspTransport, StreamKind,
 };
 use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtspStage, RtpHeader, SdpTrack};
@@ -489,6 +490,9 @@ struct Endpoint {
     /// the magnified channel alone: a back channel is a camera resource, and
     /// sixteen tiles asking for one at once would fight over it.
     talk: bool,
+    /// How this camera's speaker is reached, as the user configured it. See
+    /// [`TalkMode`].
+    talk_mode: TalkMode,
     /// The second address a channel may try when the first cannot be reached,
     /// with its own credentials. Present only for [`ConnectionMode::Auto`]: a
     /// protocol the user forced has no fallback.
@@ -514,6 +518,7 @@ impl Endpoint {
             && self.credentials == other.credentials
             && self.transport == other.transport
             && self.talk == other.talk
+            && self.talk_mode == other.talk_mode
             && self.fallback == other.fallback
     }
 
@@ -592,6 +597,7 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endp
         stream,
         transport: source.transport,
         talk: false,
+        talk_mode: source.talk,
         fallback,
     }
 }
@@ -820,7 +826,8 @@ async fn supervisor(
                                     TalkStream::new(AudioCodec::from_encoding(encoding)).is_some()
                                 })
                                 .unwrap_or(false);
-                            let route = route_from(probe.realm.as_deref(), encodable);
+                            let route =
+                                route_from(endpoint.talk_mode, probe.realm.as_deref(), encodable);
                             tracing::debug!(
                                 target: "xgview::talk",
                                 camera = %camera_id,
@@ -3201,6 +3208,7 @@ mod tests {
             mse_username: None,
             mse_password: None,
             connect: ConnectionMode::default(),
+            talk: TalkMode::default(),
             enabled: true,
             tags: Vec::new(),
             origin: CameraOrigin::Manual,

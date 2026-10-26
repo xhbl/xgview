@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::model::TalkMode;
 use crate::Result;
 
 pub mod channel;
@@ -140,25 +141,45 @@ impl Vendor {
     }
 }
 
-/// Which way to reach a camera, given what its probe came back with.
+/// Which way to reach a camera, given how the user asked for it and what the
+/// probe came back with.
 ///
-/// **The order is the point.** A maker whose own protocol is known wins over
-/// the standard one, even when the camera offers the standard one: a camera can
-/// negotiate a Profile T back channel and still play nothing into it, which is
-/// exactly what one of this fleet does. Negotiating is not the same as being
-/// heard, and only the maker's protocol is known to be heard.
+/// **The order is the point.** Under [`TalkMode::Auto`], a maker whose own
+/// protocol is known wins over the standard one, even when the camera offers the
+/// standard one: a camera can negotiate a Profile T back channel and still play
+/// nothing into it, which is exactly what one of this fleet does. Negotiating is
+/// not the same as being heard, and only the maker's protocol is known to be
+/// heard.
+///
+/// A forced mode is obeyed rather than second-guessed - including `Vendor` on a
+/// camera that does not name a maker this build knows, which is a `None` and not
+/// a fallback to the standard route. The user asked for that one.
 ///
 /// `encodable` is whether the back channel's encoding is one this build can
 /// send - the caller asks [`TalkStream::new`], which is where that knowledge
 /// lives.
-pub fn route_from(realm: Option<&str>, encodable: bool) -> TalkRoute {
-    if let Some(vendor) = realm.and_then(Vendor::from_realm) {
-        return TalkRoute::Vendor(vendor);
-    }
-    if encodable {
-        TalkRoute::Standard
-    } else {
-        TalkRoute::None
+pub fn route_from(mode: TalkMode, realm: Option<&str>, encodable: bool) -> TalkRoute {
+    let vendor = realm.and_then(Vendor::from_realm);
+    match mode {
+        TalkMode::Off => TalkRoute::None,
+        TalkMode::Vendor => vendor.map(TalkRoute::Vendor).unwrap_or(TalkRoute::None),
+        TalkMode::Standard => {
+            if encodable {
+                TalkRoute::Standard
+            } else {
+                TalkRoute::None
+            }
+        }
+        TalkMode::Auto => {
+            if let Some(vendor) = vendor {
+                return TalkRoute::Vendor(vendor);
+            }
+            if encodable {
+                TalkRoute::Standard
+            } else {
+                TalkRoute::None
+            }
+        }
     }
 }
 
@@ -308,15 +329,31 @@ mod tests {
     /// plays nothing into it, so negotiating is not evidence of being heard.
     #[test]
     fn a_known_maker_wins_over_a_back_channel_that_negotiates() {
-        assert_eq!(route_from(Some("Foscam"), true), TalkRoute::Vendor(Vendor::Foscam));
+        let auto = TalkMode::Auto;
+        assert_eq!(route_from(auto, Some("Foscam"), true), TalkRoute::Vendor(Vendor::Foscam));
         assert_eq!(
-            route_from(Some("Foscam IPCam Living Video"), false),
+            route_from(auto, Some("Foscam IPCam Living Video"), false),
             TalkRoute::Vendor(Vendor::Foscam)
         );
-        assert_eq!(route_from(None, true), TalkRoute::Standard);
-        assert_eq!(route_from(Some("IP Camera"), true), TalkRoute::Standard);
-        assert_eq!(route_from(None, false), TalkRoute::None);
-        assert_eq!(route_from(Some("Reolink"), false), TalkRoute::None);
+        assert_eq!(route_from(auto, None, true), TalkRoute::Standard);
+        assert_eq!(route_from(auto, Some("IP Camera"), true), TalkRoute::Standard);
+        assert_eq!(route_from(auto, None, false), TalkRoute::None);
+        assert_eq!(route_from(auto, Some("Reolink"), false), TalkRoute::None);
+    }
+
+    /// A forced mode is obeyed, including the ways it leads nowhere: `off` is
+    /// silent whatever the camera offers, and `vendor` on a camera that names no
+    /// maker this build knows is a `None` rather than a quiet fallback.
+    #[test]
+    fn a_forced_mode_is_not_second_guessed() {
+        assert_eq!(route_from(TalkMode::Off, Some("Foscam"), true), TalkRoute::None);
+        assert_eq!(
+            route_from(TalkMode::Vendor, Some("Foscam"), false),
+            TalkRoute::Vendor(Vendor::Foscam)
+        );
+        assert_eq!(route_from(TalkMode::Vendor, Some("IP Camera"), true), TalkRoute::None);
+        assert_eq!(route_from(TalkMode::Standard, Some("Foscam"), true), TalkRoute::Standard);
+        assert_eq!(route_from(TalkMode::Standard, Some("Foscam"), false), TalkRoute::None);
     }
 
     /// Only the routes that lead somewhere put a microphone on the screen.
