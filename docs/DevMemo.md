@@ -2606,7 +2606,7 @@ without going through `zoom_in`.
 
 ## 35. A call is a session of its own: the picture carries the picture, and RTP is not a heartbeat
 
-*Landed 2026-10-25, in 1.5.45. Supersedes the last two paragraphs of §34: the
+*Landed 2026-10-25, in 1.5.46. Supersedes the last two paragraphs of §34: the
 back channel is no longer taken when the picture is magnified, and the rule that
 ends a call is no longer "the bar has gone".*
 
@@ -2726,6 +2726,20 @@ None of them is stable against a driver update, a language change or a device
 unplugged between two runs, so a name that no longer opens falls back to the
 default and says so in the log. Storing an index instead would be worse: indices
 move when a device is added.
+
+**The list cannot be read while it is in use.** The first version asked the
+platform for its devices on every frame, and on the kiosk the panel came back as
+"the USB card and four HDMI ports" on start and then as two entries that it
+stepped between and nothing else. An open device is exclusive: once the sink
+holds `plughw:CARD=PCH,DEV=3`, the platform's enumeration no longer lists it, so
+every frame was a list of everything *except* the device in use. The choice was
+appended at the end to stay reachable, which made the next step from it wrap to
+"system default" and then to the first real entry - a cycle of two. The list is
+now read once, at start, before the sink opens anything, and kept; a device
+plugged in later appears at the next start, which is when the sound is reopened
+anyway. The lesson is not about audio: **an enumeration taken from a system that
+is currently using one of the things it enumerates is not the enumeration you
+want**, and reading it repeatedly turns a stable list into a moving one.
 
 **A stream can be playing and write nothing at all.** This one cost an afternoon
 and is worth writing down. On this kiosk the sound was silent with no error
