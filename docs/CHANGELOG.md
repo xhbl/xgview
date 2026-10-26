@@ -3,6 +3,40 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.5.60
+
+Changes since 1.5.47.
+
+### Talking back to more cameras
+
+- **The microphone now works on more cameras.** Cameras that do not offer the
+  standard back channel are reached another way, so talking back is no longer
+  limited to the ones that do.
+- **The camera's speaker can be tried before it is trusted.** A test tone plays
+  from the settings, so you can hear whether anything is connected to the
+  speaker before relying on it.
+- **The form says how a camera's speaker is reached**, or that it is not to be
+  tried at all.
+
+### Sound
+
+- **The camera's sound is louder on Android**, where the call path used to play
+  it quieter than other audio.
+- **The voice sent to the camera is louder on Android**, so the camera's speaker
+  is easier to hear.
+- **Opening the microphone no longer silences the camera's sound.** It used to
+  stay silent until the sound switch was toggled; it now keeps playing.
+
+### Fixed
+
+- **The test tone answers in the manual add form**, and its result is shown
+  there instead of hidden behind the dialog.
+
+### For go2rtc users
+
+- **A bridge is included** so go2rtc can speak to the same cameras. See
+  `scripts/go2rtc/config/foscam_bridge.py`.
+
 ## 1.5.47
 
 Changes since 1.4.98. **You can hear the camera, and talk back to it.** The
