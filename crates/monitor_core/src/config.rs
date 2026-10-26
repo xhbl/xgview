@@ -1296,7 +1296,6 @@ mod tests {
         assert!(AppConfig::from_json(r#""config.json""#).is_err());
     }
 
-    #[test]
     /// The two audio device names are the only place a machine's own hardware
     /// is written down, and a configuration from before they existed has
     /// neither: both must read back as "the system's default".

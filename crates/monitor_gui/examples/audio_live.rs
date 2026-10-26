@@ -27,7 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = std::env::args().nth(1).expect("usage: audio_live <rtsp url> [seconds]");
     let seconds: u64 = std::env::args().nth(2).and_then(|v| v.parse().ok()).unwrap_or(3);
 
-    let sink = CpalOutput::open().expect("no audio device on this machine");
+    // The system's default device: this is the exit-path repro, not a way to
+    // choose one.
+    let sink = CpalOutput::open(None).expect("no audio device on this machine");
     sink.set_active(true);
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
