@@ -25,7 +25,7 @@ use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{infer_sub_stream, ConnectionState, OsdItem, StreamKind, TileAspect};
 use monitor_core::pipeline::{CallFailure, ChannelManager, StreamEvent};
 use monitor_core::scheduler::Scheduler;
-use monitor_core::talk::TalkRoute;
+use monitor_core::talk::{TalkRoute, ToneFailure};
 use monitor_core::{CameraSource, Direction};
 
 use crate::dialogs::{self, BackgroundEvent, CameraDraft, DiscoveryUi, Tab};
@@ -999,6 +999,12 @@ pub struct XgViewApp {
     passphrase_anchor: Option<Id>,
     /// The seal or open running on a thread of its own, if any. See [`Sealing`].
     sealing: Option<Sealing>,
+    /// The test tone a camera's form asked for, while it is being played.
+    ///
+    /// It runs on the runtime rather than in the frame: a tone is a second and a
+    /// half of socket work, and the window it was asked from stays open and
+    /// responsive underneath it.
+    talk_test: Option<Receiver<Result<(), ToneFailure>>>,
     /// Watches the prompt for the frame it appears on.
     passphrase_handoff: Handoff,
     /// The Android start-on-boot state - whether the app may draw over other
@@ -1345,6 +1351,7 @@ impl XgViewApp {
             passphrase: None,
             passphrase_anchor: None,
             sealing: None,
+            talk_test: None,
             passphrase_handoff: Handoff::default(),
             #[cfg(target_os = "android")]
             android_boot: (false, false),
@@ -6054,6 +6061,7 @@ impl XgViewApp {
         let mut save = false;
         let mut cancel = false;
         let mut detach = false;
+        let mut test = false;
         // The form edits the camera where it lives, so the heading names the
         // group it is in - when there is more than one to tell apart.
         let group = self
@@ -6086,6 +6094,9 @@ impl XgViewApp {
             if fields.detach {
                 detach = true;
             }
+            if fields.test {
+                test = true;
+            }
             if fields.inferred {
                 ui.label(RichText::new(monitor_i18n::tr("camera-edit-sub-derived")).small().color(theme::LIVE));
             }
@@ -6103,6 +6114,33 @@ impl XgViewApp {
             });
             self.nav.close();
         });
+
+        if test {
+            // Played from the draft, not the saved entry: the point of the button
+            // is to try a mode before keeping it, and the address and login are
+            // the draft's too - so a camera that has never been saved can still
+            // be heard.
+            match draft.build() {
+                Ok(source) => {
+                    let uri = source.active_uri(StreamKind::Main).to_string();
+                    let credentials = source
+                        .username
+                        .as_ref()
+                        .map(|user| (user.clone(), source.password.clone().unwrap_or_default()));
+                    let mode = draft.talk;
+                    let (sender, receiver) = unbounded();
+                    self.handle.spawn(async move {
+                        let _ = sender.send(monitor_core::talk::test_tone(&uri, credentials, mode).await);
+                    });
+                    self.talk_test = Some(receiver);
+                    self.flash(monitor_i18n::tr("toast-talk-test-playing"), ToastKind::Info);
+                }
+                // The form says what is wrong with it when it is saved; a tone
+                // from an address that will not parse is not worth a second
+                // message of its own.
+                Err(error) => self.flash(error, ToastKind::Error),
+            }
+        }
 
         if detach {
             // The camera leaves the import's hands: its MSE address and login go
@@ -6878,6 +6916,33 @@ impl XgViewApp {
     /// The thread is left to finish by itself when the job is over - what it
     /// holds is a document and a passphrase, and there is nothing to gain by
     /// stopping it half way.
+    /// Reports the test tone once it is over.
+    ///
+    /// Polled with the other background jobs: a tone is a second and a half of
+    /// socket work, and the answer arrives long after the press.
+    fn poll_talk_test(&mut self) {
+        use crossbeam_channel::TryRecvError;
+
+        let Some(receiver) = self.talk_test.take() else { return };
+        match receiver.try_recv() {
+            Ok(Ok(())) => self.flash(monitor_i18n::tr("toast-talk-test-sent"), ToastKind::Info),
+            Ok(Err(ToneFailure::Off)) => {
+                self.flash(monitor_i18n::tr("toast-talk-test-off"), ToastKind::Error)
+            }
+            Ok(Err(ToneFailure::NoRoute)) => {
+                self.flash(monitor_i18n::tr("toast-talk-test-no-route"), ToastKind::Error)
+            }
+            Ok(Err(ToneFailure::Failed(reason))) => self.flash(
+                monitor_i18n::tr_args("toast-talk-test-failed", &[("reason", reason.into())]),
+                ToastKind::Error,
+            ),
+            Err(TryRecvError::Empty) => self.talk_test = Some(receiver),
+            Err(TryRecvError::Disconnected) => {
+                self.flash(monitor_i18n::tr("toast-talk-test-failed-unknown"), ToastKind::Error)
+            }
+        }
+    }
+
     fn poll_sealing(&mut self) {
         use crossbeam_channel::TryRecvError;
 
@@ -8205,6 +8270,7 @@ impl eframe::App for XgViewApp {
 
         self.poll_events();
         self.poll_sealing();
+        self.poll_talk_test();
         // An answer comes back with the wall drawn a frame or two after it was
         // asked for, so the frame it lands in has to come on its own.
         if self.sealing.is_some() {

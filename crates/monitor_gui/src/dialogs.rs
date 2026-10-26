@@ -971,6 +971,9 @@ pub struct CameraFields {
     /// Whether the "Detach" button was pressed - the camera is to leave the
     /// import's hands, its addresses becoming editable by hand.
     pub detach: bool,
+    /// Whether the test tone was asked for. The form cannot play it: that needs
+    /// the runtime and a channel, and both belong to the window that owns it.
+    pub test: bool,
 }
 
 /// A camera field, drawn greyed and uneditable while the entry is managed by an
@@ -1015,6 +1018,7 @@ pub fn camera_fields(
     let mut first = None;
     let mut inferred = false;
     let mut detach = false;
+    let mut test = false;
     // The MSE rows appear only when the entry carries an MSE address: an
     // imported camera, or one detached from an import.
     let has_mse = !draft.mse_main.trim().is_empty();
@@ -1107,8 +1111,15 @@ pub fn camera_fields(
     ui.add_space(6.0);
     egui::Grid::new(format!("{grid_id}-talk")).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
         ui.label(monitor_i18n::tr("dialog-talk"));
-        controls::cycle_button(nav, ui, &TalkMode::ALL, &mut draft.talk, |mode| {
-            monitor_i18n::tr(mode.label())
+        ui.horizontal(|ui| {
+            controls::cycle_button(nav, ui, &TalkMode::ALL, &mut draft.talk, |mode| {
+                monitor_i18n::tr(mode.label())
+            });
+            // The tone is the only way to find out whether anything is plugged
+            // into the camera's speaker jack: the camera itself cannot say.
+            if nav.tracked(ui.button(monitor_i18n::tr("camera-talk-test"))).clicked() {
+                test = true;
+            }
         });
         ui.end_row();
     });
@@ -1125,7 +1136,7 @@ pub fn camera_fields(
         }
     }
 
-    CameraFields { first, inferred, detach }
+    CameraFields { first, inferred, detach, test }
 }
 
 /// A credentials row, editable or greyed - the shape a managed camera's account
@@ -1157,6 +1168,11 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
         state.note(Tab::Manual, monitor_i18n::tr("dialog-sub-derived-msg"));
     }
 
+    // The form and its two buttons are two groups, not one run of controls: the
+    // same gap the edit window puts before Save and Cancel. Without it the last
+    // row of the form - the talk setting, which is a cycling button and a button
+    // of its own - reads as part of the row that adds the camera.
+    ui.add_space(theme::space::M);
     ui.horizontal(|ui| {
         if nav.tracked(ui.button(monitor_i18n::tr("dialog-add-camera"))).clicked() {
             match state.manual.build() {

@@ -40,8 +40,10 @@ use crate::Result;
 pub mod channel;
 pub mod foscam;
 pub mod rtsp;
+pub mod tone;
 
 pub use channel::Channel;
+pub use tone::{test_tone, ToneFailure};
 pub use rtsp::{
     talk_gap, RtspTalkChannel, TalkStream, FRAME_SAMPLES, TALK_INTERVAL, TALK_KEEPALIVE,
 };
