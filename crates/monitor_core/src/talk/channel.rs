@@ -23,15 +23,28 @@
 
 use std::time::Duration;
 
+use super::foscam::FoscamTalkChannel;
 use super::rtsp::RtspTalkChannel;
-use super::TalkChannel;
+use super::{TalkChannel, TalkRoute, Vendor};
+use crate::error::CoreError;
+use crate::rtsp::RtspUrl;
 use crate::Result;
+
+/// The port a Foscam's own protocol listens on when its address names none.
+///
+/// The camera serves its RTSP on the same port, which is why an address for one
+/// looks like `rtsp://host:88/videoMain` - the number in the URL is the talk
+/// port too. An address without one is a camera whose RTSP is on the default
+/// port, and its talk protocol is still on 88.
+const FOSCAM_PORT: u16 = 88;
 
 /// One open channel to one camera's speaker.
 pub enum Channel {
     /// The camera's own back channel: an RTSP session carrying `a=sendonly`
     /// audio, as ONVIF Profile T describes it.
     Rtsp(RtspTalkChannel),
+    /// A protocol of the maker's own, on a connection of the viewer's.
+    Foscam(FoscamTalkChannel),
 }
 
 impl Channel {
@@ -42,24 +55,58 @@ impl Channel {
     /// attempt - the transport broke, or the session it was asked for was
     /// refused - and is what the caller reports and, where there is another
     /// protocol to try, falls back from.
-    pub async fn open(uri: &str, credentials: Option<(String, String)>) -> Result<Option<Self>> {
-        let Some(channel) = RtspTalkChannel::open(uri, credentials).await? else {
-            return Ok(None);
-        };
-        // The interleaved channel is the server's choice and the one fact about
-        // this session worth a line: everything after it is audio.
-        tracing::debug!(
-            target: "xgview::talk",
-            interleaved = channel.channel(),
-            "a talk session is open"
-        );
-        Ok(Some(Self::Rtsp(channel)))
+    pub async fn open(
+        route: TalkRoute,
+        uri: &str,
+        credentials: Option<(String, String)>,
+    ) -> Result<Option<Self>> {
+        match route {
+            TalkRoute::Standard => {
+                let Some(channel) = RtspTalkChannel::open(uri, credentials).await? else {
+                    return Ok(None);
+                };
+                // The interleaved channel is the server's choice and the one
+                // fact about this session worth a line: everything after it is
+                // audio.
+                tracing::debug!(
+                    target: "xgview::talk",
+                    interleaved = channel.channel(),
+                    "a talk session is open"
+                );
+                Ok(Some(Self::Rtsp(channel)))
+            }
+            TalkRoute::Vendor(Vendor::Foscam) => {
+                let url = RtspUrl::parse(uri)?;
+                let host = url.host().unwrap_or_default().to_string();
+                let port = url.port().unwrap_or(FOSCAM_PORT);
+                let Some((user, password)) = credentials else {
+                    // The maker's protocol carries the password in clear, and
+                    // there is nothing to send without one.
+                    return Err(CoreError::transport(
+                        "talk: the camera has no credentials to log in with",
+                    ));
+                };
+                let channel = FoscamTalkChannel::open(&host, port, &user, &password).await?;
+                tracing::debug!(
+                    target: "xgview::talk",
+                    %host,
+                    port,
+                    "a talk connection to the camera's own protocol is open"
+                );
+                Ok(Some(Self::Foscam(channel)))
+            }
+            // Asked for a call on a route that leads nowhere: the caller has
+            // the wrong idea about this camera, and no answer is better than a
+            // guess.
+            TalkRoute::None | TalkRoute::Unknown => Ok(None),
+        }
     }
 
     /// What this channel is, for the log line that says a call is live.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Rtsp(_) => "rtsp",
+            Self::Foscam(_) => "foscam",
         }
     }
 
@@ -67,6 +114,7 @@ impl Channel {
     pub fn interval(&self) -> Duration {
         match self {
             Self::Rtsp(channel) => channel.interval(),
+            Self::Foscam(channel) => channel.interval(),
         }
     }
 
@@ -74,6 +122,7 @@ impl Channel {
     pub fn samples(&self) -> usize {
         match self {
             Self::Rtsp(channel) => channel.samples(),
+            Self::Foscam(channel) => channel.samples(),
         }
     }
 
@@ -81,6 +130,7 @@ impl Channel {
     pub fn send(&mut self, samples: &[i16]) -> Result<()> {
         match self {
             Self::Rtsp(channel) => channel.send(samples),
+            Self::Foscam(channel) => channel.send(samples),
         }
     }
 
@@ -93,6 +143,8 @@ impl Channel {
     pub fn keep_alive_interval(&self) -> Option<Duration> {
         match self {
             Self::Rtsp(channel) => Some(channel.keep_alive_interval()),
+            // Every frame is proof of life, and the camera never asks for more.
+            Self::Foscam(_) => None,
         }
     }
 
@@ -100,6 +152,8 @@ impl Channel {
     pub async fn keep_alive(&mut self) -> Result<()> {
         match self {
             Self::Rtsp(channel) => channel.keep_alive().await,
+            // Never called: the interval above is `None`.
+            Self::Foscam(_) => Ok(()),
         }
     }
 
@@ -111,6 +165,7 @@ impl Channel {
     pub async fn watch(&mut self) -> Result<()> {
         match self {
             Self::Rtsp(channel) => channel.watch().await,
+            Self::Foscam(channel) => channel.watch().await,
         }
     }
 
@@ -118,6 +173,7 @@ impl Channel {
     pub async fn close(self) {
         match self {
             Self::Rtsp(channel) => channel.close().await,
+            Self::Foscam(channel) => channel.close().await,
         }
     }
 }

@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use monitor_core::rtsp::{MediaPacket, RtspClient};
-use monitor_core::talk::{Channel, RATE};
+use monitor_core::talk::{Channel, TalkRoute, RATE};
 
 #[tokio::main]
 async fn main() {
@@ -141,7 +141,9 @@ async fn main() {
 
     // 3. A session of its own, carrying the back channel and nothing else.
     let opened = Instant::now();
-    let mut channel = match Channel::open(&url, credentials).await {
+    // This tool is about the standard route: it asks for the back channel and
+    // speaks RTSP. The maker's own protocol has its own tool, `foscam_talk`.
+    let mut channel = match Channel::open(TalkRoute::Standard, &url, credentials).await {
         Ok(Some(channel)) => channel,
         Ok(None) => {
             eprintln!("the talk-only session found no back channel it can encode");

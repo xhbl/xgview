@@ -912,9 +912,18 @@ async fn supervisor(
                     let settings = settings.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     settings.handshake_timeout
                 };
+                // How this camera is reached, as its probe answered. A press
+                // that beat the answer falls back to the standard route, which
+                // is what every camera was before there was a choice.
+                let route = talk_support
+                    .get(&runtime.endpoint.uri)
+                    .map(|entry| entry.route)
+                    .filter(|route| route.reachable())
+                    .unwrap_or(TalkRoute::Standard);
                 call = Some(handle.spawn(talk_worker(
                     index,
                     endpoint,
+                    route,
                     talk.clone(),
                     events.clone(),
                     command_tx.clone(),
@@ -1562,6 +1571,7 @@ async fn negotiate(
 async fn talk_worker(
     index: usize,
     endpoint: Endpoint,
+    route: TalkRoute,
     talk: Arc<TalkHub>,
     events: Sender<StreamEvent>,
     commands: UnboundedSender<ChannelCommand>,
@@ -1576,7 +1586,7 @@ async fn talk_worker(
         });
     };
 
-    let mut channel = match tokio::time::timeout(timeout, Channel::open(&uri, credentials)).await {
+    let mut channel = match tokio::time::timeout(timeout, Channel::open(route, &uri, credentials)).await {
         Ok(Ok(Some(channel))) => channel,
         Ok(Ok(None)) => {
             tracing::debug!(
