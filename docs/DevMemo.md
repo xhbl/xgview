@@ -2768,3 +2768,64 @@ call back (the guard passes) and still writes nothing, so the write path is wher
 that one is lost. **The real answer is to choose the device** - `hw:CARD=PCH,DEV=3`
 measured `avail` going *down*, which is a stream being fed - which is why the two
 changes landed together.
+
+---
+
+## 37. A frame that runs long says so, and says what was on it
+
+*Landed 2026-10-25, in 1.5.46.*
+
+**The question "why does it stutter" is answered by a number, not by a look at
+the code.** Two rounds of this were spent guessing: the settings panel felt slow,
+the guess was the device enumeration, the enumeration was fixed, it still felt
+slow, and the second guess - the label read on every frame - was right. Both were
+found by reading, not by measuring, and the second one only after the first had
+been ruled out by hand.
+
+So the frame is timed. `XGVIEW_FRAME_MS` names a threshold in milliseconds:
+
+```sh
+XGVIEW_FRAME_MS=16 RUST_LOG=xgview::frame=info xgview
+```
+
+```text
+INFO xgview::frame: a frame ran long ms=8.286897999999999 swallowed=48
+     scene="wall settings=Streams channels=10 textures=10 decoder=ffmpeg"
+```
+
+`swallowed` is the frames that ran long inside the same second and were not
+written - one line a second, with the count carried into the next, so a wall that
+stutters on every frame cannot drown the log it is meant to explain. `scene` says
+what was being drawn: `wall` or `magnified`, then any of `settings=<tab>`,
+`layouts`, `blank`, `call`, and the counts that matter - channels, pictures on
+the GPU, which decoder.
+
+**What it measures is the frame, not the wait for the display.** The two clocks
+are read at the top and the bottom of `update`, so the number is the work the
+viewer does between two repaints. That is the part the viewer can do something
+about; a frame that is short here and still arrives late belongs to the
+compositor or the GPU, and no amount of work in this codebase will move it.
+
+**Off by default, and cheap when off.** No threshold means `None` in the app and
+one `Option` check a frame - the clocks are not read at all. The description is
+built only for a frame that is going to be written, so the usual frame allocates
+nothing for this.
+
+**What it said, on the kiosk, ten pictures on the wall, threshold at 1 ms:**
+
+| what was drawn | frames sampled | mean | max | repaints/s |
+| --- | --- | --- | --- | --- |
+| the wall | 11 | 2.85 ms | 5.46 ms | 42 |
+| wall + settings, Display | 2 | 3.44 ms | 4.60 ms | 48 |
+| wall + settings, Cameras | 14 | 3.66 ms | 7.32 ms | 46 |
+| wall + settings, Streams | 51 | 3.81 ms | 8.29 ms | 47 |
+
+The page that had been reading two files under `/proc` per row per frame now
+costs about a millisecond a frame over the bare wall, against a budget of 16.6.
+At a 16 ms threshold nothing at all was reported, on the wall or on that page.
+
+The samples are one a second by design, so the table is a sample of frames rather
+than a distribution - enough to tell "under the budget" from "over it", not enough
+to say what the ninety-ninth percentile is. A run that wants the distribution
+sets the threshold to 1 ms, which on this hardware reports very nearly every
+frame, and keeps the log.
