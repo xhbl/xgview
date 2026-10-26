@@ -757,6 +757,12 @@ pub struct XgViewApp {
     vitals: monitor_core::vitals::Vitals,
     /// When this viewer started, for the About page's uptime.
     started: Instant,
+    /// Measures the frame, when `XGVIEW_FRAME_MS` asks it to.
+    ///
+    /// `None` is the usual state: a frame that stutters is a question, and this
+    /// is the answer to it, not something the viewer pays for by default. See
+    /// [`crate::frame`].
+    frame_clock: Option<crate::frame::FrameClock>,
     events_tx: Sender<BackgroundEvent>,
     events_rx: Receiver<BackgroundEvent>,
     /// The file dialog the export / import opens, and what it was opened for.
@@ -1251,6 +1257,7 @@ impl XgViewApp {
             video,
             vitals: monitor_core::vitals::Vitals::new(),
             started: Instant::now(),
+            frame_clock: crate::frame::FrameClock::from_env(),
             events_tx,
             events_rx,
             #[cfg(not(target_os = "android"))]
@@ -8050,6 +8057,11 @@ fn clock_field(nav: &mut crate::nav::Nav, ui: &mut egui::Ui, minutes: &mut u16) 
 
 impl eframe::App for XgViewApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // The frame is timed from here to the end of it, and only when
+        // `XGVIEW_FRAME_MS` asks: `start` reads a clock, which is cheap, but the
+        // `Option` in front of it is cheaper and the default is that nobody is
+        // asking. See `crate::frame`.
+        let frame_start = self.frame_clock.as_ref().map(crate::frame::FrameClock::start);
         // Portrait is for watching: the settings panel and the layout picker are
         // built for landscape and do not fit, so they are never up while the
         // wall stands upright. Close them if the wall was turned with them open.
@@ -8781,6 +8793,50 @@ impl eframe::App for XgViewApp {
         // egui's to move.
         #[cfg(target_os = "android")]
         ctx.output_mut(|output| output.ime = None);
+
+        // Last, so that what the line says is what this frame actually drew:
+        // the description is built only for a frame that is going to be
+        // reported, and the clock is taken by name first so that reading the
+        // scene does not hold a borrow of it.
+        if let Some(start) = frame_start {
+            let took = start.elapsed();
+            if self.frame_clock.as_ref().is_some_and(|clock| clock.wants(took)) {
+                let scene = self.describe_scene();
+                if let Some(clock) = self.frame_clock.as_mut() {
+                    clock.report(took, &scene);
+                }
+            }
+        }
+    }
+}
+
+impl XgViewApp {
+    /// What this frame was drawing, for a frame that ran long.
+    ///
+    /// One line, read beside the milliseconds: a stutter on the wall, a stutter
+    /// with a panel over it and a stutter on a magnified picture are three
+    /// different problems, and the number alone does not say which one was seen.
+    fn describe_scene(&self) -> String {
+        let mut what = String::from(if self.scheduler.is_zoomed() { "magnified" } else { "wall" });
+        if self.show_settings {
+            what.push_str(&format!(" settings={:?}", self.settings_tab));
+        }
+        if self.layout_picker {
+            what.push_str(" layouts");
+        }
+        if self.blackout_on {
+            what.push_str(" blank");
+        }
+        if self.talking {
+            what.push_str(" call");
+        }
+        what.push_str(&format!(
+            " channels={} textures={} decoder={}",
+            self.channels.len(),
+            self.textures.len(),
+            self.decoder
+        ));
+        what
     }
 }
 

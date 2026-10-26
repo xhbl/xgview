@@ -30,6 +30,7 @@ pub mod dialogs;
 #[path = "../../../priv/juanz/mod.rs"]
 pub mod juanz;
 pub mod fonts;
+pub mod frame;
 pub mod grid;
 pub mod icons;
 pub mod instance;
