@@ -49,6 +49,26 @@ thread_local! {
 static ANDROID_CAPTURE: std::sync::Mutex<Option<(Arc<TalkHub>, Downsampler)>> =
     std::sync::Mutex::new(None);
 
+/// The makeup gain applied to the Android capture before it leaves for the
+/// camera, in linear terms.
+///
+/// The voice-communication source is processed for speech and arrives quiet: on
+/// a phone the camera's speaker played the viewer noticeably softer than the
+/// microphone heard them. `1.995` is +6 dB, the same lift the playback got in
+/// the other direction (see `MainActivity.TALK_GAIN`). Applied with a soft clip
+/// so a loud syllable saturates instead of breaking up.
+#[cfg(any(target_os = "android", test))]
+const TALK_UPLINK_GAIN: f32 = 1.995;
+
+/// Lifts a block of the capture by [`TALK_UPLINK_GAIN`], with a soft clip.
+#[cfg(any(target_os = "android", test))]
+fn apply_uplink_gain(samples: &mut [i16]) {
+    for sample in samples.iter_mut() {
+        let lifted = (f32::from(*sample) / 32_768.0 * TALK_UPLINK_GAIN).tanh();
+        *sample = (lifted * 32_767.0) as i16;
+    }
+}
+
 /// Captures audio into the talk hub.
 ///
 /// The device and its stream live in [`INPUT_STREAM`]; this is the handle that
@@ -259,6 +279,10 @@ pub fn android_push(samples: &[i16], rate: u32) {
         downsampler.push(f32::from(*sample) / 32_768.0, &mut mono);
     }
     if !mono.is_empty() {
+        // The capture comes up quieter than the camera's speaker can use; lift
+        // it here, after the downsample, so the gain applies to the samples
+        // that actually leave for the camera.
+        apply_uplink_gain(&mut mono);
         hub.push(&mono);
     }
 }
@@ -395,5 +419,19 @@ mod tests {
         }
         assert_eq!(out.len(), 10);
         assert!(out.iter().all(|sample| *sample == 8_191));
+    }
+
+    #[test]
+    fn the_uplink_gain_lifts_a_quiet_block_and_soft_clips_a_loud_one() {
+        let mut quiet = [0i16, 1_000, -1_000];
+        apply_uplink_gain(&mut quiet);
+        assert_eq!(quiet[0], 0);
+        assert!(quiet[1] > 1_000, "lifted: {}", quiet[1]);
+        assert!(quiet[2] < -1_000, "lifted: {}", quiet[2]);
+
+        let mut loud = [32_767i16, -32_768];
+        apply_uplink_gain(&mut loud);
+        assert!(loud[0] < 32_767 && loud[0] > 30_000, "soft clipped: {}", loud[0]);
+        assert!(loud[1] > -32_768 && loud[1] < -30_000, "soft clipped: {}", loud[1]);
     }
 }
