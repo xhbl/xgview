@@ -31,6 +31,9 @@ gained the picture fit and the quarter turn.
   with a speaker behind it. Settings → Streams lists the platform's own devices
   beside a "system default", the choice is remembered, and a device that is no
   longer there falls back to the default rather than leaving the viewer silent.
+  The list is read once at start, before anything opens a device: an open device
+  is exclusive and the platform stops listing it, so a list read while the sound
+  is playing is missing exactly the device in use.
   Android has no such list - its routing is the system's, on the
   voice-communication path the echo canceller needs - so the rows are not drawn
   there.
