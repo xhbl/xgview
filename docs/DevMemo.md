@@ -2606,7 +2606,7 @@ without going through `zoom_in`.
 
 ## 35. A call is a session of its own: the picture carries the picture, and RTP is not a heartbeat
 
-*Landed 2026-10-25, in 1.5.46. Supersedes the last two paragraphs of §34: the
+*Landed 2026-10-25, in 1.5.47. Supersedes the last two paragraphs of §34: the
 back channel is no longer taken when the picture is magnified, and the rule that
 ends a call is no longer "the bar has gone".*
 
@@ -2707,7 +2707,7 @@ object safe, and nothing here needs a second implementation to share them yet.
 
 ## 36. The speaker is chosen, and a stream that never asks for data is not kept
 
-*Landed 2026-10-25, in 1.5.46.*
+*Landed 2026-10-25, in 1.5.47.*
 
 **A machine with two outputs has no "the" output.** A Debian kiosk here has a USB
 audio dongle on card 0 and a television on HDMI at card 1 device 3. ALSA's
@@ -2773,7 +2773,7 @@ changes landed together.
 
 ## 37. A frame that runs long says so, and says what was on it
 
-*Landed 2026-10-25, in 1.5.46.*
+*Landed 2026-10-25, in 1.5.47.*
 
 **The question "why does it stutter" is answered by a number, not by a look at
 the code.** Two rounds of this were spent guessing: the settings panel felt slow,

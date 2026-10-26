@@ -3,21 +3,19 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 1.5.46
+## 1.5.47
 
 Changes since 1.4.98. **You can hear the camera, and talk back to it.** The
 magnified picture's bar gained a sound switch and a microphone: the camera's
-audio is decoded - G.711 everywhere, AAC through FFmpeg on the desktop and
-`AMediaCodec` on Android - and the microphone is sent to the camera as G.711.
-The bar itself was rebuilt on egui's own buttons so a remote can walk it, and
-gained the picture fit and the quarter turn.
+audio is played through the machine's own output - G.711 everywhere, AAC through
+FFmpeg on the desktop and `AMediaCodec` on Android - and the microphone is sent
+to the camera. The bar itself was rebuilt so a remote can walk it, and gained the
+picture fit and the quarter turn.
 
 ### Hearing the camera
 
-- **The audible channel's track is decoded and played through the machine's own
-  output**, once, for the channel that is magnified: the `AudioDecoder` trait,
-  G.711 µ-law and A-law first, then AAC over FFmpeg, `AMediaCodec` on Android,
-  and the camera's audio read out of an MSE stream as well as an RTSP one.
+- **The magnified camera can be heard.** Its audio track is decoded and played
+  through the machine's own output, from an RTSP stream or an MSE one.
 - **The sound switch appears only for a camera that reports an audio track**,
   and the settings volume row drives the same switch. Off until it is turned on.
 - **On Android a call takes the voice-communication path**, so the platform's
@@ -27,53 +25,40 @@ gained the picture fit and the quarter turn.
   speaker.
 - **The output device and the microphone can be chosen.** A machine with one
   sound card needs nothing; a kiosk with a USB dongle and a television on HDMI
-  does, because the system's default is card 0 and that is not always the one
-  with a speaker behind it. Settings → Streams lists the platform's own devices
-  beside a "system default", the choice is remembered, and a device that is no
-  longer there falls back to the default rather than leaving the viewer silent.
-  The list is read once at start, before anything opens a device: an open device
-  is exclusive and the platform stops listing it, so a list read while the sound
-  is playing is missing exactly the device in use.
-  Android has no such list - its routing is the system's, on the
-  voice-communication path the echo canceller needs - so the rows are not drawn
-  there.
-- **A stream that has stopped asking for data is not kept.** A sink that is
-  opened and then never fed looks like a working device from the outside, which
-  is how a `dmix` PCM on a kiosk without a sound server plays silence with no
-  error anywhere: the sink now expects a callback after the stream has settled
-  and leaves the sound off, with a line in the log, when one never comes.
-- **The Linux package links ALSA** (`libasound2`) now that there is an audio
-  path, so the viewer will not start on a machine that does not have it. Every
-  desktop does; a box built from a minimal image may not, so `install.sh` asks
-  the loader what the executable needs and installs the package through `apt`,
-  `dnf`, `yum`, `pacman` or `zypper` before it copies anything. A machine with
-  no sound *card* is unaffected - it has the library and simply has nothing to
-  play through.
+  does, because the system's default is not always the one with a speaker behind
+  it. Settings → Streams lists the platform's own devices beside a "system
+  default", the choice is remembered, and a device that is no longer there falls
+  back to the default rather than leaving the viewer silent. Android has no such
+  list - its routing is the system's, on the voice-communication path the echo
+  canceller needs - so the rows are not drawn there.
+- **A device that is opened and then never plays is not kept.** A machine whose
+  default output accepts the stream and plays silence - a kiosk with no sound
+  server is where this was found - no longer looks like a working device: the
+  sound is left off and a line is written to the log.
+- **The Linux package brings ALSA with it.** The viewer needs `libasound2` to
+  start now that there is an audio path, which every desktop has and a minimal
+  image may not, so `install.sh` installs it through the system's own package
+  manager before it copies anything. A machine with no sound *card* is
+  unaffected - it has the library and simply has nothing to play through.
 
 ### Talking back to it
 
-- **The picture's session no longer carries the back channel.** It used to ask
-  for it the moment a tile was magnified, set the `sendonly` track up and write a
-  silence packet every 20 ms for as long as the picture stayed magnified - 70
-  kbit/s of nothing, and the camera's speaker held whether or not anyone was
-  talking. The picture's session now carries the picture.
-- **A camera's capability is a question asked on its own connection**:
-  `OPTIONS` with `?backchannel=1`, a `DESCRIBE` carrying the Profile T header,
-  the SDP read, the connection closed. No `SETUP`, so the server keeps no session
-  and nothing has to be torn down. The answer is cached against the address a
-  call would be placed to, so the microphone appears without the picture having
-  asked anything - and magnifying a camera no longer reopens its session.
+- **The picture's session carries the picture.** It used to take the back channel
+  the moment a tile was magnified and write a silence packet every 20 ms for as
+  long as the tile stayed magnified - 70 kbit/s of nothing, and the camera's
+  speaker held by a viewer who was not talking.
+- **Whether a camera can be talked to is asked on a connection of its own**, and
+  the answer is remembered: the microphone appears without the picture having
+  asked anything, and magnifying a camera no longer reopens its session.
 - **A call is a session of its own**, opened when the microphone is pressed and
-  ended when it is released: the `sendonly` track set up alone, `PLAY`, then one
-  G.711 packet every 20 ms, silence included. A camera that refuses that shape of
-  session gets the old arrangement instead - the back channel carried by the
-  picture's session - and that is remembered for the run.
-- **A call keeps itself alive with `OPTIONS`.** RTP does not count as the client
-  being there: a camera drops a session that sends no request, which on the
-  D340W is thirty seconds.
-- **`TEARDOWN` is written and the connection dropped rather than waited on.**
-  go2rtc answers none, and the client's own timeout made hanging up a ten-second
-  affair.
+  ended when it is released. A camera that refuses that shape of session gets the
+  old arrangement instead, and that is remembered for the run.
+- **A call no longer dies after half a minute.** A camera drops a session that
+  never sends it anything, however much audio is going the other way, so the
+  viewer now says it is still there at intervals for as long as a call is up.
+- **Hanging up is immediate.** The camera is told and the connection dropped
+  rather than waited on - one of the relays in use never answers, and the wait
+  made hanging up take ten seconds.
 - **A call ends on the handset, on `Esc` / `BACK`, or by leaving the camera**,
   and the bar is modal while the microphone is open: a press that would put it
   away leaves it, a panel opening over the wall no longer takes it down, and the
@@ -84,9 +69,9 @@ gained the picture fit and the quarter turn.
 
 ### The magnified picture's bar
 
-- **Rebuilt on egui's own buttons**, so the navigation layer walks it like any
-  other row of controls - the seat it opens on, the arrows that step onto the
-  first control, the selection ring drawn only while the remote drives it.
+- **Rebuilt on egui's own buttons**, so a remote can walk it like any other row
+  of controls - the seat it opens on, the arrows that step onto the first
+  control, the selection ring drawn only while the remote drives it.
 - **The picture fit is cycled from an icon** and named in the middle of the
   picture; the wall's own landscape and portrait fits are untouched.
 - **The quarter turn is the configuration's**, not the camera's: the picture
@@ -97,6 +82,14 @@ gained the picture fit and the quarter turn.
   that does not turn the page and a pinch leave it alone, and a double press is
   still the way back to the grid.
 - **The wall's own bars stay away while the magnified bar is in use.**
+
+### A frame that runs long says so
+
+- **`XGVIEW_FRAME_MS` names a threshold in milliseconds.** A frame at or over it
+  writes one line to the log - how long it took, and what was being drawn: the
+  wall, a panel and which page, a magnified picture, a call - at most once a
+  second, with the frames it swallowed counted into the next line. Off unless the
+  variable is set.
 
 ## 1.4.98
 
