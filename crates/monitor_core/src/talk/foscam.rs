@@ -180,8 +180,16 @@ fn request(host: &str, port: u16) -> Vec<u8> {
 
 /// The login block: the credentials in clear, padded to 172 bytes.
 ///
-/// The eight bytes after the password are a token the camera's own app sends; an
-/// all-zero one is accepted, which was measured rather than assumed.
+/// **The fields are sixty-four bytes each, not thirty-two.** That is what the
+/// capture of the camera's own client says, and it is the difference between a
+/// session the camera takes and one it silently drops: with thirty-two the
+/// password lands sixteen bytes early and every reply carries a one where a
+/// successful login carries a zero. Measured 2026-10-26, after the tone had
+/// failed twice.
+///
+/// The eight bytes after the password are a token the client sends. The capture
+/// had `df 0f 69 76 00 00 00 00`; all zeros are accepted too, which is what this
+/// sends - the camera does not check it.
 fn login(user: &str, password: &str) -> Vec<u8> {
     let mut block = Vec::with_capacity(172);
     block.extend_from_slice(&[0x04, 0, 0, 0]);
@@ -218,9 +226,9 @@ fn frame(samples: &[i16]) -> Vec<u8> {
     frame
 }
 
-/// A user name or password, as the block carries it: 32 bytes, NUL padded.
-fn padded(text: &str) -> [u8; 32] {
-    let mut slot = [0u8; 32];
+/// A user name or password, as the block carries it: 64 bytes, NUL padded.
+fn padded(text: &str) -> [u8; 64] {
+    let mut slot = [0u8; 64];
     let bytes = text.as_bytes();
     let take = bytes.len().min(slot.len());
     slot[..take].copy_from_slice(&bytes[..take]);
@@ -246,25 +254,28 @@ mod tests {
         assert!(frame[22..].iter().all(|byte| *byte == 0), "padded with silence");
     }
 
+    /// The offsets are the ones in the capture: twelve bytes of header, then
+    /// sixty-four for the user, sixty-four for the password, eight for the
+    /// token, and padding out to 172.
     #[test]
-    fn the_login_block_is_172_bytes_with_the_credentials_in_clear() {
+    fn the_login_block_is_the_one_the_capture_shows() {
         let block = login("admin", "secret");
         assert_eq!(block.len(), 172);
         assert_eq!(&block[..8], &[0x04, 0, 0, 0, b'F', b'O', b'S', b'C']);
         assert_eq!(&block[8..12], &[0xa0, 0, 0, 0]);
         assert_eq!(&block[12..17], b"admin");
-        assert_eq!(&block[44..50], b"secret");
-        assert!(block[84..].iter().all(|byte| *byte == 0), "token and padding");
+        assert_eq!(&block[76..82], b"secret");
+        assert!(block[148..].iter().all(|byte| *byte == 0), "token and padding");
     }
 
     /// A credential too long for the block is cut, not refused: the field is
-    /// fixed width and the camera reads the first 32 bytes.
+    /// fixed width and the camera reads the first sixty-four bytes.
     #[test]
     fn a_long_credential_is_cut_to_the_field() {
-        let block = login(&"u".repeat(40), &"p".repeat(40));
+        let block = login(&"u".repeat(80), &"p".repeat(80));
         assert_eq!(block.len(), 172);
-        assert!(block[12..44].iter().all(|byte| *byte == b'u'));
-        assert!(block[44..76].iter().all(|byte| *byte == b'p'));
+        assert!(block[12..76].iter().all(|byte| *byte == b'u'));
+        assert!(block[76..140].iter().all(|byte| *byte == b'p'));
     }
 
     #[test]
