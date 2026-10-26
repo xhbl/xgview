@@ -19,6 +19,9 @@
 /xgvconfig.json
 /priv
 
+# Assistant workspace (notes and memory kept beside the tree, not in it)
+/.workbuddy-ai/
+
 # Environment & secrets
 .env
 .env.*
