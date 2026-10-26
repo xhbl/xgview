@@ -283,10 +283,49 @@ pub(crate) fn labelled(names: Vec<String>, playback: bool) -> Vec<AudioDevice> {
 /// A device that is open - the one the sound is going through - can drop out of
 /// the enumeration, and the settings panel still has to show what it is: the
 /// entry that is not in the list is the one the viewer is listening to.
+///
+/// The answer is remembered after the first ask. Reading it costs two files
+/// under `/proc`, and the panel asks again on every frame it is drawn, so a
+/// panel left open would read the same two files sixty times a second for an
+/// answer that cannot change while the process runs. A card renamed by hand
+/// needs a restart to show it, which is the same restart that re-enumerates the
+/// list.
 pub fn device_label(name: &str, playback: bool) -> String {
     #[cfg(target_os = "linux")]
     {
-        alsa_label(name, playback).unwrap_or_else(|| name.to_string())
+        /// One cache per direction: a `&str` lookup costs no allocation this
+        /// way, and there are as many entries as the machine has devices.
+        static PLAYBACK: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<String, String>>,
+        > = std::sync::OnceLock::new();
+        static CAPTURE: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<String, String>>,
+        > = std::sync::OnceLock::new();
+
+        fn cached(
+            cell: &std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+            name: &str,
+        ) -> Option<String> {
+            cell.get_or_init(Default::default).lock().ok()?.get(name).cloned()
+        }
+
+        fn remember(
+            cell: &std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+            name: &str,
+            label: &str,
+        ) {
+            if let Ok(mut map) = cell.get_or_init(Default::default).lock() {
+                map.insert(name.to_string(), label.to_string());
+            }
+        }
+
+        let cell = if playback { &PLAYBACK } else { &CAPTURE };
+        if let Some(label) = cached(cell, name) {
+            return label;
+        }
+        let label = alsa_label(name, playback).unwrap_or_else(|| name.to_string());
+        remember(cell, name, &label);
+        label
     }
     #[cfg(not(target_os = "linux"))]
     {
