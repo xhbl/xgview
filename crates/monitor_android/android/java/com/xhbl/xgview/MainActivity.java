@@ -1414,7 +1414,10 @@ public class MainActivity extends NativeActivity {
         if (!requestRecordAudio()) {
             return -1;
         }
-        stopTalkCapture();
+        // Clear the capture only: stopping the whole call here would close the
+        // playback that carries the camera's sound, and nothing would reopen it
+        // while the native sink believes its track is still open.
+        stopTalkRecord();
 
         final AudioManager audio =
                 (AudioManager) self.getSystemService(Context.AUDIO_SERVICE);
@@ -1481,10 +1484,16 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
-     * Stops a call's capture and puts the audio mode back. Called from the native
-     * side, and safe when no call is up.
+     * Stops only the capture: the reader thread, the record and the canceller.
+     *
+     * <p>Kept apart from {@link #stopTalkCapture} because starting a call clears
+     * the capture first, and a clear that also closed the playback silenced the
+     * camera's sound the moment the microphone opened: the native sink still
+     * believed its track was open, so nothing asked for it again until the
+     * viewer toggled the sound switch. The playback is not the call's to close -
+     * it carries the camera's microphone, and a call is full duplex.
      */
-    public static void stopTalkCapture() {
+    private static void stopTalkRecord() {
         talkRunning = false;
         final Thread thread = talkThread;
         talkThread = null;
@@ -1509,6 +1518,15 @@ public class MainActivity extends NativeActivity {
             talkCanceller.release();
             talkCanceller = null;
         }
+    }
+
+    /**
+     * Stops a call's capture and playback and puts the audio mode back. Called
+     * from the native side when the microphone is let go, and safe when no call
+     * is up.
+     */
+    public static void stopTalkCapture() {
+        stopTalkRecord();
         stopTalkPlayback();
         final MainActivity self = instance;
         leaveTalkAudio(self == null
