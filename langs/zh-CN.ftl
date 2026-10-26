@@ -475,6 +475,12 @@ dialog-sub-hint = 可选，由主码流推断
 dialog-sub-hint-plain = 可选
 dialog-infer = 推断
 dialog-derive-sub = 辅码流为空时由主码流推断
+
+dialog-talk = 对讲
+camera-talk-auto = 自动
+camera-talk-off = 关闭
+camera-talk-standard = 标准回传
+camera-talk-vendor = 厂家协议
 dialog-add-camera = 添加摄像头
 dialog-clear = 清空
 dialog-camera-added = 摄像头已添加

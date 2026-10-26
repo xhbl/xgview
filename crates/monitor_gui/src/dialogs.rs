@@ -21,7 +21,7 @@ use monitor_core::discovery::frigate::{
     extract_rtsp_port, extract_stream, mse_url as frigate_mse_url, rtsp_url as frigate_rtsp_url,
 };
 use monitor_core::discovery::go2rtc::{mse_url as go2rtc_mse_url, restream_url as go2rtc_rtsp_url};
-use monitor_core::model::{infer_sub_stream, is_stream_url, CameraSource};
+use monitor_core::model::{infer_sub_stream, is_stream_url, CameraSource, TalkMode};
 
 use crate::controls;
 use crate::icons::{self, Icon};
@@ -227,6 +227,8 @@ pub struct CameraDraft {
     pub mse_username: String,
     pub mse_password: String,
     pub infer_sub: bool,
+    /// How this camera's speaker is reached. See [`TalkMode`].
+    pub talk: TalkMode,
 }
 
 impl CameraDraft {
@@ -272,6 +274,7 @@ impl CameraDraft {
             source.mse_username = Some(self.mse_username.trim().to_string());
             source.mse_password = Some(self.mse_password.clone());
         }
+        source.talk = self.talk;
         Ok(source)
     }
 
@@ -293,6 +296,7 @@ impl CameraDraft {
             mse_password: camera.mse_password.clone().unwrap_or_default(),
             // A sub stream already there is not to be overwritten by inference.
             infer_sub: camera.rtsp_sub.is_none(),
+            talk: camera.talk,
         }
     }
 }
@@ -1094,6 +1098,20 @@ pub fn camera_fields(
         ui.label(RichText::new(monitor_i18n::tr("dialog-mse-credentials")).small());
         credentials_fields(ui, nav, &mut draft.mse_username, &mut draft.mse_password, locked);
     }
+
+    // How this camera's speaker is reached, and whether it is reached at all. A
+    // camera cannot tell whether anything is plugged into its speaker jack and
+    // will happily play into an empty one, so this is the owner's call. A
+    // cycling button like the rest of the settings: the popup a drop-down opens
+    // is egui's own and the remote cannot walk into it.
+    ui.add_space(6.0);
+    egui::Grid::new(format!("{grid_id}-talk")).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+        ui.label(monitor_i18n::tr("dialog-talk"));
+        controls::cycle_button(nav, ui, &TalkMode::ALL, &mut draft.talk, |mode| {
+            monitor_i18n::tr(mode.label())
+        });
+        ui.end_row();
+    });
 
     if locked {
         ui.add_space(6.0);

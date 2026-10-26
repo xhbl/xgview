@@ -113,6 +113,9 @@ impl Mic {
     pub fn open(hub: Arc<TalkHub>, name: Option<&str>) -> Result<Arc<Self>, MicError> {
         #[cfg(target_os = "android")]
         {
+            // The capture is the activity's, on the voice-communication path the
+            // platform's echo canceller needs; there is no device to name here.
+            let _ = name;
             match crate::android::start_talk_capture() {
                 crate::android::TalkCapture::Permission => Err(MicError::Permission),
                 crate::android::TalkCapture::NoDevice => Err(MicError::NoDevice),

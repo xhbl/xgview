@@ -186,6 +186,21 @@ pub enum TalkMode {
     Vendor,
 }
 
+impl TalkMode {
+    /// Every mode, in the order the interface cycles them.
+    pub const ALL: [Self; 4] = [Self::Auto, Self::Off, Self::Standard, Self::Vendor];
+
+    /// The key the interface names this mode with.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "camera-talk-auto",
+            Self::Off => "camera-talk-off",
+            Self::Standard => "camera-talk-standard",
+            Self::Vendor => "camera-talk-vendor",
+        }
+    }
+}
+
 /// One stop of the per-camera connection switch.
 ///
 /// The switch folds the protocol and the RTSP transport into one walk: a camera
@@ -611,6 +626,7 @@ impl CameraSource {
         self.mse_username = form.mse_username.clone();
         self.mse_password = form.mse_password.clone();
         self.host = form.host.clone();
+        self.talk = form.talk;
     }
 
     /// Takes a camera out of the import's hands, so its addresses can be edited

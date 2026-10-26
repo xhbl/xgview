@@ -1,5 +1,6 @@
 use crate::layout::{self, Direction, GridLayout, NavigateOutcome, PageInfo};
-use crate::model::{CameraSource, ConnectionMode, RtspTransport, StreamKind};
+use crate::model::{
+    TalkMode,CameraSource, ConnectionMode, RtspTransport, StreamKind};
 
 /// Decoding decision for a single channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,11 @@ pub struct ChannelPlan {
     /// camera between `Auto`, `Rtsp` and `Mse` reconnects it - two of those
     /// share a URL, so the URL alone would not tell them apart.
     pub connect: ConnectionMode,
+    /// How the camera's speaker is reached. Part of the plan for the same
+    /// reason: the channel that answers the talk probe is the one the plan
+    /// started, and a camera switched to `off` keeps answering `auto` until
+    /// something makes it reopen.
+    pub talk: TalkMode,
 }
 
 /// The complete decoding plan derived from layout, page, zoom and focus.
@@ -480,6 +486,7 @@ impl Scheduler {
                     uri,
                     transport: camera.transport,
                     connect: camera.connect,
+                    talk: camera.talk,
                 }
             })
             .collect();

@@ -294,7 +294,11 @@ enum ChannelCommand {
     ProbeTalk { index: usize },
     /// A probe's answer, from the task that asked. The supervisor keeps the
     /// cache, so the task only does the asking.
-    TalkProbed { uri: String, route: TalkRoute },
+    TalkProbed {
+        uri: String,
+        route: TalkRoute,
+        mode: TalkMode,
+    },
     /// Place a call: a session of its own that carries the microphone to the
     /// camera behind this channel.
     Call { index: usize },
@@ -606,6 +610,9 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endp
 #[derive(Default)]
 struct TalkEntry {
     route: TalkRoute,
+    /// The mode the answer was given for. A camera whose `talk` setting changed
+    /// has a different answer waiting, and the cached one is not it.
+    mode: TalkMode,
     /// When the answer was given; `None` until one is.
     answered: Option<Instant>,
     /// A probe is in flight for this address.
@@ -787,7 +794,7 @@ async fn supervisor(
                     continue;
                 }
                 let entry = talk_support.entry(uri.clone()).or_default();
-                if entry.fresh() {
+                if entry.fresh() && entry.mode == endpoint.talk_mode {
                     let _ = events.send(answer(entry.route));
                     continue;
                 }
@@ -859,14 +866,19 @@ async fn supervisor(
                             TalkRoute::Unknown
                         }
                     };
-                    let _ = commands.send(ChannelCommand::TalkProbed { uri, route });
+                    let _ = commands.send(ChannelCommand::TalkProbed {
+                        uri,
+                        route,
+                        mode: endpoint.talk_mode,
+                    });
                 });
             }
-            ChannelCommand::TalkProbed { uri, route } => {
+            ChannelCommand::TalkProbed { uri, route, mode } => {
                 let entry = talk_support.entry(uri.clone()).or_default();
                 entry.probing = false;
                 if route != TalkRoute::Unknown {
                     entry.route = route;
+                    entry.mode = mode;
                     entry.answered = Some(Instant::now());
                 }
                 // The answer is the camera's, so every channel showing that
