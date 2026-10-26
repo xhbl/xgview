@@ -409,6 +409,19 @@ pub struct TalkTrack {
     pub encoding: Option<String>,
 }
 
+/// What a camera answered when asked whether it can be talked to.
+///
+/// Two things, because two things decide the route: whether it offers the
+/// standard back channel at all, and who made it - a maker whose own protocol is
+/// known is reached that way whether or not the standard one was offered.
+#[derive(Debug, Clone, Default)]
+pub struct BackChannelProbe {
+    /// The encoding of the `sendonly` track, when there is one.
+    pub encoding: Option<String>,
+    /// The realm its authentication challenge named, when it named one.
+    pub realm: Option<String>,
+}
+
 /// Splits a `Session` header into its identifier and its timeout.
 ///
 /// Cameras answer `SETUP` with `Session: 12345678;timeout=60`, where the
@@ -1522,8 +1535,7 @@ impl RtspClient {
         Ok(parse_sdp(&sdp))
     }
 
-    /// Asks whether this camera offers a talk-back media, and returns the
-    /// encoding it names.
+    /// Asks whether this camera offers a talk-back media, and who made it.
     ///
     /// Only `OPTIONS` and `DESCRIBE`: with no `SETUP` there is no session for
     /// the server to keep and nothing to tear down, so the caller simply drops
@@ -1532,16 +1544,34 @@ impl RtspClient {
     /// anything - and it is why the answer is worth caching rather than asking
     /// again on every frame.
     ///
-    /// `Ok(None)` is an answer - this camera has no such media - and `Err` is
-    /// the absence of one; a caller that caches must not conflate them. Whether
-    /// the encoding can be sent is the talk layer's question: this reports what
-    /// the SDP says and nothing more.
-    pub async fn probe_backchannel(&mut self) -> Result<Option<String>> {
+    /// The realm comes back with the encoding because a camera that offers no
+    /// back channel may still be reachable through a protocol of its maker's,
+    /// and the `401` challenge is where most of them name their maker. See
+    /// [`BackChannelProbe`].
+    ///
+    /// An `Err` is the absence of an answer rather than a "no"; a caller that
+    /// caches must not conflate the two. Whether the encoding can be sent is the
+    /// talk layer's question: this reports what the SDP says and nothing more.
+    pub async fn probe_backchannel(&mut self) -> Result<BackChannelProbe> {
         let tracks = self.open_and_describe(true).await?;
-        Ok(tracks
+        let encoding = tracks
             .iter()
             .find(|track| track.is_audio() && track.is_sendonly())
-            .and_then(|track| track.encoding.clone()))
+            .and_then(|track| track.encoding.clone());
+        // Read after the `DESCRIBE`, which is the request that draws the `401`.
+        let realm = self.realm().map(str::to_string);
+        Ok(BackChannelProbe { encoding, realm })
+    }
+
+    /// The realm the camera's authentication challenge named, once one has been
+    /// answered.
+    ///
+    /// A camera that does not announce its maker in a `Server` header often
+    /// names it here instead - `Digest realm="Foscam IPCam Living Video"` - and
+    /// the challenge arrives before any credentials are sent, so reading it
+    /// costs nothing beyond the request the probe was going to make.
+    pub fn realm(&self) -> Option<&str> {
+        self.challenge.as_ref().map(|challenge| challenge.realm.as_str())
     }
 
     /// Opens a session that carries the talk-back media and nothing else.

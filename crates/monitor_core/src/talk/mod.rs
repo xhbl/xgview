@@ -74,24 +74,92 @@ const QUEUE_SAMPLES: usize = (RATE as usize) / 2;
 /// The value [`TalkHub::target`] carries when nothing is magnified.
 const NO_TARGET: usize = usize::MAX;
 
-/// Whether a camera can be talked to, as far as this process knows.
+/// How a camera's speaker would be reached, as far as this process knows.
 ///
 /// The question is the camera's, not a session's: the picture's session never
 /// asks for a back channel, so there is nothing in it to read the answer from.
 /// A probe asks on its own connection - `OPTIONS` and `DESCRIBE`, no `SETUP` -
 /// and what comes back is cached against the address a call would be placed to.
+///
+/// It is a route and not a yes-or-no because the answer now has a shape: a
+/// camera with a protocol of its own is reached that way, and a camera that
+/// speaks ONVIF Profile T is reached the standard way. The icon and the call
+/// read the same value, so what is drawn and what is dialled cannot disagree.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum TalkSupport {
+pub enum TalkRoute {
     /// Not asked yet, or asked and the answer was a failure rather than a
     /// refusal. Nothing is drawn on this.
     #[default]
     Unknown,
-    /// The camera offers a back channel, and it carries an encoding this build
-    /// can send.
-    Supported,
+    /// The camera's own back channel: an `a=sendonly` media in its session
+    /// description, as ONVIF Profile T describes it.
+    Standard,
+    /// A protocol the maker defined, on a connection of the viewer's own.
+    Vendor(Vendor),
     /// The camera answered, and the answer was no: no such media, a header it
-    /// will not take, or a codec this build cannot encode.
-    Unsupported,
+    /// will not take, a codec this build cannot encode, and no protocol of its
+    /// maker's that this build speaks.
+    None,
+}
+
+impl TalkRoute {
+    /// Whether a call could be placed at all - which is also whether the
+    /// microphone is worth drawing.
+    pub fn reachable(self) -> bool {
+        matches!(self, Self::Standard | Self::Vendor(_))
+    }
+}
+
+/// The makers whose own talk protocol this build speaks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Vendor {
+    /// Foscam and the cameras built on its firmware: a plain TCP connection to
+    /// port 88 carrying 16-bit PCM, not RTSP at all. See [`foscam`].
+    Foscam,
+}
+
+impl Vendor {
+    /// The maker a camera's authentication realm names, if it names one.
+    ///
+    /// The realm is the only place most of this fleet says who it is: an
+    /// `OPTIONS` comes back without a `Server` header, and the `DESCRIBE` that
+    /// asks for the session description is answered `401` with the maker's name
+    /// in the challenge - before any credentials are sent, so asking costs
+    /// nothing beyond a request the probe was going to make anyway. Measured
+    /// 2026-10-26 across nine cameras: eight answer
+    /// `Digest realm="Foscam IPCam Living Video"` and the ninth, on other
+    /// firmware, `Digest realm="Foscam"`. Both spell it, so the test is a
+    /// substring and not an equality.
+    pub fn from_realm(realm: &str) -> Option<Self> {
+        let realm = realm.to_ascii_lowercase();
+        if realm.contains("foscam") {
+            Some(Self::Foscam)
+        } else {
+            None
+        }
+    }
+}
+
+/// Which way to reach a camera, given what its probe came back with.
+///
+/// **The order is the point.** A maker whose own protocol is known wins over
+/// the standard one, even when the camera offers the standard one: a camera can
+/// negotiate a Profile T back channel and still play nothing into it, which is
+/// exactly what one of this fleet does. Negotiating is not the same as being
+/// heard, and only the maker's protocol is known to be heard.
+///
+/// `encodable` is whether the back channel's encoding is one this build can
+/// send - the caller asks [`TalkStream::new`], which is where that knowledge
+/// lives.
+pub fn route_from(realm: Option<&str>, encodable: bool) -> TalkRoute {
+    if let Some(vendor) = realm.and_then(Vendor::from_realm) {
+        return TalkRoute::Vendor(vendor);
+    }
+    if encodable {
+        TalkRoute::Standard
+    } else {
+        TalkRoute::None
+    }
 }
 
 /// One channel to one camera, as the loop that feeds it sees it.
@@ -223,6 +291,42 @@ impl TalkHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two spellings the fleet actually answered with, and the ones that
+    /// must not be taken for them.
+    #[test]
+    fn the_realm_names_the_maker() {
+        assert_eq!(Vendor::from_realm("Foscam IPCam Living Video"), Some(Vendor::Foscam));
+        assert_eq!(Vendor::from_realm("Foscam"), Some(Vendor::Foscam));
+        assert_eq!(Vendor::from_realm("foscam"), Some(Vendor::Foscam));
+        assert_eq!(Vendor::from_realm("IP Camera"), None);
+        assert_eq!(Vendor::from_realm(""), None);
+    }
+
+    /// A maker whose protocol is known wins even when the camera also offers
+    /// the standard one: one camera in this fleet negotiates Profile T and then
+    /// plays nothing into it, so negotiating is not evidence of being heard.
+    #[test]
+    fn a_known_maker_wins_over_a_back_channel_that_negotiates() {
+        assert_eq!(route_from(Some("Foscam"), true), TalkRoute::Vendor(Vendor::Foscam));
+        assert_eq!(
+            route_from(Some("Foscam IPCam Living Video"), false),
+            TalkRoute::Vendor(Vendor::Foscam)
+        );
+        assert_eq!(route_from(None, true), TalkRoute::Standard);
+        assert_eq!(route_from(Some("IP Camera"), true), TalkRoute::Standard);
+        assert_eq!(route_from(None, false), TalkRoute::None);
+        assert_eq!(route_from(Some("Reolink"), false), TalkRoute::None);
+    }
+
+    /// Only the routes that lead somewhere put a microphone on the screen.
+    #[test]
+    fn a_route_is_reachable_or_it_is_not() {
+        assert!(TalkRoute::Standard.reachable());
+        assert!(TalkRoute::Vendor(Vendor::Foscam).reachable());
+        assert!(!TalkRoute::None.reachable());
+        assert!(!TalkRoute::Unknown.reachable());
+    }
 
     #[test]
     fn hub_keeps_only_the_newest_half_second() {

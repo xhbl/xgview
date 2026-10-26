@@ -95,12 +95,19 @@ async fn main() {
         }
     };
     match prober.probe_backchannel().await {
-        Ok(Some(encoding)) => {
-            println!("probe: back channel offered as {encoding} ({:?})", asked.elapsed())
-        }
-        Ok(None) => {
-            println!("probe: no back channel offered ({:?})", asked.elapsed());
-            return;
+        Ok(probe) => {
+            // Both halves of the answer, because both decide the route: the
+            // realm names the maker on cameras that offer nothing standard.
+            println!(
+                "probe: realm {:?}, back channel {:?} ({:?})",
+                probe.realm.as_deref().unwrap_or("-"),
+                probe.encoding.as_deref().unwrap_or("none"),
+                asked.elapsed()
+            );
+            if probe.encoding.is_none() {
+                println!("probe: nothing standard to set up");
+                return;
+            }
         }
         Err(err) => {
             eprintln!("probe failed: {err}");

@@ -34,8 +34,8 @@ use crate::model::{
 use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtspStage, RtpHeader, SdpTrack};
 use crate::scheduler::ScheduleChange;
 use crate::talk::{
-    talk_gap, Channel, TalkHub, TalkStream, TalkSupport, FRAME_SAMPLES, PROBE_DELAY, TALK_INTERVAL,
-    UNSUPPORTED_TTL,
+    route_from, talk_gap, Channel, TalkHub, TalkRoute, TalkStream, FRAME_SAMPLES, PROBE_DELAY,
+    TALK_INTERVAL, UNSUPPORTED_TTL,
 };
 
 /// Time without any RTP payload after which the session is considered dead.
@@ -149,7 +149,7 @@ pub enum StreamEvent {
         camera_id: String,
         /// The address the probe asked, and the one a call would go to.
         uri: String,
-        support: TalkSupport,
+        route: TalkRoute,
     },
     /// A call that could not be placed, or that ended without the viewer
     /// hanging up. The interface ends the call and says why.
@@ -293,7 +293,7 @@ enum ChannelCommand {
     ProbeTalk { index: usize },
     /// A probe's answer, from the task that asked. The supervisor keeps the
     /// cache, so the task only does the asking.
-    TalkProbed { uri: String, support: TalkSupport },
+    TalkProbed { uri: String, route: TalkRoute },
     /// Place a call: a session of its own that carries the microphone to the
     /// camera behind this channel.
     Call { index: usize },
@@ -596,10 +596,10 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endp
     }
 }
 
-/// What the supervisor knows about one camera's back channel.
+/// What the supervisor knows about how to reach one camera's speaker.
 #[derive(Default)]
 struct TalkEntry {
-    support: TalkSupport,
+    route: TalkRoute,
     /// When the answer was given; `None` until one is.
     answered: Option<Instant>,
     /// A probe is in flight for this address.
@@ -619,10 +619,10 @@ impl TalkEntry {
     /// does.
     fn fresh(&self) -> bool {
         let Some(at) = self.answered else { return false };
-        match self.support {
-            TalkSupport::Supported => true,
-            TalkSupport::Unsupported => at.elapsed() < UNSUPPORTED_TTL,
-            TalkSupport::Unknown => false,
+        match self.route {
+            TalkRoute::Standard | TalkRoute::Vendor(_) => true,
+            TalkRoute::None => at.elapsed() < UNSUPPORTED_TTL,
+            TalkRoute::Unknown => false,
         }
     }
 }
@@ -767,22 +767,22 @@ async fn supervisor(
                 let Some(runtime) = channels.get(&index) else { continue };
                 let endpoint = runtime.endpoint.clone();
                 let uri = endpoint.uri.clone();
-                let answer = |support| StreamEvent::Talk {
+                let answer = |route| StreamEvent::Talk {
                     index,
                     camera_id: endpoint.camera_id.clone(),
                     uri: uri.clone(),
-                    support,
+                    route,
                 };
                 // MJPEG and the MSE fallback carry no media the client sends,
                 // so there is nothing to ask: the answer is known without a
                 // connection.
                 if endpoint.is_mjpeg() || endpoint.is_ws() {
-                    let _ = events.send(answer(TalkSupport::Unsupported));
+                    let _ = events.send(answer(TalkRoute::None));
                     continue;
                 }
                 let entry = talk_support.entry(uri.clone()).or_default();
                 if entry.fresh() {
-                    let _ = events.send(answer(entry.support));
+                    let _ = events.send(answer(entry.route));
                     continue;
                 }
                 // One probe per address at a time: the second caller would only
@@ -807,34 +807,29 @@ async fn supervisor(
                         let mut client = RtspClient::connect_with_auth(&uri, credentials).await?;
                         client.probe_backchannel().await
                     };
-                    let support = match tokio::time::timeout(timeout, ask).await {
-                        Ok(Ok(Some(encoding))) => {
-                            let codec = AudioCodec::from_encoding(&encoding);
-                            if TalkStream::new(codec).is_some() {
-                                tracing::debug!(
-                                    target: "xgview::talk",
-                                    camera = %camera_id,
-                                    encoding,
-                                    "the camera offers a back channel"
-                                );
-                                TalkSupport::Supported
-                            } else {
-                                tracing::debug!(
-                                    target: "xgview::talk",
-                                    camera = %camera_id,
-                                    encoding,
-                                    "the back channel carries an encoding this build cannot send"
-                                );
-                                TalkSupport::Unsupported
-                            }
-                        }
-                        Ok(Ok(None)) => {
+                    let route = match tokio::time::timeout(timeout, ask).await {
+                        Ok(Ok(probe)) => {
+                            // Whether the standard back channel carries
+                            // something this build can send; the vendor route
+                            // does not care, which is the point of asking the
+                            // maker before the media.
+                            let encodable = probe
+                                .encoding
+                                .as_deref()
+                                .map(|encoding| {
+                                    TalkStream::new(AudioCodec::from_encoding(encoding)).is_some()
+                                })
+                                .unwrap_or(false);
+                            let route = route_from(probe.realm.as_deref(), encodable);
                             tracing::debug!(
                                 target: "xgview::talk",
                                 camera = %camera_id,
-                                "the camera offers no back channel"
+                                realm = probe.realm.as_deref().unwrap_or("-"),
+                                encoding = probe.encoding.as_deref().unwrap_or("-"),
+                                ?route,
+                                "the camera answered the talk probe"
                             );
-                            TalkSupport::Unsupported
+                            route
                         }
                         // A failure is not an answer: nothing is cached on it,
                         // so the next magnification asks again.
@@ -845,7 +840,7 @@ async fn supervisor(
                                 error = %err,
                                 "the talk-back probe failed"
                             );
-                            TalkSupport::Unknown
+                            TalkRoute::Unknown
                         }
                         Err(_) => {
                             tracing::debug!(
@@ -854,17 +849,17 @@ async fn supervisor(
                                 timeout_s = timeout.as_secs(),
                                 "the talk-back probe timed out"
                             );
-                            TalkSupport::Unknown
+                            TalkRoute::Unknown
                         }
                     };
-                    let _ = commands.send(ChannelCommand::TalkProbed { uri, support });
+                    let _ = commands.send(ChannelCommand::TalkProbed { uri, route });
                 });
             }
-            ChannelCommand::TalkProbed { uri, support } => {
+            ChannelCommand::TalkProbed { uri, route } => {
                 let entry = talk_support.entry(uri.clone()).or_default();
                 entry.probing = false;
-                if support != TalkSupport::Unknown {
-                    entry.support = support;
+                if route != TalkRoute::Unknown {
+                    entry.route = route;
                     entry.answered = Some(Instant::now());
                 }
                 // The answer is the camera's, so every channel showing that
@@ -875,7 +870,7 @@ async fn supervisor(
                             index: *index,
                             camera_id: runtime.endpoint.camera_id.clone(),
                             uri: uri.clone(),
-                            support: entry.support,
+                            route: entry.route,
                         });
                     }
                 }
@@ -3162,16 +3157,19 @@ mod tests {
         let mut entry = TalkEntry::default();
         assert!(!entry.fresh(), "nothing has been asked yet");
 
-        entry.support = TalkSupport::Supported;
+        entry.route = TalkRoute::Standard;
         entry.answered = Some(Instant::now());
         assert!(entry.fresh(), "a camera that offered a back channel still does");
 
-        entry.support = TalkSupport::Unsupported;
+        entry.route = TalkRoute::Vendor(crate::talk::Vendor::Foscam);
+        assert!(entry.fresh(), "and so does a maker's own protocol");
+
+        entry.route = TalkRoute::None;
         assert!(entry.fresh(), "a fresh refusal is worth believing");
         entry.answered = Some(Instant::now() - UNSUPPORTED_TTL - Duration::from_secs(1));
         assert!(!entry.fresh(), "but it is asked again after a while");
 
-        entry.support = TalkSupport::Unknown;
+        entry.route = TalkRoute::Unknown;
         entry.answered = None;
         assert!(!entry.fresh(), "a failed probe caches nothing");
     }

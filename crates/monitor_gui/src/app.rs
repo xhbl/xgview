@@ -25,7 +25,7 @@ use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{infer_sub_stream, ConnectionState, OsdItem, StreamKind, TileAspect};
 use monitor_core::pipeline::{CallFailure, ChannelManager, StreamEvent};
 use monitor_core::scheduler::Scheduler;
-use monitor_core::talk::TalkSupport;
+use monitor_core::talk::TalkRoute;
 use monitor_core::{CameraSource, Direction};
 
 use crate::dialogs::{self, BackgroundEvent, CameraDraft, DiscoveryUi, Tab};
@@ -257,9 +257,9 @@ impl ChannelUi {
                 self.bitrate_kbps = 0.0;
                 self.total_frames = 0;
             }
-            // A camera's capability, not this channel's state: the interface
-            // takes it before an event reaches a channel, and caches it by
-            // address. See `App::talk_support`.
+            // How this camera would be talked to, which is not this channel's
+            // state: the interface takes it before an event reaches a channel,
+            // and caches it by address. See `App::talk_route`.
             StreamEvent::Talk { .. } => {}
             // Likewise a failed call, which ends the call rather than saying
             // anything about the channel: see `App::poll_events`.
@@ -747,7 +747,7 @@ pub struct XgViewApp {
     /// A camera's capability rather than a channel's: the picture's session
     /// carries no back channel, so the answer comes from a probe of its own and
     /// belongs to the address, not to the slot the camera is shown in.
-    talk_support: HashMap<String, TalkSupport>,
+    talk_route: HashMap<String, TalkRoute>,
     /// Decoded pictures currently on the GPU, keyed by channel index.
     textures: HashMap<usize, ChannelTexture>,
     /// Uploads the decoded planes and turns them into those pictures.
@@ -1252,7 +1252,7 @@ impl XgViewApp {
             channels: HashMap::new(),
             audio_outputs,
             audio_inputs,
-            talk_support: HashMap::new(),
+            talk_route: HashMap::new(),
             textures: HashMap::new(),
             video,
             vitals: monitor_core::vitals::Vitals::new(),
@@ -2718,8 +2718,8 @@ impl XgViewApp {
         for event in self.manager.poll() {
             // A camera's answer, not a channel's: it is kept by address so that
             // a camera shown in two slots, or magnified twice, is asked once.
-            if let StreamEvent::Talk { uri, support, .. } = &event {
-                self.talk_support.insert(uri.clone(), *support);
+            if let StreamEvent::Talk { uri, route, .. } = &event {
+                self.talk_route.insert(uri.clone(), *route);
                 continue;
             }
             // A call that did not come up ends the call the interface thought it
@@ -7528,7 +7528,7 @@ impl XgViewApp {
     /// survives the session being reopened under it.
     fn magnified_has_backchannel(&self) -> bool {
         self.magnified_stream_uri()
-            .is_some_and(|uri| self.talk_support.get(&uri) == Some(&TalkSupport::Supported))
+            .is_some_and(|uri| self.talk_route.get(&uri).is_some_and(|route| route.reachable()))
     }
 
     /// The address a call to the magnified camera would be placed to.
