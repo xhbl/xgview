@@ -34,8 +34,8 @@ use crate::model::{
 use crate::rtsp::{parse_rtp_header, MediaPacket, RtspClient, RtspStage, RtpHeader, SdpTrack};
 use crate::scheduler::ScheduleChange;
 use crate::talk::{
-    talk_gap, RtspTalkChannel, TalkChannel, TalkHub, TalkStream, TalkSupport, FRAME_SAMPLES,
-    PROBE_DELAY, TALK_INTERVAL, UNSUPPORTED_TTL,
+    talk_gap, Channel, TalkHub, TalkStream, TalkSupport, FRAME_SAMPLES, PROBE_DELAY, TALK_INTERVAL,
+    UNSUPPORTED_TTL,
 };
 
 /// Time without any RTP payload after which the session is considered dead.
@@ -1581,7 +1581,7 @@ async fn talk_worker(
         });
     };
 
-    let mut channel = match tokio::time::timeout(timeout, RtspTalkChannel::open(&uri, credentials)).await {
+    let mut channel = match tokio::time::timeout(timeout, Channel::open(&uri, credentials)).await {
         Ok(Ok(Some(channel))) => channel,
         Ok(Ok(None)) => {
             tracing::debug!(
@@ -1636,20 +1636,24 @@ async fn talk_worker(
     tracing::debug!(
         target: "xgview::talk",
         camera = %camera_id,
-        channel = channel.channel(),
+        channel = channel.label(),
         "the call is live"
     );
 
     let interval = channel.interval();
     let mut next_send = Instant::now();
-    let mut next_keep_alive = Instant::now() + channel.keep_alive_interval();
+    // `None` is a protocol that needs no keep-alive: its audio is the proof of
+    // life. A protocol that does need one names how often.
+    let mut next_keep_alive = channel.keep_alive_interval().map(|every| Instant::now() + every);
     while talk.talking_on(index) {
         let now = Instant::now();
-        if now >= next_keep_alive {
-            if channel.keep_alive().await.is_err() {
-                break;
+        if let Some(due) = next_keep_alive {
+            if now >= due {
+                if channel.keep_alive().await.is_err() {
+                    break;
+                }
+                next_keep_alive = channel.keep_alive_interval().map(|every| now + every);
             }
-            next_keep_alive = now + channel.keep_alive_interval();
         }
         if now >= next_send {
             let samples = talk.take(channel.samples());
@@ -1668,7 +1672,11 @@ async fn talk_worker(
         // to do. It is what keeps the answers to the keep alive from piling up
         // in the socket, and it is the only way a camera that has closed the
         // session is noticed before the next packet goes nowhere.
-        let wait = next_send.min(next_keep_alive).saturating_duration_since(Instant::now());
+        let next_wake = match next_keep_alive {
+            Some(due) => next_send.min(due),
+            None => next_send,
+        };
+        let wait = next_wake.saturating_duration_since(Instant::now());
         if let Ok(Err(_)) = tokio::time::timeout(wait, channel.watch()).await {
             break;
         }

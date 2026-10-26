@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use monitor_core::rtsp::{MediaPacket, RtspClient};
-use monitor_core::talk::{RtspTalkChannel, TalkChannel, RATE};
+use monitor_core::talk::{Channel, RATE};
 
 #[tokio::main]
 async fn main() {
@@ -134,7 +134,7 @@ async fn main() {
 
     // 3. A session of its own, carrying the back channel and nothing else.
     let opened = Instant::now();
-    let mut channel = match RtspTalkChannel::open(&url, credentials).await {
+    let mut channel = match Channel::open(&url, credentials).await {
         Ok(Some(channel)) => channel,
         Ok(None) => {
             eprintln!("the talk-only session found no back channel it can encode");
@@ -146,9 +146,9 @@ async fn main() {
         }
     };
     println!(
-        "talk-only session live in {:?}: interleaved channel {}, {:?} a packet, keep alive every {:?}",
+        "talk-only session live in {:?}: {}, {:?} a packet, keep alive {:?}",
         opened.elapsed(),
-        channel.channel(),
+        channel.label(),
         channel.interval(),
         channel.keep_alive_interval()
     );
@@ -166,7 +166,7 @@ async fn main() {
     let mut restarted = false;
     let mut ended: Option<String> = None;
     let keep_alive = channel.keep_alive_interval();
-    let mut next_keep_alive = Instant::now() + keep_alive;
+    let mut next_keep_alive = keep_alive.map(|every| Instant::now() + every);
     let first_packet = Instant::now();
     let started = Instant::now();
     let mut next = Instant::now();
@@ -192,12 +192,14 @@ async fn main() {
         }
         // A camera times a session out on its own clock, and the audio on the
         // wire does not count: this is the `OPTIONS` that keeps it open.
-        if Instant::now() >= next_keep_alive {
-            if let Err(err) = channel.keep_alive().await {
-                ended = Some(format!("the keep alive failed: {err}"));
-                break;
+        if let Some(due) = next_keep_alive {
+            if Instant::now() >= due {
+                if let Err(err) = channel.keep_alive().await {
+                    ended = Some(format!("the keep alive failed: {err}"));
+                    break;
+                }
+                next_keep_alive = keep_alive.map(|every| Instant::now() + every);
             }
-            next_keep_alive = Instant::now() + keep_alive;
         }
         let samples: Vec<i16> = (0..channel.samples())
             .map(|_| {

@@ -36,9 +36,11 @@ use std::time::Duration;
 
 use crate::Result;
 
+pub mod channel;
 pub mod foscam;
 pub mod rtsp;
 
+pub use channel::Channel;
 pub use rtsp::{
     talk_gap, RtspTalkChannel, TalkStream, FRAME_SAMPLES, TALK_INTERVAL, TALK_KEEPALIVE,
 };

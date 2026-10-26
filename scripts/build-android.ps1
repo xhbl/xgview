@@ -149,8 +149,16 @@ try {
         Write-Host "    libc++_shared.so ($abi)"
     }
 
+    # `--no-daemon` is here for the console, not for the build. With a daemon,
+    # the build runs in a process that outlives the launcher and keeps the
+    # console handle it inherited, so anything reading this script's output
+    # through a pipe - `| Select-Object`, `| Tee-Object`, a CI log collector -
+    # waits for a handle that is never closed: the APK is written, the script
+    # sits there, and the run has to be killed. Without the daemon the launcher
+    # is the build, and it exits when it is done. The cost is one Gradle start-up
+    # per build, which a per-release script can afford.
     Write-Host "==> APK (gradle $task)" -ForegroundColor Cyan
-    & $gradle -p android $task --console=plain
+    & $gradle -p android $task --console=plain --no-daemon
     if ($LASTEXITCODE -ne 0) { throw "gradle failed (exit $LASTEXITCODE)" }
 
     $built = Join-Path $repoRoot "android\app\build\outputs\apk\$variant\app-$variant.apk"
