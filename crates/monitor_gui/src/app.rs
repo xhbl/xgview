@@ -6046,6 +6046,27 @@ impl XgViewApp {
         self.restore_focus = self.reorder_trigger_anchor;
     }
 
+    /// Plays a test tone to the camera a draft describes.
+    ///
+    /// The tone is played from the draft rather than the saved entry, so a mode
+    /// can be tried before it is kept and a camera that has never been saved can
+    /// still be heard. Both the edit window's button and the manual tab's reach
+    /// it, which is why it is a method and not a block in one window.
+    fn spawn_test_tone(&mut self, source: CameraSource) {
+        let uri = source.active_uri(StreamKind::Main).to_string();
+        let credentials = source
+            .username
+            .as_ref()
+            .map(|user| (user.clone(), source.password.clone().unwrap_or_default()));
+        let mode = source.talk;
+        let (sender, receiver) = unbounded();
+        self.handle.spawn(async move {
+            let _ = sender.send(monitor_core::talk::test_tone(&uri, credentials, mode).await);
+        });
+        self.talk_test = Some(receiver);
+        self.flash(monitor_i18n::tr("toast-talk-test-playing"), ToastKind::Info);
+    }
+
     /// The window one camera of the settings panel is edited in.
     ///
     /// It lays out the same form as the "Manual entry" tab - see
@@ -6116,28 +6137,8 @@ impl XgViewApp {
         });
 
         if test {
-            // Played from the draft, not the saved entry: the point of the button
-            // is to try a mode before keeping it, and the address and login are
-            // the draft's too - so a camera that has never been saved can still
-            // be heard.
             match draft.build() {
-                Ok(source) => {
-                    let uri = source.active_uri(StreamKind::Main).to_string();
-                    let credentials = source
-                        .username
-                        .as_ref()
-                        .map(|user| (user.clone(), source.password.clone().unwrap_or_default()));
-                    let mode = draft.talk;
-                    let (sender, receiver) = unbounded();
-                    self.handle.spawn(async move {
-                        let _ = sender.send(monitor_core::talk::test_tone(&uri, credentials, mode).await);
-                    });
-                    self.talk_test = Some(receiver);
-                    self.flash(monitor_i18n::tr("toast-talk-test-playing"), ToastKind::Info);
-                }
-                // The form says what is wrong with it when it is saved; a tone
-                // from an address that will not parse is not worth a second
-                // message of its own.
+                Ok(source) => self.spawn_test_tone(source),
                 Err(error) => self.flash(error, ToastKind::Error),
             }
         }
@@ -8044,6 +8045,11 @@ impl XgViewApp {
             (egui::Align2::CENTER_BOTTOM, vec2(0.0, -56.0))
         };
         egui::Area::new(Id::new("xgview-toast"))
+            // Above every modal. A toast is often the answer to a press made
+            // inside one - the test tone's "the address is not complete", say -
+            // and a modal's backdrop would otherwise cover it, which reads as a
+            // button that did nothing.
+            .order(egui::Order::Tooltip)
             .anchor(anchor, offset)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -8505,6 +8511,15 @@ impl eframe::App for XgViewApp {
             ) {
                 self.needs_sync = true;
                 self.mark_dirty();
+            }
+            // The manual tab's test button: the dialog has no runtime, so the
+            // press comes back here and is played like the edit window's.
+            if std::mem::take(&mut self.discovery.talk_test) {
+                let result = self.discovery.manual.build();
+                match result {
+                    Ok(source) => self.spawn_test_tone(source),
+                    Err(error) => self.flash(error, ToastKind::Error),
+                }
             }
             // The window closed itself - its cross, or Back - so the button it
             // was opened from takes the focus again.

@@ -320,6 +320,10 @@ pub struct DiscoveryUi {
     pub error: Option<(Tab, String)>,
     pub message: Option<(Tab, String)>,
     pub manual: CameraDraft,
+    /// The manual tab's test button, which needs the runtime the dialog has not
+    /// got: the application picks it up after drawing the dialog and plays the
+    /// tone the way the edit window's button does.
+    pub talk_test: bool,
     pub synology_busy: bool,
     /// Cameras the last Synology fetch returned, waiting to be picked.
     ///
@@ -1164,8 +1168,14 @@ fn credentials_fields(
 
 fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {
     let mut changed = false;
-    if camera_fields(ui, nav, "manual-camera", &mut state.manual, None).inferred {
+    let fields = camera_fields(ui, nav, "manual-camera", &mut state.manual, None);
+    if fields.inferred {
         state.note(Tab::Manual, monitor_i18n::tr("dialog-sub-derived-msg"));
+    }
+    // The dialog has no runtime to play a tone with, so the press is handed
+    // back to the application, which plays it like the edit window's button.
+    if fields.test {
+        state.talk_test = true;
     }
 
     // The form and its two buttons are two groups, not one run of controls: the
