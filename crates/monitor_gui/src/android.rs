@@ -9,7 +9,7 @@
 //! reasoning for attaching the VM to the UI thread permanently. Only compiled
 //! on Android.
 
-use std::sync::atomic::{AtomicI32, AtomicI8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI8, Ordering};
 use std::sync::Mutex;
 
 use jni::objects::{GlobalRef, JString, JValue};
@@ -146,6 +146,25 @@ pub fn set_orientation(portrait: bool) {
 /// step, without keeping a second copy of that answer in Java.
 pub fn reset_orientation() {
     ORIENTATION_SENT.store(-1, Ordering::Relaxed);
+}
+
+/// Set when the activity has come back to the foreground, cleared when the
+/// application has acted on it. See [`request_resume`].
+static RESUME_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// The activity came back to the foreground.
+///
+/// The channels may have spent the time in the background counting failures -
+/// a Wi-Fi that slept, a socket that went half open - and grown their backoff
+/// to its ceiling. [`take_resume`] is how the application learns to retry them
+/// at once rather than wait that backoff out.
+pub fn request_resume() {
+    RESUME_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// Whether the activity has come back since the last call, clearing the flag.
+pub fn take_resume() -> bool {
+    RESUME_REQUESTED.swap(false, Ordering::Relaxed)
 }
 
 /// Whether the device can stand upright - it has a touch screen and is not a

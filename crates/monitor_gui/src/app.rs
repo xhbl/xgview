@@ -8144,6 +8144,14 @@ impl eframe::App for XgViewApp {
         // other platforms, which have no orientation to ask for.
         #[cfg(target_os = "android")]
         crate::android::set_orientation(self.is_portrait());
+        // The activity came back to the foreground: retry every channel that is
+        // waiting out a backoff, rather than let it spend the delay the
+        // background grew. Android only - it is the only platform whose process
+        // is suspended and resumed this way.
+        #[cfg(target_os = "android")]
+        if crate::android::take_resume() {
+            self.manager.wake();
+        }
         // Whether the bars were up as the last frame left them, read before
         // anything this frame can move them. The focus ring compares it with
         // what the frame leaves behind, at the end of the frame: full screen is

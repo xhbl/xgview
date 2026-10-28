@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use monitor_codec::audio::{create_audio_decoder, AudioCodec, AudioDecoder, AudioStreamInfo};
@@ -306,6 +307,11 @@ enum ChannelCommand {
     /// picture's session instead - the way it was carried before the split.
     /// Only used when a call has already been refused.
     TalkFallback { index: usize },
+    /// The viewer came back to the window. Every channel waiting out a backoff
+    /// retries at once instead: the failures it counted happened while the
+    /// process was in the background, and waiting them out now would only add
+    /// that delay to the time the viewer was already away.
+    Wake,
     Shutdown,
 }
 
@@ -413,6 +419,15 @@ impl ChannelManager {
 
     /// The runtime used by the streaming tasks (the UI uses it to spawn the
     /// discovery and import jobs as well).
+    /// Retries every channel that is waiting out a backoff, at once.
+    ///
+    /// Called when the window comes back to the foreground: the failures that
+    /// grew the backoff happened while the process was in the background, and
+    /// the viewer should not have to wait them out after returning.
+    pub fn wake(&self) {
+        let _ = self.commands.send(ChannelCommand::Wake);
+    }
+
     pub fn handle(&self) -> &Handle {
         &self.handle
     }
@@ -556,6 +571,8 @@ impl Endpoint {
 struct ChannelRuntime {
     endpoint: Endpoint,
     task: JoinHandle<()>,
+    /// Wakes this channel out of a backoff wait; see [`ChannelCommand::Wake`].
+    wake: Arc<Notify>,
 }
 
 /// Credentials configured for a camera, if any.
@@ -700,6 +717,7 @@ async fn supervisor(
                     stream = stream.as_str(),
                     "starting channel"
                 );
+                let wake = Arc::new(Notify::new());
                 let task = handle.spawn(run_channel(
                     endpoint.clone(),
                     prefer_hardware,
@@ -708,14 +726,28 @@ async fn supervisor(
                     frames.clone(),
                     audio.clone(),
                     talk.clone(),
+                    wake.clone(),
                 ));
-                channels.insert(index, ChannelRuntime { endpoint, task });
+                channels.insert(index, ChannelRuntime { endpoint, task, wake });
             }
             ChannelCommand::Suspend { index } => {
                 if let Some(existing) = channels.remove(&index) {
                     existing.task.abort();
                     tracing::debug!(target: "xgview::pipeline", index, "channel suspended");
                 }
+            }
+            ChannelCommand::Wake => {
+                // Only the channels waiting out a backoff care. `notify_waiters`
+                // leaves no permit behind, so one that is streaming is untouched
+                // and one that is connecting finishes its attempt.
+                for runtime in channels.values() {
+                    runtime.wake.notify_waiters();
+                }
+                tracing::debug!(
+                    target: "xgview::pipeline",
+                    channels = channels.len(),
+                    "woken for a resume"
+                );
             }
             ChannelCommand::PreferHardware(prefer) => {
                 if prefer == prefer_hardware {
@@ -735,6 +767,7 @@ async fn supervisor(
                 for (index, runtime) in channels.drain().collect::<Vec<_>>() {
                     runtime.task.abort();
                     let endpoint = runtime.endpoint;
+                    let wake = runtime.wake;
                     let task = handle.spawn(run_channel(
                         endpoint.clone(),
                         prefer_hardware,
@@ -743,8 +776,9 @@ async fn supervisor(
                         frames.clone(),
                         audio.clone(),
                         talk.clone(),
+                        wake.clone(),
                     ));
-                    channels.insert(index, ChannelRuntime { endpoint, task });
+                    channels.insert(index, ChannelRuntime { endpoint, task, wake });
                 }
             }
             ChannelCommand::Talk(target) => {
@@ -959,6 +993,7 @@ async fn supervisor(
                     camera = %endpoint.camera_id,
                     "this camera takes the back channel on the picture's session"
                 );
+                let wake = runtime.wake;
                 let task = handle.spawn(run_channel(
                     endpoint.clone(),
                     prefer_hardware,
@@ -967,8 +1002,9 @@ async fn supervisor(
                     frames.clone(),
                     audio.clone(),
                     talk.clone(),
+                    wake.clone(),
                 ));
-                channels.insert(index, ChannelRuntime { endpoint, task });
+                channels.insert(index, ChannelRuntime { endpoint, task, wake });
             }
             ChannelCommand::SetPolicy(new_policy) => {
                 match settings.lock() {
@@ -1135,6 +1171,7 @@ async fn run_channel(
     frames: Arc<FrameStore>,
     audio: Arc<AudioHub>,
     talk: Arc<TalkHub>,
+    wake: Arc<Notify>,
 ) {
     let index = endpoint.index;
     let mut attempt: u32 = 0;
@@ -1262,7 +1299,19 @@ async fn run_channel(
                 detail: format!("{failure} | retry in {} ms", delay.as_millis()),
             },
         );
-        tokio::time::sleep(delay).await;
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = wake.notified() => {
+                // The window came back: the attempts counted while it was in
+                // the background are not a reason to keep the viewer waiting.
+                attempt = 0;
+                tracing::debug!(
+                    target: "xgview::pipeline",
+                    index,
+                    "woken for a resume, retrying now"
+                );
+            }
+        }
     }
 }
 

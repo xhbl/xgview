@@ -138,6 +138,9 @@ pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeResumed(
     _class: jni::objects::JClass,
 ) {
     monitor_gui::android::reset_orientation();
+    // The channels may have grown their backoff while the process was in the
+    // background; the application retries them on the next frame.
+    monitor_gui::android::request_resume();
 }
 
 /// A block of a call's capture, handed back by the activity's record thread.
