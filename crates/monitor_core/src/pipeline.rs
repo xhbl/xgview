@@ -2101,12 +2101,18 @@ async fn run_session(
         // While stalled the patience is already spent, so the wait would be
         // zero and the loop would spin. A one second poll keeps it from
         // busy-waiting without blocking long enough to miss the hard timeout.
-        let wait = if since_picture >= patience {
+        // A channel with no decoder has no picture to wait for and no stall
+        // state to read: the only signal it has is whether packets are still
+        // arriving, so it waits for the full read timeout and lets that be the
+        // one that reports silence on the wire.
+        let wait = if decoder.is_some() && since_picture >= patience {
             STALL_HARD_TIMEOUT
                 .saturating_sub(stall.stalled_since.unwrap().elapsed())
                 .min(Duration::from_secs(1))
-        } else {
+        } else if decoder.is_some() {
             READ_TIMEOUT.min(patience.saturating_sub(since_picture))
+        } else {
+            READ_TIMEOUT
         };
         // A session feeding a camera's speaker has one more clock to honour:
         // the wait is cut so that the next talk packet is written on time even
@@ -2129,7 +2135,10 @@ async fn run_session(
                 // A wait that the picture deadline cut short is not silence on
                 // the wire, and reporting it as such would name the wrong fault
                 // and the wrong duration. The loop's own check reports that one.
-                if stall.since_picture() >= patience {
+                // A channel with no decoder is exempt: its wait was the full
+                // read timeout, not a deadline slice, so an expiry here really
+                // is silence on the wire.
+                if decoder.is_some() && stall.since_picture() >= patience {
                     continue;
                 }
                 return Err(crate::error::CoreError::rtsp(format!(
