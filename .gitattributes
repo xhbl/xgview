@@ -1,0 +1,45 @@
+# Every text file is stored with LF and checked out with LF, on every platform.
+#
+# `core.autocrlf=true` is not this repository's setting - it comes from the
+# bundled PortableGit on the machine the tree was first cloned on - so without
+# this file the same source is handed out as CRLF here and as LF on a Linux box,
+# and whoever edits it on Windows commits a whole-file diff that says nothing
+# about the change they made. An attribute travels with the clone; a
+# `core.autocrlf` does not, and a clone made with `autocrlf=false` would keep
+# the CRLF files CRLF and the LF files LF, which is the state this file exists to
+# end.
+#
+# `text=auto` leaves the decision about what is text to git's own sniffing;
+# `eol=lf` fixes what happens to the answer. Nothing in the tree needs CRLF:
+# the `.ps1` scripts are already LF and run, and `xgview.rc` is already LF and
+# `rc.exe` compiles it.
+* text=auto eol=lf
+
+# Binary, spelled out rather than left to the sniff. `text=auto` classifies by
+# looking for a NUL byte in the first few kilobytes, which is right for all of
+# these today - but a signing key or an icon put through a line-ending
+# conversion is not a failure worth leaving to a heuristic, and the ones that are
+# not in the tree yet are the ones nobody will remember to check.
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.ico      binary
+*.icns     binary
+*.webp     binary
+*.ttf      binary
+*.otf      binary
+*.woff     binary
+*.woff2    binary
+*.so       binary
+*.dylib    binary
+*.dll      binary
+*.exe      binary
+*.apk      binary
+*.aar      binary
+*.jar      binary
+*.jks      binary
+*.keystore binary
+*.zip      binary
+*.gz       binary
+*.mp4      binary
+*.m4a      binary

@@ -1,0 +1,9 @@
+# The sources in this tree end their lines with LF, and `cargo fmt` should not
+# hand them back with CRLF on Windows. The default, `Auto`, preserves whatever
+# endings the file already has - which is how a CRLF file would survive a format
+# and then show up as a whole-file diff on the next real change.
+newline_style = "Unix"
+
+# This file is not an invitation to run `cargo fmt`: the tree is not fmt-clean,
+# and a format would rewrite every source in it. It settles the endings for the
+# day someone runs the formatter anyway, and for an editor doing format-on-save.

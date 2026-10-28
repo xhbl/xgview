@@ -3046,3 +3046,55 @@ recoverable, and the right moment for it.
 logs and lets the save continue: a wall that cannot keep history is still better
 than a wall that cannot save. The same for the fresh install, where there is
 nothing to keep - `NotFound` is the expected answer, not an error.
+
+## 42. One line ending for the whole tree
+
+*Landed 2026-10-28, in 1.5.69.*
+
+**What was there.** No `.gitattributes`, and `core.autocrlf=true` - which turns
+out not to be this repository's setting at all, but the bundled PortableGit's
+system config on the machine the tree was first cloned on. The index held LF for
+everything, because `autocrlf` normalises on the way in, but twelve files were
+CRLF in the blob *and* in the working copy, and the other 118 were LF in both.
+The twelve were the audio-related sources (`monitor_codec/src/audio.rs`,
+`ffmpeg_audio.rs`, `g711.rs`, `monitor_core/src/audio.rs`, `mse.rs`,
+`reboot.rs`, the two `audio_live`/`audio_probe` examples, `monitor_gui/src/
+audio.rs`), two `monitor_android` Java files and `bug_report.yml`.
+
+**Why it matters more than it looks.** A clone made with `autocrlf=false` - a
+Linux box, a colleague's git, a CI image - checks those twelve out as CRLF and
+the rest as LF, and the split moves around with whoever touched the file last.
+Editing a CRLF file in a tree where git expects LF is a whole-file diff that
+says nothing about the change; the same file then looks different on two
+machines for no reason anyone can find later. A `.gitattributes` travels with
+the clone and overrides `core.autocrlf`, which is the only place this can be
+decided once instead of per machine.
+
+**`rustfmt.toml` with `newline_style = "Unix"` is not the fix**, and it is worth
+being clear about why: it only covers `.rs`, only applies when rustfmt writes the
+file, and `cargo fmt` is not run here - `cargo fmt --check` reports whole-file
+differences across the tree, because the sources were never formatted with it.
+The default, `Auto`, preserves whatever endings a file already has, so the option
+only settles the endings for the day someone runs the formatter anyway or an
+editor does format-on-save. It is in the tree for that, with a comment saying so,
+and it is not what makes the tree LF. The `.gitattributes` is.
+
+**The renormalise is two steps, not one.** `git add --renormalize .` rewrites the
+blobs in the index; it does not touch the working copy, because an attribute
+governs how git converts content, not what is already on disk. `git ls-files
+--eol` keeps reporting `w/crlf` for the twelve until each file is checked out
+again - `rm` them and `git checkout --` them, which writes through the new
+`eol=lf` and produces LF. Skipping that leaves a tree whose index says LF and
+whose files are still CRLF: clean to `git status`, wrong to every tool that reads
+the bytes.
+
+**How to prove the commit is only endings**: `git diff --cached
+--ignore-cr-at-eol --numstat` reports `0 0` for every converted file. If a line
+count shows up there, something else changed in the same commit.
+
+**Nothing in the tree needed CRLF.** The six `.ps1` scripts were already LF and
+run, and `assets/icons/windows/xgview.rc` was already LF and `rc.exe` compiles
+it, so there was no file to carve an exception out for. The binary list in
+`.gitattributes` is spelled out rather than left to `text=auto`'s NUL-byte sniff:
+a keystore or an icon through a line-ending conversion is not a failure worth
+leaving to a heuristic.
