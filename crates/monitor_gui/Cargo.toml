@@ -24,7 +24,11 @@ eframe = { version = "0.32", default-features = false, features = ["wgpu", "defa
 # shader, which needs the renderer eframe already runs and its wgpu.
 egui-wgpu = "0.32"
 wgpu = "25"
-tokio = { version = "1", features = ["full"] }
+# The runtime this crate builds runs the jobs `monitor_core` spawns, and it is
+# built with `enable_all()`: the io and time drivers it asks for only exist if
+# the features are on, so they are asked for here rather than left to
+# `monitor_core`'s list. See `docs/DevMemo.md` §43.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
 tracing = "0.1"
 # The audio sink, one API for every target: WASAPI on Windows, ALSA / JACK on
 # Linux, CoreAudio on macOS and Oboe on Android. The core only knows its

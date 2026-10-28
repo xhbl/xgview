@@ -28,9 +28,22 @@ sha1 = "0.10"
 sha2 = "0.10"
 socket2 = "0.6"
 thiserror = "2"
-tokio = { version = "1", features = ["full"] }
+# Only what this crate calls. `full` was here once and turned on the process,
+# signal, filesystem and io-std modules for every target, none of which is used
+# by anything in the workspace - see `docs/DevMemo.md` §43.
+#   rt       `spawn`, `JoinSet`, `Handle`
+#   net      `TcpStream`, `TcpListener`, `UdpSocket`
+#   io-util  `AsyncReadExt` / `AsyncWriteExt` / `BufReader`
+#   time     `timeout`, `sleep`, `interval`
+#   sync     `mpsc`
+#   macros   `select!`, `pin!`, `#[tokio::test]`
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "sync", "macros"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-rustls = "0.23"
+# `ring`, not rustls' default `aws-lc-rs`. reqwest's `rustls-tls` pulls ring in
+# anyway, so the default features meant both providers were compiled and linked
+# into every binary - two full TLS implementations for one client. See
+# `docs/DevMemo.md` §43.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
@@ -56,3 +69,8 @@ zbus = "5"
 
 [dev-dependencies]
 tempfile = "3"
+# The examples are `#[tokio::main]` programs, whose default flavor is
+# multi-thread; the tests want the macro too. Dev-only, so this does not put a
+# thread pool in the shipped binary - the runtime there is built by
+# `monitor_gui`, which asks for `rt-multi-thread` itself.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

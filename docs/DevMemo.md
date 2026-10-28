@@ -3098,3 +3098,78 @@ it, so there was no file to carve an exception out for. The binary list in
 `.gitattributes` is spelled out rather than left to `text=auto`'s NUL-byte sniff:
 a keystore or an icon through a line-ending conversion is not a failure worth
 leaving to a heuristic.
+
+## 43. Two TLS implementations, and a tokio nobody used
+
+*Landed 2026-10-28, in 1.5.70.*
+
+**What was there.** `tokio = { features = ["full"] }` in three manifests. The
+root package - the two binaries - names no tokio API at all: `src/main.rs` and
+`src/bin/xgview-cli.rs` are `std::thread`, `std::process` and `std::time`.
+Cargo unifies features across the graph, so that one line turned on `process`,
+`signal`, `fs`, `io-std` and `parking_lot` for every target anyway, none of
+which anything in the workspace calls.
+
+**And rustls had two providers compiled in.** `monitor_core` asked for
+`rustls = "0.23"` with the default features, which are `aws_lc_rs`; reqwest's
+`rustls-tls` feature enables `__rustls-ring`, which pulls `ring`. Feature
+unification does not pick one - it compiles both, and `cargo tree -i ring` and
+`cargo tree -i aws-lc-rs` printed the same tree under each. The explicit
+`aws_lc_rs` in `pipeline.rs` was naming a provider that only half the build was
+using.
+
+**This was not a bug, and it is worth being exact about why not.** reqwest
+builds its config with `ClientConfig::builder_with_provider` and falls back to
+ring itself (`reqwest/src/async_impl/client.rs:765`), so nothing ever asked
+rustls to guess. Had it called `ClientConfig::builder()`, rustls'
+`get_default_or_install_from_crate_features` returns `None` when both features
+are on and panics with "make sure exactly one of the 'aws-lc-rs' and 'ring'
+features is enabled" - so the latent trap was there, and the explicit provider
+in `pipeline.rs` was likely what kept it from being found. The cost paid was
+size and build time, not behaviour.
+
+**Measured**, same source, same profile (thin LTO, `codegen-units = 1`,
+`strip`), only the dependency lines differing between the two builds:
+
+| | before | after | |
+|---|---|---|---|
+| `xgview.exe`, release | 22,005,760 | 20,594,176 | −1.35 MB (−6.4 %) |
+| `libmonitor_android.so`, arm64 | 17,150,224 | 15,101,640 | −1.95 MB (−11.9 %) |
+
+The APK is deflated, so the packaged saving is smaller than the library's; the
+library is the number that is comparable across builds.
+
+**The provider kept is ring, not aws-lc-rs**, for three reasons: reqwest already
+wanted it, so the change is four lines in `pipeline.rs` rather than a
+`-no-provider` feature plus a process-wide `install_default()`; it is the
+smaller of the two; and `aws-lc-sys` is built with cmake, so dropping it takes
+cmake out of the build entirely - `cmake` and `fs_extra` left `Cargo.lock`
+alongside `aws-lc-rs` and `aws-lc-sys`. What is given up is TLS 1.3's
+post-quantum key exchange (`prefer-post-quantum` arrives with rustls' default
+features and needs aws-lc-rs), which for a camera stream on a LAN is nothing.
+
+**What tokio is asked for now**, and why each: `rt` (`spawn`, `JoinSet`,
+`Handle`), `net`, `io-util`, `time`, `sync`, `macros` in `monitor_core`;
+`rt-multi-thread` plus `net` and `time` in `monitor_gui`, because the runtime it
+builds with `enable_all()` only has io and time drivers if those features are in
+the build. The examples are `#[tokio::main]` programs and the tests use
+`#[tokio::test]`, so `rt-multi-thread` and `macros` also appear in
+`monitor_core`'s **dev**-dependencies - dev-dependencies do not reach the shipped
+binary, and that is the only place a multi-thread runtime is needed on that side.
+
+**How to keep it from coming back.** `cargo tree -i aws-lc-rs` must fail;
+`cargo tree -e features -i tokio` lists the features that are actually on;
+`cargo tree -d` for duplicates. The `ring` in `pipeline.rs` is what makes the
+choice visible at the point of use - with `default` features it is possible to
+re-add a provider without touching a line of code.
+
+**Left alone, deliberately.** `cargo tree -d` still reports duplicates, and they
+are not all ours to fix: `calloop` 0.13/0.14, `smithay-client-toolkit` 0.19/0.20,
+`rustix`, `linux-raw-sys`, `hashbrown`, `self_cell`, `miniz_oxide` and
+`rustc-hash` come from winit and eframe disagreeing with themselves. `thiserror`
+1/2 and `syn` 2/3 are pulled by crates we only consume. The three we could act
+on are `getrandom` (0.2 ours, 0.3 from `ahash`, 0.4 from `uuid`), `base64`
+(0.22 ours, 0.23 from `hyper-util`) and `webpki-roots` (0.26 from
+`tokio-tungstenite`, 1.0 from reqwest); each is a few kilobytes, and the
+`getrandom` bump changes the call in the sealed-configuration key path, which is
+not worth re-testing for that.

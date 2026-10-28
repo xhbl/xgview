@@ -30,7 +30,6 @@ path = "src/bin/xgview-cli.rs"
 
 [dependencies]
 anyhow = "1"
-tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -60,7 +59,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.5.69"
+version = "1.5.70"
 authors = ["XHBL <newxhbl@hotmail.com>"]
 description = "A grid viewer for surveillance cameras"
 license = "MIT"

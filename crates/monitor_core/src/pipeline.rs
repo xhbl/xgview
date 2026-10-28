@@ -2819,6 +2819,10 @@ async fn run_mjpeg_session(
 /// and the user already opted in by aiming the camera at an MSE (`wss://`)
 /// address.  TLS handshake signatures are still verified cryptographically so
 /// the channel is not plaintext.
+///
+/// The provider is `ring`, the same one the connector below is built with:
+/// naming a provider here and taking rustls' default there is how two TLS
+/// implementations ended up in the binary - see `docs/DevMemo.md` §43.
 #[derive(Debug)]
 struct NoServerCertVerifier;
 
@@ -2840,7 +2844,7 @@ impl rustls::client::danger::ServerCertVerifier for NoServerCertVerifier {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        let alg = &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms;
+        let alg = &rustls::crypto::ring::default_provider().signature_verification_algorithms;
         rustls::crypto::verify_tls12_signature(message, cert, dss, alg)
     }
 
@@ -2850,12 +2854,12 @@ impl rustls::client::danger::ServerCertVerifier for NoServerCertVerifier {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        let alg = &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms;
+        let alg = &rustls::crypto::ring::default_provider().signature_verification_algorithms;
         rustls::crypto::verify_tls13_signature(message, cert, dss, alg)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::aws_lc_rs::default_provider()
+        rustls::crypto::ring::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
     }
@@ -2975,7 +2979,7 @@ pub(crate) async fn open_mse(
     // A TLS connector that accepts self-signed certificates (Frigate's LAN box
     // uses one). For plain `ws://` no connector is needed.
     let connector = if uri.starts_with("wss://") {
-        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let provider = rustls::crypto::ring::default_provider();
         let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
             .with_safe_default_protocol_versions()
             .map_err(|e| crate::error::CoreError::network(format!("rustls config error: {e}")))?
