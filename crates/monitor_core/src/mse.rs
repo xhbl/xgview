@@ -457,31 +457,38 @@ impl<'a> Iterator for BoxIter<'a> {
     type Item = (&'a [u8; 4], &'a [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos + 8 > self.data.len() {
+        let remaining = self.data.len().checked_sub(self.pos)?;
+        if remaining < 8 {
             return None;
         }
         let size = u32::from_be_bytes(self.data[self.pos..self.pos + 4].try_into().ok()?) as usize;
         let box_type: &[u8; 4] = self.data[self.pos + 4..self.pos + 8].try_into().ok()?;
 
         let (header_size, box_size) = if size == 1 {
-            if self.pos + 16 > self.data.len() {
+            if remaining < 16 {
                 return None;
             }
+            // The 64-bit size can exceed usize on a 32-bit target; if it
+            // does, the box cannot fit in the slice we hold, so stop.
             let large = u64::from_be_bytes(
                 self.data[self.pos + 8..self.pos + 16].try_into().ok()?,
-            ) as usize;
+            );
+            let large = usize::try_from(large).ok()?;
             (16, large)
         } else if size == 0 {
-            (8, self.data.len() - self.pos)
+            (8, remaining)
         } else {
             (8, size)
         };
 
-        if self.pos + box_size > self.data.len() || box_size < header_size {
+        // All arithmetic is checked: on a 32-bit target `self.pos + box_size`
+        // can wrap, and a wrapped value would slice past the end and panic.
+        let end = self.pos.checked_add(box_size)?;
+        if end > self.data.len() || box_size < header_size {
             return None;
         }
-        let content = &self.data[self.pos + header_size..self.pos + box_size];
-        self.pos += box_size;
+        let content = &self.data[self.pos + header_size..end];
+        self.pos = end;
         Some((box_type, content))
     }
 }
@@ -697,7 +704,7 @@ fn next_descriptor(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
 }
 
 fn parse_trun(data: &[u8]) -> Result<TrunData> {
-    let (version, flags, body) = full_box_header(data)
+    let (_, flags, body) = full_box_header(data)
         .ok_or_else(|| CoreError::network("trun too short"))?;
 
     if body.len() < 4 {
@@ -729,14 +736,16 @@ fn parse_trun(data: &[u8]) -> Result<TrunData> {
     let has_size = flags & 0x000200 != 0;
     let has_comp = flags & 0x000400 != 0;
     let has_flags = flags & 0x000800 != 0;
-    let comp_is_64 = version == 1 && has_comp;
+    // ISO 14496-12: composition_time_offset is always 32 bits. Version 1
+    // makes it signed, not 64-bit - the old code read 8 bytes on v1 and
+    // shifted every field after it.
 
     // A run with no per-sample field carries nothing to read. Returning here
     // rather than walking to `sample_count` matters: the count is a u32 from
     // the wire, and four billion turns of an empty loop freeze the pipeline
     // for seconds on a box of a dozen bytes.
-    let bytes_per_sample = (has_dur as usize + has_size as usize + has_flags as usize) * 4
-        + has_comp as usize * if comp_is_64 { 8 } else { 4 };
+    let bytes_per_sample = (has_dur as usize + has_size as usize + has_flags as usize
+        + has_comp as usize) * 4;
     if bytes_per_sample == 0 {
         return Ok(TrunData {
             sample_count,
@@ -774,15 +783,12 @@ fn parse_trun(data: &[u8]) -> Result<TrunData> {
             pos += 4;
         }
         if has_comp {
-            if comp_is_64 {
-                if pos + 8 > body.len() { break; }
-                composition_offsets.push(i64::from_be_bytes(body[pos..pos + 8].try_into().unwrap()) as i32);
-                pos += 8;
-            } else {
-                if pos + 4 > body.len() { break; }
-                composition_offsets.push(i32::from_be_bytes(body[pos..pos + 4].try_into().unwrap()));
-                pos += 4;
-            }
+            if pos + 4 > body.len() { break; }
+            // Always 32 bits: v0 is unsigned, v1 is signed, but the bit
+            // pattern is the same and `u32 as i32` preserves it.
+            let raw = u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap());
+            composition_offsets.push(raw as i32);
+            pos += 4;
         }
         if has_flags {
             if pos + 4 > body.len() { break; }
@@ -811,9 +817,16 @@ fn parse_tfhd(data: &[u8]) -> (u32, u32, u32, u32) {
         return (0, 0, 0, 0);
     }
     // The `track_ID` is the first field, before the flagged optional ones.
+    // The optional fields appear in flag-bit order: base_data_offset (0x01,
+    // 8 bytes), sample_description_index (0x02, 4 bytes). The old code skipped
+    // 0x02 but not 0x01, so a tfhd that carried a base_data_offset shifted
+    // every field after it.
     let track_id = u32::from_be_bytes(body[0..4].try_into().unwrap());
     let mut pos = 4;
 
+    if flags & 0x000001 != 0 {
+        pos += 8;
+    }
     if flags & 0x000002 != 0 {
         pos += 4;
     }
@@ -861,16 +874,19 @@ fn parse_tfdt(data: &[u8]) -> u64 {
 
 /// Reads the `track_ID` out of a `tkhd` box.
 ///
-/// Full box: version(1) + flags(3), then version 0 is creation(4) +
-/// modification(4) + track_ID(4). Only the version-0 layout matters: go2rtc's
-/// init segments are version 0.
+/// Version 0: creation(4) + modification(4) + track_ID(4) — track_ID at
+/// body[8..12].  Version 1: creation(8) + modification(8) + track_ID(4) —
+/// track_ID at body[16..20]. The old code read body[12..16], which is the
+/// reserved field after track_ID in v0 and was never correct for v1.
 fn parse_tkhd(data: &[u8]) -> u32 {
-    let (_, _, body) = match full_box_header(data) {
+    let (version, _, body) = match full_box_header(data) {
         Some(t) => t,
         None => return 0,
     };
-    if body.len() >= 16 {
-        u32::from_be_bytes(body[12..16].try_into().unwrap())
+    if version == 1 && body.len() >= 20 {
+        u32::from_be_bytes(body[16..20].try_into().unwrap())
+    } else if version == 0 && body.len() >= 12 {
+        u32::from_be_bytes(body[8..12].try_into().unwrap())
     } else {
         0
     }
@@ -1083,5 +1099,26 @@ mod tests {
         assert!(samples.is_empty());
         assert!(audio.is_empty());
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn tkhd_reads_track_id_in_both_versions() {
+        // Version 0: creation(4) + modification(4) + track_ID(4).
+        let mut v0 = vec![0u8, 0, 0, 0];
+        v0.extend_from_slice(&[0u8; 8]);
+        v0.extend_from_slice(&7u32.to_be_bytes());
+        assert_eq!(parse_tkhd(&v0), 7);
+
+        // Version 1: creation(8) + modification(8) + track_ID(4).
+        let mut v1 = vec![1u8, 0, 0, 0];
+        v1.extend_from_slice(&[0u8; 16]);
+        v1.extend_from_slice(&9u32.to_be_bytes());
+        assert_eq!(parse_tkhd(&v1), 9);
+
+        // A version-1 box too short to hold the field is not read as if it
+        // were version 0.
+        let mut short = vec![1u8, 0, 0, 0];
+        short.extend_from_slice(&[0u8; 12]);
+        assert_eq!(parse_tkhd(&short), 0);
     }
 }
