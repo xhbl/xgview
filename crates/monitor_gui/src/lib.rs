@@ -745,7 +745,23 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
 
     match outcome {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(err)) => Err(anyhow::anyhow!("cannot start the viewer: {err}")),
+        Ok(Err(err)) => {
+            // A start that failed leaves the attempt marker where it was, which
+            // is right for a failed Vulkan attempt: the next launch falls back
+            // to GL. It is wrong for a failed *GL* attempt, because the marker
+            // is what chose GL - see `backend::failed_start_clears_marker`,
+            // which is where that rule and its measurements live.
+            if backend::failed_start_clears_marker(decision.backend) {
+                if let Some(path) = marker.as_deref().filter(|path| path.exists()) {
+                    let _ = std::fs::remove_file(path);
+                    tracing::warn!(
+                        target: "xgview",
+                        "the GL fallback could not start either; the next launch tries Vulkan again"
+                    );
+                }
+            }
+            Err(anyhow::anyhow!("cannot start the viewer: {err}"))
+        }
         Err(payload) => {
             let message = panic_message(payload.as_ref());
             // The catch covers the whole life of the process, so how far the

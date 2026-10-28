@@ -108,6 +108,32 @@ pub fn panic_action(renderer_up: bool, on_gl: bool) -> PanicAction {
     }
 }
 
+/// Whether a start that failed should take the attempt marker with it.
+///
+/// The marker is written before a Vulkan attempt and is what sends the next
+/// launch to GL, so a failed Vulkan attempt leaves it alone - that is the whole
+/// point of it. A failed *GL* attempt is the opposite case: the marker is what
+/// chose GL, and leaving it would choose GL again on a device that has just
+/// shown it cannot serve it.
+///
+/// That is not hypothetical. On the SHIELD the GL backend cannot start at all
+/// (`Parent device is lost`, §9), so one lost start - and §47's boot retry
+/// produces those - was enough to pin the box to a backend that never comes up:
+/// every later launch chose GL because the marker was there, failed, and left
+/// the marker behind. `MainActivity.applyVulkanGate` drops the marker when the
+/// build or the ROM changes (§19), so in the field the pin lasts until the next
+/// release; during a run of same-version installs it lasts as long as the run.
+///
+/// The family the marker was written for is untouched. §19's Adreno 506 and 512
+/// report no Vulkan 1.1, so they are `Gl(GlReason::Gate)` and never reach this
+/// rule - and what goes wrong on them is a caught panic, which is the other arm
+/// of the match in `run_android`. A gate launch has no marker of its own either,
+/// and `Decision::clear_attempt_marker` has already dropped any stale one, so
+/// there is nothing to clear there.
+pub fn failed_start_clears_marker(backend: Backend) -> bool {
+    matches!(backend, Backend::Gl(GlReason::PreviousAttempt))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +220,61 @@ mod tests {
                         action,
                         if on_gl { PanicAction::GiveUp } else { PanicAction::MarkAndRestart },
                         "attempt={attempt} gate={gate} forced={forced}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every cell of the failed-start table, written out like the others.
+    #[test]
+    fn the_failed_start_table() {
+        // (attempt, gate, forced) -> the marker is dropped
+        let table = [
+            // A Vulkan attempt that failed: the marker stays, and is what sends
+            // the next launch to GL.
+            (false, false, false, false),
+            (false, false, true, false),
+            // The gate's launch never wrote one to drop.
+            (false, true, false, false),
+            (false, true, true, false),
+            // A GL launch the marker chose: GL has now failed too, so the
+            // marker goes and the next launch is Vulkan again.
+            (true, false, false, true),
+            (true, false, true, true),
+            // The gate outranks the marker and has already dropped it.
+            (true, true, false, false),
+            (true, true, true, false),
+        ];
+        for (attempt, gate, forced, clears) in table {
+            let backend = decide(attempt, gate, forced).backend;
+            assert_eq!(
+                failed_start_clears_marker(backend),
+                clears,
+                "attempt={attempt} gate={gate} forced={forced}"
+            );
+        }
+    }
+
+    /// Dropping the marker must leave the next launch somewhere else.
+    ///
+    /// The invariant worth having: a device that alternates between the two
+    /// backends is recoverable, one pinned to a backend that cannot start is
+    /// not - and a marker cleared by a failed GL start that still sent the next
+    /// launch to GL would be exactly that pin.
+    #[test]
+    fn a_failed_start_never_leaves_the_next_launch_on_gl() {
+        for attempt in [false, true] {
+            for gate in [false, true] {
+                for forced in [false, true] {
+                    let backend = decide(attempt, gate, forced).backend;
+                    if !failed_start_clears_marker(backend) {
+                        continue;
+                    }
+                    let next = decide(false, gate, forced).backend;
+                    assert!(
+                        next.tries_vulkan(),
+                        "attempt={attempt} gate={gate} forced={forced} -> {next:?}"
                     );
                 }
             }

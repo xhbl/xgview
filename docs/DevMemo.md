@@ -3300,7 +3300,8 @@ activity for the second.
 
 ## 47. Start on boot was a single shot in a race it could lose
 
-*Landed 2026-10-28, in 1.5.71.*
+*Landed 2026-10-28, in 1.5.71; the retry, and the two failures the retry
+exposed, followed the same day.*
 
 **The report was "sometimes the picture does not come up".** The receiver fires,
 the process starts, and the wall is not on screen - sometimes. Two boots of the
@@ -3330,13 +3331,53 @@ activity once and `MainActivity` did not even override `onPause`, so being
 covered was invisible to it.
 
 **The fix is a bounded re-assert, not a fight.** `MainActivity` now keeps a
-grace window open for `BOOT_GRACE_MS` (120s) when the launch carries the
+grace window open for `BOOT_GRACE_MS` (60s) when the launch carries the
 `FROM_AUTOSTART` extra that `BootReceiver` already set - a manual open gets no
 window, because covering it would be wrong. Inside the window, `onPause`
-schedules `takeForegroundBack` 1.5s later; that re-sends the launch intent
-(`singleTask`, so `onNewIntent`) unless the wall is resumed again by then, and
-stops after `BOOT_REASSERT_LIMIT` (3) attempts. Past the window, or past the
-limit, a `HOME` press is the viewer's and is obeyed.
+schedules `takeForegroundBack` 1.5s later; that re-sends the *launcher* intent -
+`LauncherActivity`, the entry the boot receiver uses - and schedules the next
+attempt itself, stopping at `BOOT_REASSERT_LIMIT` (2) attempts. Past the window,
+or past the limit, a `HOME` press is the viewer's and is obeyed. Those two - the
+window and the count - are the only bound; an earlier version also had one on
+time on screen, and the paragraph after next is about why it went.
+
+**`onUserLeaveHint` cannot tell a cover from a `HOME` press on this box.** It is
+the documented way to know that the viewer left rather than being covered, so it
+was implemented first: set a flag there, and have `onPause` obey instead of
+answering. The device disproved it. A boot with nobody touching the remote:
+
+```
+14:11:32.948  xgview MainActivity started
+14:11:35.581  Projectivy starts itself again (uid 10108, no input)
+14:11:35.602  viewer left the wall        <- onUserLeaveHint fired
+14:11:35.978  paused; leftByUser=true     <- so the wall let it stay in front
+```
+
+No key was pressed and no `keyevent` appears anywhere in the capture; the
+launcher simply started itself and the callback fired anyway. Gating on it
+therefore silenced the one case the whole mechanism exists for. It was removed
+rather than fixed: there is no reading of that callback on this ROM that keeps
+the case it was meant for.
+
+**Time on screen was the next attempt, and it was worse than nothing.** The
+replacement was `SETTLE_MS` (6s): `lastResumedAt` stamped in `onResume`, and a
+pause within six seconds of it answered while anything later was left alone. The
+reasoning was that the cover this exists for arrives about three seconds after
+the wall appears - measured once, at `14:18:52.282` (`shown=2671`, answered by
+`covered during boot (1/2)` at `14:18:53.824`, wall back afterwards). Three boots
+after it landed:
+
+```
+wall resumed    +513ms over Projectivy   -> Projectivy back, seconds later
+wall resumed    +789ms over Projectivy   -> Projectivy back, seconds later
+```
+
+In both the wall had been on screen for longer than six seconds by the time it
+was covered, so `shown >= SETTLE_MS` and it obeyed - the wall stayed behind with
+no attempt made. The number that was supposed to protect a `HOME` press also
+suppressed the cover it was measured against, because "on screen for a while" and
+"the viewer has seen it" are not the same thing when a launcher starts itself
+late. Removed; the window and the count are the bound.
 
 **The 1.5s delay is not padding.** Measured on the same box: `HOME` at
 `13:26:53.625`, tvlauncher resumes at `53.854`, and Projectivy takes the
@@ -3344,12 +3385,253 @@ foreground at `54.989` - 1.1s *after* the press. Re-asserting as soon as the
 wall was paused would have been overwritten by that. Waiting put the re-assert
 at `55.203`, and the wall was back at `55.727`.
 
-**Verified on the device**, four cases, all with `adb`: covered once → back on
-top, log `(1/3)`; covered again → `(2/3)`; third time → `(3/3)`; fourth → no
-log and the launcher stays. After the window expired, `HOME` → the launcher
-stays and no re-assert runs. The two attempts the limit allows were also what
-let a `HOME` press at `13:27:09` be answered - that one was Projectivy grabbing
-the foreground on its own, with no key pressed at all.
+**Verified on the device**, all with `adb`, at the first pass's 3 in 120s:
+covered once → back on top, log `(1/3)`; covered again → `(2/3)`; third time →
+`(3/3)`; fourth → no log and the launcher stays. After the window expired,
+`HOME` → the launcher stays and no re-assert runs. That run was read at the time
+as the re-assert working; it was not. The same code was later shown to be a
+no-op (see below), so what put the wall back in those three cases was the system
+returning to the previous activity once the launcher's own start failed to take,
+and the log line only coincided with it. What that run did establish is the
+limit and the window: the fourth cover ran no attempt and the expired window ran
+none either.
+
+**The limits were then tightened to 2 in 60s.** On that box the three attempts
+were spent inside 33 seconds (`13:26:55.203`, `13:27:10.791`, `13:27:27.875`),
+which left the remaining 87 seconds of the window unguarded - the width bought
+nothing and only lengthened the argument with a launcher that wanted the screen.
+A minute covers the boot burst, which is over within seconds of the launcher
+settling, and two attempts cover a launcher that takes the screen back once more
+after we have answered.
+
+**Re-sending the activity's own intent does nothing, and that was the bug.**
+The first version re-sent `getIntent()`, reasoning that the activity is
+`singleTask` so it would land as `onNewIntent`. Measured: two attempts, both
+logged, both `START u0 {flg=0x34000000 cmp=com.xhbl.xgview/.MainActivity}`, and
+neither produced a `wm_on_resume_called` - the activity was still there
+(`visible=true`, still paused) and the launcher stayed in front. The activity is
+already the root of its task, so the very flags that bring a task forward make
+`ActivityStarter` read the start as "already at the top, deliver a new intent".
+Starting the exported `LauncherActivity` instead does move the task forward, and
+it also picks the right one of the two orientations. Verified: `(1/2)` at
+`13:59:59.771`, `LauncherActivity` started at `59.779`, `MainActivity` at
+`14:00:00.376`, wall back on top.
+
+**An attempt that loses used to be the last one.** The trigger was `onPause`, and
+a cover is one pause: an attempt that lost left the wall paused, so no further
+`onPause` ever came and the second attempt was never scheduled - the limit read
+"2" but meant "1". Measured at 3 in 120s: `(1/2)` at `13:49:24.186`, the
+launcher's own start at `24.946`, and no `(2/2)` for the rest of the window.
+`takeForegroundBack` now schedules the next attempt itself, which `onResume`
+drops. Verified on the build before the intent fix, where an attempt still lost:
+`(1/2)` at `13:57:04.513` and `(2/2)` at `13:57:06.055`, 1.5s apart with no pause
+in between.
+
+**The boot start itself can be dropped, and the re-assert cannot help.** One
+boot in five measured: `Start proc ... for broadcast BootReceiver`, then
+`START ... LauncherActivity` and the `SYSTEM_ALERT_WINDOW` allowance, and then
+nothing - no `wm_create_activity`, no log line from the process at all, not even
+the native side's first. Seven seconds later
+`Killing ... (adj 975): empty #17`, alongside eight other processes killed the
+same way. The boot was under load and the system logged
+`Activity top resumed state loss timeout` and `Activity pause timeout` for the
+previous home; the launch was lost in that, and the process was then reclaimed
+as one with no components. There is no activity to re-assert from, so the
+re-assert has nothing to offer here; the answer had to be a second start.
+
+**`BootReceiver` looks again eight seconds later.** It records the boot in
+shared preferences (`boot_at`, and `boot_retries = 0`), starts the wall, and
+sets an alarm for `RETRY_DELAY_MS` (8s) carrying a `RETRY_START` broadcast to
+itself. That retry compares `boot_at` with `resumed_at`, which
+`MainActivity.onResume` writes on every resume: if the wall has been in the
+foreground since the boot there is nothing to do and it says so
+(`the wall came up <n>ms after the boot`), and if not it starts the wall again,
+up to `RETRY_LIMIT` (2), rescheduling after each. The alarm is held by
+`AlarmManager` rather than by the process, so it survives the process being
+reclaimed - which is the whole failure it exists for. Verified on two real lost
+starts: `the wall never came up after the boot; starting it again (1/2)`, then
+`the wall came up 15430ms after the boot`; and `15689ms` in a later boot. The
+alarm is due at `+8s` and the wall reached the foreground at `+15.4s`, so the
+alarm itself fired several seconds late - `set` is inexact, and a device that is
+still starting is the worst case for it.
+
+**The retry can land in a process that has spent its event loop, and that used
+to be the end of the app.** winit builds one `EventLoop` per process and refuses
+a second (`EventLoop can't be recreated`), and a relaunch is handed to whatever
+process is still cached rather than to a new one. What that left behind was not
+a failed start but a dead shell: the activity was created, the native side gave
+up, and the window neither drew nor closed. Nothing recovered it - not
+`am start` from the shell, which found the same process each time:
+
+```
+14:44:19.847 START u0 {cmp=com.xhbl.xgview/.MainActivity} from uid 10122
+14:44:19.887  7883  ERROR xgview: the viewer stopped
+              error=cannot start the viewer: winit EventLoopError: EventLoop can't be recreated
+14:44:27.705 START u0 {cmp=com.xhbl.xgview/.LauncherActivity} from uid 2000
+14:44:27.754  7883  ERROR xgview: the viewer stopped            (the same, from the shell)
+```
+
+`run_android` now keeps a process-wide flag: a second `android_main` is logged
+and the launch is handed to a fresh process through the `restartSoon` alarm the
+panic fallback already uses, and the process exits either way. The exit is the
+load-bearing half - a process that has spent its event loop cannot serve a
+viewer however often it is asked - and the alarm is what brings the wall back
+when it is not the top activity, which it usually is not when a launcher is in
+front. Verified: a covered wall, then `am start`:
+
+```
+14:53:02.078  8736  the viewer has already been started in this process; it cannot be started again
+14:53:02.078  8736  restarted 3 times within 10 minutes; leaving the viewer down
+14:53:02.078  8736  no restart was scheduled; the next launch gets a process of its own
+14:53:02.229  8843  marked this launch as a Vulkan attempt; the mark is cleared once the renderer is up
+14:53:02.676  8843  the renderer came up on Vulkan; its attempt marker is cleared
+```
+
+Note that the restart budget was already spent and the recovery still happened:
+the system restarts the process of a top activity that dies. The alarm covers
+the other case.
+
+**A failed start used to pin the box to the GL backend, which cannot start
+here.** The attempt marker is written before a Vulkan attempt and is what sends
+the next launch to GL - correct for a failed Vulkan attempt, wrong for a failed
+*GL* one, because the marker is what chose GL. §9 has the measurement that makes
+this fatal on this device: pinning wgpu to GL fails to start at all
+(`WGPU error: Parent device is lost`). So one lost start - and the retry above
+produces exactly those - was enough to pin the box to a backend that never comes
+up, and every later launch chose GL because the marker was there, failed, and
+left the marker behind.
+
+How long that lasts is worth being exact about, because the first reading of it
+was wrong. The marker is not permanent by design: `applyVulkanGate` drops it when
+`Build.FINGERPRINT` or the app version changes (§19, "The attempt marker stopped
+being permanent"). What made it stick here was that every install during this
+work was the same version on the same ROM, so the escape hatch never fired. On a
+box in the field the wall would stay down until the next release - recoverable,
+and still unacceptable on a wall that has to come up on boot.
+
+A failed GL start now drops the marker, so the next launch is Vulkan again. The
+rule is `backend::failed_start_clears_marker` with the table and the invariant
+beside the other two (`a failed start never leaves the next launch on GL`). A
+device that alternates between the two backends is recoverable; one pinned to a
+backend that cannot start is not. Verified on the stuck box: the launch after
+the install still went to GL and failed, then
+
+```
+14:52:17.061  WARN xgview: the GL fallback could not start either; the next launch tries Vulkan again
+```
+
+and the next launch came up on Vulkan and drew all eight streams.
+
+**The devices the marker exists for do not reach this rule.** It is worth
+walking, because "a change to the fallback" is exactly where a device nobody has
+in hand gets broken. The marker is there for §19's Adreno 506 and 512 on
+Android 8.1 - Vulkan 1.0, a driver that is handed a device and loses it while
+the first pipeline is built, and a GL driver that works - and for drivers the
+version gate cannot name. Those devices answer `hasSystemFeature(
+FEATURE_VULKAN_HARDWARE_VERSION, 0x401000)` with `false`, so they are behind the
+gate and `decide` gives them `Gl(GlReason::Gate)`, which this rule does not
+touch; a stale attempt marker under the gate is already dropped by
+`Decision::clear_attempt_marker` before the question is asked. And what goes
+wrong on them is a *panic* inside `create_render_pipeline`, caught by
+`catch_unwind` and answered by `panic_action` - the other arm of the `match` in
+`run_android`, which still keeps the marker so the next launch lands on GL.
+
+The one cell that changes is "GL was chosen because of the marker, and GL could
+not start". On those devices GL is the backend that works, so that cell is not
+the expected outcome there; where it does happen the choice is one more Vulkan
+attempt (one caught panic and a restart, capped at three in ten minutes) against
+staying down for good.
+
+**Measured on that device, 1.5.75.** The OPPO of §19 was put in front of the
+work rather than reasoned about, and every claim above came out as stated:
+
+- The gate answers first, as designed:
+  `no Vulkan 1.1 on this device; the GL backend is marked for this launch` and
+  `this device has no Vulkan 1.1; using the GL backend` - `Gl(GlReason::Gate)`,
+  which the new rule does not match. Six channels at 15-22 fps on GL afterwards.
+- `force-vulkan` still produces §19's sequence, unchanged: the panic is caught
+  (`panicked wgpu error: Validation Error ... Parent device is lost`), the launch
+  is marked, `the renderer panicked before it came up; the next launch uses the
+  GL backend`, the process restarts and the wall is back on GL 5.2s later - with
+  **no** `Fatal signal`, `Abort message` or backtrace from `libmonitor_android.so`
+  anywhere in the log.
+- The marker that attempt left behind never reaches the new rule either:
+  `the version gate supersedes the previous attempt; its marker is cleared` is
+  `Decision::clear_attempt_marker` doing what §19 says it does.
+
+**A `HOME` press cannot be answered on this ROM, and that is worth knowing
+before reading a log that looks like it was.** With the window armed, `HOME` gave
+two attempts, both dropped by the system:
+
+```
+15:31:26.558  paused; shown=7924 graceLeft=51684 attempts=0
+15:31:28.061  covered during boot; taking the foreground back (1/2)
+15:31:28.065  START u0 {cmp=com.xhbl.xgview/.LauncherActivity} from uid 10138
+15:31:28.071  W ActivityManager: Activity start request from 10138 stopped
+15:31:29.575  covered during boot; taking the foreground back (2/2)
+15:31:29.578  W ActivityManager: Activity start request from 10138 stopped
+15:31:32.129  App Resumed - is running
+```
+
+The wall came back 2.5s after the last attempt with nothing else from us, so this
+is the system returning to the previous activity - the same misreading §47
+already records once. A `HOME` press puts the task into the stopped state, and a
+start request from a task that is stopping is dropped rather than queued.
+
+Covered by another application, the same build does answer, and on the first
+attempt:
+
+```
+15:33:08.230  paused; shown=7769 graceLeft=52187 attempts=0
+15:33:09.732  covered during boot; taking the foreground back (1/2)
+15:33:10.299  App Resumed - is running
+```
+
+567ms, one attempt, and the resumed activity was the wall's rather than Settings'.
+That is the case the mechanism exists for - a launcher or a media app starting
+itself at boot - so the limitation on `HOME` costs nothing that was wanted, and
+it is a second reason not to try to tell the two apart: on this ROM they are
+distinguishable, and the distinction is exactly the one that works.
+
+**ColorOS does not deliver `BOOT_COMPLETED` to an app that is not in its
+autostart list, and the stopped flag is the reason.** Two boot tests on the OPPO
+produced no `XGView.BootReceiver` line at all, with the wall down and the OPPO
+launcher in front. What looked like two separate findings - the missing broadcast,
+and a package that reported `stopped=true` again after the boot although it had
+been launched (`stopped=false`) before the reboot - are one fact: the ROM
+force-stops the app during boot when it is not whitelisted, and a stopped package
+is excluded from every broadcast, this one included. An earlier reading of this
+same measurement called the stopped-package exclusion a separate, ruled-out
+cause. It was the cause.
+
+Added to 手机管家 → 自启动 and rebooted from a clean `stopped=false`, the same
+build comes up on its own:
+
+```
+15:45:21.862  Start proc 5084:com.xhbl.xgview/u0a138 for broadcast com.xhbl.xgview/.BootReceiver
+15:45:22.095  START u0 {act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER]
+              flg=0x34000000 pkg=com.xhbl.xgview cmp=com.xhbl.xgview/.LauncherActivity} from uid 10138
+15:45:22.697  am_on_resume_called: [0,com.xhbl.xgview.MainActivity,LAUNCH_ACTIVITY]
+15:45:22.826  am_activity_launch_time: [0,209187647,com.xhbl.xgview/.MainActivity,493,671]
+```
+
+835ms from the broadcast to `onResume`, no start refused, `stopped=false`
+afterwards, nine channels on the hardware decoder at 15-21 fps. The retry alarm
+fired once, eight seconds after the boot, and started nothing a second time:
+
+```
+u0a138:com.xhbl.xgview +5ms running, 1 wakeups, 1 alarms: *walarm*:com.xhbl.xgview.RETRY_START
+```
+
+One wakeup and no second `am_proc_start` is `retry` finding `resumedAt >= bootAt`
+and standing down - the half of the mechanism that must not interfere, doing
+nothing.
+
+A boot test therefore needs two things that are easy to get wrong: launch the app
+once after any `am force-stop`, which marks the package stopped, and check that
+`stopped=false` holds immediately before the reboot. The flag the ROM sets during
+boot is the same one, and until the broadcast fails there is nothing on the
+outside that distinguishes the two.
 
 **What this does not fix.** If the wall is not running at all - the earlier
 snapshot of the same box had an empty `pidof com.xhbl.xgview` while Projectivy
@@ -3359,3 +3641,11 @@ or a process that was killed afterwards, not a wall behind a launcher. The
 that proves the boot start was allowed at all is
 `Background activity start for com.xhbl.xgview allowed because SYSTEM_ALERT_WINDOW permission is granted`.
 Revoke it and the failure changes shape, from "covered" to "never started".
+
+**Replacing the APK re-delivers `BOOT_COMPLETED`,** which is worth knowing
+before reading a boot log taken after an install: `adb install -r` produced
+`14:52:16.593 I/XGView.BootReceiver: received android.intent.action.BOOT_COMPLETED`
+four minutes after the actual boot, and the wall came up from it. It is the
+system giving a newly installed package the boot broadcast it missed, it is not
+a bug in the receiver, and it means an update puts the wall back on screen by
+itself.
