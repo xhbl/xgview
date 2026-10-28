@@ -23,7 +23,7 @@ use monitor_core::reboot;
 use monitor_core::config::{AppConfig, Orientation};
 use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{infer_sub_stream, ConnectionState, OsdItem, StreamKind, TileAspect};
-use monitor_core::pipeline::{CallFailure, ChannelManager, StreamEvent};
+use monitor_core::pipeline::{CallFailure, ChannelManager, StreamEvent, StreamStats};
 use monitor_core::scheduler::Scheduler;
 use monitor_core::talk::{TalkRoute, ToneFailure};
 use monitor_core::{CameraSource, Direction};
@@ -193,6 +193,10 @@ pub struct ChannelUi {
     /// Stream decoded before the current switch. While it is set the viewport
     /// keeps the last frame of that stream instead of showing a black frame.
     pub switching_from: Option<StreamKind>,
+    /// Which sample of the pipeline's statistics was applied last. The numbers
+    /// are read from a store rather than delivered, so this is what keeps a
+    /// repaint from applying the same one again.
+    stats_sequence: u64,
 }
 
 impl Default for ChannelUi {
@@ -210,6 +214,7 @@ impl Default for ChannelUi {
             bitrate_kbps: 0.0,
             total_frames: 0,
             switching_from: None,
+            stats_sequence: 0,
         }
     }
 }
@@ -229,27 +234,6 @@ impl ChannelUi {
                     self.total_frames = 0;
                 }
             }
-            StreamEvent::Stats { stream, codec, width, height, hardware, audio, fps, bitrate_kbps, total_frames, .. } => {
-                self.stream = Some(stream);
-                if codec.is_some() {
-                    self.codec = codec;
-                }
-                self.hardware = hardware;
-                self.audio = audio;
-                if width.is_some() {
-                    self.width = width;
-                }
-                if height.is_some() {
-                    self.height = height;
-                }
-                self.fps = fps;
-                self.bitrate_kbps = bitrate_kbps;
-                self.total_frames = total_frames;
-                // The new stream delivered data: the held frame can be dropped.
-                if total_frames > 0 {
-                    self.switching_from = None;
-                }
-            }
             StreamEvent::Transition { from, to, .. } => {
                 self.switching_from = from.filter(|from| *from != to);
                 self.stream = Some(to);
@@ -264,6 +248,37 @@ impl ChannelUi {
             // Likewise a failed call, which ends the call rather than saying
             // anything about the channel: see `App::poll_events`.
             StreamEvent::CallFailed { .. } => {}
+        }
+    }
+
+    /// Takes one sample of the pipeline's statistics, if it is a new one.
+    ///
+    /// The numbers describe the stream as it is now, so the newest sample is
+    /// the whole of what there is to know: applying it twice says nothing the
+    /// first application did not.
+    fn apply_stats(&mut self, sequence: u64, stats: &StreamStats) {
+        if sequence == self.stats_sequence {
+            return;
+        }
+        self.stats_sequence = sequence;
+        self.stream = Some(stats.stream);
+        if stats.codec.is_some() {
+            self.codec = stats.codec.clone();
+        }
+        self.hardware = stats.hardware;
+        self.audio = stats.audio;
+        if stats.width.is_some() {
+            self.width = stats.width;
+        }
+        if stats.height.is_some() {
+            self.height = stats.height;
+        }
+        self.fps = stats.fps;
+        self.bitrate_kbps = stats.bitrate_kbps;
+        self.total_frames = stats.total_frames;
+        // The new stream delivered data: the held frame can be dropped.
+        if stats.total_frames > 0 {
+            self.switching_from = None;
         }
     }
 }
@@ -2840,6 +2855,19 @@ impl XgViewApp {
             }
             if let Some((text, kind)) = toast {
                 self.flash(text, kind);
+            }
+        }
+
+        // The periodic numbers are kept rather than delivered, so they are read
+        // here rather than drained: a repaint that never happened - the app in
+        // the background, the window covered - leaves one sample per channel
+        // waiting, not a queue of them. Read after the events, so that a sample
+        // taken by the session that has just ended cannot be applied over the
+        // state its ending set.
+        let stats = self.manager.stats().clone();
+        for (index, channel) in self.channels.iter_mut() {
+            if let Some(entry) = stats.latest(*index) {
+                channel.apply_stats(entry.sequence, &entry.stats);
             }
         }
     }
@@ -9738,5 +9766,44 @@ mod tests {
         assert!(!in_tile_bar_strip(pos2(1000.0, 360.0), area, true, tilebar::Dock::Top));
         assert!(in_tile_bar_strip(pos2(40.0, 360.0), area, true, tilebar::Dock::Bottom));
         assert!(!in_tile_bar_strip(pos2(280.0, 360.0), area, true, tilebar::Dock::Bottom));
+    }
+
+    /// The numbers are read from a store rather than delivered, so the same
+    /// sample can be read again after a later event: applying it twice must not
+    /// undo what the event set. A switch keeps the last frame of the stream it
+    /// is leaving - which the numbers of that stream, applied again, would let
+    /// go of.
+    #[test]
+    fn a_sample_read_twice_does_not_undo_a_switch() {
+        let sub = StreamStats {
+            index: 0,
+            camera_id: "cam".to_string(),
+            stream: StreamKind::Sub,
+            codec: Some("H264".to_string()),
+            width: Some(640),
+            height: Some(360),
+            hardware: false,
+            audio: false,
+            fps: 25.0,
+            bitrate_kbps: 512.0,
+            total_frames: 900,
+        };
+        let mut channel = ChannelUi::default();
+        channel.apply_stats(7, &sub);
+        assert_eq!(channel.fps, 25.0);
+
+        channel.apply(StreamEvent::Transition {
+            index: 0,
+            camera_id: "cam".to_string(),
+            from: Some(StreamKind::Sub),
+            to: StreamKind::Main,
+        });
+        assert_eq!(channel.switching_from, Some(StreamKind::Sub), "the sub stream's frame is held");
+        assert_eq!(channel.fps, 0.0, "a stream that has not delivered yet has no rate");
+
+        channel.apply_stats(7, &sub);
+        assert_eq!(channel.switching_from, Some(StreamKind::Sub), "the held frame is still held");
+        assert_eq!(channel.fps, 0.0);
+        assert_eq!(channel.stream, Some(StreamKind::Main), "and the channel is still on the new stream");
     }
 }

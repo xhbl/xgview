@@ -2880,3 +2880,69 @@ is accepted, `01 00 00 00` is refused. Everything after that is silent whatever
 happens - a wrong password looks exactly like a right one, and a frame is never
 acknowledged. Which is why the settings gain a test tone: it is the only way a
 person can tell whether the far end of this is a speaker or an empty jack.
+
+## 39. A number is not an event: the statistics leave the channel
+
+*Landed 2026-10-28, in 1.5.67.*
+
+**What was wrong.** `StreamEvent::Stats` travelled on the same unbounded
+crossbeam channel as the state changes, and the interface drained it in
+`poll_events`, which runs on a repaint. A repaint is not a certainty: on Android
+the app in the background stops being drawn, and on the desktop a covered window
+does too. The channel went on filling meanwhile - one sample per channel every
+`STATS_INTERVAL`, so eight a second on a 4x4 wall, each carrying a `camera_id`
+`String` - and nothing bounded it. An hour away is 28,800 samples; a night is
+more; a process that is never closed never stops.
+
+**Why a bounded channel was not the answer**, though it is the obvious one. The
+same channel carries `State`, and a bounded channel cannot drop *only* the
+statistics. `try_send` would drop a state change when it mattered most - a
+channel that failed while the app was away would come back saying it was still
+running until the next transition - and `send` would park a runtime thread on a
+full queue, which with an interface that is not draining is not a pause but a
+stopped session.
+
+**The rule the two kinds of message divide on**: a change has to be seen, a
+measurement does not. `State`, `Transition`, `Talk` and `CallFailed` mark
+something that happened once; a sample of the statistics describes the stream as
+it is at the instant it is taken, and the next one replaces it whole. An
+intermediate sample that nobody read is worth nothing, and the newest is the
+entire truth. So the numbers left the channel and became a store -
+`StatsStore`, next to `FrameStore`, doing what `FrameStore` already did for
+pictures and for the same reason. A publish replaces the previous sample, so an
+interface that stays away costs each channel one sample however long it stays
+away, and a repaint that comes back reads the current numbers rather than a
+backlog of old ones.
+
+**Three details that are the whole of the correctness.**
+
+The sample count is **global to the store, not per channel**. The interface
+applies a sample when the count has moved, and the count has to keep rising
+across a `clear` - a per channel counter that restarted at one would make a new
+session's first sample look like one already applied, and the channel would show
+nothing at all.
+
+**A sample is dropped whenever the session that took it stops existing**: at the
+end of an attempt, when a channel gives up, when it is suspended, and when its
+task is aborted to be replaced - a switch, the decoding preference, a call
+falling back to the picture's session. What it measured belonged to that
+session, and the next one has its own codec, resolution and rate. Two of those
+are worth their own line.
+
+The **switch** is the one that shows a picture. `switching_from` is what keeps
+the last frame of the stream being left on screen until the new one delivers
+(`30.`), and a sample of the old stream applied after the transition ends that:
+the numbers say `total_frames > 0`, which is the signal that the new stream has
+data, and the held frame is let go for a black tile. Since the store has no
+ordering against the channel, a sample published in the half second before the
+switch is read after it - a quarter of all switches, not a race.
+
+The **give-up** case is its own line because nothing will publish over that
+sample again: a channel that failed would otherwise go on showing the rate it
+had, for as long as it stayed failed.
+
+**The interface reads the store after draining the events**, not before. The two
+have no ordering between them - a sample published before a `State` may be read
+after it - so reading last is what keeps a sample from a session that has just
+ended from being applied over the state its ending set. That is also why the
+`State` handler zeroing `fps` on `Connecting` still means something.

@@ -108,6 +108,11 @@ pub enum CallFailure {
 }
 
 /// Everything a channel reports to the renderer.
+///
+/// Each of these marks a change and has to be seen, so they travel on a channel
+/// the renderer drains. The periodic numbers a stream produces are not here:
+/// they are a measurement of the moment, kept in [`StatsStore`] where a newer
+/// one replaces them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
     /// Connection state changed.
@@ -116,27 +121,6 @@ pub enum StreamEvent {
         camera_id: String,
         state: ConnectionState,
         detail: String,
-    },
-    /// Periodic statistics of a live stream.
-    Stats {
-        index: usize,
-        camera_id: String,
-        stream: StreamKind,
-        codec: Option<String>,
-        width: Option<u32>,
-        height: Option<u32>,
-        /// True once the decoder has proved it runs on the GPU. A channel whose
-        /// hardware decoder refused the stream reports `false` here, whatever
-        /// the preference asked for.
-        hardware: bool,
-        /// True when this stream carries an audio track the build can decode.
-        /// The magnified bar offers its sound switch on this: a camera that is
-        /// heard from nothing should not show a button that does nothing.
-        audio: bool,
-        /// Frames per second measured on RTP marker bits.
-        fps: f32,
-        bitrate_kbps: f32,
-        total_frames: u64,
     },
     /// Whether the camera behind a channel can be talked to.
     ///
@@ -174,7 +158,6 @@ impl StreamEvent {
     pub fn index(&self) -> usize {
         match self {
             StreamEvent::State { index, .. }
-            | StreamEvent::Stats { index, .. }
             | StreamEvent::Talk { index, .. }
             | StreamEvent::CallFailed { index, .. }
             | StreamEvent::Transition { index, .. } => *index,
@@ -184,7 +167,6 @@ impl StreamEvent {
     pub fn camera_id(&self) -> &str {
         match self {
             StreamEvent::State { camera_id, .. }
-            | StreamEvent::Stats { camera_id, .. }
             | StreamEvent::Talk { camera_id, .. }
             | StreamEvent::CallFailed { camera_id, .. }
             | StreamEvent::Transition { camera_id, .. } => camera_id,
@@ -262,6 +244,96 @@ impl FrameStore {
     }
 }
 
+/// What one channel measures about the stream it is reading.
+///
+/// A sample describes the stream as it is at the moment it is taken: the next
+/// one replaces it whole. Nothing here is a change to be observed, which is why
+/// it is not a [`StreamEvent`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamStats {
+    pub index: usize,
+    pub camera_id: String,
+    pub stream: StreamKind,
+    pub codec: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// True once the decoder has proved it runs on the GPU. A channel whose
+    /// hardware decoder refused the stream reports `false` here, whatever the
+    /// preference asked for.
+    pub hardware: bool,
+    /// True when this stream carries an audio track the build can decode.
+    /// The magnified bar offers its sound switch on this: a camera that is
+    /// heard from nothing should not show a button that does nothing.
+    pub audio: bool,
+    /// Frames per second measured on RTP marker bits.
+    pub fps: f32,
+    pub bitrate_kbps: f32,
+    pub total_frames: u64,
+}
+
+/// One channel's newest sample, and the number of the sample it is.
+#[derive(Debug)]
+pub struct StatsEntry {
+    /// Which sample this is, counted over the whole store. A renderer applies a
+    /// sample when this has moved rather than on every repaint, and the count
+    /// keeps rising across a `clear` so a fresh session's first sample is never
+    /// mistaken for one already applied.
+    pub sequence: u64,
+    pub stats: StreamStats,
+}
+
+/// The newest sample of every channel.
+///
+/// Statistics are periodic and level-triggered: a channel publishes one every
+/// `STATS_INTERVAL`, and the renderer wants the numbers as they are now, not
+/// the history of them. Queued on the event channel they accumulate for as long
+/// as nothing repaints - an Android app in the background, a window behind
+/// another - which is unbounded growth for data that is stale by the time it is
+/// read. Here a publish replaces the previous sample, so an interface that
+/// stays away costs each channel one sample however long it stays away.
+///
+/// The same arrangement as [`FrameStore`], for the same reason.
+#[derive(Debug, Default)]
+pub struct StatsStore {
+    inner: Mutex<StatsInner>,
+}
+
+#[derive(Debug, Default)]
+struct StatsInner {
+    channels: HashMap<usize, Arc<StatsEntry>>,
+    /// Samples published since the process started.
+    published: u64,
+}
+
+impl StatsStore {
+    fn publish(&self, stats: StreamStats) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.published += 1;
+            let sequence = inner.published;
+            inner.channels.insert(stats.index, Arc::new(StatsEntry { sequence, stats }));
+        }
+    }
+
+    /// Newest sample of a channel, `None` until it has published one.
+    pub fn latest(&self, index: usize) -> Option<Arc<StatsEntry>> {
+        self.inner.lock().ok()?.channels.get(&index).cloned()
+    }
+
+    /// Drops a channel's sample.
+    ///
+    /// Called wherever the session that took it stops existing: the attempt
+    /// ended, the channel gave up, it was suspended, or its task was aborted to
+    /// be replaced. What it measured belonged to that session, and the next one
+    /// has its own codec, resolution and rate - and because the store has no
+    /// ordering against the event channel, a sample left behind is read after
+    /// the event that said the session was over and overwrites what it set.
+    fn clear(&self, index: usize) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.channels.remove(&index);
+        }
+    }
+}
+
 /// Commands sent to the supervisor task.
 #[derive(Debug)]
 enum ChannelCommand {
@@ -321,6 +393,7 @@ pub struct ChannelManager {
     commands: UnboundedSender<ChannelCommand>,
     events: Receiver<StreamEvent>,
     frames: Arc<FrameStore>,
+    stats: Arc<StatsStore>,
     audio: Arc<AudioHub>,
     talk: Arc<TalkHub>,
     handle: Handle,
@@ -340,6 +413,7 @@ impl ChannelManager {
         let (command_tx, command_rx) = unbounded_channel();
         let (event_tx, event_rx) = unbounded();
         let frames = Arc::new(FrameStore::default());
+        let stats = Arc::new(StatsStore::default());
         let audio = AudioHub::new();
         let talk = TalkHub::new();
         handle.spawn(supervisor(
@@ -347,13 +421,14 @@ impl ChannelManager {
             command_tx.clone(),
             event_tx,
             frames.clone(),
+            stats.clone(),
             audio.clone(),
             talk.clone(),
             Arc::new(Mutex::new(SessionSettings { reconnect: policy, handshake_timeout })),
             prefer_hardware,
             handle.clone(),
         ));
-        Self { commands: command_tx, events: event_rx, frames, audio, talk, handle: handle.clone() }
+        Self { commands: command_tx, events: event_rx, frames, stats, audio, talk, handle: handle.clone() }
     }
 
     /// The shared talk hub: the interface pushes captured audio here and names
@@ -435,6 +510,14 @@ impl ChannelManager {
     /// The newest decoded picture of every channel.
     pub fn frames(&self) -> &Arc<FrameStore> {
         &self.frames
+    }
+
+    /// The newest statistics of every channel.
+    ///
+    /// Read on repaint rather than drained: see [`StatsStore`] for why the
+    /// numbers are kept instead of sent.
+    pub fn stats(&self) -> &Arc<StatsStore> {
+        &self.stats
     }
 
     /// The shared audio hub: the interface installs its sink here and names the
@@ -662,6 +745,7 @@ async fn supervisor(
     command_tx: UnboundedSender<ChannelCommand>,
     events: Sender<StreamEvent>,
     frames: Arc<FrameStore>,
+    stats: Arc<StatsStore>,
     audio: Arc<AudioHub>,
     talk: Arc<TalkHub>,
     settings: Arc<Mutex<SessionSettings>>,
@@ -701,6 +785,12 @@ async fn supervisor(
                 }
                 if let Some(existing) = channels.remove(&index) {
                     existing.task.abort();
+                    // The sample belongs to the session being replaced, and it
+                    // is dropped before the transition is announced: read after
+                    // it, the numbers of the stream that is going away would
+                    // overwrite the state the switch just set - including the
+                    // held frame it is meant to keep on screen.
+                    stats.clear(index);
                 }
                 if previous_stream.is_some() {
                     let _ = events.send(StreamEvent::Transition {
@@ -724,6 +814,7 @@ async fn supervisor(
                     settings.clone(),
                     events.clone(),
                     frames.clone(),
+                    stats.clone(),
                     audio.clone(),
                     talk.clone(),
                     wake.clone(),
@@ -733,6 +824,8 @@ async fn supervisor(
             ChannelCommand::Suspend { index } => {
                 if let Some(existing) = channels.remove(&index) {
                     existing.task.abort();
+                    // The numbers belonged to the session that was just stopped.
+                    stats.clear(index);
                     tracing::debug!(target: "xgview::pipeline", index, "channel suspended");
                 }
             }
@@ -766,6 +859,10 @@ async fn supervisor(
                 // has no reason to see a change: nothing about the cameras did.
                 for (index, runtime) in channels.drain().collect::<Vec<_>>() {
                     runtime.task.abort();
+                    // Reopened, not continued: the sample described the decoder
+                    // this channel is leaving behind, and `hardware` in it would
+                    // be the answer that has just been changed.
+                    stats.clear(index);
                     let endpoint = runtime.endpoint;
                     let wake = runtime.wake;
                     let task = handle.spawn(run_channel(
@@ -774,6 +871,7 @@ async fn supervisor(
                         settings.clone(),
                         events.clone(),
                         frames.clone(),
+                        stats.clone(),
                         audio.clone(),
                         talk.clone(),
                         wake.clone(),
@@ -986,6 +1084,9 @@ async fn supervisor(
             ChannelCommand::TalkFallback { index } => {
                 let Some(runtime) = channels.remove(&index) else { continue };
                 runtime.task.abort();
+                // The session is reopened to carry the microphone, and what it
+                // measured before is not what it will measure now.
+                stats.clear(index);
                 let endpoint = runtime.endpoint.with_talk(true);
                 talk_support.entry(endpoint.uri.clone()).or_default().refuses_call = true;
                 tracing::debug!(
@@ -1000,6 +1101,7 @@ async fn supervisor(
                     settings.clone(),
                     events.clone(),
                     frames.clone(),
+                    stats.clone(),
                     audio.clone(),
                     talk.clone(),
                     wake.clone(),
@@ -1140,6 +1242,19 @@ fn aac_config(fmtp: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Where a session puts what it produces: the events that mark a change, and
+/// the two stores that keep the newest of what has no history worth keeping.
+///
+/// Carried as one argument because a session writes to these three and to
+/// nothing else, and because three of them among nine positional parameters is
+/// a signature read by counting.
+#[derive(Clone, Copy)]
+struct Sinks<'a> {
+    events: &'a Sender<StreamEvent>,
+    frames: &'a FrameStore,
+    stats: &'a StatsStore,
+}
+
 /// Runs one attempt on one endpoint, opening the session its address calls for.
 ///
 /// The scheme is what decides: an `http://` address is an MJPEG stream, a
@@ -1148,17 +1263,16 @@ async fn run_once(
     endpoint: &Endpoint,
     prefer_hardware: bool,
     handshake_timeout: Duration,
-    events: &Sender<StreamEvent>,
-    frames: &FrameStore,
+    sinks: Sinks<'_>,
     audio: &AudioHub,
     talk: &TalkHub,
 ) -> Result<()> {
     if endpoint.is_mjpeg() {
-        run_mjpeg_session(endpoint.clone(), handshake_timeout, events, frames).await
+        run_mjpeg_session(endpoint.clone(), handshake_timeout, sinks).await
     } else if endpoint.is_ws() {
-        run_ws_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames, audio).await
+        run_ws_session(endpoint.clone(), prefer_hardware, handshake_timeout, sinks, audio).await
     } else {
-        run_session(endpoint.clone(), prefer_hardware, handshake_timeout, events, frames, audio, talk).await
+        run_session(endpoint.clone(), prefer_hardware, handshake_timeout, sinks, audio, talk).await
     }
 }
 
@@ -1169,6 +1283,7 @@ async fn run_channel(
     settings: Arc<Mutex<SessionSettings>>,
     events: Sender<StreamEvent>,
     frames: Arc<FrameStore>,
+    stats: Arc<StatsStore>,
     audio: Arc<AudioHub>,
     talk: Arc<TalkHub>,
     wake: Arc<Notify>,
@@ -1179,6 +1294,10 @@ async fn run_channel(
     // a rejected password or an unreachable device is the only explanation the
     // user has, and the grid tile truncates the detail line.
     let mut failure = "connection attempt".to_string();
+    // The stores this channel's sessions publish into. Built once: every attempt
+    // writes to the same three, and the channel's own events go through
+    // `events` directly.
+    let sinks = Sinks { events: &events, frames: &frames, stats: &stats };
 
     loop {
         attempt += 1;
@@ -1215,7 +1334,7 @@ async fn run_channel(
         // endpoint picks the one it needs rather than a single session branching
         // on it statement by statement.
         let started = Instant::now();
-        let mut outcome = run_once(&endpoint, prefer_hardware, settings.handshake_timeout, &events, &frames, &audio, &talk).await;
+        let mut outcome = run_once(&endpoint, prefer_hardware, settings.handshake_timeout, sinks, &audio, &talk).await;
 
         // `Auto`: RTSP is preferred, and an RTSP that could not be reached at
         // all is answered with the MSE address at once rather than with a
@@ -1239,8 +1358,14 @@ async fn run_channel(
                 },
             );
             let mse = Endpoint { uri: fallback.uri, credentials: fallback.credentials, fallback: None, ..endpoint.clone() };
-            outcome = run_once(&mse, prefer_hardware, settings.handshake_timeout, &events, &frames, &audio, &talk).await;
+            outcome = run_once(&mse, prefer_hardware, settings.handshake_timeout, sinks, &audio, &talk).await;
         }
+
+        // The attempt is over, so its measurements are too: whatever the next
+        // one opens, it has its own codec, resolution and rate, and a renderer
+        // reading the numbers of the session that just ended would show them as
+        // if they still described the channel.
+        stats.clear(index);
 
         let lived = started.elapsed();
         match outcome {
@@ -1276,6 +1401,10 @@ async fn run_channel(
         // The snapshot taken at the top of the attempt is what this reads: one
         // policy for the whole attempt, and the newest one the user set.
         if !settings.reconnect.should_retry(attempt) {
+            // Nothing will publish again on this channel, so the sample of the
+            // attempt that has just ended is dropped here rather than left for
+            // a renderer to read as if the channel were still running.
+            stats.clear(index);
             emit(
                 &events,
                 StreamEvent::State {
@@ -1772,11 +1901,11 @@ async fn run_session(
     endpoint: Endpoint,
     prefer_hardware: bool,
     handshake_timeout: Duration,
-    events: &Sender<StreamEvent>,
-    frames: &FrameStore,
+    sinks: Sinks<'_>,
     audio: &AudioHub,
     talk: &TalkHub,
 ) -> Result<()> {
+    let Sinks { events, frames, stats } = sinks;
     let Endpoint { index, camera_id, uri, credentials, stream, transport, talk: wants_talk, .. } = endpoint;
     let camera_id = camera_id.as_str();
     let uri = uri.as_str();
@@ -1902,22 +2031,19 @@ async fn run_session(
         "session negotiated"
     );
 
-    emit(
-        events,
-        StreamEvent::Stats {
-            index,
-            camera_id: camera_id.to_string(),
-            stream,
-            codec: codec.clone(),
-            width,
-            height,
-            hardware: uses_hardware(&decoder),
-            audio: audio_decoder.is_some(),
-            fps: 0.0,
-            bitrate_kbps: 0.0,
-            total_frames: 0,
-        },
-    );
+    stats.publish(StreamStats {
+        index,
+        camera_id: camera_id.to_string(),
+        stream,
+        codec: codec.clone(),
+        width,
+        height,
+        hardware: uses_hardware(&decoder),
+        audio: audio_decoder.is_some(),
+        fps: 0.0,
+        bitrate_kbps: 0.0,
+        total_frames: 0,
+    });
 
     let mut total_frames: u64 = 0;
     let mut window_frames: u64 = 0;
@@ -2422,22 +2548,19 @@ async fn run_session(
         let elapsed = window_start.elapsed();
         if elapsed >= STATS_INTERVAL {
             let seconds = elapsed.as_secs_f32().max(0.001);
-            emit(
-                events,
-                StreamEvent::Stats {
-                    index,
-                    camera_id: camera_id.to_string(),
-                    stream,
-                    codec: codec.clone(),
-                    width,
-                    height,
-                    hardware: uses_hardware(&decoder),
-                    audio: audio_decoder.is_some(),
-                    fps: window_frames as f32 / seconds,
-                    bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
-                    total_frames,
-                },
-            );
+            stats.publish(StreamStats {
+                index,
+                camera_id: camera_id.to_string(),
+                stream,
+                codec: codec.clone(),
+                width,
+                height,
+                hardware: uses_hardware(&decoder),
+                audio: audio_decoder.is_some(),
+                fps: window_frames as f32 / seconds,
+                bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                total_frames,
+            });
             // `units` is what the network delivered, `decoded` what came out of
             // the decoder: a frozen picture with a steady `units` blames the
             // decoder (or the renderer), a `units` that drops to zero and then
@@ -2532,9 +2655,9 @@ fn publish_frames(
 async fn run_mjpeg_session(
     endpoint: Endpoint,
     handshake_timeout: Duration,
-    events: &Sender<StreamEvent>,
-    frames: &FrameStore,
+    sinks: Sinks<'_>,
 ) -> Result<()> {
+    let Sinks { events, frames, stats } = sinks;
     let Endpoint { index, camera_id, uri, stream, .. } = endpoint;
     let camera_id = camera_id.as_str();
 
@@ -2583,22 +2706,19 @@ async fn run_mjpeg_session(
     let mut window_start = Instant::now();
     let mut announced = false;
 
-    emit(
-        events,
-        StreamEvent::Stats {
-            index,
-            camera_id: camera_id.to_string(),
-            stream,
-            codec: Some("MJPEG".to_string()),
-            width,
-            height,
-            hardware: uses_hardware(&decoder),
-            audio: false,
-            fps: 0.0,
-            bitrate_kbps: 0.0,
-            total_frames: 0,
-        },
-    );
+    stats.publish(StreamStats {
+        index,
+        camera_id: camera_id.to_string(),
+        stream,
+        codec: Some("MJPEG".to_string()),
+        width,
+        height,
+        hardware: uses_hardware(&decoder),
+        audio: false,
+        fps: 0.0,
+        bitrate_kbps: 0.0,
+        total_frames: 0,
+    });
 
     loop {
         // The read is bounded so that a server which stops writing is noticed.
@@ -2660,22 +2780,19 @@ async fn run_mjpeg_session(
         if elapsed >= STATS_INTERVAL {
             let seconds = elapsed.as_secs_f32().max(0.001);
             let fps = window_frames as f32 / seconds;
-            emit(
-                events,
-                StreamEvent::Stats {
-                    index,
-                    camera_id: camera_id.to_string(),
-                    stream,
-                    codec: Some("MJPEG".to_string()),
-                    width,
-                    height,
-                    hardware: uses_hardware(&decoder),
-                    audio: false,
-                    fps,
-                    bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
-                    total_frames,
-                },
-            );
+            stats.publish(StreamStats {
+                index,
+                camera_id: camera_id.to_string(),
+                stream,
+                codec: Some("MJPEG".to_string()),
+                width,
+                height,
+                hardware: uses_hardware(&decoder),
+                audio: false,
+                fps,
+                bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                total_frames,
+            });
             tracing::debug!(
                 target: "xgview::pipeline",
                 index,
@@ -2909,10 +3026,10 @@ async fn run_ws_session(
     endpoint: Endpoint,
     prefer_hardware: bool,
     handshake_timeout: Duration,
-    events: &Sender<StreamEvent>,
-    frames: &FrameStore,
+    sinks: Sinks<'_>,
     audio: &AudioHub,
 ) -> Result<()> {
+    let Sinks { events, frames, stats } = sinks;
 
     use futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
@@ -3028,22 +3145,19 @@ async fn run_ws_session(
                     }
                 }
             }
-            emit(
-                events,
-                StreamEvent::Stats {
-                    index,
-                    camera_id: camera_id_str.to_string(),
-                    stream,
-                    codec: codec_label.clone(),
-                    width,
-                    height,
-                    hardware: uses_hardware(&decoder),
-                    audio: audio_decoder.is_some(),
-                    fps: 0.0,
-                    bitrate_kbps: 0.0,
-                    total_frames: 0,
-                },
-            );
+            stats.publish(StreamStats {
+                index,
+                camera_id: camera_id_str.to_string(),
+                stream,
+                codec: codec_label.clone(),
+                width,
+                height,
+                hardware: uses_hardware(&decoder),
+                audio: audio_decoder.is_some(),
+                fps: 0.0,
+                bitrate_kbps: 0.0,
+                total_frames: 0,
+            });
         }
 
         // The audio units that rode along in the same segment, decoded while this
@@ -3114,22 +3228,19 @@ async fn run_ws_session(
         if elapsed >= STATS_INTERVAL {
             let seconds = elapsed.as_secs_f32().max(0.001);
             let fps = window_frames as f32 / seconds;
-            emit(
-                events,
-                StreamEvent::Stats {
-                    index,
-                    camera_id: camera_id_str.to_string(),
-                    stream,
-                    codec: codec_label.clone(),
-                    width,
-                    height,
-                    hardware: uses_hardware(&decoder),
-                    audio: audio_decoder.is_some(),
-                    fps,
-                    bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
-                    total_frames,
-                },
-            );
+            stats.publish(StreamStats {
+                index,
+                camera_id: camera_id_str.to_string(),
+                stream,
+                codec: codec_label.clone(),
+                width,
+                height,
+                hardware: uses_hardware(&decoder),
+                audio: audio_decoder.is_some(),
+                fps,
+                bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                total_frames,
+            });
             tracing::debug!(
                 target: "xgview::pipeline",
                 index,
@@ -3423,6 +3534,72 @@ mod tests {
 
         stall.picture(base + Duration::from_secs(2));
         assert_eq!(stall.patience(), STALL_FLOOR);
+    }
+
+    /// A sample describes the stream as it is now, so a newer one replaces it:
+    /// an interface that was not repainting leaves one sample waiting per
+    /// channel rather than a queue of them.
+    #[test]
+    fn a_channel_keeps_only_its_newest_sample() {
+        let store = StatsStore::default();
+        let sample = |fps: f32| StreamStats {
+            index: 3,
+            camera_id: "cam".to_string(),
+            stream: StreamKind::Main,
+            codec: Some("H264".to_string()),
+            width: Some(1920),
+            height: Some(1080),
+            hardware: false,
+            audio: false,
+            fps,
+            bitrate_kbps: 0.0,
+            total_frames: 0,
+        };
+
+        assert!(store.latest(3).is_none(), "nothing has been published yet");
+        store.publish(sample(12.0));
+        let first = store.latest(3).expect("the sample is kept");
+        store.publish(sample(25.0));
+        let second = store.latest(3).expect("the newer sample is the one kept");
+
+        assert_eq!(second.stats.fps, 25.0, "the older sample is gone, not queued");
+        assert!(second.sequence > first.sequence, "and is told from the one before it");
+        assert!(store.latest(4).is_none(), "one channel's sample is not another's");
+    }
+
+    /// The numbers of a session that has ended describe nothing: the next one
+    /// has its own codec, resolution and rate, and a renderer that read the old
+    /// ones would show a failed channel still running.
+    #[test]
+    fn a_sample_taken_by_a_finished_session_is_dropped() {
+        let store = StatsStore::default();
+        let sample = StreamStats {
+            index: 7,
+            camera_id: "cam".to_string(),
+            stream: StreamKind::Main,
+            codec: None,
+            width: None,
+            height: None,
+            hardware: false,
+            audio: false,
+            fps: 25.0,
+            bitrate_kbps: 0.0,
+            total_frames: 0,
+        };
+
+        store.publish(sample.clone());
+        let last = store.latest(7).expect("published");
+        store.clear(7);
+        assert!(store.latest(7).is_none(), "the sample went with the session");
+
+        // The next session's first sample is still a new one, though the store
+        // holds nothing before it: the count keeps rising across a clear, so a
+        // renderer that applied the old sample does not mistake it for a repeat.
+        store.publish(sample);
+        assert!(
+            store.latest(7).expect("published").sequence > last.sequence,
+            "a sample after a clear is newer than the one cleared"
+        );
     }
 
     #[test]
