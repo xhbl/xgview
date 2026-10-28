@@ -13,10 +13,22 @@ import android.util.Log;
  * receiver is registered for {@code BOOT_COMPLETED} (and the vendor specific
  * {@code QUICKBOOT_POWERON} variants) in {@code AndroidManifest.xml}.
  *
+ * <p>It is not direct boot aware, so it runs only once the device is usable.
+ * The configuration lives in credential-encrypted storage, so before the user
+ * unlocks there is no camera list to draw and nothing this receiver could
+ * usefully start - the manifest says the rest.
+ *
  * <p>Because the UI is a {@code NativeActivity}, the receiver does not need to
  * know anything about the native library: it simply asks the package manager for
  * the launcher intent of this package, which respects the activity declared in
  * the manifest and the user's "default launcher app" choice.
+ *
+ * <p>The receiver is exported, which lets any app on the device send it an
+ * intent and bring the viewer to the foreground. That is a deliberate trade -
+ * the manifest says what it costs, why an action check would not help, and what
+ * would have to be true to set {@code exported="false"} instead. Keep the work
+ * done here to starting the launcher intent: that bound is what makes the trade
+ * acceptable.
  *
  * <p>Note on Android 10 (API 29) and newer: background activity starts are
  * restricted. The launch below therefore only succeeds when one of the following

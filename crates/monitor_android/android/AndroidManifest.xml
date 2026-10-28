@@ -186,15 +186,56 @@
         </activity>
 
         <!-- Relaunches the activity after the device booted. See
-             java/com/xhbl/xgview/BootReceiver.java. -->
+             java/com/xhbl/xgview/BootReceiver.java.
+
+             Exported on purpose, and the cost is accepted: an explicit intent
+             carries its own component, so the intent filter below does not
+             constrain who may send one - any app on the box can name this
+             receiver and make the viewer come to the foreground.
+
+             What that is worth to an attacker is bounded by what onReceive
+             does: it starts the package's launcher intent and nothing else. No
+             configuration is read, nothing is written, no privileged API is
+             called, and the launch itself is still subject to the background
+             start restrictions above - so on a box where XGView does not hold
+             SYSTEM_ALERT_WINDOW and is not the launcher, the attempt fails on
+             its own. The worst case is a wall that appears in front of whatever
+             was on screen.
+
+             `exported="false"` would close it and the documented behaviour
+             keeps the standard broadcasts arriving - "the only messages the
+             broadcast receiver receives are those sent by the system,
+             components of the same application, or applications with the same
+             user ID". The reason it is not false is QUICKBOOT_POWERON: the
+             vendor variants are sent by the ROM's own apps, and a vendor app
+             that is not signed with the platform key runs under its own uid and
+             would be refused with it. The failure that buys is a wall that does
+             not come back after a power cut, which is the one thing this
+             receiver exists for. On a box where start-on-boot is known to work
+             through BOOT_COMPLETED alone, false is the better setting.
+
+             An action check in onReceive would not help: the action is chosen
+             by the sender, so a deliberate one sends BOOT_COMPLETED, and a
+             manifest receiver has no API for the identity of its sender - there
+             is nothing to allow-list against.
+
+             Not direct boot aware, and not registered for
+             LOCKED_BOOT_COMPLETED - which is the same statement twice. The wall
+             cannot be shown before the user unlocks: the configuration lives in
+             credential-encrypted storage (the entry point hands over
+             getFilesDir()), so before unlock there is no camera list to draw,
+             and none of the three activities is direct boot aware either, so
+             the start is refused outright. Declaring both only bought a failed
+             start and a log line at every boot, on the boxes that have a lock
+             screen at all. A box without one is unlocked from the moment it
+             boots and gets BOOT_COMPLETED immediately, so it never needed the
+             earlier broadcast. -->
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
-            android:exported="true"
-            android:directBootAware="true">
+            android:exported="true">
             <intent-filter android:priority="1000">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>

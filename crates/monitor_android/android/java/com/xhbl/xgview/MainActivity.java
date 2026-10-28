@@ -98,10 +98,29 @@ public class MainActivity extends NativeActivity {
      * <p>Volatile: the native thread reads it, and the markers that hang off it,
      * with none of the Java thread's synchronisation. It is also set only after
      * {@code super.onCreate}, which is where the native thread starts, so a
-     * panic early enough can still find it null - {@link #restartSoon} says so
-     * rather than returning quietly.
+     * panic early enough can still find it null - which is why
+     * {@link #restartSoon} falls back to {@link #appContext} rather than giving
+     * up there.
      */
     private static volatile MainActivity instance;
+
+    /**
+     * A context that exists before the activity does, for the earliest native
+     * code.
+     *
+     * <p>{@link #instance} cannot serve that purpose: it is assigned after
+     * {@code super.onCreate}, and the native thread - which is what panics -
+     * starts inside it. A renderer that loses its device while the first
+     * pipeline is built can therefore fail while there is no activity to ask.
+     * That used to be a dead end: the process exited and the wall stayed black
+     * until somebody walked up to the box, which on a surveillance wall is the
+     * failure the whole start-on-boot machinery exists to prevent.
+     *
+     * <p>The application context is enough for what a restart needs - the
+     * package manager, the alarm service and shared preferences - and it is
+     * available before {@code super.onCreate} runs.
+     */
+    private static volatile Context appContext;
 
     /** Whether {@code monitor_android} is loaded, so a native method may be called. */
     private boolean nativeLoaded;
@@ -120,6 +139,24 @@ public class MainActivity extends NativeActivity {
 
     /** Whether the activity was started by the boot receiver, read from the launch intent. */
     private static boolean fromAutostart = false;
+
+    /**
+     * When the boot-launch grace window ends, on {@link SystemClock#elapsedRealtime},
+     * or zero when this launch was not a boot launch.
+     */
+    private long bootGraceUntil;
+
+    /** How many times the wall has taken the foreground back since this launch. */
+    private int bootReasserts;
+
+    /** Whether this activity is the resumed one, as far as it has been told. */
+    private boolean resumed;
+
+    /** Posts {@link #bootReassert}, so a re-assert can be dropped again on resume. */
+    private final Handler ui = new Handler(Looper.getMainLooper());
+
+    /** Takes the foreground back after something covered the wall during boot. */
+    private final Runnable bootReassert = this::takeForegroundBack;
 
     /** The one pixel view the input method types into. */
     private View inputView;
@@ -210,6 +247,17 @@ public class MainActivity extends NativeActivity {
     protected void onCreate(Bundle savedInstanceState) {
         Intent launch = getIntent();
         fromAutostart = launch != null && launch.getBooleanExtra("com.xhbl.xgview.FROM_AUTOSTART", false);
+        // A boot launch is the only launch that has to win a race for the
+        // foreground, so it is the only one that gets a window to do it in.
+        // A manual open is the viewer asking, and covering it with ourselves
+        // would be wrong - see BOOT_GRACE_MS.
+        if (fromAutostart) {
+            bootGraceUntil = SystemClock.elapsedRealtime() + BOOT_GRACE_MS;
+        }
+        // Before super.onCreate, for the same reason `applyVulkanGate` is: the
+        // native thread starts inside it, and a renderer that panics on its
+        // first frame has to have something to ask for a restart with.
+        appContext = getApplicationContext();
         // Before super.onCreate, and so before android-activity starts the
         // native thread: the marker it writes is what the native side reads to
         // choose its backend, and the choice has to be made before the renderer
@@ -761,6 +809,10 @@ public class MainActivity extends NativeActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        // On screen again, so a re-assert scheduled by a cover that has since
+        // gone away has nothing left to do.
+        resumed = true;
+        ui.removeCallbacks(bootReassert);
         // The activity on screen is the one native calls must reach, even when
         // it was not the last one created. This is also where a sibling that
         // the launcher started and then destroyed can leave the static behind.
@@ -771,6 +823,72 @@ public class MainActivity extends NativeActivity {
         // native side is asked to send the orientation it is laying out for.
         if (nativeLoaded) {
             nativeResumed();
+        }
+    }
+
+    /**
+     * Notes that something else is on screen, and - during the boot window -
+     * schedules the wall to ask for the foreground back.
+     *
+     * <p>Being covered is the one thing a wall must not accept quietly at boot:
+     * the box is unattended, so a wall that lost the race for the foreground
+     * stays lost until somebody walks up to it. The delay and the limit are
+     * what make taking it back safe; see {@link #BOOT_GRACE_MS}.
+     */
+    @Override
+    protected void onPause() {
+        super.onPause();
+        resumed = false;
+        // A wall that is on its way out must not pull itself back: the pause
+        // would otherwise be answered with a start that undoes the exit.
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        if (bootGraceUntil == 0 || SystemClock.elapsedRealtime() >= bootGraceUntil) {
+            return;
+        }
+        if (bootReasserts >= BOOT_REASSERT_LIMIT) {
+            return;
+        }
+        ui.removeCallbacks(bootReassert);
+        ui.postDelayed(bootReassert, BOOT_REASSERT_DELAY_MS);
+    }
+
+    /**
+     * Takes the foreground back if the wall is still covered, and does nothing
+     * if it is not.
+     *
+     * <p>Runs on the main thread a moment after {@link #onPause}, so the state
+     * it acts on is the settled one rather than a start that was still in
+     * flight. The launch intent is re-sent with the same flags the boot
+     * receiver uses: the activity is {@code singleTask}, so this delivers
+     * {@code onNewIntent} rather than building a second activity.
+     *
+     * <p>Whether the system allows it at all depends on the same whitelist that
+     * let the boot receiver start us - {@code SYSTEM_ALERT_WINDOW} here; see
+     * the manifest. A refusal is not retried beyond the limit.
+     */
+    private void takeForegroundBack() {
+        if (resumed) {
+            return;
+        }
+        if (bootGraceUntil == 0 || SystemClock.elapsedRealtime() >= bootGraceUntil) {
+            return;
+        }
+        if (bootReasserts >= BOOT_REASSERT_LIMIT) {
+            return;
+        }
+        bootReasserts++;
+        android.util.Log.i("xgview", "covered during boot; taking the foreground back ("
+                + bootReasserts + "/" + BOOT_REASSERT_LIMIT + ")");
+        final Intent back = new Intent(getIntent());
+        back.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        try {
+            startActivity(back);
+        } catch (RuntimeException error) {
+            android.util.Log.w("xgview", "cannot take the foreground back", error);
         }
     }
 
@@ -823,6 +941,38 @@ public class MainActivity extends NativeActivity {
     private static final int RESTART_LIMIT = 3;
 
     private static final long RESTART_WINDOW_MS = 10 * 60 * 1000L;
+
+    /**
+     * How long after a boot launch the wall may take the foreground back, and
+     * how many times.
+     *
+     * <p>A boot launch races every other app that starts itself at boot, and
+     * the wall only ever asked once. Measured on the SHIELD: the Google TV
+     * launcher resumed at {@code +2.4s}, a third-party launcher (Projectivy)
+     * resumed at {@code +3.2s} and again at {@code +3.7s}, and this activity
+     * resumed at {@code +3.9s} - a 435ms win with nothing behind it. The
+     * third-party launcher issues its second start from its own process, so
+     * there is no order between that and {@code BootReceiver}; when it lands a
+     * little later the wall is covered and stays covered, because nothing looks
+     * again. That is the "sometimes" of "boots but sometimes no picture".
+     *
+     * <p>The window is also what keeps this from fighting the viewer: past it,
+     * a Home press is the viewer's and is obeyed. The limit stops a launcher
+     * that keeps taking the screen back from trading it with us for ever.
+     */
+    private static final long BOOT_GRACE_MS = 120 * 1000L;
+
+    /** How many times the wall may take the foreground back within {@link #BOOT_GRACE_MS}. */
+    private static final int BOOT_REASSERT_LIMIT = 3;
+
+    /**
+     * How long to wait after being covered before taking the foreground back.
+     *
+     * <p>Long enough for the launcher that covered the wall to finish its own
+     * start: asking while that start is still in flight only gets overwritten
+     * by it again, which is how the limit above would be spent on nothing.
+     */
+    private static final long BOOT_REASSERT_DELAY_MS = 1500;
 
     /**
 
@@ -916,6 +1066,12 @@ public class MainActivity extends NativeActivity {
      * {@code AlarmManager}, whose alarm is held by the system and fires after
      * this process is gone.
      *
+     * <p>Works with no activity at all, through {@link #appContext}: a renderer
+     * that panics on its very first frame does so while {@code super.onCreate}
+     * is still running, which is before {@link #instance} is set. That used to
+     * be the one case where nothing was restarted, and on a wall it is the case
+     * that matters - a black screen with nobody in front of it.
+     *
      * <p>A panic that happens the same way every time would otherwise restart
      * the app for ever, so no more than {@link #RESTART_LIMIT} restarts are
      * allowed within {@link #RESTART_WINDOW_MS}; past that the answer is false
@@ -928,19 +1084,21 @@ public class MainActivity extends NativeActivity {
      * before the alarm was set.
      */
     public static boolean restartSoon() {
-        final MainActivity self = instance;
-        if (self == null) {
-            android.util.Log.w("xgview", "no activity to restart with; leaving the viewer down");
+        // The activity when there is one, the application context when the
+        // panic came before it existed. Both can reach everything below.
+        final Context context = instance != null ? instance : appContext;
+        if (context == null) {
+            android.util.Log.w("xgview", "no context to restart with; leaving the viewer down");
             return false;
         }
-        if (!self.mayRestart()) {
+        if (!mayRestart(context)) {
             android.util.Log.w("xgview", "restarted " + RESTART_LIMIT + " times within "
                     + (RESTART_WINDOW_MS / 60_000) + " minutes; leaving the viewer down");
             return false;
         }
         try {
-            final Intent launch = self.getPackageManager()
-                    .getLaunchIntentForPackage(self.getPackageName());
+            final Intent launch = context.getPackageManager()
+                    .getLaunchIntentForPackage(context.getPackageName());
             if (launch == null) {
                 android.util.Log.w("xgview", "no launcher intent to restart with");
                 return false;
@@ -948,10 +1106,10 @@ public class MainActivity extends NativeActivity {
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP
                     | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            final PendingIntent pending = PendingIntent.getActivity(self, 0, launch,
+            final PendingIntent pending = PendingIntent.getActivity(context, 0, launch,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             final AlarmManager alarms =
-                    (AlarmManager) self.getSystemService(Context.ALARM_SERVICE);
+                    (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
             if (alarms == null) {
                 android.util.Log.w("xgview", "no alarm service to restart with");
                 return false;
@@ -975,11 +1133,13 @@ public class MainActivity extends NativeActivity {
      * Records this restart and says whether it is within the limit.
      *
      * <p>The times live in shared preferences rather than in memory: the whole
-     * point of them is to outlive the restarts they count.
+     * point of them is to outlive the restarts they count. Takes a context
+     * rather than using the activity's, because the earliest restart has no
+     * activity to ask - see {@link #appContext}.
      */
-    private boolean mayRestart() {
+    private static boolean mayRestart(final Context context) {
         final long now = System.currentTimeMillis();
-        final SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        final SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         final StringBuilder kept = new StringBuilder();
         int recent = 0;
         for (final String part : prefs.getString(KEY_RESTARTS, "").split(",")) {

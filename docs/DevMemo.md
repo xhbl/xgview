@@ -3173,3 +3173,189 @@ on are `getrandom` (0.2 ours, 0.3 from `ahash`, 0.4 from `uuid`), `base64`
 `tokio-tungstenite`, 1.0 from reqwest); each is a few kilobytes, and the
 `getrandom` bump changes the call in the sealed-configuration key path, which is
 not worth re-testing for that.
+
+## 44. The boot receiver is exported, and that is written down
+
+*Landed 2026-10-28, in 1.5.71.*
+
+**The finding.** `BootReceiver` is declared `android:exported="true"` with an
+intent filter for `BOOT_COMPLETED`, `LOCKED_BOOT_COMPLETED` and the two
+`QUICKBOOT_POWERON` variants. `BOOT_COMPLETED` is a protected broadcast, so no
+third-party app can *send* it - but an intent filter only governs implicit
+resolution. An explicit intent names the component and is delivered regardless,
+so any app on the box can name `.BootReceiver` with any action and make the
+viewer come to the foreground. `onReceive` reads the action to log it and does
+not check it.
+
+**The action check is not the fix, and it is worth saying why**, because it is
+the obvious first idea. The action of the intent is chosen by the sender: an
+app that wants this to happen sends `android.intent.action.BOOT_COMPLETED` and
+an action allow-list is satisfied. Checking it would only reject senders who got
+the action wrong, and nobody deliberately does that. The other half of the idea -
+allow-listing the *sender* - has no API behind it: a manifest receiver is not
+told the uid of whoever sent the broadcast, unlike a bound service where
+`Binder.getCallingUid()` answers. There is nothing to compare against.
+
+**The only real switch is `exported="false"`, and the documentation is
+explicit** that it does not cost the system broadcasts: "If 'false', the only
+messages the broadcast receiver receives are those sent by the system,
+components of the same application, or applications with the same user ID." The
+standard boot actions are sent by the system server and keep arriving.
+
+**What stops it being false here is `QUICKBOOT_POWERON`.** The vendor variants
+are sent by the ROM's own apps, and a vendor app that is not platform-signed
+runs under its own uid, which a non-exported receiver refuses. The failure that
+buys is a wall that does not come back after a power cut - the single thing this
+receiver exists for, on exactly the boxes that need it most. That is not a trade
+to make on the strength of a documentation page.
+
+**What bounds the risk instead.** `onReceive` starts the package's launcher
+intent and does nothing else: no configuration is read, nothing is written, no
+privileged API is reached. The start is still subject to the Android 10+
+background-activity-start restrictions, so on a box where XGView is neither the
+launcher nor a `SYSTEM_ALERT_WINDOW` holder the attempt fails by itself. The
+worst case is the wall appearing in front of whatever was on the screen.
+
+**Where this is recorded**: the comment above the `<receiver>` in
+`AndroidManifest.xml`, next to the attribute it is about, and a pointer to it in
+`BootReceiver`'s javadoc that also says to keep the receiver's work bounded to
+starting the launcher intent - that bound is what makes the trade acceptable. If
+a box is ever confirmed to start through `BOOT_COMPLETED` alone, flipping the
+attribute is the improvement, and the comment says so.
+
+## 45. The boot receiver does not run before the user unlocks
+
+*Landed 2026-10-28, in 1.5.71.*
+
+**What was there.** `BootReceiver` was declared `android:directBootAware="true"`
+and listed `LOCKED_BOOT_COMPLETED` beside `BOOT_COMPLETED` - the pair that looks
+like "start as early as the platform allows", which is the right instinct for a
+wall that has to come back after a power cut.
+
+**It could not do that, for three reasons that all point the same way.** The
+configuration lives in credential-encrypted storage - the entry point hands
+`getFilesDir()` to `set_config_home` - so before the user unlocks there is no
+camera list to draw. None of the three activities is direct boot aware, so the
+`startActivity` below is refused by the system outright; the `catch` that logs
+it is what ran. And had the start somehow succeeded, the viewer would have come
+up on the defaults with no cameras, and would not re-read the configuration when
+the user unlocked, because the process was already running.
+
+**What it cost while it was there.** On a box with a lock screen, a failed start
+and a `could not start the activity` line at every boot. On a box without one -
+which is the normal TV box - the device is unlocked from the moment it boots, so
+`LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED` arrive one after the other and the
+receiver launched twice; the second was a no-op bring-to-front only because the
+activity is `singleTask`.
+
+**So both declarations are gone**, and the manifest now says why in the comment
+above the receiver. What is left is the earliest moment the wall can actually be
+drawn: `BOOT_COMPLETED`, after unlock. On a lockless box that is immediately
+after boot, which is the case the receiver exists for; on a locked box it is
+after somebody unlocks, which is later than the old code tried and the first
+moment it could have worked.
+
+**The other direction was considered and is worse.** Making direct boot real
+means moving the configuration to device-protected storage, which is encrypted
+with a device key rather than the user's credential - so the camera passwords in
+it become readable to anything running before unlock, and the viewer would then
+have to draw over the lock screen, which on a box that has a lock is precisely
+what the operator does not want. A wall is not an alarm clock. If a deployment
+needs the wall up before unlock, the answer is to take the lock off the box or
+make XGView its launcher - not to weaken the storage the credentials sit in.
+
+## 46. The earliest panic had nobody to restart it
+
+*Landed 2026-10-28, in 1.5.71.*
+
+**What was there.** `MainActivity.restartSoon` - the one path that brings the
+wall back after a renderer panic - began with `final MainActivity self =
+instance` and gave up when that was null, logging `no activity to restart with;
+leaving the viewer down`. `instance` is assigned *after* `super.onCreate`, and
+the native thread starts *inside* `super.onCreate`. A renderer that panics on
+its first frame therefore panics in the one window where there is no activity
+to ask, and the process exits with nothing scheduled to bring it back.
+
+**On a wall that is the worst case, not an edge one.** Nobody is standing in
+front of the box; a black screen stays black until somebody notices. Every other
+failure on this path has a fallback - Vulkan to GL, GL to a bounded restart -
+and this one had none.
+
+**The fix is a context that exists earlier.** `onCreate` now takes
+`getApplicationContext()` before `super.onCreate` and keeps it in `appContext`;
+`restartSoon` uses the activity when there is one and that context when there is
+not, and `mayRestart` takes the context rather than reaching for the activity.
+Everything a restart needs - package manager, alarm service, shared preferences
+- is reachable from it, and the restart limit still applies, so a driver that
+panics on every launch still stops after three tries instead of looping.
+
+**What this does not fix, and how to tell them apart.** A start that the system
+refuses (Android 10+ background activity start with no exemption) and a wall
+that comes up behind the launcher look the same from the outside - a process
+that is running and a screen that is not showing it. Neither is a renderer
+failure, so neither goes through `restartSoon`. The logcat line to look for is
+`Background activity start ... blocked` from `ActivityTaskManager` for the
+first, and `dumpsys activity activities` naming the launcher as the resumed
+activity for the second.
+
+## 47. Start on boot was a single shot in a race it could lose
+
+*Landed 2026-10-28, in 1.5.71.*
+
+**The report was "sometimes the picture does not come up".** The receiver fires,
+the process starts, and the wall is not on screen - sometimes. Two boots of the
+same box, read out of the `events` buffer (`wm_on_resume_called`), say why:
+
+```
+        boot A                     boot B
+13:19:52.143  tvlauncher   13:28:21.129  tvlauncher
+13:19:52.942  Projectivy   13:28:21.829  Projectivy
+13:19:53.433  Projectivy
+13:19:53.868  xgview       13:28:21.908  xgview
+```
+
+Both boots started from `FallbackHome` (boot A at `13:19:48.692`, boot B at
+`13:28:17.061`) and both had `BootReceiver` start the wall at the same point in
+the sequence. The margins were 435ms in boot A and 79ms in boot B.
+
+`Projectivy` is a third-party launcher (`com.spocky.projengmenu`) that starts
+itself at boot with `CATEGORY_LEANBACK_LAUNCHER` from its own uid - twice in
+boot A - and its accessibility service takes the foreground back when it sees
+a `HOME` press. It is not the default home; `com.google.android.tvlauncher` is.
+So the wall and that launcher are two independent boot launches with no order
+between them, and the winner is whoever resumes last. The margins measured were
+435ms and 79ms. A boot where the disk is busier or the native thread is slower
+puts the wall second, and nothing looked again: `BootReceiver` starts the
+activity once and `MainActivity` did not even override `onPause`, so being
+covered was invisible to it.
+
+**The fix is a bounded re-assert, not a fight.** `MainActivity` now keeps a
+grace window open for `BOOT_GRACE_MS` (120s) when the launch carries the
+`FROM_AUTOSTART` extra that `BootReceiver` already set - a manual open gets no
+window, because covering it would be wrong. Inside the window, `onPause`
+schedules `takeForegroundBack` 1.5s later; that re-sends the launch intent
+(`singleTask`, so `onNewIntent`) unless the wall is resumed again by then, and
+stops after `BOOT_REASSERT_LIMIT` (3) attempts. Past the window, or past the
+limit, a `HOME` press is the viewer's and is obeyed.
+
+**The 1.5s delay is not padding.** Measured on the same box: `HOME` at
+`13:26:53.625`, tvlauncher resumes at `53.854`, and Projectivy takes the
+foreground at `54.989` - 1.1s *after* the press. Re-asserting as soon as the
+wall was paused would have been overwritten by that. Waiting put the re-assert
+at `55.203`, and the wall was back at `55.727`.
+
+**Verified on the device**, four cases, all with `adb`: covered once → back on
+top, log `(1/3)`; covered again → `(2/3)`; third time → `(3/3)`; fourth → no
+log and the launcher stays. After the window expired, `HOME` → the launcher
+stays and no re-assert runs. The two attempts the limit allows were also what
+let a `HOME` press at `13:27:09` be answered - that one was Projectivy grabbing
+the foreground on its own, with no key pressed at all.
+
+**What this does not fix.** If the wall is not running at all - the earlier
+snapshot of the same box had an empty `pidof com.xhbl.xgview` while Projectivy
+was in front - then nothing here applies: that is a start that never happened
+or a process that was killed afterwards, not a wall behind a launcher. The
+`SYSTEM_ALERT_WINDOW` grant is also load-bearing for both paths: the log line
+that proves the boot start was allowed at all is
+`Background activity start for com.xhbl.xgview allowed because SYSTEM_ALERT_WINDOW permission is granted`.
+Revoke it and the failure changes shape, from "covered" to "never started".
