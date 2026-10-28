@@ -2946,3 +2946,103 @@ have no ordering between them - a sample published before a `State` may be read
 after it - so reading last is what keeps a sample from a session that has just
 ended from being applied over the state its ending set. That is also why the
 `State` handler zeroing `fps` on `Connecting` still means something.
+
+## 40. A rename is atomic, not durable: what a power cut does to the configuration
+
+*Landed 2026-10-28, in 1.5.68.*
+
+**What was there.** `AppConfig::save` wrote the JSON to `config.json.tmp` and
+renamed it over `config.json`. The rename makes the *change* all-or-nothing,
+which is the part everyone remembers, and it says nothing about whether either
+file is on the disk - and neither the write nor the rename was followed by a
+sync. A wall is a box that gets switched off at the mains rather than shut down,
+so that gap is the normal way this program ends, not an exotic one.
+
+**What a cut in that gap actually produces depends on the filesystem**, which is
+why this went unnoticed for so long. ext4 has a heuristic for exactly this
+pattern - `auto_da_alloc`, since 2.6.30 - which notices a write to a new file
+followed by a rename over an existing one and forces the data blocks out before
+the rename commits. Editors and configuration savers do this everywhere, so the
+heuristic exists, and on a stock ext4 the outcome is the old file or the new one.
+XFS, btrfs and the f2fs that Android uses under `/data` have no such rule: the
+rename is a metadata operation and is committed on its own schedule, so a cut
+after the commit and before the data is written leaves the name in place with
+nothing behind it.
+
+**An empty file is the outcome worth being afraid of**, not a stale one. `load`
+reads the text, `from_json` fails on nothing at all, `load_or_default` logs and
+starts on the defaults - the wall comes up with no cameras on it. The file is
+deliberately left alone at that point ("it is the user's"), but the first
+settings change saves the defaults over it, and by then there is nothing left to
+recover. A stale file would have been recoverable; an empty one is not.
+
+**The fix is two syncs, and they cover different losses.** `sync_all` on the
+temporary file before the rename puts the bytes on the disk first, so the name
+can never arrive ahead of its contents. The fsync of the *directory* afterwards
+is what makes the rename itself durable: the name lives in the directory's own
+data, and a cut before that reaches the disk takes the whole save back to the
+file it replaced - the previous configuration, which is the good failure.
+
+**Two platform notes.** A filesystem with no directory to flush - a FAT stick,
+which `XGVIEW_CONFIG_DIR` lets a portable deployment point at - answers `EINVAL`
+to that fsync; the file itself is already synced, so the error is treated as "as
+durable as this filesystem gets" rather than as a failed save. On Windows a
+directory cannot be opened as a file at all, so the renamed file is flushed
+instead: NTFS keeps a file's name in its own record, and flushing it is the
+durability the platform offers. It has to be reopened for writing to do that -
+`File::open` gives a read-only handle and `FlushFileBuffers` refuses it with
+`os error 5` - which is what the first version of this did, and what a `cargo
+test` on the host caught that a `cargo check` inside WSL could not: the unix
+branch is the only one that compiles there. **Run the platform's tests, not just
+its type check**, when a `cfg` branch is the thing being added.
+
+The cost is one fsync per save, and saves are debounced - `SAVE_DEBOUNCE` after
+the last change - so it is not on the path of anything a person waits for.
+
+## 41. The save keeps the version it replaced, and the load prefers it to the defaults
+
+*Landed 2026-10-28, in 1.5.68.*
+
+**Durability is a promise the platform can break.** The syncs in §40 are what
+makes a save survive a cut on a filesystem that honours them; a filesystem that
+ignores `fsync` - some SD cards and USB sticks, an Android phone whose vendor
+tuned the flush away, a network mount - answers the call and does nothing. A
+wall is also moved, cloned from an image, and copied off a drive that was pulled
+out mid-copy. All of those end with a configuration that cannot be read, and the
+previous behaviour was to answer that with the defaults, which is the one answer
+that loses the cameras.
+
+**So `save` keeps what it is about to replace**, as `xgvconfig.json.prev`, and
+`load_or_default` answers an unreadable file with that copy instead of with the
+defaults. The wall then comes back one settings change out of date, which is a
+wall.
+
+**The copy is written before the replacement, not after it.** Read the old file,
+write the copy to `config.json.prev.tmp`, sync it, rename it onto `.prev`, and
+only then write the new configuration. Keeping it afterwards would be simpler and
+wrong: a cut between the two would leave a new configuration beside a copy of the
+version before *that* one, and the copy would be the newer file. The order is
+what makes `.prev` mean "one save ago" rather than "some other save".
+
+**Two copy names, and they are not interchangeable.** The interface already kept
+the configuration an import replaced, as `.json.bak`, before adopting a sealed
+document. That is a different thing from a save's copy - it is written once per
+import, by a different code path - and the load tries `.prev` first because a
+save's copy is the newer of the two. This surfaced as a failing test: the harness
+called `save` on the import copy, so the two paths kept overwriting each other's
+file and the distinction the test was written to check could not exist. The
+import copy now goes through `save_copy`, which is `write` without the
+`keep_previous` step, and a copy of a copy is no longer litter beside the
+configuration.
+
+**The unreadable file is still not overwritten.** Recovery reads `.prev` and
+returns it; the broken file stays on the disk, because it may be the user's own
+edit and it is the only thing left that says what they meant. What the
+configuration *is* at that moment is the recovered copy, so the next save writes
+that over the broken file - which is the moment the old bytes stop being
+recoverable, and the right moment for it.
+
+**A copy that cannot be read is not a reason to fail the save.** `keep_previous`
+logs and lets the save continue: a wall that cannot keep history is still better
+than a wall that cannot save. The same for the fresh install, where there is
+nothing to keep - `NotFound` is the expected answer, not an error.

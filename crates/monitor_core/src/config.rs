@@ -763,7 +763,8 @@ impl AppConfig {
     /// have a file behind them, ready to be backed up, edited, or carried to the
     /// next machine. A file that is there but unreadable is left as it is - it
     /// is the user's, and whatever it still holds is not the defaults' to
-    /// overwrite.
+    /// overwrite - and the copy of the version it replaced is used instead, when
+    /// the last save kept one.
     pub fn load_or_default(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref();
         let missing = !path.exists();
@@ -779,10 +780,54 @@ impl AppConfig {
                 config
             }
             Err(err) => {
+                // Unreadable: a cut while it was being written, a half-copied
+                // drive, an edit that broke the JSON. The copy of the version it
+                // replaced is one save out of date and worth trying, and the
+                // broken file itself is only read, never written - it may be the
+                // user's own edit, and not ours to throw away.
+                if let Some(previous) = Self::load_previous(path) {
+                    tracing::warn!(
+                        target: "xgview::config",
+                        path = %path.display(),
+                        %err,
+                        "cannot read the configuration, using the version it replaced"
+                    );
+                    return previous;
+                }
                 tracing::warn!(target: "xgview::config", %err, "falling back to default configuration");
                 Self::default()
             }
         }
+    }
+
+    /// The configuration saved before the current one, when a copy was kept.
+    ///
+    /// Two copies can be there: the version the last save replaced, and the one
+    /// an import replaced - the interface keeps the second before it adopts a
+    /// document. The save's copy is the newer of the two, so it is tried first.
+    /// `None` on a fresh install, and `None` when neither copy can be read: the
+    /// caller decides what a wall with no configuration at all looks like.
+    fn load_previous(path: &Path) -> Option<Self> {
+        for candidate in [previous_path(path), backup_path(path)] {
+            let Ok(data) = std::fs::read_to_string(&candidate) else { continue };
+            match Self::from_json(&data) {
+                Ok(config) => {
+                    tracing::info!(
+                        target: "xgview::config",
+                        path = %candidate.display(),
+                        "recovered the configuration from the copy beside it"
+                    );
+                    return Some(config);
+                }
+                Err(err) => tracing::warn!(
+                    target: "xgview::config",
+                    path = %candidate.display(),
+                    %err,
+                    "the copy beside the configuration cannot be read either"
+                ),
+            }
+        }
+        None
     }
 
     /// The configuration as the JSON an export carries.
@@ -799,8 +844,45 @@ impl AppConfig {
     /// credentials in clear, and the mode a plain write would take - the process
     /// umask, 0644 on a stock system - leaves them open to every account on the
     /// machine.
+    ///
+    /// What is written is also made durable before this returns. A wall is a box
+    /// that is switched off at the mains rather than shut down, and a rename
+    /// that reaches the disk without the bytes behind it leaves an empty
+    /// configuration - the one outcome that loses the cameras, because an empty
+    /// file parses as nothing, the viewer starts on the defaults, and the next
+    /// save writes those over it.
+    ///
+    /// The version being replaced is kept beside it, as the same name with a
+    /// `.prev` extension; see [`AppConfig::load_or_default`] for what reads it.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
+        // Before the replacement, while the old bytes still exist: one save of
+        // history is what turns an unreadable configuration from a wall with no
+        // cameras on it into a wall one setting out of date.
+        if let Err(err) = keep_previous(path) {
+            tracing::warn!(
+                target: "xgview::config",
+                path = %path.display(),
+                %err,
+                "cannot keep a copy of the previous configuration"
+            );
+        }
+        self.write(path)
+    }
+
+    /// Writes the configuration to `path` without keeping a copy of the version
+    /// already there.
+    ///
+    /// The copy [`AppConfig::save`] keeps is what makes a corrupt configuration
+    /// recoverable, so this is for a file that is itself a copy: the interface
+    /// keeps the configuration an import replaces, and a copy of that copy would
+    /// only be litter beside the configuration.
+    pub fn save_copy(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.write(path.as_ref())
+    }
+
+    /// The write itself: temporary file, sync, rename, sync the directory.
+    fn write(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
@@ -811,6 +893,12 @@ impl AppConfig {
         write_private(&temporary, json.as_bytes())?;
         std::fs::rename(&temporary, path).map_err(|err| {
             CoreError::config(format!("cannot replace {}: {err}", path.display()))
+        })?;
+        // The rename is atomic, which is not the same as durable: the new name
+        // lives in the directory's own data, and a cut before that reaches the
+        // disk takes the whole save back to the file it replaced.
+        sync_directory_of(path).map_err(|err| {
+            CoreError::config(format!("cannot make {} durable: {err}", path.display()))
         })?;
         tracing::debug!(target: "xgview::config", path = %path.display(), "configuration saved");
         Ok(())
@@ -1205,24 +1293,105 @@ fn looks_like_a_configuration(value: &serde_json::Value) -> bool {
 /// permissions are set on the handle rather than at creation, so a leftover
 /// temporary file from a run that died cannot hand its own mode on to the file
 /// that replaces it.
+#[cfg(unix)]
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(data)?;
+    // The rename that follows is only worth anything if the bytes are already
+    // on the disk: without this the name can be committed first, and a cut in
+    // between leaves an empty file behind it.
+    file.sync_all()
+}
+
+#[cfg(not(unix))]
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
 
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        options.mode(0o600);
-        let mut file = options.open(path)?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        file.write_all(data)?;
-        return Ok(());
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(data)?;
+    file.sync_all()
+}
+
+/// Flushes the directory a rename happened in, so the new name survives a cut.
+///
+/// `fsync` on the file itself says nothing about the directory entry that
+/// points at it: the two are separate writes, and a rename is only durable once
+/// the directory holding the name has been flushed too.
+#[cfg(unix)]
+fn sync_directory_of(path: &Path) -> std::io::Result<()> {
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    match std::fs::File::open(dir).and_then(|dir| dir.sync_all()) {
+        Ok(()) => Ok(()),
+        // A filesystem with no directory to flush - a FAT stick, which
+        // `XGVIEW_CONFIG_DIR` allows a portable deployment to point at - answers
+        // `EINVAL`. The file itself was synced, so the save is as durable as
+        // that filesystem can make it.
+        Err(err) if err.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        Err(err) => Err(err),
     }
-    #[cfg(not(unix))]
-    {
-        options.open(path)?.write_all(data)
-    }
+}
+
+/// Windows cannot open a directory as a file, so the renamed file is flushed
+/// instead: NTFS keeps a file's name in its own record, and flushing that is
+/// the durability the platform offers.
+///
+/// It has to be reopened for writing. `File::open` is a read-only handle and
+/// `FlushFileBuffers` refuses one - `os error 5`, access denied - so the
+/// obvious `File::open(path)?.sync_all()` fails every save on this platform
+/// rather than doing nothing quietly. The rename has already happened, so the
+/// file this flushes is the new one.
+#[cfg(not(unix))]
+fn sync_directory_of(path: &Path) -> std::io::Result<()> {
+    let file = std::fs::OpenOptions::new().write(true).open(path)?;
+    file.sync_all()
+}
+
+/// Where the version replaced by the last save is kept.
+fn previous_path(path: &Path) -> PathBuf {
+    path.with_extension("json.prev")
+}
+
+/// Where the interface keeps the configuration an import replaces.
+///
+/// Written by the interface, not here - this only names it, so that a
+/// configuration that cannot be read can still be recovered from the copy that
+/// import left behind.
+fn backup_path(path: &Path) -> PathBuf {
+    path.with_extension("json.bak")
+}
+
+/// Keeps a copy of the configuration at `path` under [`previous_path`].
+///
+/// A no-op when there is nothing there yet - the first save of a fresh install
+/// has no version to keep. The copy is written the way the configuration is,
+/// private and synced, and put in place by a rename, so a cut while it is being
+/// kept cannot leave a half-written copy for the next load to prefer over a good
+/// file.
+fn keep_previous(path: &Path) -> std::io::Result<()> {
+    let previous = match std::fs::read(path) {
+        Ok(previous) => previous,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let staging = path.with_extension("json.prev.tmp");
+    write_private(&staging, &previous)?;
+    std::fs::rename(&staging, previous_path(path))
 }
 
 #[cfg(test)]
@@ -1267,6 +1436,15 @@ mod tests {
             "{ not json",
             "the file is the user's, not the defaults' to replace"
         );
+
+        // An empty file is the shape a crash between the rename and the bytes
+        // reaching the disk leaves behind, and it is the one worth being afraid
+        // of: it parses as nothing, so the wall comes up with no cameras on it.
+        // `save` syncs the bytes before the rename for that reason; reading one
+        // is still not the defaults' business to overwrite.
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(AppConfig::load_or_default(&path), AppConfig::default());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "left as it was");
     }
 
     /// The configuration carries the cameras' credentials in clear, so it is
@@ -1283,6 +1461,114 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+
+        // The copy of the version it replaced holds the same credentials, so it
+        // is written the same way.
+        AppConfig::default().save(&path).unwrap();
+        let previous = dir.path().join("config.json.prev");
+        let mode = std::fs::metadata(&previous).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the copy is private too");
+    }
+
+    /// The version a save replaces is kept: an unreadable configuration then
+    /// costs one save of history instead of the cameras.
+    #[test]
+    fn a_save_keeps_the_version_it_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let previous = dir.path().join("config.json.prev");
+
+        let mut first = AppConfig::default();
+        first.chrome_idle_secs = 5.0;
+        first.save(&path).unwrap();
+        assert!(!previous.exists(), "the first save has no version to keep");
+
+        let mut second = first.clone();
+        second.chrome_idle_secs = 9.0;
+        second.save(&path).unwrap();
+
+        assert_eq!(AppConfig::load(&path).unwrap().chrome_idle_secs, 9.0);
+        assert_eq!(
+            AppConfig::load(&previous).unwrap().chrome_idle_secs,
+            5.0,
+            "the version the save replaced"
+        );
+    }
+
+    /// A configuration that cannot be read is answered with the copy of the
+    /// version it replaced, and the broken file is left where it is.
+    #[test]
+    fn an_unreadable_configuration_falls_back_to_the_version_it_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+
+        let mut first = AppConfig::default();
+        first.chrome_idle_secs = 5.0;
+        first.save(&path).unwrap();
+        let mut second = first.clone();
+        second.chrome_idle_secs = 9.0;
+        second.save(&path).unwrap();
+
+        std::fs::write(&path, "").unwrap();
+        let recovered = AppConfig::load_or_default(&path);
+
+        assert_eq!(recovered.chrome_idle_secs, 5.0, "the version before the last save");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "",
+            "the broken file is the user's, and the recovery does not write over it"
+        );
+    }
+
+    /// The copy an import leaves behind is the last resort: older than the one
+    /// the last save kept, and still better than a wall with no cameras on it.
+    #[test]
+    fn an_import_copy_is_the_last_resort() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+
+        let mut before_import = AppConfig::default();
+        before_import.chrome_idle_secs = 3.0;
+        // What `App::back_up_configuration` writes before it adopts a document.
+        before_import.save_copy(&dir.path().join("config.json.bak")).unwrap();
+
+        let mut imported = before_import.clone();
+        imported.chrome_idle_secs = 7.0;
+        imported.save(&path).unwrap();
+        std::fs::write(&path, "{ half a document").unwrap();
+
+        assert_eq!(
+            AppConfig::load_or_default(&path).chrome_idle_secs,
+            3.0,
+            "the import copy, with no save of its own to prefer"
+        );
+    }
+
+    /// Once a save has kept a copy of its own, that copy is the newer of the two
+    /// and the one a broken configuration comes back to.
+    #[test]
+    fn the_copy_the_last_save_kept_wins_over_the_import_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+
+        let mut before_import = AppConfig::default();
+        before_import.chrome_idle_secs = 3.0;
+        before_import.save_copy(&dir.path().join("config.json.bak")).unwrap();
+
+        let mut imported = before_import.clone();
+        imported.chrome_idle_secs = 7.0;
+        imported.save(&path).unwrap();
+
+        let mut later = imported.clone();
+        later.chrome_idle_secs = 11.0;
+        later.save(&path).unwrap();
+        std::fs::write(&path, "{ half a document").unwrap();
+
+        assert_eq!(
+            AppConfig::load_or_default(&path).chrome_idle_secs,
+            7.0,
+            "the version the last save replaced, not the import's copy"
+        );
     }
 
     /// A JSON document that is not a configuration - the user picked the wrong

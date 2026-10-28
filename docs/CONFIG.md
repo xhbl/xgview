@@ -56,6 +56,15 @@ The viewer persists everything to one JSON file, created on first launch:
   beside it as `xgvconfig.json.bak` before the new one is adopted, and a JSON
   document that is not an XGView configuration is refused rather than read as an
   empty one.
+- **Every save keeps the version it replaces**, as `xgvconfig.json.prev`. A
+  configuration that cannot be read - a power cut in the middle of a save, a
+  half-copied drive, an edit that broke the JSON - is answered with that copy
+  rather than with the defaults, so a wall comes back one setting out of date
+  instead of with no cameras on it. The unreadable file itself is only read in
+  that case, never overwritten: it may be an edit of yours. The copy is written
+  and flushed to the disk before the new configuration takes its place, and so is
+  the configuration itself - the box is switched off at the mains rather than
+  shut down, and a save that is only in the page cache is not a save.
 - The **format marker** is `xgv-seal/v1:` at the head of the base64 body: a
   sealed document names its own version, so a later change to the key derivation
   or the cipher can be told apart from this one rather than read as a wrong

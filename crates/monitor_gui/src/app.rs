@@ -6867,7 +6867,9 @@ impl XgViewApp {
     /// reason to refuse the new one, but it is something to hear about.
     fn back_up_configuration(&mut self) {
         let path = self.config_path.with_extension("json.bak");
-        match self.config.save(&path) {
+        // A copy, not a save: the version this replaces is already kept by the
+        // save that follows, and `save` would keep a copy of the copy too.
+        match self.config.save_copy(&path) {
             Ok(()) => tracing::info!(
                 target: "xgview::config",
                 path = %path.display(),
