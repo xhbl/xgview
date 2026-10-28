@@ -527,11 +527,49 @@ fn exit_now() -> ! {
     unsafe { _exit(0) }
 }
 
+/// Whether a viewer has already been started in this process.
+///
+/// A process gets one event loop: winit builds it per process and refuses a
+/// second - `EventLoop can't be recreated` - so a second `android_main` in the
+/// same process has nothing to hand a window. It is not a rare shape: the
+/// activity is destroyed and created again in a process the system has kept,
+/// and the boot retry is the case that was measured, since its alarm relaunches
+/// into whatever process is still cached rather than into a new one.
+///
+/// What that used to leave behind was worse than a failure to start: the
+/// activity was created, the native side gave up, and the window neither drew
+/// nor closed. Nothing short of killing the process could recover it - not even
+/// `am start` from the shell, which found the same dead process each time.
+#[cfg(target_os = "android")]
+static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Starts the viewer from the Android `android_main` entry point.
 #[cfg(target_os = "android")]
 pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
     init_android_logging();
     install_panic_hook();
+
+    // Checked before anything is built, because what is missing is the event
+    // loop itself and every step below would be wasted work on a process that
+    // can no longer draw. The launch is handed to a fresh process - the alarm
+    // `restartSoon` sets is held by the system, so it survives this one - and
+    // this process exits either way: one that has spent its event loop cannot
+    // serve a viewer however often it is asked, and leaving it alive is what
+    // made the failure permanent.
+    if STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::error!(
+            target: "xgview",
+            "the viewer has already been started in this process; it cannot be started again"
+        );
+        if !android::restart_soon() {
+            tracing::warn!(
+                target: "xgview",
+                "no restart was scheduled; the next launch gets a process of its own"
+            );
+        }
+        exit_now();
+    }
+
     let runtime = build_runtime()?;
     let handle = runtime.handle().clone();
 
