@@ -824,6 +824,10 @@ public class MainActivity extends NativeActivity {
         // gone away has nothing left to do. The time is kept for the pause log.
         resumed = true;
         lastResumedAt = SystemClock.elapsedRealtime();
+        // Wall clock, and on disk: the boot retry compares it against the boot
+        // and cannot read anything this process holds in memory.
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putLong(KEY_RESUMED_AT, System.currentTimeMillis()).apply();
         ui.removeCallbacks(bootReassert);
         // The activity on screen is the one native calls must reach, even when
         // it was not the last one created. This is also where a sibling that
@@ -982,12 +986,28 @@ public class MainActivity extends NativeActivity {
     /** The file the native side writes before it tries Vulkan, and may leave behind. */
     private static final String VULKAN_ATTEMPT_MARKER = "xgview/wgpu-no-vulkan";
 
-    /** Preference file: which build last launched, and when it last restarted. */
-    private static final String PREFS = "xgview";
+    /**
+     * Preference file: which build last launched, when it last restarted, and
+     * when the wall was last on screen.
+     *
+     * <p>Package visible because {@code BootReceiver} reads and writes it: the
+     * two have to agree on the name, and on {@link #KEY_RESUMED_AT}.
+     */
+    static final String PREFS = "xgview";
 
     private static final String KEY_ENV = "env";
 
     private static final String KEY_RESTARTS = "restarts";
+
+    /**
+     * When the wall was last resumed, as wall clock milliseconds.
+     *
+     * <p>Written by {@link #onResume} and read by {@code BootReceiver}'s retry:
+     * a boot launch that never reached the foreground leaves this older than
+     * the boot, which is what tells the retry that the start was lost rather
+     * than merely slow.
+     */
+    static final String KEY_RESUMED_AT = "resumed_at";
 
     /** How many restarts are allowed within {@link #RESTART_WINDOW_MS}. */
     private static final int RESTART_LIMIT = 3;
