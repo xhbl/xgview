@@ -22,7 +22,7 @@ use crate::error::{CoreError, Result};
 use crate::h264::{nal_unit_type, H264Depacketizer};
 use crate::mse::MseParser;
 use crate::pipeline::open_mse;
-use crate::rtsp::{parse_rtp_header, parse_sdp, MediaPacket, RtspClient};
+use crate::rtsp::{mask_url, parse_rtp_header, parse_sdp, MediaPacket, RtspClient};
 
 /// Measures the resolution of an RTSP stream, or `None` if it could not be read
 /// within `timeout`.
@@ -34,13 +34,18 @@ pub async fn probe_resolution(
     match tokio::time::timeout(timeout, read_resolution(url, credentials)).await {
         Ok(Ok(size)) => size,
         Ok(Err(err)) => {
-            tracing::debug!(target: "xgview::discovery", %url, %err, "resolution probe failed");
+            tracing::debug!(
+                target: "xgview::discovery",
+                url = %mask_url(url),
+                %err,
+                "resolution probe failed"
+            );
             None
         }
         Err(_) => {
             tracing::debug!(
                 target: "xgview::discovery",
-                %url,
+                url = %mask_url(url),
                 timeout_s = timeout.as_secs(),
                 "resolution probe timed out"
             );
@@ -104,13 +109,18 @@ pub async fn probe_resolution_mse(
     match tokio::time::timeout(timeout, read_mse_size(url, credentials, timeout)).await {
         Ok(Ok(size)) => size,
         Ok(Err(err)) => {
-            tracing::debug!(target: "xgview::discovery", %url, %err, "mse resolution probe failed");
+            tracing::debug!(
+                target: "xgview::discovery",
+                url = %mask_url(url),
+                %err,
+                "mse resolution probe failed"
+            );
             None
         }
         Err(_) => {
             tracing::debug!(
                 target: "xgview::discovery",
-                %url,
+                url = %mask_url(url),
                 timeout_s = timeout.as_secs(),
                 "mse resolution probe timed out"
             );

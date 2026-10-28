@@ -113,7 +113,10 @@ impl RtspUrl {
         let input = input.trim();
         let (scheme, rest) = input
             .split_once("://")
-            .ok_or_else(|| CoreError::parse(format!("missing scheme in url: {input}")))?;
+            // The input goes into the message so a malformed address can be
+            // recognised, and it may still carry `user:pass@` - a URL typed
+            // without its scheme never reached the parser that strips them.
+            .ok_or_else(|| CoreError::parse(format!("missing scheme in url: {}", mask_url(input))))?;
         let scheme = scheme.to_ascii_lowercase();
         if scheme != "rtsp" && scheme != "rtsps" {
             return Err(CoreError::parse(format!("unsupported scheme: {scheme}")));
@@ -263,6 +266,25 @@ impl fmt::Display for RtspUrl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.masked())
     }
+}
+
+/// Any URL with the `user:pass@` in its authority replaced by `***`, for logs
+/// and error text.
+///
+/// [`RtspUrl::masked`] cannot serve everywhere: it parses RTSP only, and the
+/// MSE probe is handed a `ws://` address. This works on the text, so it covers
+/// every scheme and a URL that does not parse. A URL with no `@` in its
+/// authority comes back unchanged, which keeps the useful part of a message
+/// about a malformed address.
+pub(crate) fn mask_url(url: &str) -> String {
+    let scheme_end = url.find("://").map_or(0, |index| index + 3);
+    let authority_end = url[scheme_end..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |index| scheme_end + index);
+    let Some(at) = url[scheme_end..authority_end].rfind('@') else {
+        return url.to_string();
+    };
+    format!("{}***{}", &url[..scheme_end], &url[scheme_end + at..])
 }
 
 /// A parsed RTSP response.
@@ -1987,6 +2009,27 @@ impl RtspClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_url_in_a_log_loses_its_credentials() {
+        assert_eq!(
+            mask_url("rtsp://admin:pass@10.1.2.3:8554/live/ch0?a=1"),
+            "rtsp://***@10.1.2.3:8554/live/ch0?a=1"
+        );
+        assert_eq!(
+            mask_url("ws://admin:pass@10.1.2.3:5000/live/mse/api/ws?src=cam"),
+            "ws://***@10.1.2.3:5000/live/mse/api/ws?src=cam"
+        );
+        // An address typed without its scheme still has an authority to mask.
+        assert_eq!(mask_url("admin:pass@10.1.2.3/live"), "***@10.1.2.3/live");
+        // No user info, or an `@` outside the authority: nothing to hide, and
+        // the message keeps the address it is about.
+        assert_eq!(
+            mask_url("rtsp://10.1.2.3:554/live?src=a@b"),
+            "rtsp://10.1.2.3:554/live?src=a@b"
+        );
+        assert_eq!(mask_url("10.1.2.3:554"), "10.1.2.3:554");
+    }
 
     #[tokio::test]
     async fn a_line_is_read_up_to_its_newline() {
