@@ -2843,7 +2843,16 @@ pub(crate) async fn open_mse(
             let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
             format!("Basic {token}")
         };
-        request.headers_mut().insert("Authorization", authorization.try_into().unwrap());
+        // A header value rejects control characters and anything outside
+        // visible ASCII, and the Frigate token is whatever the server handed
+        // back - a malformed one has to fail the session, not panic on it. The
+        // value is not echoed in the error: it is a credential.
+        let value = authorization.try_into().map_err(|_| {
+            crate::error::CoreError::network(
+                "credentials cannot be carried in an Authorization header",
+            )
+        })?;
+        request.headers_mut().insert("Authorization", value);
     }
 
     // A TLS connector that accepts self-signed certificates (Frigate's LAN box
