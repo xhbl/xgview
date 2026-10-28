@@ -28,8 +28,20 @@ use crate::model::RtspTransport;
 /// Default RTSP port.
 pub const RTSP_DEFAULT_PORT: u16 = 554;
 
-/// Maximum size accepted for a single interleaved RTP payload.
-const MAX_INTERLEAVED_PAYLOAD: usize = 1 << 21;
+/// Upper bound on an RTSP response body. A DESCRIBE response carries the SDP,
+/// which is well under a kilobyte for any real camera; a megabyte leaves room
+/// for the odd vendor blob without inviting an OOM from a hostile server.
+const MAX_RESPONSE_BODY: usize = 1 << 20;
+
+/// Upper bound on one RTSP status or header line. Lines are short; eight
+/// kilobytes is far beyond anything a real camera sends and stops a server
+/// from keeping the reader in an unbounded `read_line`.
+const MAX_LINE: usize = 8 * 1024;
+
+/// Maximum number of header lines accepted in one response. A real RTSP
+/// response carries well under twenty; a hundred is generous, and a server
+/// that sends more is either broken or stalling the reader.
+const MAX_HEADERS: usize = 100;
 
 /// The `Require` header a camera that implements ONVIF Profile T looks for
 /// before it advertises its talk-back media in the session description.
@@ -832,6 +844,38 @@ pub struct RtspClient {
     rtcp_buffer: Box<[u8; 8192]>,
 }
 
+/// Reads one line from the RTSP transport, capped at [`MAX_LINE`] bytes.
+///
+/// The cap is enforced *before* the bytes are kept. `read_until` would not do:
+/// it grows the buffer until it finds the delimiter, so a server that never
+/// sends a newline would exhaust memory before any check could run.
+/// The returned string includes the trailing `\r\n`; the caller trims it.
+async fn read_limited_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<String> {
+    let mut buf: Vec<u8> = Vec::with_capacity(128);
+    loop {
+        let available = reader
+            .fill_buf()
+            .await
+            .map_err(|err| CoreError::rtsp(format!("read line: {err}")))?;
+        if available.is_empty() {
+            break;
+        }
+        let newline = available.iter().position(|&byte| byte == b'\n');
+        let take = newline.map_or(available.len(), |index| index + 1);
+        if buf.len() + take > MAX_LINE {
+            return Err(CoreError::rtsp(format!(
+                "line too long: more than {MAX_LINE} bytes"
+            )));
+        }
+        buf.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 impl RtspClient {
     /// Connects to the RTSP server described by `url`.
     pub async fn connect(url: &str) -> Result<Self> {
@@ -1030,9 +1074,9 @@ impl RtspClient {
                 .map_err(|err| CoreError::rtsp(format!("read interleaved header: {err}")))?;
             let channel = header[1];
             let length = u16::from_be_bytes([header[2], header[3]]) as usize;
-            if length > MAX_INTERLEAVED_PAYLOAD {
-                return Err(CoreError::rtsp(format!("interleaved payload too large: {length}")));
-            }
+            // The length is a u16, so it cannot exceed 64 KiB: no separate
+            // cap is needed, and the old `MAX_INTERLEAVED_PAYLOAD` (2 MiB)
+            // was a dead check against it.
             let mut payload = vec![0u8; length];
             reader
                 .read_exact(&mut payload)
@@ -1047,12 +1091,8 @@ impl RtspClient {
 
     /// Reads one response, body included.
     async fn read_response_headers(reader: &mut BufReader<OwnedReadHalf>) -> Result<RtspResponse> {
-        let mut status_line = String::new();
-        reader
-            .read_line(&mut status_line)
-            .await
-            .map_err(|err| CoreError::rtsp(format!("read status line: {err}")))?;
-        let status_line = status_line.trim_end().to_string();
+        let status_line = read_limited_line(reader).await?;
+        let status_line = status_line.trim_end();
         let mut parts = status_line.splitn(3, ' ');
         let version = parts.next().unwrap_or_default().to_string();
         if !version.to_ascii_uppercase().starts_with("RTSP/") {
@@ -1062,19 +1102,23 @@ impl RtspClient {
         let reason = parts.next().unwrap_or_default().to_string();
 
         let mut headers = Vec::new();
-        loop {
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .await
-                .map_err(|err| CoreError::rtsp(format!("read header line: {err}")))?;
+        let mut terminated = false;
+        for _ in 0..MAX_HEADERS {
+            let line = read_limited_line(reader).await?;
             let line = line.trim_end_matches(['\r', '\n']);
             if line.is_empty() {
+                terminated = true;
                 break;
             }
             if let Some((key, value)) = line.split_once(':') {
                 headers.push((key.trim().to_string(), value.trim().to_string()));
             }
+        }
+        // The blank line that ends the header block is the only thing that
+        // proves the response is framed. A response that never sent one is
+        // mis-framed, and reading a body from it would take the wrong bytes.
+        if !terminated {
+            return Err(CoreError::rtsp("too many header lines"));
         }
 
         let content_length = headers
@@ -1082,6 +1126,11 @@ impl RtspClient {
             .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
             .and_then(|(_, value)| value.parse::<usize>().ok())
             .unwrap_or(0);
+        if content_length > MAX_RESPONSE_BODY {
+            return Err(CoreError::rtsp(format!(
+                "response body too large: {content_length} bytes"
+            )));
+        }
         let mut body = vec![0u8; content_length];
         if content_length > 0 {
             reader
@@ -1938,6 +1987,24 @@ impl RtspClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_line_is_read_up_to_its_newline() {
+        let data = b"RTSP/1.0 200 OK\r\nthe rest";
+        let mut reader = BufReader::new(&data[..]);
+        assert_eq!(read_limited_line(&mut reader).await.unwrap(), "RTSP/1.0 200 OK\r\n");
+        assert_eq!(read_limited_line(&mut reader).await.unwrap(), "the rest");
+    }
+
+    #[tokio::test]
+    async fn a_line_without_a_newline_stops_at_the_cap() {
+        // Ten kilobytes of payload and no delimiter: the read must give up
+        // rather than grow the buffer until the peer stops sending.
+        let data = vec![b'a'; 10 * 1024];
+        let mut reader = BufReader::new(&data[..]);
+        let err = read_limited_line(&mut reader).await.unwrap_err();
+        assert!(err.to_string().contains("line too long"), "{err}");
+    }
 
     #[test]
     fn parses_url_with_credentials_and_port() {

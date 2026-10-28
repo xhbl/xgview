@@ -2291,7 +2291,8 @@ is four bytes of header - `$`, a channel, and a two-byte big-endian length -
 followed by exactly that many bytes, and there is no resynchronisation inside
 the stream. A length that is wrong by even one byte moves the start of the frame
 after it, and from there every frame is read from the wrong offset:
-`read_packet` either refuses a length past `MAX_INTERLEAVED_PAYLOAD` or takes
+`read_packet` either reads up to 64 KiB of payload (the two-byte length
+caps it) or takes
 payload for header until the next `$` happens to line up. So one damaged byte
 costs every picture after it, not one. A datagram is different: it arrives whole
 or not at all, so a packet the network loses costs that packet alone, its

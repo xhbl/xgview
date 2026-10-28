@@ -392,7 +392,22 @@ impl MseParser {
         let mut dts = run.base_dts;
         let mut offset = base_offset;
 
-        for i in 0..trun.sample_count as usize {
+        // The run can name more samples than the segment carries, and the
+        // count is a u32 from the wire: walking all of it is four billion turns
+        // of arithmetic for a box that holds none. Stop where the samples stop
+        // - the per-sample table bounds the walk while it lasts, a non-zero
+        // default size bounds it by what `mdat` can hold, and with neither
+        // there is nothing left to read.
+        let declared = trun.sample_count as usize;
+        let walk = if trun.sizes.len() >= declared {
+            declared
+        } else if run.default_sample_size > 0 {
+            declared.min(mdat.len() / run.default_sample_size as usize + 1)
+        } else {
+            trun.sizes.len()
+        };
+
+        for i in 0..walk {
             let duration = trun.durations.get(i).copied().unwrap_or(run.default_sample_duration) as u64;
             let size = trun.sizes.get(i).copied().unwrap_or(run.default_sample_size) as usize;
             let comp_offset = trun.composition_offsets.get(i).copied().unwrap_or(0) as i64;
@@ -704,6 +719,9 @@ fn parse_trun(data: &[u8]) -> Result<TrunData> {
 
     if flags & 0x000004 != 0 {
         // first_sample_flags — skip (we use per-sample or default).
+        if pos + 4 > body.len() {
+            return Err(CoreError::network("trun first_sample_flags truncated"));
+        }
         pos += 4;
     }
 
@@ -713,10 +731,36 @@ fn parse_trun(data: &[u8]) -> Result<TrunData> {
     let has_flags = flags & 0x000800 != 0;
     let comp_is_64 = version == 1 && has_comp;
 
-    let mut durations = Vec::with_capacity(if has_dur { sample_count as usize } else { 0 });
-    let mut sizes = Vec::with_capacity(if has_size { sample_count as usize } else { 0 });
-    let mut composition_offsets = Vec::with_capacity(if has_comp { sample_count as usize } else { 0 });
-    let mut sample_flags = Vec::with_capacity(if has_flags { sample_count as usize } else { 0 });
+    // A run with no per-sample field carries nothing to read. Returning here
+    // rather than walking to `sample_count` matters: the count is a u32 from
+    // the wire, and four billion turns of an empty loop freeze the pipeline
+    // for seconds on a box of a dozen bytes.
+    let bytes_per_sample = (has_dur as usize + has_size as usize + has_flags as usize) * 4
+        + has_comp as usize * if comp_is_64 { 8 } else { 4 };
+    if bytes_per_sample == 0 {
+        return Ok(TrunData {
+            sample_count,
+            data_offset,
+            durations: Vec::new(),
+            sizes: Vec::new(),
+            composition_offsets: Vec::new(),
+            sample_flags: Vec::new(),
+        });
+    }
+
+    // A malicious or broken trun can name millions of samples in a body that
+    // holds only a handful: `with_capacity` would allocate before the loop's
+    // own bounds check ever runs, and the process would abort. Cap each Vec to
+    // what the remaining body could possibly contain. `saturating_sub` is belt
+    // and braces - the optional fields above are bounds-checked - because an
+    // underflow here would wrap to a huge cap and undo the whole point.
+    let max_samples = body.len().saturating_sub(pos) / bytes_per_sample;
+    let cap = (sample_count as usize).min(max_samples);
+
+    let mut durations = Vec::with_capacity(if has_dur { cap } else { 0 });
+    let mut sizes = Vec::with_capacity(if has_size { cap } else { 0 });
+    let mut composition_offsets = Vec::with_capacity(if has_comp { cap } else { 0 });
+    let mut sample_flags = Vec::with_capacity(if has_flags { cap } else { 0 });
 
     for _ in 0..sample_count {
         if has_dur {
@@ -970,5 +1014,74 @@ mod tests {
         assert!(boxes[0].1.is_empty());
         assert_eq!(boxes[1].0, b"moov");
         assert_eq!(boxes[1].1, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn trun_with_a_truncated_first_sample_flags_is_refused() {
+        // version 0, flags 0x000004: first_sample_flags present, but the body
+        // holds nothing after sample_count. Advancing `pos` past the end would
+        // underflow the capacity computation.
+        let data = [0u8, 0x00, 0x00, 0x04, 0, 0, 0, 1];
+        assert!(parse_trun(&data).is_err());
+    }
+
+    #[test]
+    fn trun_capacity_is_capped_by_the_body() {
+        // flags 0x000100: durations present. sample_count claims ten million
+        // while the body holds none, so the Vec must stay near-empty instead
+        // of reserving forty megabytes for a lie.
+        let mut data = vec![0u8, 0x00, 0x01, 0x00];
+        data.extend_from_slice(&10_000_000u32.to_be_bytes());
+        let trun = parse_trun(&data).unwrap();
+        assert_eq!(trun.sample_count, 10_000_000);
+        assert!(trun.durations.is_empty());
+        assert!(trun.durations.capacity() <= 4);
+    }
+
+    #[test]
+    fn trun_with_no_per_sample_field_does_not_walk_the_count() {
+        // flags 0x000001: data_offset only, nothing per sample. The declared
+        // count is four billion, and the old loop spun on an empty body for
+        // seconds - a twelve-byte box freezing the pipeline.
+        let mut data = vec![0u8, 0x00, 0x00, 0x01];
+        data.extend_from_slice(&u32::MAX.to_be_bytes());
+        data.extend_from_slice(&0i32.to_be_bytes());
+        let start = std::time::Instant::now();
+        let trun = parse_trun(&data).unwrap();
+        assert_eq!(trun.sample_count, u32::MAX);
+        assert!(trun.durations.is_empty());
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_run_naming_more_samples_than_it_carries_does_not_walk_them_all() {
+        // The same count, one layer up: no per-sample size, no default size,
+        // an empty mdat. Nothing can come out, so nothing should be walked.
+        let run = TrackRun {
+            track_id: 1,
+            base_dts: 0,
+            trun: TrunData {
+                sample_count: u32::MAX,
+                data_offset: None,
+                durations: Vec::new(),
+                sizes: Vec::new(),
+                composition_offsets: Vec::new(),
+                sample_flags: Vec::new(),
+            },
+            default_sample_duration: 0,
+            default_sample_size: 0,
+            default_sample_flags: 0,
+            moof_size: 0,
+        };
+        let parser = MseParser::new();
+        let mut samples = Vec::new();
+        let mut audio = Vec::new();
+        let start = std::time::Instant::now();
+        parser
+            .extract_samples(&run, &[], &mut samples, &mut audio)
+            .unwrap();
+        assert!(samples.is_empty());
+        assert!(audio.is_empty());
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
     }
 }
