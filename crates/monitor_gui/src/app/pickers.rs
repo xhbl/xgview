@@ -18,94 +18,102 @@ impl XgViewApp {
     /// painted into it. The three rows are three scopes of the navigation
     /// layer, and the vertical arrows cross between them at the same column.
     pub(super) fn draw_layout_picker(&mut self, ctx: &egui::Context) {
-        if !self.layout_picker.is_open() {
-            return;
-        }
-        let mut chosen: Option<GridLayout> = None;
-        let mut close = false;
+        self.modal_frame(
+            ctx,
+            "xgview-layout-picker",
+            360.0,
+            |app| &mut app.layout_picker,
+            |app, ui, ()| {
+                let mut chosen: Option<GridLayout> = None;
+                let mut close = false;
 
-        egui::Modal::new(Id::new("xgview-layout-picker")).show(ctx, |ui| {
-            ui.set_width(360.0);
-            // The way out, at the far end of the title bar: a cross rather
-            // than the word, which stays as its tooltip.
-            let bar = dialogs::title_bar(
-                ui,
-                &monitor_i18n::tr("layout-picker-title"),
-                true,
-                &monitor_i18n::tr("dialog-close"),
-            );
-            if let Some(close_button) = bar.close {
-                if self.nav.tracked(close_button).clicked() {
-                    close = true;
+                // The way out, at the far end of the title bar: a cross rather
+                // than the word, which stays as its tooltip.
+                let bar = dialogs::title_bar(
+                    ui,
+                    &monitor_i18n::tr("layout-picker-title"),
+                    true,
+                    &monitor_i18n::tr("dialog-close"),
+                );
+                if let Some(close_button) = bar.close {
+                    if app.nav.tracked(close_button).clicked() {
+                        close = true;
+                    }
                 }
-            }
 
-            // Three to a row, each row a scope of the navigation layer: the
-            // sideways arrows walk a row and the vertical ones cross between
-            // them at the same column, so a remote reaches all nine.
-            self.layout_picker.anchor = None;
-            for (row, chunk) in GridLayout::EXTENDED.chunks(3).enumerate() {
-                let scope = LAYOUT_PICKER_ROWS[row];
-                ui.horizontal(|ui| {
-                    self.nav.open(scope);
-                    for layout in chunk {
-                        let selected = self.scheduler.layout() == *layout;
-                        let (rect, response) =
-                            ui.allocate_exact_size(vec2(108.0, 84.0), Sense::click());
-                        if self.layout_picker.anchor.is_none() {
-                            self.layout_picker.anchor = Some(response.id);
-                        }
-                        if ui.is_rect_visible(rect) {
-                            let painter = ui.painter();
-                            // The two states the rest of the interface draws:
-                            // the layout in use carries the accent fill, and the
-                            // thumbnail the remote is on carries the focus ring.
-                            // Both come from the same `WidgetVisuals` a
-                            // `selectable_label` would use, so the fill and the
-                            // number match the toolbar's own layout buttons.
-                            let visuals = ui.style().interact_selectable(&response, selected);
-                            let corner = CornerRadius::same(theme::radius::S);
-                            if selected || response.hovered() {
-                                painter.rect_filled(rect, corner, visuals.weak_bg_fill);
+                // Three to a row, each row a scope of the navigation layer: the
+                // sideways arrows walk a row and the vertical ones cross between
+                // them at the same column, so a remote reaches all nine.
+                app.layout_picker.anchor = None;
+                for (row, chunk) in GridLayout::EXTENDED.chunks(3).enumerate() {
+                    let scope = LAYOUT_PICKER_ROWS[row];
+                    ui.horizontal(|ui| {
+                        app.nav.open(scope);
+                        for layout in chunk {
+                            let selected = app.scheduler.layout() == *layout;
+                            let (rect, response) =
+                                ui.allocate_exact_size(vec2(108.0, 84.0), Sense::click());
+                            if app.layout_picker.anchor.is_none() {
+                                app.layout_picker.anchor = Some(response.id);
                             }
-                            if visuals.bg_stroke.width > 0.0 {
-                                painter.rect_stroke(
-                                    rect,
-                                    corner,
-                                    visuals.bg_stroke,
-                                    StrokeKind::Inside,
+                            if ui.is_rect_visible(rect) {
+                                let painter = ui.painter();
+                                // The two states the rest of the interface draws:
+                                // the layout in use carries the accent fill, and
+                                // the thumbnail the remote is on carries the
+                                // focus ring. Both come from the same
+                                // `WidgetVisuals` a `selectable_label` would use,
+                                // so the fill and the number match the toolbar's
+                                // own layout buttons.
+                                let visuals = ui.style().interact_selectable(&response, selected);
+                                let corner = CornerRadius::same(theme::radius::S);
+                                if selected || response.hovered() {
+                                    painter.rect_filled(rect, corner, visuals.weak_bg_fill);
+                                }
+                                if visuals.bg_stroke.width > 0.0 {
+                                    painter.rect_stroke(
+                                        rect,
+                                        corner,
+                                        visuals.bg_stroke,
+                                        StrokeKind::Inside,
+                                    );
+                                }
+                                let thumb = Rect::from_min_size(
+                                    rect.left_top() + vec2(6.0, 6.0),
+                                    vec2(rect.width() - 12.0, rect.height() - 30.0),
+                                );
+                                grid::layout_thumbnail(painter, thumb, *layout);
+                                painter.text(
+                                    egui::pos2(rect.center().x, rect.bottom() - 12.0),
+                                    Align2::CENTER_CENTER,
+                                    layout.label(),
+                                    FontId::proportional(15.0),
+                                    visuals.text_color(),
                                 );
                             }
-                            let thumb = Rect::from_min_size(
-                                rect.left_top() + vec2(6.0, 6.0),
-                                vec2(rect.width() - 12.0, rect.height() - 30.0),
-                            );
-                            grid::layout_thumbnail(painter, thumb, *layout);
-                            painter.text(
-                                egui::pos2(rect.center().x, rect.bottom() - 12.0),
-                                Align2::CENTER_CENTER,
-                                layout.label(),
-                                FontId::proportional(15.0),
-                                visuals.text_color(),
-                            );
+                            let response = app.nav.tracked(response);
+                            app.name(&response, layout_hint(*layout));
+                            if response.clicked() {
+                                chosen = Some(*layout);
+                            }
                         }
-                        let response = self.nav.tracked(response);
-                        self.name(&response, layout_hint(*layout));
-                        if response.clicked() {
-                            chosen = Some(*layout);
-                        }
-                    }
-                    self.nav.close();
-                });
-            }
-        });
+                        app.nav.close();
+                    });
+                }
 
-        if let Some(layout) = chosen {
-            self.set_layout(layout);
-            self.restore_focus = self.layout_picker.close_restoring();
-        } else if close {
-            self.restore_focus = self.layout_picker.close_restoring();
-        }
+                if let Some(layout) = chosen {
+                    // `set_layout` closes the pickers itself; the answer below
+                    // only says to give the focus back.
+                    app.set_layout(layout);
+                    return Answer::CLOSE;
+                }
+                if close {
+                    Answer::CLOSE
+                } else {
+                    Answer::STAY
+                }
+            },
+        );
     }
 
     /// The modal that lists the cameras on the current portrait page and lets
