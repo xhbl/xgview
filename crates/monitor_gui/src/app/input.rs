@@ -692,6 +692,39 @@ impl XgViewApp {
         }
     }
 
+    /// Whether Back closed one of the windows this application opened.
+    ///
+    /// The innermost layer, whatever has the focus inside it: a field's caret
+    /// must not hold a window open - Back on the first field would otherwise
+    /// hand the focus back to that same field, and the window could never be
+    /// left. A prompt whose passphrase is being stretched is the exception: it
+    /// is the one thing on this side of the answer that cannot be backed out of,
+    /// because the answer would then have nowhere to go.
+    fn keys_of_the_window(&mut self, ctx: &egui::Context) -> bool {
+        let waiting = (self.passphrase.payload.as_ref().is_some_and(|prompt| !prompt.working))
+            || self.camera_edit.is_open()
+            || self.remove_confirm.is_open()
+            || self.system_confirm.is_open();
+        if !(waiting && self.dialog_back_pressed(ctx)) {
+            return false;
+        }
+        if self.passphrase.is_open() {
+            self.passphrase.close();
+            // Backing out of it leaves the export or import unasked for, and the
+            // button behind the prompt takes the focus again.
+            self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
+        } else if self.remove_confirm.is_open() {
+            // The focus goes back to the button that opened it, which is then
+            // forgotten: a closed window does not keep pointing at one.
+            self.restore_focus = self.remove_confirm.close_restoring();
+        } else if self.system_confirm.is_open() {
+            self.restore_focus = self.system_confirm.close_restoring();
+        } else if self.camera_edit.is_open() {
+            self.restore_focus = self.camera_edit.close_restoring();
+        }
+        true
+    }
+
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
         // The file dialog owns the keyboard while it is up. Its own keybindings
         // and egui's focus walk are how a viewer moves around it, and the arrows
@@ -743,32 +776,8 @@ impl XgViewApp {
         }
 
         // A window this application opened is the innermost layer: Back closes
-        // it, whatever inside it has the focus. A field's caret must not hold it
-        // open - Back on the first field would otherwise hand the focus back to
-        // that same field, and the window could never be left.
-        // A prompt whose passphrase is being stretched is the exception: it is
-        // the one thing on this side of the answer that cannot be backed out of,
-        // because the answer would then have nowhere to go.
-        if ((self.passphrase.payload.as_ref().is_some_and(|prompt| !prompt.working))
-            || self.camera_edit.is_open()
-            || self.remove_confirm.is_open()
-            || self.system_confirm.is_open())
-            && self.dialog_back_pressed(ctx)
-        {
-            if self.passphrase.is_open() {
-                self.passphrase.close();
-                // Backing out of it leaves the export or import unasked for, and
-                // the button behind the prompt takes the focus again.
-                self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
-            } else if self.remove_confirm.is_open() {
-                // The focus goes back to the button that opened it, which is
-                // then forgotten: a closed window does not keep pointing at one.
-                self.restore_focus = self.remove_confirm.close_restoring();
-            } else if self.system_confirm.is_open() {
-                self.restore_focus = self.system_confirm.close_restoring();
-            } else if self.camera_edit.is_open() {
-                self.restore_focus = self.camera_edit.close_restoring();
-            }
+        // it, whatever inside it has the focus. See `keys_of_the_window`.
+        if self.keys_of_the_window(ctx) {
             return;
         }
 
