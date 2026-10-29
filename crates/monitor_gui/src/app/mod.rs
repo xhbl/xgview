@@ -1945,97 +1945,9 @@ impl eframe::App for XgViewApp {
             self.tile_bar.hide();
         }
 
-        // The start-up full screen is asked for here, on the first frame the
-        // window is on its monitor, rather than on the viewport builder: asked
-        // for there it is answered before the window has a monitor to be made
-        // full screen on, and Windows then leaves it covering a window-sized
-        // area - the same wrong geometry that toggling F11 twice repairs. See
-        // `native_options` in `lib.rs`.
-        if std::mem::take(&mut self.fullscreen_pending) {
-            self.set_fullscreen(ctx, true);
-        }
+        self.pump_background(ctx);
 
-        // Another launch asked this window to come forward. The restore is a
-        // command of its own, a frame before the focus: winit only raises a
-        // window it does not consider minimised, and it looks at the state it
-        // had before this frame, so sending the two together would drop the
-        // focus. See `crate::instance`.
-        if crate::instance::asked_to_come_forward() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            self.come_forward = true;
-        } else if std::mem::take(&mut self.come_forward) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
-
-        // A suspension with a clock on it ends by itself, on the first frame
-        // after the moment it named. The other kind is ended by the code that
-        // began it, which knows when the thing it opened is over.
-        if let OnTop::SuspendedUntil(until) = self.on_top {
-            if Instant::now() >= until {
-                self.set_on_top(ctx, OnTop::Configured);
-            }
-        }
-
-        // The file dialog, while it is up: drawn and answered here, at the top
-        // of the frame, so that a configuration it picked is the one the wall
-        // behind is drawn from. See `ask_for_file`.
-        #[cfg(not(target_os = "android"))]
-        self.poll_file_dialog(ctx);
-
-        // Anything the soft keyboard typed has to be in the input queue before
-        // a widget is drawn: a text field reads the events of the frame it is
-        // drawn in, so a keystroke handed over later would be a frame behind.
-        #[cfg(target_os = "android")]
-        crate::keyboard::drain(ctx);
-
-        // The document an import picked, if the picker has answered since the
-        // last frame. Taken before anything is drawn, so the wall it changes is
-        // drawn from the new configuration on this frame.
-        #[cfg(target_os = "android")]
-        self.poll_picked_config();
-
-        if ctx.input(|input| input.viewport().close_requested()) {
-            self.save_now();
-            self.manager.shutdown();
-            // The request outlives the viewport otherwise: on the desktop this
-            // is the last moment anything of ours runs.
-            if let Err(err) = power::release() {
-                tracing::warn!(target: "xgview::power", %err, "cannot take the wake request back");
-            }
-        }
-
-        // Read before the keys are handed out: `handle_keys` takes the ones the
-        // application acts on out of the queue, and the bars still have to know
-        // a viewer was there. What counts as asking for them is the whole of
-        // `viewer_active`.
-        self.chrome.input_seen = self.viewer_active(ctx);
-        // And the press in flight is tracked before anything is drawn: the
-        // release that closes the magnified viewport's bar is read against it.
-        self.track_tap(ctx);
-        // A tap asks for the strip, but only once egui's double-click window has
-        // passed: the second tap of a double press is the way back to the grid,
-        // and the first must not put the strip on screen on its way there. See
-        // `tile_bar_overlay`.
-        if let Some(at) = self.tap_open_at {
-            let now = Instant::now();
-            if now >= at {
-                self.tap_open_at = None;
-                if self.scheduler.is_zoomed() && !self.tile_bar.is_open() {
-                    self.tile_bar.show(tilebar::Dock::Bottom, now);
-                }
-            } else {
-                ctx.request_repaint_after(at - now);
-            }
-        }
-
-        self.poll_events();
-        self.poll_sealing();
-        self.poll_talk_test();
-        // An answer comes back with the wall drawn a frame or two after it was
-        // asked for, so the frame it lands in has to come on its own.
-        if self.sealing.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
+        self.pump_events(ctx);
         // The navigation layer starts its frame here: the layout it collects
         // while the widgets are drawn below becomes the one the next frame's
         // arrows read. The keys handed out just above used the previous one.
@@ -2084,226 +1996,8 @@ impl eframe::App for XgViewApp {
         // offer the status line. See `focus_names`.
         self.focus_names.clear();
 
-        // Android: the navigation bar keeps a strip along one edge, and which
-        // edge that is belongs to the device - a landscape phone carries it
-        // along a short edge, a tablet whose natural orientation is landscape
-        // along the bottom one. The wall leaves exactly that strip free, so no
-        // control sits under the bar. A television and an external display have
-        // no navigation bar, so those insets are zero and everything stays edge
-        // to edge. The notch is separate: it is reserved even with the bars
-        // hidden, as a top strip upright, a bottom strip when the device is held
-        // the other way up, and a side strip on its side, because a toolbar or
-        // tile drawn under it cannot be used. The activity reports only the
-        // notch when the bars are hidden, and the notch and the bar together
-        // when they are reserved; see `MainActivity.applySystemBars`.
-        #[cfg(target_os = "android")]
-        let (inset_left, inset_top, inset_right, inset_bottom) = {
-            crate::android::set_reserve_navigation_bar(self.config.reserve_navigation_bar);
-            crate::android::insets_px()
-        };
-        #[cfg(not(target_os = "android"))]
-        let (inset_left, inset_top, inset_right, inset_bottom) = (0_i32, 0_i32, 0_i32, 0_i32);
-        let pixels_per_point = ctx.pixels_per_point();
-        let inset_left = inset_left as f32 / pixels_per_point;
-        let inset_top = inset_top as f32 / pixels_per_point;
-        let inset_right = inset_right as f32 / pixels_per_point;
-        let inset_bottom = inset_bottom as f32 / pixels_per_point;
-        if inset_left >= 1.0 {
-            egui::SidePanel::left("xgview-gutter-left")
-                .resizable(false)
-                .exact_width(inset_left)
-                .frame(egui::Frame::default().fill(theme::BACKGROUND))
-                .show(ctx, |_| {});
-        }
-        if inset_right >= 1.0 {
-            egui::SidePanel::right("xgview-gutter-right")
-                .resizable(false)
-                .exact_width(inset_right)
-                .frame(egui::Frame::default().fill(theme::BACKGROUND))
-                .show(ctx, |_| {});
-        }
-        if inset_top >= 1.0 {
-            egui::TopBottomPanel::top("xgview-gutter-top")
-                .resizable(false)
-                .exact_height(inset_top)
-                .frame(egui::Frame::default().fill(theme::BACKGROUND))
-                .show(ctx, |_| {});
-        }
-        if inset_bottom >= 1.0 {
-            egui::TopBottomPanel::bottom("xgview-gutter-bottom")
-                .resizable(false)
-                .exact_height(inset_bottom)
-                .frame(egui::Frame::default().fill(theme::BACKGROUND))
-                .show(ctx, |_| {});
-        }
-
-        // In full screen the bars fade out when the wall is left alone; see
-        // `chrome_visible`. The row is not inset on the right: the version
-        // label that ends it is what keeps the touch screen's back-gesture band
-        // clear of the controls; see `toolbar`.
-        //
-        // Whether the band of each bar has to be claimed this frame is read
-        // *before* the bars are asked for, because the frame a press in a band
-        // brings them back in is one of the frames that has to claim it.
-        let bands_hidden = !self.chrome.visible;
-        let bars = self.chrome_visible();
-        if bars {
-            let toolbar = egui::TopBottomPanel::top("xgview-toolbar").show(ctx, |ui| self.toolbar(ui));
-            let status = egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| self.status_bar(ui));
-            // Kept past this frame, when the bars are gone: the band a bar
-            // occupies is the pointer's way of asking for it back. See
-            // `Chrome::bars`.
-            self.chrome.bars = Some((toolbar.response.rect, status.response.rect));
-        } else {
-            // The bar is gone, and with it anything it could hand the remote's
-            // focus to: keeping the list would point the focus at a control
-            // that is not on screen.
-            self.toolbar_items.clear();
-            self.status_author = None;
-            // A pointer the viewer cannot see is a pointer they cannot aim. The
-            // bars stay away - moving the mouse is not a request for them - but
-            // the cursor comes back with the first movement, so that a viewer
-            // can find the band they are meant to press.
-            if ctx.input(|input| input.pointer.is_moving()) {
-                ctx.set_cursor_icon(egui::CursorIcon::Default);
-            } else {
-                ctx.set_cursor_icon(egui::CursorIcon::None);
-            }
-        }
-        // The band each bar sat in is the pointer's way of asking for it back -
-        // see `viewer_active` - and the wall is drawn underneath it, so it has
-        // to be the pointer's alone: without this, the press that asks for the
-        // bars would land on the tile behind it as well, and a viewer reaching
-        // for the menu would also move the focus. A press is hit-tested against
-        // the widgets of the frame it lands in, which is why the frame that
-        // brings the bars back claims the band just like any other: by the time
-        // the press is placed the bars are drawn, and the band is over them.
-        //
-        // Magnified, the band is the viewport's own bar's instead, and the tile
-        // under it is what has to see the press: these overlays are exactly
-        // where that bar is drawn, so one of them would eat the press before the
-        // tile could open it. See `crate::tilebar` and `wall_event`.
-        if bands_hidden && !self.scheduler.is_zoomed() {
-            if let Some((top, bottom)) = self.chrome.bars {
-                for (id, band) in [("xgview-toolbar-band", top), ("xgview-status-band", bottom)] {
-                    // The size is given, and never left to the area's own
-                    // default: an area with none starts at `default_area_size`
-                    // and is then constrained back onto the screen, which for
-                    // the bottom band moves its top to the top of the window -
-                    // an overlay over the whole wall, eating every press on a
-                    // tile. See `band_overlay_area_is_the_band`.
-                    egui::Area::new(Id::new(id))
-                        .order(egui::Order::Middle)
-                        .fixed_pos(band.min)
-                        .default_size(band.size())
-                        .show(ctx, |ui| {
-                            ui.allocate_rect(band, egui::Sense::click());
-                        });
-                }
-            }
-        }
-        if self.show_settings {
-            egui::SidePanel::right("xgview-settings")
-                .default_width(SETTINGS_WIDTH)
-                .min_width(SETTINGS_MIN_WIDTH)
-                .show(ctx, |ui| self.settings_panel(ui));
-
-            // The pointer's way out of the panel: a click anywhere on the wall
-            // beside it. A remote control and a keyboard have Back and Escape,
-            // which say "close the panel" from wherever the focus happens to
-            // be; a mouse or a finger has only the gear that opened it, and a
-            // control that opens something is not read as the one that closes
-            // it either.
-            //
-            // The press is taken by a layer over the wall rather than read
-            // from the input queue, so that the click which dismisses the
-            // panel cannot also land on the tile under the pointer - a click
-            // on the wall magnifies that channel, and closing the panel while
-            // zooming into a picture behind it is not what the viewer asked
-            // for. The layer stops short of the bars: they keep working while
-            // the panel is open, and the gear closes it by itself.
-            //
-            // Its rect is what the central panel is about to be given, so it
-            // covers the wall and nothing else - the panel has just been laid
-            // out, and the bars before it.
-            let wall = ctx.available_rect();
-            let dismissed = egui::Area::new(Id::new("xgview-settings-dismiss"))
-                .order(egui::Order::Middle)
-                .fixed_pos(wall.min)
-                .show(ctx, |ui| ui.allocate_rect(wall, egui::Sense::click()).clicked())
-                .inner;
-            if dismissed {
-                self.show_settings = false;
-            }
-        }
-
-        egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(theme::BACKGROUND))
-            .show(ctx, |ui| {
-                let area = ui.available_rect_before_wrap();
-                self.draw_grid(ui);
-                // The floating page arrows sit at the very edges the magnified
-                // viewport's bar is docked to, and are drawn after the wall - so
-                // they would lie on top of it. The bar is the surface in use
-                // while it is up, and the bars' own page buttons are still
-                // there; the arrows come back with the picture once it goes.
-                if self.is_portrait() && self.chrome.visible && !self.tile_bar.is_open() {
-                    self.portrait_page_buttons(ui, area);
-                }
-            });
-
-        if self.discovery.open {
-            let handle = self.handle.clone();
-            let events = self.events_tx.clone();
-            if dialogs::add_devices_window(
-                ctx,
-                &mut self.discovery,
-                &mut self.config,
-                &handle,
-                &events,
-                &mut self.nav,
-            ) {
-                self.needs_sync = true;
-                self.mark_dirty();
-            }
-            // The manual tab's test button: the dialog has no runtime, so the
-            // press comes back here and is played like the edit window's.
-            if std::mem::take(&mut self.discovery.talk_test) {
-                let result = self.discovery.manual.build();
-                match result {
-                    Ok(source) => self.spawn_test_tone(source),
-                    Err(error) => self.flash(error, ToastKind::Error),
-                }
-            }
-            // The window closed itself - its cross, or Back - so the button it
-            // was opened from takes the focus again.
-            if !self.discovery.open {
-                self.restore_focus = self.discovery.from.take();
-            }
-        }
-
-        if self.camera_edit_window(ctx) {
-            self.mark_dirty();
-        }
-        if self.remove_confirm_window(ctx) {
-            self.mark_dirty();
-        }
-        self.system_confirm_window(ctx);
-        if self.passphrase_window(ctx) {
-            self.mark_dirty();
-        }
-
-        self.draw_layout_picker(ctx);
-        self.draw_portrait_aspect_picker(ctx);
-        self.draw_combined_info_picker(ctx);
-        self.draw_toast(ctx);
-        self.draw_exit_hint(ctx);
-        // After everything else, and on its own layer: the blank covers the
-        // toolbar, the status bar and the tiles, not only the wall.
-        if self.blackout_on {
-            self.blackout.draw(ctx, self.time);
-        }
-        self.autosave();
+        self.draw_chrome(ctx);
+        self.draw_wall(ctx);
 
         // A panel that appears takes the remote's focus, once: without it the
         // arrows would go on walking the wall behind it, which is the one thing
@@ -2642,6 +2336,338 @@ impl eframe::App for XgViewApp {
                 }
             }
         }
+    }
+}
+
+impl XgViewApp {
+    /// The frame's background work: where the window sits among the others, the file
+    /// dialog, the keyboard, and a close that was asked for.
+    pub(super) fn pump_background(&mut self, ctx: &egui::Context) {
+        // The start-up full screen is asked for here, on the first frame the
+        // window is on its monitor, rather than on the viewport builder: asked
+        // for there it is answered before the window has a monitor to be made
+        // full screen on, and Windows then leaves it covering a window-sized
+        // area - the same wrong geometry that toggling F11 twice repairs. See
+        // `native_options` in `lib.rs`.
+        if std::mem::take(&mut self.fullscreen_pending) {
+            self.set_fullscreen(ctx, true);
+        }
+
+        // Another launch asked this window to come forward. The restore is a
+        // command of its own, a frame before the focus: winit only raises a
+        // window it does not consider minimised, and it looks at the state it
+        // had before this frame, so sending the two together would drop the
+        // focus. See `crate::instance`.
+        if crate::instance::asked_to_come_forward() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            self.come_forward = true;
+        } else if std::mem::take(&mut self.come_forward) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+
+        // A suspension with a clock on it ends by itself, on the first frame
+        // after the moment it named. The other kind is ended by the code that
+        // began it, which knows when the thing it opened is over.
+        if let OnTop::SuspendedUntil(until) = self.on_top {
+            if Instant::now() >= until {
+                self.set_on_top(ctx, OnTop::Configured);
+            }
+        }
+
+        // The file dialog, while it is up: drawn and answered here, at the top
+        // of the frame, so that a configuration it picked is the one the wall
+        // behind is drawn from. See `ask_for_file`.
+        #[cfg(not(target_os = "android"))]
+        self.poll_file_dialog(ctx);
+
+        // Anything the soft keyboard typed has to be in the input queue before
+        // a widget is drawn: a text field reads the events of the frame it is
+        // drawn in, so a keystroke handed over later would be a frame behind.
+        #[cfg(target_os = "android")]
+        crate::keyboard::drain(ctx);
+
+        // The document an import picked, if the picker has answered since the
+        // last frame. Taken before anything is drawn, so the wall it changes is
+        // drawn from the new configuration on this frame.
+        #[cfg(target_os = "android")]
+        self.poll_picked_config();
+
+        if ctx.input(|input| input.viewport().close_requested()) {
+            self.save_now();
+            self.manager.shutdown();
+            // The request outlives the viewport otherwise: on the desktop this
+            // is the last moment anything of ours runs.
+            if let Err(err) = power::release() {
+                tracing::warn!(target: "xgview::power", %err, "cannot take the wake request back");
+            }
+        }
+    }
+
+    /// What the background jobs answered since the last frame, and the press in
+    /// flight - both read before anything is drawn.
+    pub(super) fn pump_events(&mut self, ctx: &egui::Context) {
+        // Read before the keys are handed out: `handle_keys` takes the ones the
+        // application acts on out of the queue, and the bars still have to know
+        // a viewer was there. What counts as asking for them is the whole of
+        // `viewer_active`.
+        self.chrome.input_seen = self.viewer_active(ctx);
+        // And the press in flight is tracked before anything is drawn: the
+        // release that closes the magnified viewport's bar is read against it.
+        self.track_tap(ctx);
+        // A tap asks for the strip, but only once egui's double-click window has
+        // passed: the second tap of a double press is the way back to the grid,
+        // and the first must not put the strip on screen on its way there. See
+        // `tile_bar_overlay`.
+        if let Some(at) = self.tap_open_at {
+            let now = Instant::now();
+            if now >= at {
+                self.tap_open_at = None;
+                if self.scheduler.is_zoomed() && !self.tile_bar.is_open() {
+                    self.tile_bar.show(tilebar::Dock::Bottom, now);
+                }
+            } else {
+                ctx.request_repaint_after(at - now);
+            }
+        }
+
+        self.poll_events();
+        self.poll_sealing();
+        self.poll_talk_test();
+        // An answer comes back with the wall drawn a frame or two after it was
+        // asked for, so the frame it lands in has to come on its own.
+        if self.sealing.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    /// The strips the platform reserves and the two bars, then the bands they leave
+    /// behind for the pointer to find them by.
+    pub(super) fn draw_chrome(&mut self, ctx: &egui::Context) {
+        // Android: the navigation bar keeps a strip along one edge, and which
+        // edge that is belongs to the device - a landscape phone carries it
+        // along a short edge, a tablet whose natural orientation is landscape
+        // along the bottom one. The wall leaves exactly that strip free, so no
+        // control sits under the bar. A television and an external display have
+        // no navigation bar, so those insets are zero and everything stays edge
+        // to edge. The notch is separate: it is reserved even with the bars
+        // hidden, as a top strip upright, a bottom strip when the device is held
+        // the other way up, and a side strip on its side, because a toolbar or
+        // tile drawn under it cannot be used. The activity reports only the
+        // notch when the bars are hidden, and the notch and the bar together
+        // when they are reserved; see `MainActivity.applySystemBars`.
+        #[cfg(target_os = "android")]
+        let (inset_left, inset_top, inset_right, inset_bottom) = {
+            crate::android::set_reserve_navigation_bar(self.config.reserve_navigation_bar);
+            crate::android::insets_px()
+        };
+        #[cfg(not(target_os = "android"))]
+        let (inset_left, inset_top, inset_right, inset_bottom) = (0_i32, 0_i32, 0_i32, 0_i32);
+        let pixels_per_point = ctx.pixels_per_point();
+        let inset_left = inset_left as f32 / pixels_per_point;
+        let inset_top = inset_top as f32 / pixels_per_point;
+        let inset_right = inset_right as f32 / pixels_per_point;
+        let inset_bottom = inset_bottom as f32 / pixels_per_point;
+        if inset_left >= 1.0 {
+            egui::SidePanel::left("xgview-gutter-left")
+                .resizable(false)
+                .exact_width(inset_left)
+                .frame(egui::Frame::default().fill(theme::BACKGROUND))
+                .show(ctx, |_| {});
+        }
+        if inset_right >= 1.0 {
+            egui::SidePanel::right("xgview-gutter-right")
+                .resizable(false)
+                .exact_width(inset_right)
+                .frame(egui::Frame::default().fill(theme::BACKGROUND))
+                .show(ctx, |_| {});
+        }
+        if inset_top >= 1.0 {
+            egui::TopBottomPanel::top("xgview-gutter-top")
+                .resizable(false)
+                .exact_height(inset_top)
+                .frame(egui::Frame::default().fill(theme::BACKGROUND))
+                .show(ctx, |_| {});
+        }
+        if inset_bottom >= 1.0 {
+            egui::TopBottomPanel::bottom("xgview-gutter-bottom")
+                .resizable(false)
+                .exact_height(inset_bottom)
+                .frame(egui::Frame::default().fill(theme::BACKGROUND))
+                .show(ctx, |_| {});
+        }
+
+        // In full screen the bars fade out when the wall is left alone; see
+        // `chrome_visible`. The row is not inset on the right: the version
+        // label that ends it is what keeps the touch screen's back-gesture band
+        // clear of the controls; see `toolbar`.
+        //
+        // Whether the band of each bar has to be claimed this frame is read
+        // *before* the bars are asked for, because the frame a press in a band
+        // brings them back in is one of the frames that has to claim it.
+        let bands_hidden = !self.chrome.visible;
+        let bars = self.chrome_visible();
+        if bars {
+            let toolbar = egui::TopBottomPanel::top("xgview-toolbar").show(ctx, |ui| self.toolbar(ui));
+            let status = egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| self.status_bar(ui));
+            // Kept past this frame, when the bars are gone: the band a bar
+            // occupies is the pointer's way of asking for it back. See
+            // `Chrome::bars`.
+            self.chrome.bars = Some((toolbar.response.rect, status.response.rect));
+        } else {
+            // The bar is gone, and with it anything it could hand the remote's
+            // focus to: keeping the list would point the focus at a control
+            // that is not on screen.
+            self.toolbar_items.clear();
+            self.status_author = None;
+            // A pointer the viewer cannot see is a pointer they cannot aim. The
+            // bars stay away - moving the mouse is not a request for them - but
+            // the cursor comes back with the first movement, so that a viewer
+            // can find the band they are meant to press.
+            if ctx.input(|input| input.pointer.is_moving()) {
+                ctx.set_cursor_icon(egui::CursorIcon::Default);
+            } else {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+            }
+        }
+        // The band each bar sat in is the pointer's way of asking for it back -
+        // see `viewer_active` - and the wall is drawn underneath it, so it has
+        // to be the pointer's alone: without this, the press that asks for the
+        // bars would land on the tile behind it as well, and a viewer reaching
+        // for the menu would also move the focus. A press is hit-tested against
+        // the widgets of the frame it lands in, which is why the frame that
+        // brings the bars back claims the band just like any other: by the time
+        // the press is placed the bars are drawn, and the band is over them.
+        //
+        // Magnified, the band is the viewport's own bar's instead, and the tile
+        // under it is what has to see the press: these overlays are exactly
+        // where that bar is drawn, so one of them would eat the press before the
+        // tile could open it. See `crate::tilebar` and `wall_event`.
+        if bands_hidden && !self.scheduler.is_zoomed() {
+            if let Some((top, bottom)) = self.chrome.bars {
+                for (id, band) in [("xgview-toolbar-band", top), ("xgview-status-band", bottom)] {
+                    // The size is given, and never left to the area's own
+                    // default: an area with none starts at `default_area_size`
+                    // and is then constrained back onto the screen, which for
+                    // the bottom band moves its top to the top of the window -
+                    // an overlay over the whole wall, eating every press on a
+                    // tile. See `band_overlay_area_is_the_band`.
+                    egui::Area::new(Id::new(id))
+                        .order(egui::Order::Middle)
+                        .fixed_pos(band.min)
+                        .default_size(band.size())
+                        .show(ctx, |ui| {
+                            ui.allocate_rect(band, egui::Sense::click());
+                        });
+                }
+            }
+        }
+    }
+
+    /// The wall, the panel over it, the windows and the pickers, and the save that
+    /// ends the drawing.
+    pub(super) fn draw_wall(&mut self, ctx: &egui::Context) {
+        if self.show_settings {
+            egui::SidePanel::right("xgview-settings")
+                .default_width(SETTINGS_WIDTH)
+                .min_width(SETTINGS_MIN_WIDTH)
+                .show(ctx, |ui| self.settings_panel(ui));
+
+            // The pointer's way out of the panel: a click anywhere on the wall
+            // beside it. A remote control and a keyboard have Back and Escape,
+            // which say "close the panel" from wherever the focus happens to
+            // be; a mouse or a finger has only the gear that opened it, and a
+            // control that opens something is not read as the one that closes
+            // it either.
+            //
+            // The press is taken by a layer over the wall rather than read
+            // from the input queue, so that the click which dismisses the
+            // panel cannot also land on the tile under the pointer - a click
+            // on the wall magnifies that channel, and closing the panel while
+            // zooming into a picture behind it is not what the viewer asked
+            // for. The layer stops short of the bars: they keep working while
+            // the panel is open, and the gear closes it by itself.
+            //
+            // Its rect is what the central panel is about to be given, so it
+            // covers the wall and nothing else - the panel has just been laid
+            // out, and the bars before it.
+            let wall = ctx.available_rect();
+            let dismissed = egui::Area::new(Id::new("xgview-settings-dismiss"))
+                .order(egui::Order::Middle)
+                .fixed_pos(wall.min)
+                .show(ctx, |ui| ui.allocate_rect(wall, egui::Sense::click()).clicked())
+                .inner;
+            if dismissed {
+                self.show_settings = false;
+            }
+        }
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(theme::BACKGROUND))
+            .show(ctx, |ui| {
+                let area = ui.available_rect_before_wrap();
+                self.draw_grid(ui);
+                // The floating page arrows sit at the very edges the magnified
+                // viewport's bar is docked to, and are drawn after the wall - so
+                // they would lie on top of it. The bar is the surface in use
+                // while it is up, and the bars' own page buttons are still
+                // there; the arrows come back with the picture once it goes.
+                if self.is_portrait() && self.chrome.visible && !self.tile_bar.is_open() {
+                    self.portrait_page_buttons(ui, area);
+                }
+            });
+
+        if self.discovery.open {
+            let handle = self.handle.clone();
+            let events = self.events_tx.clone();
+            if dialogs::add_devices_window(
+                ctx,
+                &mut self.discovery,
+                &mut self.config,
+                &handle,
+                &events,
+                &mut self.nav,
+            ) {
+                self.needs_sync = true;
+                self.mark_dirty();
+            }
+            // The manual tab's test button: the dialog has no runtime, so the
+            // press comes back here and is played like the edit window's.
+            if std::mem::take(&mut self.discovery.talk_test) {
+                let result = self.discovery.manual.build();
+                match result {
+                    Ok(source) => self.spawn_test_tone(source),
+                    Err(error) => self.flash(error, ToastKind::Error),
+                }
+            }
+            // The window closed itself - its cross, or Back - so the button it
+            // was opened from takes the focus again.
+            if !self.discovery.open {
+                self.restore_focus = self.discovery.from.take();
+            }
+        }
+
+        if self.camera_edit_window(ctx) {
+            self.mark_dirty();
+        }
+        if self.remove_confirm_window(ctx) {
+            self.mark_dirty();
+        }
+        self.system_confirm_window(ctx);
+        if self.passphrase_window(ctx) {
+            self.mark_dirty();
+        }
+
+        self.draw_layout_picker(ctx);
+        self.draw_portrait_aspect_picker(ctx);
+        self.draw_combined_info_picker(ctx);
+        self.draw_toast(ctx);
+        self.draw_exit_hint(ctx);
+        // After everything else, and on its own layer: the blank covers the
+        // toolbar, the status bar and the tiles, not only the wall.
+        if self.blackout_on {
+            self.blackout.draw(ctx, self.time);
+        }
+        self.autosave();
     }
 }
 
