@@ -702,10 +702,10 @@ pub(super) async fn run_session(
 /// The state one RTSP session carries between packets.
 ///
 /// Everything the loop carried from one iteration to the next is a field,
-/// because the loop is being split into methods that each answer one question -
-/// the clocks, the talk-back, one media packet - and a method cannot reach a
-/// local. The split is the reason the fields are here; the fields themselves are
-/// what the loop always held.
+/// because the loop is answered by methods that each own one question - the
+/// clocks, the talk-back, one media packet, the window - and a method cannot
+/// reach a local. The split is the reason the fields are here; the fields
+/// themselves are what the loop always held.
 struct RtspSession<'a> {
     /// What it publishes through, and the two hubs it shares with the rest of
     /// the application.
@@ -1034,39 +1034,9 @@ impl<'a> RtspSession<'a> {
                 MediaPacket::AudioRtcp(_) => (3u8, Vec::new()),
             };
 
-            // Channel 2 carries the audio RTP. It is decoded and played only while
-            // this channel is the one the user is listening to and the sink is open;
-            // otherwise the packet is dropped, which is what keeps the grid's nine
-            // tiles from all playing their microphones.
+            // Channel 2 carries the audio RTP.
             if channel == 2 {
-                if self.audio.wants(self.index) {
-                    if let Some(output) = self.audio.output().filter(|output| output.is_active()) {
-                        if let Some(track) = self.audio_decoder.as_mut() {
-                            if let Some(header) = parse_rtp_header(&payload) {
-                                let body = &payload[header.header_len..];
-                                let mut pcm: Vec<i16> = Vec::with_capacity(512);
-                                // RFC 3640 carries the AAC access units behind their
-                                // AU headers; G.711 is the payload as it stands. The
-                                // header field widths come from the track's fmtp.
-                                let result = if track.info.codec == AudioCodec::Aac {
-                                    crate::audio::aac_access_units(
-                                        body,
-                                        track.aac.size_length,
-                                        track.aac.index_length,
-                                    )
-                                    .into_iter()
-                                    .try_for_each(|range| track.decoder.decode(&body[range], &mut pcm))
-                                } else {
-                                    track.decoder.decode(body, &mut pcm)
-                                };
-                                if result.is_ok() && !pcm.is_empty() {
-                                    output.configure(&track.info);
-                                    output.push(&pcm);
-                                }
-                            }
-                        }
-                    }
-                }
+                self.on_audio(&payload);
                 continue;
             }
             if channel == 3 {
@@ -1076,255 +1046,13 @@ impl<'a> RtspSession<'a> {
             // Channel 0 carries RTP, channel 1 carries RTCP.
             if channel == 0 {
                 if let Some(header) = parse_rtp_header(&payload) {
-                    // UDP reorders and duplicates. A stale fragment fed to the
-                    // depacketizer would be spliced into the picture being
-                    // assembled, so such a packet is dropped before it reaches it.
-                    // The interleaved transport never does either.
-                    if self.transport.is_udp() {
-                        match self.sequence_window.accept(header.sequence) {
-                            Arrival::Stale => {
-                                // A duplicate, or a straggler that belongs to a
-                                // picture already handed over.
-                                self.window.counters.reordered += 1;
-                                continue;
-                            }
-                            Arrival::Gap(missing) => {
-                                // The packets in between were lost, so the unit
-                                // being assembled is missing part of its picture. It
-                                // is written off rather than stitched together and
-                                // decoded into a screenful of corruption.
-                                self.window.counters.lost += u64::from(missing);
-                                self.depacketizer.invalidate();
-                            }
-                            Arrival::Next => {}
-                        }
+                    if !self.on_rtp(&header, &payload) {
+                        continue;
                     }
-                    self.window.counters.bytes += payload.len() as u64;
-                    // The receiver report counts sequence numbers the way RFC 3550
-                    // does: the 16 bit RTP field folded with the number of times it
-                    // has wrapped, so a long session does not look like it restarted.
-                    self.source_ssrc = header.ssrc;
-                    self.received_packets = true;
-                    self.sequence_window.see(header.sequence);
-                    // How far apart this packet and the last one were sent, against
-                    // how far apart they arrived. RFC 3550 smooths the difference
-                    // into the jitter the receiver report carries.
-                    self.jitter.observe(header.timestamp, Instant::now());
-                    // The marker bit is set on the last packet of an access unit.
-                    if header.marker && header.payload_type < 192 {
-                        self.window.counters.frames += 1;
-                        self.total_frames += 1;
-                    }
-                    if self.payload_type.is_some_and(|expected| header.payload_type != expected) {
-                        self.window.counters.foreign += 1;
-                    }
-                    announce_streaming(
-                        self.sinks.events,
-                        self.index,
-                        &self.camera_id,
-                        self.stream,
-                        &mut self.announced,
-                    );
-
-                    if let Some(decoder) = self.decoder.as_mut() {
-                        let payload = &payload[header.header_len..];
-                        // A packet completes at most two pictures: the one the RTP
-                        // timestamp change released, and the one its marker closed.
-                        let units = self.depacketizer.push(&header, payload);
-                        let completed_none = units.is_empty();
-                        for mut unit in units {
-                            self.window.counters.units += 1;
-                            self.window.counters.unit_bytes += unit.data.len() as u64;
-                            // Once per session, from the first access unit that
-                            // carries a parameter set of its own: a camera whose
-                            // SDP advertised none only ever says what it is here.
-                            // H.264's reader, so an H.265 access unit is left out of
-                            // it rather than read with H.264's layout.
-                            if self.kind == Codec::H264 && !self.sps_logged {
-                                if let Some(nal) = sps::access_unit_sps(&unit.data) {
-                                    if let Some(info) = sps::sps_info(nal) {
-                                        // What a hardware decoder screens the
-                                        // stream on: a profile or level it does not
-                                        // implement, a chroma sampling other than
-                                        // 4:2:0, more than eight bits per sample, a
-                                        // set carrying scaling matrices. One line
-                                        // per session, and the first place to look
-                                        // when a channel decodes on the CPU.
-                                        tracing::debug!(
-                                            target: "xgview::pipeline",
-                                            index = self.index,
-                                            profile = info.profile,
-                                            level = info.level,
-                                            chroma = info.chroma,
-                                            bit_depth = info.bit_depth,
-                                            scaling_matrices = info.scaling_matrices,
-                                            size = ?info.size,
-                                            "stream parameter set"
-                                        );
-                                        self.sps_logged = true;
-                                    }
-                                }
-                            }
-                            self.baseline_fix.observe(self.index, self.kind, &mut unit.data);
-                            self.stall.observe(unit.keyframe, Instant::now());
-                            let started = Instant::now();
-                            let decoded = decoder.decode(&unit.data, unit.pts_us(), unit.keyframe);
-                            self.window.counters.decode_took(started.elapsed());
-                            match decoded {
-                                Ok(decoded) => {
-                                    // A picture came out, whatever the renderer can
-                                    // do with it: on the platform whose frames stay
-                                    // in a GPU buffer there are no planes to publish,
-                                    // and the stream is no less alive for it.
-                                    if !decoded.is_empty() {
-                                        let was_stalled = self.stall.stalled_since.is_some();
-                                        self.stall.picture(Instant::now());
-                                        if was_stalled {
-                                            emit(
-                                                self.sinks.events,
-                                                StreamEvent::State {
-                                                    index: self.index,
-                                                    camera_id: self.camera_id.clone(),
-                                                    state: ConnectionState::Streaming,
-                                                    detail: format!(
-                                                        "receiving {} stream",
-                                                        self.stream.label()
-                                                    ),
-                                                },
-                                            );
-                                        }
-                                    }
-                                    self.window.counters.decoded += decoded.len() as u64;
-                                    if let Some((picture_width, picture_height)) =
-                                        publish_frames(
-                                            self.sinks.frames,
-                                            self.index,
-                                            &mut self.sequence,
-                                            decoded,
-                                        )
-                                    {
-                                        self.width = Some(picture_width);
-                                        self.height = Some(picture_height);
-                                    }
-                                }
-                                // One damaged picture is not worth a new session:
-                                // the encoder recovers at its next IDR.
-                                Err(err) => {
-                                    // Pictures refused before the session has shown
-                                    // one are its opening rather than damage. A
-                                    // camera that sends a run of pictures before its
-                                    // first IDR leaves the decoder nothing to
-                                    // reference - one here spends its first thirty
-                                    // five that way and then runs clean - so
-                                    // counting them as errors would report a
-                                    // working channel as a broken one at every
-                                    // connect. They are counted apart, and the
-                                    // warning is kept for a session that had a
-                                    // picture and then lost it.
-                                    if !self.stall.running {
-                                        self.window.counters.opening += 1;
-                                        if self.window.counters.opening == 1 {
-                                            tracing::debug!(
-                                                target: "xgview::pipeline",
-                                                index = self.index,
-                                                %err,
-                                                "no picture yet, waiting for the first key frame"
-                                            );
-                                        }
-                                    } else {
-                                        self.decode_errors += 1;
-                                        self.window.counters.errors += 1;
-                                        // The first rejections carry the payload
-                                        // that caused them, which names the NAL
-                                        // units the decoder was given.
-                                        if self.decode_errors <= 3 {
-                                            tracing::debug!(
-                                                target: "xgview::pipeline",
-                                                index = self.index,
-                                                len = unit.data.len(),
-                                                types = ?nal_types(&unit.data, self.kind),
-                                                keyframe = unit.keyframe,
-                                                au = %hex(&unit.data, 24),
-                                                cached = ?self.depacketizer.parameter_sets(),
-                                                "access unit rejected by the decoder"
-                                            );
-                                        }
-                                        if self.decode_errors == 1 {
-                                            tracing::warn!(
-                                                target: "xgview::pipeline",
-                                                index = self.index,
-                                                %err,
-                                                "decoding failed, waiting for the next key frame"
-                                            );
-                                        } else {
-                                            tracing::debug!(
-                                                target: "xgview::pipeline",
-                                                index = self.index,
-                                                errors = self.decode_errors,
-                                                %err,
-                                                "decoding failed"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if completed_none && header.marker {
-                            // The marker closed a picture but nothing came out of
-                            // it: the unit held no slice, or its head was lost.
-                            self.window.counters.dropped += 1;
-                        }
-                    }
+                    self.on_video(&header, &payload);
                 }
             }
-
-            if self.window.due() {
-                let seconds = self.window.seconds();
-                let fps = self.window.counters.fps(seconds);
-                let kbps = self.window.counters.kbps(seconds);
-                self.sinks.stats.publish(StreamStats {
-                    index: self.index,
-                    camera_id: self.camera_id.clone(),
-                    stream: self.stream,
-                    codec: self.codec.clone(),
-                    width: self.width,
-                    height: self.height,
-                    hardware: uses_hardware(&self.decoder),
-                    audio: self.audio_decoder.is_some(),
-                    fps,
-                    bitrate_kbps: kbps,
-                    total_frames: self.total_frames,
-                });
-                // `units` is what the network delivered, `decoded` what came out of
-                // the decoder: a frozen picture with a steady `units` blames the
-                // decoder (or the renderer), a `units` that drops to zero and then
-                // bursts blames the camera, the link, or this loop being starved.
-                let counted = self.window.close();
-                tracing::debug!(
-                    target: "xgview::pipeline",
-                    index = self.index,
-                    stream = self.stream.as_str(),
-                    hardware = uses_hardware(&self.decoder),
-                    // The picture deadline this session is being held to. It is
-                    // learned from the stream, so a channel cut off at a number of
-                    // seconds that is not the one in the source reads here as the
-                    // group of pictures that camera turned out to have.
-                    deadline_s = self.stall.patience().as_secs(),
-                    units = counted.units,
-                    unit_bytes = counted.unit_bytes,
-                    decoded = counted.decoded,
-                    errors = counted.errors,
-                    opening = counted.opening,
-                    dropped = counted.dropped,
-                    foreign = counted.foreign,
-                    reordered = counted.reordered,
-                    lost = counted.lost,
-                    slowest_decode_ms = counted.slowest.as_millis() as u64,
-                    fps,
-                    kbps,
-                    "stream window"
-                );
-            }
+            self.publish_window();
         }
     }
 
@@ -1466,5 +1194,304 @@ impl<'a> RtspSession<'a> {
             Some(talk_wait) => wait.min(talk_wait),
             None => wait,
         }
+    }
+
+    /// Decodes one audio packet and hands it to the sink, while this channel is
+    /// the one being listened to and the sink is open.
+    ///
+    /// Otherwise the packet is dropped, which is what keeps the grid's nine tiles
+    /// from all playing their microphones.
+    fn on_audio(&mut self, payload: &[u8]) {
+        if self.audio.wants(self.index) {
+            if let Some(output) = self.audio.output().filter(|output| output.is_active()) {
+                if let Some(track) = self.audio_decoder.as_mut() {
+                    if let Some(header) = parse_rtp_header(payload) {
+                        let body = &payload[header.header_len..];
+                        let mut pcm: Vec<i16> = Vec::with_capacity(512);
+                        // RFC 3640 carries the AAC access units behind their
+                        // AU headers; G.711 is the payload as it stands. The
+                        // header field widths come from the track's fmtp.
+                        let result = if track.info.codec == AudioCodec::Aac {
+                            crate::audio::aac_access_units(
+                                body,
+                                track.aac.size_length,
+                                track.aac.index_length,
+                            )
+                            .into_iter()
+                            .try_for_each(|range| track.decoder.decode(&body[range], &mut pcm))
+                        } else {
+                            track.decoder.decode(body, &mut pcm)
+                        };
+                        if result.is_ok() && !pcm.is_empty() {
+                            output.configure(&track.info);
+                            output.push(&pcm);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Takes one RTP packet: the sequence numbers, the jitter, the counters and
+    /// the announcement that the stream is running, and says whether it is worth
+    /// decoding.
+    fn on_rtp(&mut self, header: &RtpHeader, payload: &[u8]) -> bool {
+        // UDP reorders and duplicates. A stale fragment fed to the
+        // depacketizer would be spliced into the picture being
+        // assembled, so such a packet is dropped before it reaches it.
+        // The interleaved transport never does either.
+        if self.transport.is_udp() {
+            match self.sequence_window.accept(header.sequence) {
+                Arrival::Stale => {
+                    // A duplicate, or a straggler that belongs to a
+                    // picture already handed over.
+                    self.window.counters.reordered += 1;
+                    return false;
+                }
+                Arrival::Gap(missing) => {
+                    // The packets in between were lost, so the unit
+                    // being assembled is missing part of its picture. It
+                    // is written off rather than stitched together and
+                    // decoded into a screenful of corruption.
+                    self.window.counters.lost += u64::from(missing);
+                    self.depacketizer.invalidate();
+                }
+                Arrival::Next => {}
+            }
+        }
+        self.window.counters.bytes += payload.len() as u64;
+        // The receiver report counts sequence numbers the way RFC 3550
+        // does: the 16 bit RTP field folded with the number of times it
+        // has wrapped, so a long session does not look like it restarted.
+        self.source_ssrc = header.ssrc;
+        self.received_packets = true;
+        self.sequence_window.see(header.sequence);
+        // How far apart this packet and the last one were sent, against
+        // how far apart they arrived. RFC 3550 smooths the difference
+        // into the jitter the receiver report carries.
+        self.jitter.observe(header.timestamp, Instant::now());
+        // The marker bit is set on the last packet of an access unit.
+        if header.marker && header.payload_type < 192 {
+            self.window.counters.frames += 1;
+            self.total_frames += 1;
+        }
+        if self.payload_type.is_some_and(|expected| header.payload_type != expected) {
+            self.window.counters.foreign += 1;
+        }
+        announce_streaming(
+            self.sinks.events,
+            self.index,
+            &self.camera_id,
+            self.stream,
+            &mut self.announced,
+        );
+        true
+    }
+
+    /// Hands the access units a packet completed to the decoder, and the pictures
+    /// that come out of it to the frame store.
+    fn on_video(&mut self, header: &RtpHeader, payload: &[u8]) {
+        let Some(decoder) = self.decoder.as_mut() else {
+            return;
+        };
+        let payload = &payload[header.header_len..];
+        // A packet completes at most two pictures: the one the RTP
+        // timestamp change released, and the one its marker closed.
+        let units = self.depacketizer.push(header, payload);
+        let completed_none = units.is_empty();
+        for mut unit in units {
+            self.window.counters.units += 1;
+            self.window.counters.unit_bytes += unit.data.len() as u64;
+            // Once per session, from the first access unit that
+            // carries a parameter set of its own: a camera whose
+            // SDP advertised none only ever says what it is here.
+            // H.264's reader, so an H.265 access unit is left out of
+            // it rather than read with H.264's layout.
+            if self.kind == Codec::H264 && !self.sps_logged {
+                if let Some(nal) = sps::access_unit_sps(&unit.data) {
+                    if let Some(info) = sps::sps_info(nal) {
+                        // What a hardware decoder screens the
+                        // stream on: a profile or level it does not
+                        // implement, a chroma sampling other than
+                        // 4:2:0, more than eight bits per sample, a
+                        // set carrying scaling matrices. One line
+                        // per session, and the first place to look
+                        // when a channel decodes on the CPU.
+                        tracing::debug!(
+                            target: "xgview::pipeline",
+                            index = self.index,
+                            profile = info.profile,
+                            level = info.level,
+                            chroma = info.chroma,
+                            bit_depth = info.bit_depth,
+                            scaling_matrices = info.scaling_matrices,
+                            size = ?info.size,
+                            "stream parameter set"
+                        );
+                        self.sps_logged = true;
+                    }
+                }
+            }
+            self.baseline_fix.observe(self.index, self.kind, &mut unit.data);
+            self.stall.observe(unit.keyframe, Instant::now());
+            let started = Instant::now();
+            let decoded = decoder.decode(&unit.data, unit.pts_us(), unit.keyframe);
+            self.window.counters.decode_took(started.elapsed());
+            match decoded {
+                Ok(decoded) => {
+                    // A picture came out, whatever the renderer can
+                    // do with it: on the platform whose frames stay
+                    // in a GPU buffer there are no planes to publish,
+                    // and the stream is no less alive for it.
+                    if !decoded.is_empty() {
+                        let was_stalled = self.stall.stalled_since.is_some();
+                        self.stall.picture(Instant::now());
+                        if was_stalled {
+                            emit(
+                                self.sinks.events,
+                                StreamEvent::State {
+                                    index: self.index,
+                                    camera_id: self.camera_id.clone(),
+                                    state: ConnectionState::Streaming,
+                                    detail: format!(
+                                        "receiving {} stream",
+                                        self.stream.label()
+                                    ),
+                                },
+                            );
+                        }
+                    }
+                    self.window.counters.decoded += decoded.len() as u64;
+                    if let Some((picture_width, picture_height)) =
+                        publish_frames(
+                            self.sinks.frames,
+                            self.index,
+                            &mut self.sequence,
+                            decoded,
+                        )
+                    {
+                        self.width = Some(picture_width);
+                        self.height = Some(picture_height);
+                    }
+                }
+                // One damaged picture is not worth a new session:
+                // the encoder recovers at its next IDR.
+                Err(err) => {
+                    // Pictures refused before the session has shown
+                    // one are its opening rather than damage. A
+                    // camera that sends a run of pictures before its
+                    // first IDR leaves the decoder nothing to
+                    // reference - one here spends its first thirty
+                    // five that way and then runs clean - so
+                    // counting them as errors would report a
+                    // working channel as a broken one at every
+                    // connect. They are counted apart, and the
+                    // warning is kept for a session that had a
+                    // picture and then lost it.
+                    if !self.stall.running {
+                        self.window.counters.opening += 1;
+                        if self.window.counters.opening == 1 {
+                            tracing::debug!(
+                                target: "xgview::pipeline",
+                                index = self.index,
+                                %err,
+                                "no picture yet, waiting for the first key frame"
+                            );
+                        }
+                    } else {
+                        self.decode_errors += 1;
+                        self.window.counters.errors += 1;
+                        // The first rejections carry the payload
+                        // that caused them, which names the NAL
+                        // units the decoder was given.
+                        if self.decode_errors <= 3 {
+                            tracing::debug!(
+                                target: "xgview::pipeline",
+                                index = self.index,
+                                len = unit.data.len(),
+                                types = ?nal_types(&unit.data, self.kind),
+                                keyframe = unit.keyframe,
+                                au = %hex(&unit.data, 24),
+                                cached = ?self.depacketizer.parameter_sets(),
+                                "access unit rejected by the decoder"
+                            );
+                        }
+                        if self.decode_errors == 1 {
+                            tracing::warn!(
+                                target: "xgview::pipeline",
+                                index = self.index,
+                                %err,
+                                "decoding failed, waiting for the next key frame"
+                            );
+                        } else {
+                            tracing::debug!(
+                                target: "xgview::pipeline",
+                                index = self.index,
+                                errors = self.decode_errors,
+                                %err,
+                                "decoding failed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if completed_none && header.marker {
+            // The marker closed a picture but nothing came out of
+            // it: the unit held no slice, or its head was lost.
+            self.window.counters.dropped += 1;
+        }
+    }
+
+    /// Publishes the sample the window was counting, and starts the next one.
+    fn publish_window(&mut self) {
+        if !self.window.due() {
+            return;
+        }
+        let seconds = self.window.seconds();
+        let fps = self.window.counters.fps(seconds);
+        let kbps = self.window.counters.kbps(seconds);
+        self.sinks.stats.publish(StreamStats {
+            index: self.index,
+            camera_id: self.camera_id.clone(),
+            stream: self.stream,
+            codec: self.codec.clone(),
+            width: self.width,
+            height: self.height,
+            hardware: uses_hardware(&self.decoder),
+            audio: self.audio_decoder.is_some(),
+            fps,
+            bitrate_kbps: kbps,
+            total_frames: self.total_frames,
+        });
+        // `units` is what the network delivered, `decoded` what came out of
+        // the decoder: a frozen picture with a steady `units` blames the
+        // decoder (or the renderer), a `units` that drops to zero and then
+        // bursts blames the camera, the link, or this loop being starved.
+        let counted = self.window.close();
+        tracing::debug!(
+            target: "xgview::pipeline",
+            index = self.index,
+            stream = self.stream.as_str(),
+            hardware = uses_hardware(&self.decoder),
+            // The picture deadline this session is being held to. It is
+            // learned from the stream, so a channel cut off at a number of
+            // seconds that is not the one in the source reads here as the
+            // group of pictures that camera turned out to have.
+            deadline_s = self.stall.patience().as_secs(),
+            units = counted.units,
+            unit_bytes = counted.unit_bytes,
+            decoded = counted.decoded,
+            errors = counted.errors,
+            opening = counted.opening,
+            dropped = counted.dropped,
+            foreign = counted.foreign,
+            reordered = counted.reordered,
+            lost = counted.lost,
+            slowest_decode_ms = counted.slowest.as_millis() as u64,
+            fps,
+            kbps,
+            "stream window"
+        );
     }
 }
