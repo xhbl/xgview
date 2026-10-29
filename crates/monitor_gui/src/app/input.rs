@@ -753,7 +753,7 @@ impl XgViewApp {
         if ((self.passphrase.as_ref().is_some_and(|prompt| !prompt.working))
             || self.camera_edit.is_some()
             || self.remove_confirm.is_some()
-            || self.system_confirm.is_some())
+            || self.system_confirm.is_open())
             && self.dialog_back_pressed(ctx)
         {
             if self.passphrase.take().is_some() {
@@ -764,9 +764,9 @@ impl XgViewApp {
             } else if let Some(confirm) = self.remove_confirm.take() {
                 self.remove_confirm_anchor = None;
                 self.restore_focus = confirm.from;
-            } else if let Some(confirm) = self.system_confirm.take() {
-                self.system_confirm_anchor = None;
-                self.restore_focus = confirm.from;
+            } else if self.system_confirm.is_open() {
+                self.system_confirm.close();
+                self.restore_focus = self.system_confirm.from;
             } else if let Some(edit) = self.camera_edit.take() {
                 self.camera_edit_anchor = None;
                 self.restore_focus = edit.from;
@@ -1015,7 +1015,7 @@ impl XgViewApp {
         let dialog_open = self.discovery.open
             || self.camera_edit.is_some()
             || self.remove_confirm.is_some()
-            || self.system_confirm.is_some()
+            || self.system_confirm.is_open()
             || self.passphrase.is_some();
         // The layout picker is a modal of its own, and it owns the keys while
         // it is up: opening a panel behind it would stack two of them.

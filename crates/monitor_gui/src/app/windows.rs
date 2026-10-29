@@ -209,9 +209,10 @@ impl XgViewApp {
     /// answers. Its own buttons (or Back) are the only way out, and the dialog
     /// opens on the answer that changes nothing.
     pub(super) fn system_confirm_window(&mut self, ctx: &egui::Context) {
-        let Some(SystemConfirm { from }) = self.system_confirm.take() else {
+        if self.system_confirm.take().is_none() {
             return;
-        };
+        }
+        let from = self.system_confirm.from;
         let mut confirm = false;
         let mut cancel = false;
 
@@ -231,7 +232,7 @@ impl XgViewApp {
                 ui.add_space(Self::center_offset(ui, &[&cancel_label, &reboot_label]));
                 let cancel_button = self.nav.tracked(ui.button(cancel_label));
                 // The dialog opens on the answer that changes nothing.
-                self.system_confirm_anchor = Some(cancel_button.id);
+                self.system_confirm.anchor = Some(cancel_button.id);
                 if cancel_button.clicked() {
                     cancel = true;
                 }
@@ -247,7 +248,7 @@ impl XgViewApp {
         });
 
         if confirm {
-            self.system_confirm_anchor = None;
+            self.system_confirm.close();
             // Save first: a reboot ends the process, and the debounced save
             // would otherwise never happen.
             self.save_now();
@@ -269,9 +270,9 @@ impl XgViewApp {
             return;
         }
         if !cancel {
-            self.system_confirm = Some(SystemConfirm { from });
+            self.system_confirm.open(());
         } else {
-            self.system_confirm_anchor = None;
+            self.system_confirm.close();
             self.restore_focus = from;
         }
     }

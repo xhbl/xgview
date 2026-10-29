@@ -695,7 +695,8 @@ impl XgViewApp {
             self.quit(ui.ctx());
         }
         if let Some(from) = ask_reboot {
-            self.system_confirm = Some(SystemConfirm { from });
+            self.system_confirm.open(());
+            self.system_confirm.from = from;
         }
 
         dirty

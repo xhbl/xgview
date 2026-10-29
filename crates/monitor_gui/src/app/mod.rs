@@ -492,6 +492,16 @@ impl<T> Modal<T> {
         self.payload = None;
         self.anchor = None;
     }
+
+    /// Takes the payload out for the frame it is being drawn on.
+    ///
+    /// The window is drawn with the payload in hand and the rest of the
+    /// application borrowed mutably beside it, which only works if the two are
+    /// separate - so the window takes it, and puts it back with `open` unless it
+    /// closed.
+    fn take(&mut self) -> Option<T> {
+        self.payload.take()
+    }
 }
 
 
@@ -521,16 +531,6 @@ struct RemoveConfirm {
     slot: usize,
     name: String,
     /// The remove button that opened the window, to give it back its focus.
-    ///
-    /// `None` when the window was opened with a pointer - see
-    /// [`CameraEdit::from`].
-    from: Option<Id>,
-}
-
-/// A reboot the settings panel is asking confirmation for.
-#[derive(Debug)]
-struct SystemConfirm {
-    /// The button that opened the window, to give it back its focus.
     ///
     /// `None` when the window was opened with a pointer - see
     /// [`CameraEdit::from`].
@@ -1110,11 +1110,7 @@ pub struct XgViewApp {
     ///
     /// Asked for in a window, so that a press on a button beside its neighbour
     /// cannot leave the program or restart the machine on its own.
-    system_confirm: Option<SystemConfirm>,
-    /// First control of the system confirm window, to hand it the focus.
-    system_confirm_anchor: Option<Id>,
-    /// Watches the system confirm window for the frame it appears on.
-    system_confirm_handoff: Handoff,
+    system_confirm: Modal<()>,
     /// Whether the group-name field is to be given the focus as it is drawn:
     /// set when a group has just been added, so its name is typed over at once.
     focus_group_name: bool,
@@ -1433,9 +1429,7 @@ impl XgViewApp {
             remove_confirm: None,
             remove_confirm_anchor: None,
             remove_confirm_handoff: Handoff::default(),
-            system_confirm: None,
-            system_confirm_anchor: None,
-            system_confirm_handoff: Handoff::default(),
+            system_confirm: Modal::default(),
             focus_group_name: false,
             group_remove: None,
             reorder: None,
@@ -1492,8 +1486,8 @@ impl XgViewApp {
             self.passphrase_anchor
         } else if self.remove_confirm.is_some() {
             self.remove_confirm_anchor
-        } else if self.system_confirm.is_some() {
-            self.system_confirm_anchor
+        } else if self.system_confirm.is_open() {
+            self.system_confirm.anchor
         } else if self.camera_edit.is_some() {
             self.camera_edit_anchor
         } else if self.discovery.open {
@@ -2120,9 +2114,9 @@ impl XgViewApp {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
-        if self.system_confirm_handoff.entering(self.system_confirm.is_some()) {
+        if self.system_confirm.handoff.entering(self.system_confirm.is_open()) {
             self.swallow_enter = 10;
-            if let Some(id) = self.system_confirm_anchor {
+            if let Some(id) = self.system_confirm.anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
