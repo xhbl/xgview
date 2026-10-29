@@ -102,8 +102,9 @@ impl XgViewApp {
                 }
 
                 if let Some(layout) = chosen {
-                    // `set_layout` closes the pickers itself; the answer below
-                    // only says to give the focus back.
+                    // The wall behind has already changed by the time this
+                    // returns; what is left is to close the window and give the
+                    // focus back to the button it came from.
                     app.set_layout(layout);
                     return Answer::CLOSE;
                 }
@@ -121,89 +122,94 @@ impl XgViewApp {
     /// its name, and the aspect it is drawn at - a press on the row turns the
     /// aspect to the next of the five.
     pub(super) fn draw_portrait_aspect_picker(&mut self, ctx: &egui::Context) {
-        if !self.portrait_aspect_picker.is_open() {
-            return;
-        }
-        let mut close = false;
-        let mut aspect_change: Option<(usize, TileAspect)> = None;
+        self.modal_frame(
+            ctx,
+            "xgview-portrait-aspect-picker",
+            300.0,
+            |app| &mut app.portrait_aspect_picker,
+            |app, ui, ()| {
+                let mut close = false;
+                let mut aspect_change: Option<(usize, TileAspect)> = None;
 
-        egui::Modal::new(Id::new("xgview-portrait-aspect-picker")).show(ctx, |ui| {
-            ui.set_width(300.0);
-            self.portrait_aspect_picker.anchor = None;
-            self.nav.open("aspect-picker");
-            let bar = dialogs::title_bar(
-                ui,
-                &monitor_i18n::tr("portrait-aspect-picker-title"),
-                true,
-                &monitor_i18n::tr("dialog-close"),
-            );
-            if let Some(close_button) = bar.close {
-                if self.nav.tracked(close_button).clicked() {
-                    close = true;
-                }
-            }
-            let hint = ui.label(
-                RichText::new(monitor_i18n::tr("portrait-aspect-picker-hint"))
-                    .small()
-                    .color(theme::TEXT_DIM),
-            );
-            let hint_focus = ui.interact(
-                hint.rect,
-                hint.id.with("focus"),
-                egui::Sense::focusable_noninteractive(),
-            );
-            self.nav.item(&hint_focus);
-            self.portrait_aspect_picker.anchor = Some(hint_focus.id);
-            ui.add_space(theme::space::M);
-
-            let layout = self.scheduler.layout();
-            let page = self.scheduler.page();
-            let total = self.config.enabled_count();
-            let cells = grid::page_cells(layout, page, total);
-            // A cell names a place on the wall, which is a place in the active
-            // group's enabled cameras and not in the file: reading the number
-            // straight out of `cameras` is how this dialog came to list the
-            // built-in group's cameras on any wall. The slot is what the file
-            // is indexed by, so the two are crossed through `active_slots`.
-            let slots = self.config.active_slots();
-
-            for cell in cells.iter() {
-                let Some(index) = cell else { continue };
-                let Some(slot) = slots.get(*index).copied() else { continue };
-                let Some(camera) = self.config.cameras.get(slot) else { continue };
-                let name = camera.short_label(18);
-                let aspect = camera.portrait_aspect;
-                ui.horizontal(|ui| {
-                    ui.label(format!("{}.", *index + 1));
-                    ui.label(name);
-                    let btn = ui
-                        .small_button(
-                            RichText::new(monitor_i18n::tr(aspect.label()))
-                                .small()
-                                .color(theme::ACCENT),
-                        )
-                        .on_hover_text(monitor_i18n::tr("cameras-aspect-tip"));
-                    let btn = self.nav.tracked(btn);
-
-                    self.name(&btn, "portrait-aspect-entry");
-                    if btn.clicked() {
-                        aspect_change = Some((slot, aspect.next()));
+                app.portrait_aspect_picker.anchor = None;
+                app.nav.open("aspect-picker");
+                let bar = dialogs::title_bar(
+                    ui,
+                    &monitor_i18n::tr("portrait-aspect-picker-title"),
+                    true,
+                    &monitor_i18n::tr("dialog-close"),
+                );
+                if let Some(close_button) = bar.close {
+                    if app.nav.tracked(close_button).clicked() {
+                        close = true;
                     }
-                });
-                ui.add_space(4.0);
-            }
-            self.nav.close();
-        });
+                }
+                let hint = ui.label(
+                    RichText::new(monitor_i18n::tr("portrait-aspect-picker-hint"))
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                let hint_focus = ui.interact(
+                    hint.rect,
+                    hint.id.with("focus"),
+                    egui::Sense::focusable_noninteractive(),
+                );
+                app.nav.item(&hint_focus);
+                app.portrait_aspect_picker.anchor = Some(hint_focus.id);
+                ui.add_space(theme::space::M);
 
-        if let Some((slot, aspect)) = aspect_change {
-            if let Some(camera) = self.config.cameras.get_mut(slot) {
-                camera.portrait_aspect = aspect;
-            }
-            self.mark_dirty();
-        }
-        if close {
-            self.restore_focus = self.portrait_aspect_picker.close_restoring();
-        }
+                let layout = app.scheduler.layout();
+                let page = app.scheduler.page();
+                let total = app.config.enabled_count();
+                let cells = grid::page_cells(layout, page, total);
+                // A cell names a place on the wall, which is a place in the
+                // active group's enabled cameras and not in the file: reading the
+                // number straight out of `cameras` is how this dialog came to
+                // list the built-in group's cameras on any wall. The slot is what
+                // the file is indexed by, so the two are crossed through
+                // `active_slots`.
+                let slots = app.config.active_slots();
+
+                for cell in cells.iter() {
+                    let Some(index) = cell else { continue };
+                    let Some(slot) = slots.get(*index).copied() else { continue };
+                    let Some(camera) = app.config.cameras.get(slot) else { continue };
+                    let name = camera.short_label(18);
+                    let aspect = camera.portrait_aspect;
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}.", *index + 1));
+                        ui.label(name);
+                        let btn = ui
+                            .small_button(
+                                RichText::new(monitor_i18n::tr(aspect.label()))
+                                    .small()
+                                    .color(theme::ACCENT),
+                            )
+                            .on_hover_text(monitor_i18n::tr("cameras-aspect-tip"));
+                        let btn = app.nav.tracked(btn);
+
+                        app.name(&btn, "portrait-aspect-entry");
+                        if btn.clicked() {
+                            aspect_change = Some((slot, aspect.next()));
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+                app.nav.close();
+
+                if let Some((slot, aspect)) = aspect_change {
+                    if let Some(camera) = app.config.cameras.get_mut(slot) {
+                        camera.portrait_aspect = aspect;
+                    }
+                    app.mark_dirty();
+                }
+                if close {
+                    Answer::CLOSE
+                } else {
+                    Answer::STAY
+                }
+            },
+        );
     }
 
     /// The modal that lets the viewer pick which atomic items a combined-info
