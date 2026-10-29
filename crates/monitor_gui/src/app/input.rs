@@ -755,7 +755,7 @@ impl XgViewApp {
             || self.system_confirm.is_open())
             && self.dialog_back_pressed(ctx)
         {
-            if self.passphrase.take().is_some() {
+            if self.passphrase.is_open() {
                 self.passphrase.close();
                 // Backing out of it leaves the export or import unasked for, and
                 // the button behind the prompt takes the focus again.

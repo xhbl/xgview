@@ -509,7 +509,9 @@ impl Answer {
     const CLOSE: Answer = Answer { keep: false, changed: false, restore: true };
     /// Close, give the focus back, and say the configuration changed.
     const CLOSE_CHANGED: Answer = Answer { keep: false, changed: true, restore: true };
-    /// Close without giving the focus back: what it asked about is gone.
+    /// Close without giving the focus back: either what it asked about is gone -
+    /// the camera row that was just removed - or something else is about to take
+    /// the screen, as the reboot this window asks for does.
     const CLOSE_LEAVING_THE_FOCUS: Answer = Answer { keep: false, changed: true, restore: false };
 }
 

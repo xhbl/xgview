@@ -285,120 +285,126 @@ impl XgViewApp {
     /// passphrase does not take, leaves the prompt up with that said - the
     /// document is kept here, so a second try costs nothing but the typing.
     pub(super) fn passphrase_window(&mut self, ctx: &egui::Context) -> bool {
-        // Taken for the frame, like the edit and remove windows, so the fields
-        // and the navigation layer can be borrowed apart.
-        let Some(mut prompt) = self.passphrase.take() else {
-            return false;
-        };
-        let mut confirm = false;
-        let mut leave = false;
+        self.modal_frame(
+            ctx,
+            "xgview-passphrase",
+            440.0,
+            |app| &mut app.passphrase,
+            |app, ui, prompt| {
+                let mut confirm = false;
+                let mut leave = false;
 
-        // A modal, like the other two: centred, and nothing behind it answers.
-        // Its own buttons (or Back) are the only way out.
-        egui::Modal::new(Id::new("xgview-passphrase")).show(ctx, |ui| {
-            self.nav.open("passphrase-body");
-            ui.set_width(440.0);
-            dialogs::title_bar(ui, &prompt.title(), false, "");
-            ui.label(RichText::new(prompt.hint()).small().color(theme::TEXT_DIM));
-            ui.add_space(theme::space::S);
+                app.nav.open("passphrase-body");
+                dialogs::title_bar(ui, &prompt.title(), false, "");
+                ui.label(RichText::new(prompt.hint()).small().color(theme::TEXT_DIM));
+                ui.add_space(theme::space::S);
 
-            // Read off once: the field is drawn with the entry hidden unless the
-            // viewer asked to see it.
-            let reveal = prompt.reveal;
-            ui.label(monitor_i18n::tr("prompt-passphrase"));
-            let first = dialogs::text_field(
-                ui,
-                &mut self.nav,
-                &mut prompt.first,
-                &monitor_i18n::tr("prompt-passphrase"),
-                !reveal,
-                false,
-                |s| egui::TextEdit::singleline(s).password(!reveal).desired_width(f32::INFINITY),
-            );
-            // The prompt opens on this field.
-            self.passphrase.anchor = Some(first.id);
-
-            if prompt.job == SealJob::Export {
-                ui.add_space(theme::space::XS);
-                ui.label(monitor_i18n::tr("prompt-passphrase-again"));
-                dialogs::text_field(
+                // Read off once: the field is drawn with the entry hidden unless
+                // the viewer asked to see it.
+                let reveal = prompt.reveal;
+                ui.label(monitor_i18n::tr("prompt-passphrase"));
+                let first = dialogs::text_field(
                     ui,
-                    &mut self.nav,
-                    &mut prompt.again,
-                    &monitor_i18n::tr("prompt-passphrase-again"),
+                    &mut app.nav,
+                    &mut prompt.first,
+                    &monitor_i18n::tr("prompt-passphrase"),
                     !reveal,
                     false,
                     |s| egui::TextEdit::singleline(s).password(!reveal).desired_width(f32::INFINITY),
                 );
-            }
+                // The prompt opens on this field.
+                app.passphrase.anchor = Some(first.id);
 
-            ui.add_space(theme::space::XS);
-            self.nav.tracked(ui.checkbox(&mut prompt.reveal, monitor_i18n::tr("prompt-reveal")));
+                if prompt.job == SealJob::Export {
+                    ui.add_space(theme::space::XS);
+                    ui.label(monitor_i18n::tr("prompt-passphrase-again"));
+                    dialogs::text_field(
+                        ui,
+                        &mut app.nav,
+                        &mut prompt.again,
+                        &monitor_i18n::tr("prompt-passphrase-again"),
+                        !reveal,
+                        false,
+                        |s| {
+                            egui::TextEdit::singleline(s)
+                                .password(!reveal)
+                                .desired_width(f32::INFINITY)
+                        },
+                    );
+                }
 
-            if let Some(error) = &prompt.error {
                 ui.add_space(theme::space::XS);
-                ui.label(RichText::new(error).color(theme::ERROR));
-            }
+                app.nav
+                    .tracked(ui.checkbox(&mut prompt.reveal, monitor_i18n::tr("prompt-reveal")));
 
-            ui.add_space(theme::space::M);
-            if prompt.working {
-                // The passphrase is being stretched away from this thread: the
-                // window stays up and says so, and its two buttons are gone,
-                // because there is nothing to press until the answer is in.
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.add_space(theme::space::S);
-                    ui.label(monitor_i18n::tr("prompt-open-working"));
-                });
-            } else {
-                let action = prompt.action();
-                let cancel_label = monitor_i18n::tr("cancel");
-                ui.horizontal(|ui| {
-                    ui.add_space(Self::center_offset(ui, &[&action, &cancel_label]));
-                    if self.nav.tracked(ui.button(action)).clicked() {
-                        confirm = true;
-                    }
-                    if self.nav.tracked(ui.button(cancel_label)).clicked() {
-                        leave = true;
-                    }
-                });
-            }
-            self.nav.close();
-        });
+                if let Some(error) = &prompt.error {
+                    ui.add_space(theme::space::XS);
+                    ui.label(RichText::new(error).color(theme::ERROR));
+                }
 
-        if confirm {
-            match prompt.job {
-                SealJob::Export => {
-                    if prompt.first.is_empty() {
-                        prompt.error = Some(monitor_i18n::tr("prompt-passphrase-empty"));
-                    } else if prompt.first != prompt.again {
-                        prompt.error = Some(monitor_i18n::tr("prompt-passphrase-mismatch"));
-                    } else {
-                        // Asked for here, and drawn from the next frame on by
-                        // `poll_file_dialog`.
-                        self.ask_for_file(FileJob::Export(Some(prompt.first.clone())));
-                        leave = true;
+                ui.add_space(theme::space::M);
+                if prompt.working {
+                    // The passphrase is being stretched away from this thread:
+                    // the window stays up and says so, and its two buttons are
+                    // gone, because there is nothing to press until the answer
+                    // is in.
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.add_space(theme::space::S);
+                        ui.label(monitor_i18n::tr("prompt-open-working"));
+                    });
+                } else {
+                    let action = prompt.action();
+                    let cancel_label = monitor_i18n::tr("cancel");
+                    ui.horizontal(|ui| {
+                        ui.add_space(Self::center_offset(ui, &[&action, &cancel_label]));
+                        if app.nav.tracked(ui.button(action)).clicked() {
+                            confirm = true;
+                        }
+                        if app.nav.tracked(ui.button(cancel_label)).clicked() {
+                            leave = true;
+                        }
+                    });
+                }
+                app.nav.close();
+
+                if confirm {
+                    match prompt.job {
+                        SealJob::Export => {
+                            if prompt.first.is_empty() {
+                                prompt.error = Some(monitor_i18n::tr("prompt-passphrase-empty"));
+                            } else if prompt.first != prompt.again {
+                                prompt.error = Some(monitor_i18n::tr("prompt-passphrase-mismatch"));
+                            } else {
+                                // Asked for here, and drawn from the next frame
+                                // on by `poll_file_dialog`.
+                                app.ask_for_file(FileJob::Export(Some(prompt.first.clone())));
+                                leave = true;
+                            }
+                        }
+                        SealJob::Import => {
+                            // Handed to a thread of its own, because stretching
+                            // the passphrase is the better part of a second of
+                            // arithmetic: what comes of it is taken by
+                            // `poll_sealing`, and the prompt waits for it with
+                            // its buttons gone.
+                            let data = prompt.sealed.clone().unwrap_or_default();
+                            app.spawn_open(data, prompt.first.clone(), prompt.origin.clone());
+                            prompt.working = true;
+                        }
                     }
                 }
-                SealJob::Import => {
-                    // Handed to a thread of its own, because stretching the
-                    // passphrase is the better part of a second of arithmetic:
-                    // what comes of it is taken by `poll_sealing`, and the
-                    // prompt waits for it with its buttons gone.
-                    let data = prompt.sealed.clone().unwrap_or_default();
-                    self.spawn_open(data, prompt.first.clone(), prompt.origin.clone());
-                    prompt.working = true;
-                }
-            }
-        }
 
-        if leave {
-            self.passphrase.close();
-        } else {
-            self.passphrase.open(prompt);
-        }
-        // Nothing here changes the configuration any more: what an opened file
-        // becomes is settled by `poll_sealing`, on the frame the answer arrives.
-        false
+                // Nothing here changes the configuration any more: what an
+                // opened file becomes is settled by `poll_sealing`, on the frame
+                // the answer arrives.
+                if leave {
+                    Answer::CLOSE
+                } else {
+                    Answer::STAY
+                }
+            },
+        )
+        .changed
     }
 }
