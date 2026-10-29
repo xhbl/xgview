@@ -185,7 +185,7 @@ pub(super) struct WindowCounters {
     pub(super) decoded: u64,
     pub(super) errors: u64,
     /// Refusals before the session had shown a picture, which are its opening
-    /// rather than damage - see `run_session`.
+    /// rather than damage - see `on_video` in `rtsp_session`.
     pub(super) opening: u64,
     /// Markers that assembled no access unit, and packets that do not carry the
     /// negotiated payload type. A channel whose pictures never assemble is

@@ -1529,7 +1529,7 @@ the codecs it takes, and then reads binary frames:
 parameter sets and the picture size, `moof`/`trun`/`tfhd`/`tfdt` for the sample
 table) and converts each AVCC/HVCC sample to Annex-B, so the decoders take it
 unchanged. The playback session is `run_ws_session` in
-`crates/monitor_core/src/pipeline.rs`.
+`crates/monitor_core/src/pipeline/ws_session.rs`.
 
 **Two servers, two logins.** The endpoints authenticate differently, and the
 path is what tells them apart (`is_frigate_mse`): Frigate fronts its MSE stream
@@ -3115,8 +3115,8 @@ which anything in the workspace calls.
 `rustls-tls` feature enables `__rustls-ring`, which pulls `ring`. Feature
 unification does not pick one - it compiles both, and `cargo tree -i ring` and
 `cargo tree -i aws-lc-rs` printed the same tree under each. The explicit
-`aws_lc_rs` in `pipeline.rs` was naming a provider that only half the build was
-using.
+`aws_lc_rs` in `pipeline/ws_session.rs` was naming a provider that only half the
+build was using.
 
 **This was not a bug, and it is worth being exact about why not.** reqwest
 builds its config with `ClientConfig::builder_with_provider` and falls back to
@@ -3125,8 +3125,8 @@ rustls to guess. Had it called `ClientConfig::builder()`, rustls'
 `get_default_or_install_from_crate_features` returns `None` when both features
 are on and panics with "make sure exactly one of the 'aws-lc-rs' and 'ring'
 features is enabled" - so the latent trap was there, and the explicit provider
-in `pipeline.rs` was likely what kept it from being found. The cost paid was
-size and build time, not behaviour.
+in `pipeline/ws_session.rs` was likely what kept it from being found. The cost
+paid was size and build time, not behaviour.
 
 **Measured**, same source, same profile (thin LTO, `codegen-units = 1`,
 `strip`), only the dependency lines differing between the two builds:
@@ -3140,8 +3140,8 @@ The APK is deflated, so the packaged saving is smaller than the library's; the
 library is the number that is comparable across builds.
 
 **The provider kept is ring, not aws-lc-rs**, for three reasons: reqwest already
-wanted it, so the change is four lines in `pipeline.rs` rather than a
-`-no-provider` feature plus a process-wide `install_default()`; it is the
+wanted it, so the change is four lines in `pipeline/ws_session.rs` rather than
+a `-no-provider` feature plus a process-wide `install_default()`; it is the
 smaller of the two; and `aws-lc-sys` is built with cmake, so dropping it takes
 cmake out of the build entirely - `cmake` and `fs_extra` left `Cargo.lock`
 alongside `aws-lc-rs` and `aws-lc-sys`. What is given up is TLS 1.3's
@@ -3159,9 +3159,9 @@ binary, and that is the only place a multi-thread runtime is needed on that side
 
 **How to keep it from coming back.** `cargo tree -i aws-lc-rs` must fail;
 `cargo tree -e features -i tokio` lists the features that are actually on;
-`cargo tree -d` for duplicates. The `ring` in `pipeline.rs` is what makes the
-choice visible at the point of use - with `default` features it is possible to
-re-add a provider without touching a line of code.
+`cargo tree -d` for duplicates. The `ring` in `pipeline/ws_session.rs` is what
+makes the choice visible at the point of use - with `default` features it is
+possible to re-add a provider without touching a line of code.
 
 **Left alone, deliberately.** `cargo tree -d` still reports duplicates, and they
 are not all ours to fix: `calloop` 0.13/0.14, `smithay-client-toolkit` 0.19/0.20,
@@ -3709,10 +3709,10 @@ the frame: holding it is a promise.
 
 ## 49. Splitting seven files, and the five ways a scripted move lies
 
-*Landed 2026-10-28, in 1.5.78 to 1.5.97.*
+*Landed 2026-10-28, in 1.5.78 to 1.5.105.*
 
-The refactor itself is recorded in `priv/docs/REFACTOR-PLAN.md`, which is not
-committed. What belongs here is what it cost.
+The refactor itself is recorded in `priv/docs/REFACTOR-PLAN.md`, which is kept in
+the private repository rather than this one. What belongs here is what it cost.
 
 **A move is only a move if nothing but position changed**, and the checks that
 look like they prove it do not all do.

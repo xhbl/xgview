@@ -408,7 +408,7 @@ xgview/
 │   │   ├── mjpeg.rs            #   MJPEG (`multipart/x-mixed-replace`) client
 │   │   ├── h264.rs             #   RTP depacketizer (the decoder is in monitor_codec)
 │   │   ├── hevc.rs             #   RTP depacketizer, RFC 7798
-│   │   ├── pipeline.rs         #   per channel supervisor + backoff reconnection
+│   │   ├── pipeline/           #   the supervisor, one session per protocol, and backoff
 │   │   ├── discovery/          #   ONVIF (WS-Discovery / SOAP), TCP scan, Synology
 │   │   └── autostart.rs        #   start on boot helpers
 │   ├── monitor_codec/          # platform decoder: FFmpeg / OpenH264, Android AMediaCodec, null fallback
