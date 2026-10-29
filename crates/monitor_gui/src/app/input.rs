@@ -910,6 +910,95 @@ impl XgViewApp {
         })
     }
 
+    /// The keys that reach the panels: settings, the device window and full
+    /// screen - how a keyboard, and whatever button a remote offers beside the
+    /// DPAD, gets to them at all.
+    ///
+    /// A dialog owns the screen while it is up, so none of these opens a panel
+    /// behind one, and a picker is a modal of its own and owns them the same
+    /// way. The magnified viewport's bar is taken down before any of them acts,
+    /// so that the two are never up at once - see [`crate::tilebar`].
+    fn keys_of_the_application(&mut self, ctx: &egui::Context, keys: &Keys) {
+        // A dialog owns the screen while it is up: nothing behind it answers the
+        // pointer, and the keys that open a panel are spent the same way, so one
+        // dialog can never be stacked on another.
+        let dialog_open = self.discovery.open
+            || self.camera_edit.is_open()
+            || self.remove_confirm.is_open()
+            || self.system_confirm.is_open()
+            || self.passphrase.is_open();
+        // The layout picker is a modal of its own, and it owns the keys while
+        // it is up: opening a panel behind it would stack two of them.
+        if keys.settings && !dialog_open && !self.layout_picker.is_open() && !self.portrait_aspect_picker.is_open() && !self.combined_info_picker.is_open() && !self.is_portrait() {
+            self.show_settings = !self.show_settings;
+        }
+        if keys.devices && !dialog_open && !self.layout_picker.is_open() && !self.portrait_aspect_picker.is_open() && !self.combined_info_picker.is_open() {
+            self.discovery.open = !self.discovery.open;
+            // Opened from the keyboard, so there is no button to hand the focus
+            // back to when it closes.
+            self.discovery.from = None;
+        }
+        if keys.fullscreen {
+            let enabled = !self.fullscreen;
+            self.set_fullscreen(ctx, enabled);
+        }
+        // A key that opens a panel, or changes the shape of the wall, is not the
+        // magnified viewport's bar's: it takes the bar down before it acts, so
+        // the two are never up at once. See [`crate::tilebar`].
+        if keys.settings
+            || keys.devices
+            || keys.fullscreen
+            || keys.page_prev
+            || keys.page_next
+            || keys.layout.iter().any(|pressed| *pressed)
+        {
+            self.tile_bar.hide();
+        }
+    }
+
+    /// The wall's own keys: the page turns and the layout digits.
+    ///
+    /// Spent while a picker is up, so that a press cannot change the wall behind
+    /// it. Back is answered below, where the panels are unwound.
+    fn keys_of_the_wall(&mut self, ctx: &egui::Context, keys: &Keys) {
+        // The picker is a modal: while it is up the wall's own keys - page
+        // turns and the layout digits - are spent, so a press cannot change the
+        // wall behind it. Back is answered below, where the panels are unwound.
+        if !self.layout_picker.is_open() && !self.portrait_aspect_picker.is_open() && !self.combined_info_picker.is_open() {
+            // A page key turns the page from wherever the focus is, but the
+            // bounce a turn at the edge makes - to the other page button -
+            // belongs to a focus that was standing on one of those buttons: the
+            // turn is what took the button it stood on away. A tile's focus, or
+            // a focus anywhere else, turns the page and stays put.
+            let on_page_button = self.page_button_has_focus(ctx);
+            if keys.page_prev {
+                self.advance(false, on_page_button);
+            }
+            if keys.page_next {
+                self.advance(true, on_page_button);
+            }
+            for (slot, pressed) in keys.layout.iter().enumerate() {
+                if !*pressed {
+                    continue;
+                }
+                if self.is_portrait() {
+                    // Upright, the digits pick the four stacked grids.
+                    if let Some(layout) = GridLayout::PORTRAIT.get(slot) {
+                        self.set_layout(*layout);
+                    }
+                } else {
+                    // The digit is the viewport count; the last slot is `0`,
+                    // which stands for the ten-cell layout. 12, 13 and 16 have
+                    // no digit.
+                    let digit = if slot == 9 { 0 } else { slot as u8 + 1 };
+                    if let Some(layout) = GridLayout::for_digit(digit) {
+                        self.set_layout(layout);
+                    }
+                }
+            }
+        }
+    }
+
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
         // The file dialog owns the keyboard while it is up. Its own keybindings
         // and egui's focus walk are how a viewer moves around it, and the arrows
@@ -1064,79 +1153,8 @@ impl XgViewApp {
         }
 
 
-        // Application keys first: they are how a keyboard, and whatever button
-        // a remote offers beside the DPAD, reach the panels at all.
-        // A dialog owns the screen while it is up: nothing behind it answers the
-        // pointer, and the keys that open a panel are spent the same way, so one
-        // dialog can never be stacked on another.
-        let dialog_open = self.discovery.open
-            || self.camera_edit.is_open()
-            || self.remove_confirm.is_open()
-            || self.system_confirm.is_open()
-            || self.passphrase.is_open();
-        // The layout picker is a modal of its own, and it owns the keys while
-        // it is up: opening a panel behind it would stack two of them.
-        if keys.settings && !dialog_open && !self.layout_picker.is_open() && !self.portrait_aspect_picker.is_open() && !self.combined_info_picker.is_open() && !self.is_portrait() {
-            self.show_settings = !self.show_settings;
-        }
-        if keys.devices && !dialog_open && !self.layout_picker.is_open() && !self.portrait_aspect_picker.is_open() && !self.combined_info_picker.is_open() {
-            self.discovery.open = !self.discovery.open;
-            // Opened from the keyboard, so there is no button to hand the focus
-            // back to when it closes.
-            self.discovery.from = None;
-        }
-        if keys.fullscreen {
-            let enabled = !self.fullscreen;
-            self.set_fullscreen(ctx, enabled);
-        }
-        // A key that opens a panel, or changes the shape of the wall, is not the
-        // magnified viewport's bar's: it takes the bar down before it acts, so
-        // the two are never up at once. See [`crate::tilebar`].
-        if keys.settings
-            || keys.devices
-            || keys.fullscreen
-            || keys.page_prev
-            || keys.page_next
-            || keys.layout.iter().any(|pressed| *pressed)
-        {
-            self.tile_bar.hide();
-        }
-        // The picker is a modal: while it is up the wall's own keys - page
-        // turns and the layout digits - are spent, so a press cannot change the
-        // wall behind it. Back is answered below, where the panels are unwound.
-        if !self.layout_picker.is_open() && !self.portrait_aspect_picker.is_open() && !self.combined_info_picker.is_open() {
-            // A page key turns the page from wherever the focus is, but the
-            // bounce a turn at the edge makes - to the other page button -
-            // belongs to a focus that was standing on one of those buttons: the
-            // turn is what took the button it stood on away. A tile's focus, or
-            // a focus anywhere else, turns the page and stays put.
-            let on_page_button = self.page_button_has_focus(ctx);
-            if keys.page_prev {
-                self.advance(false, on_page_button);
-            }
-            if keys.page_next {
-                self.advance(true, on_page_button);
-            }
-            for (slot, pressed) in keys.layout.iter().enumerate() {
-                if !*pressed {
-                    continue;
-                }
-                if self.is_portrait() {
-                    // Upright, the digits pick the four stacked grids.
-                    if let Some(layout) = GridLayout::PORTRAIT.get(slot) {
-                        self.set_layout(*layout);
-                    }
-                } else {
-                    // The digit is the viewport count; the last slot is `0`,
-                    // which stands for the ten-cell layout. 12, 13 and 16 have
-                    // no digit.
-                    let digit = if slot == 9 { 0 } else { slot as u8 + 1 };
-                    if let Some(layout) = GridLayout::for_digit(digit) {
-                        self.set_layout(layout);
-                    }
-                }
-            }
-        }
+        self.keys_of_the_application(ctx, &keys);
+        self.keys_of_the_wall(ctx, &keys);
 
         // A control of the navigation layer: the arrow moves by declaration -
         // the scope's order, then its exits - and not by geometry. Answered
