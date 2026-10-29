@@ -13,7 +13,7 @@ impl XgViewApp {
     pub(super) fn camera_edit_window(&mut self, ctx: &egui::Context) -> bool {
         // Taken for the frame, so the form and the navigation layer can be
         // borrowed apart; put back unless the window was closed or saved.
-        let Some(CameraEdit { slot, mut draft, from }) = self.camera_edit.take() else {
+        let Some(CameraEdit { slot, mut draft }) = self.camera_edit.take() else {
             return false;
         };
         let mut save = false;
@@ -48,7 +48,7 @@ impl XgViewApp {
             self.nav.open("edit-body");
             let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft, camera);
             // The dialog opens on the first control of the form.
-            self.camera_edit_anchor = fields.first;
+            self.camera_edit.anchor = fields.first;
             if fields.detach {
                 detach = true;
             }
@@ -88,7 +88,7 @@ impl XgViewApp {
                 camera.detach();
             }
             self.needs_sync = true;
-            self.camera_edit = Some(CameraEdit { slot, draft, from });
+            self.camera_edit.open(CameraEdit { slot, draft });
             return true;
         }
 
@@ -106,22 +106,20 @@ impl XgViewApp {
                         }
                     }
                     self.needs_sync = true;
-                    self.camera_edit_anchor = None;
                     // The focus goes back to the button the window was opened
                     // from, not to the first control of the panel - and only
                     // when that button was reached with the keyboard or a
-                    // remote. See `CameraEdit::from`.
-                    self.restore_focus = from;
+                    // remote. See `Modal::from`.
+                    self.restore_focus = self.camera_edit.close_restoring();
                     return true;
                 }
                 Err(error) => self.flash(error, ToastKind::Error),
             }
         }
         if !cancel {
-            self.camera_edit = Some(CameraEdit { slot, draft, from });
+            self.camera_edit.open(CameraEdit { slot, draft });
         } else {
-            self.camera_edit_anchor = None;
-            self.restore_focus = from;
+            self.restore_focus = self.camera_edit.close_restoring();
         }
         false
     }

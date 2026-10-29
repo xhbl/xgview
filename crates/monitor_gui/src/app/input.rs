@@ -750,7 +750,7 @@ impl XgViewApp {
         // the one thing on this side of the answer that cannot be backed out of,
         // because the answer would then have nowhere to go.
         if ((self.passphrase.as_ref().is_some_and(|prompt| !prompt.working))
-            || self.camera_edit.is_some()
+            || self.camera_edit.is_open()
             || self.remove_confirm.is_open()
             || self.system_confirm.is_open())
             && self.dialog_back_pressed(ctx)
@@ -766,9 +766,8 @@ impl XgViewApp {
                 self.restore_focus = self.remove_confirm.close_restoring();
             } else if self.system_confirm.is_open() {
                 self.restore_focus = self.system_confirm.close_restoring();
-            } else if let Some(edit) = self.camera_edit.take() {
-                self.camera_edit_anchor = None;
-                self.restore_focus = edit.from;
+            } else if self.camera_edit.is_open() {
+                self.restore_focus = self.camera_edit.close_restoring();
             }
             return;
         }
@@ -1012,7 +1011,7 @@ impl XgViewApp {
         // pointer, and the keys that open a panel are spent the same way, so one
         // dialog can never be stacked on another.
         let dialog_open = self.discovery.open
-            || self.camera_edit.is_some()
+            || self.camera_edit.is_open()
             || self.remove_confirm.is_open()
             || self.system_confirm.is_open()
             || self.passphrase.is_some();

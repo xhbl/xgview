@@ -466,7 +466,9 @@ struct Modal<T> {
     /// First control of the window, to be handed the focus as it opens.
     anchor: Option<Id>,
     /// The button that opened it, to give it back its focus when it closes.
-    /// `None` when it was opened with a pointer, which moves no focus.
+    /// `None` when it was opened with a pointer: a press moves no focus anywhere
+    /// else in this program, so the window closes and the ring stays where it
+    /// was.
     ///
     /// A window that may still be put back copies it, because it has to hand it
     /// on to the next frame; whoever gives the focus back takes it, so the modal
@@ -534,12 +536,6 @@ struct CameraEdit {
     /// edit came from shows.
     slot: usize,
     draft: CameraDraft,
-    /// The edit button that opened the window, to give it back its focus.
-    ///
-    /// `None` when the window was opened with a pointer: a press does not move
-    /// the focus anywhere else in this program, so it must not appear to move it
-    /// here either - the window closes and the ring stays where it was.
-    from: Option<Id>,
 }
 
 /// A camera the settings panel is asking about removing.
@@ -1103,11 +1099,7 @@ pub struct XgViewApp {
     #[cfg(target_os = "android")]
     editing: Option<Id>,
     /// The camera the settings panel is editing, while its window is up.
-    camera_edit: Option<CameraEdit>,
-    /// First control of the edit window, to hand it the focus as it opens.
-    camera_edit_anchor: Option<Id>,
-    /// Watches the edit window for the frame it appears on.
-    camera_edit_handoff: Handoff,
+    camera_edit: Modal<CameraEdit>,
     /// Camera waiting for the remove button to be confirmed.
     ///
     /// Asked for in a window, so that a press on a bin icon - a shape, one
@@ -1431,9 +1423,7 @@ impl XgViewApp {
             android_boot_at: f64::NEG_INFINITY,
             #[cfg(target_os = "android")]
             editing: None,
-            camera_edit: None,
-            camera_edit_anchor: None,
-            camera_edit_handoff: Handoff::default(),
+            camera_edit: Modal::default(),
             remove_confirm: Modal::default(),
             system_confirm: Modal::default(),
             focus_group_name: false,
@@ -1494,8 +1484,8 @@ impl XgViewApp {
             self.remove_confirm.anchor
         } else if self.system_confirm.is_open() {
             self.system_confirm.anchor
-        } else if self.camera_edit.is_some() {
-            self.camera_edit_anchor
+        } else if self.camera_edit.is_open() {
+            self.camera_edit.anchor
         } else if self.discovery.open {
             self.discovery.focus_anchor
         } else if self.layout_picker.is_open() {
@@ -2100,9 +2090,9 @@ impl XgViewApp {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
-        if self.camera_edit_handoff.entering(self.camera_edit.is_some()) {
+        if self.camera_edit.handoff.entering(self.camera_edit.is_open()) {
             self.swallow_enter = 10;
-            if let Some(id) = self.camera_edit_anchor {
+            if let Some(id) = self.camera_edit.anchor {
                 // The caret of a text field that has never been focused starts
                 // after its last character - but egui keeps the cursor in the
                 // *persisted* state the field's id carries, and this form's ids

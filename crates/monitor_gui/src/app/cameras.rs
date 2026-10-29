@@ -329,7 +329,8 @@ impl XgViewApp {
         if let Some((slot, from)) = edit {
             let draft = self.config.cameras.get(slot).map(CameraDraft::from_source);
             if let Some(draft) = draft {
-                self.camera_edit = Some(CameraEdit { slot, draft, from });
+                self.camera_edit.open(CameraEdit { slot, draft });
+                self.camera_edit.from = from;
             }
         }
         if let Some(slot) = connect_change {
