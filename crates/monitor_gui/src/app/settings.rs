@@ -865,7 +865,7 @@ impl XgViewApp {
                     self.file_dialog_anchor = Some(export.id);
                 }
                 if self.encrypt_export {
-                    self.passphrase = Some(Passphrase::for_export());
+                    self.passphrase.open(Passphrase::for_export());
                 } else {
                     self.ask_for_file(FileJob::Export(None));
                 }

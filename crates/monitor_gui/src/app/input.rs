@@ -749,14 +749,14 @@ impl XgViewApp {
         // A prompt whose passphrase is being stretched is the exception: it is
         // the one thing on this side of the answer that cannot be backed out of,
         // because the answer would then have nowhere to go.
-        if ((self.passphrase.as_ref().is_some_and(|prompt| !prompt.working))
+        if ((self.passphrase.payload.as_ref().is_some_and(|prompt| !prompt.working))
             || self.camera_edit.is_open()
             || self.remove_confirm.is_open()
             || self.system_confirm.is_open())
             && self.dialog_back_pressed(ctx)
         {
             if self.passphrase.take().is_some() {
-                self.passphrase_anchor = None;
+                self.passphrase.close();
                 // Backing out of it leaves the export or import unasked for, and
                 // the button behind the prompt takes the focus again.
                 self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
@@ -1014,7 +1014,7 @@ impl XgViewApp {
             || self.camera_edit.is_open()
             || self.remove_confirm.is_open()
             || self.system_confirm.is_open()
-            || self.passphrase.is_some();
+            || self.passphrase.is_open();
         // The layout picker is a modal of its own, and it owns the keys while
         // it is up: opening a panel behind it would stack two of them.
         if keys.settings && !dialog_open && !self.layout_picker.is_open() && !self.portrait_aspect_picker.is_open() && !self.combined_info_picker.is_open() && !self.is_portrait() {

@@ -315,7 +315,7 @@ impl XgViewApp {
                 |s| egui::TextEdit::singleline(s).password(!reveal).desired_width(f32::INFINITY),
             );
             // The prompt opens on this field.
-            self.passphrase_anchor = Some(first.id);
+            self.passphrase.anchor = Some(first.id);
 
             if prompt.job == SealJob::Export {
                 ui.add_space(theme::space::XS);
@@ -392,9 +392,9 @@ impl XgViewApp {
         }
 
         if leave {
-            self.passphrase_anchor = None;
+            self.passphrase.close();
         } else {
-            self.passphrase = Some(prompt);
+            self.passphrase.open(prompt);
         }
         // Nothing here changes the configuration any more: what an opened file
         // becomes is settled by `poll_sealing`, on the frame the answer arrives.

@@ -144,7 +144,7 @@ impl XgViewApp {
         // It is down now, so the control behind it takes the focus back - the
         // way it would have had the dialog not been opened at all. An import
         // that turned out to want the passphrase anchors itself instead.
-        if self.file_job.is_none() && self.passphrase.is_none() {
+        if self.file_job.is_none() && !self.passphrase.is_open() {
             if let Some(anchor) = self.file_dialog_anchor.take() {
                 self.restore_focus = Some(anchor);
             }
@@ -289,7 +289,7 @@ impl XgViewApp {
             }
         };
         if monitor_core::sealed::is_sealed(&data) {
-            self.passphrase = Some(Passphrase::for_import(data, Some(path)));
+            self.passphrase.open(Passphrase::for_import(data, Some(path)));
             return;
         }
         match self.apply_import(&data) {
@@ -395,7 +395,7 @@ impl XgViewApp {
             Some(crate::android::Picked::Cancelled) => {}
             Some(crate::android::Picked::Config(text)) => {
                 if monitor_core::sealed::is_sealed(&text) {
-                    self.passphrase = Some(Passphrase::for_import(text, None));
+                    self.passphrase.open(Passphrase::for_import(text, None));
                     return;
                 }
                 match self.apply_import(&text) {
@@ -451,8 +451,7 @@ impl XgViewApp {
                 Ok(Ok(config)) => {
                     let count = self.apply_import_config(config);
                     self.say_imported(count, origin);
-                    self.passphrase = None;
-                    self.passphrase_anchor = None;
+                    self.passphrase.close();
                     self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
                     self.mark_dirty();
                 }
@@ -461,7 +460,7 @@ impl XgViewApp {
                 // stays, the window stays with this said under it, and a second
                 // attempt is a second field's worth of typing.
                 Ok(Err(())) | Err(TryRecvError::Disconnected) => {
-                    if let Some(prompt) = self.passphrase.as_mut() {
+                    if let Some(prompt) = self.passphrase.payload.as_mut() {
                         prompt.working = false;
                         prompt.error = Some(monitor_i18n::tr("prompt-passphrase-wrong"));
                     }

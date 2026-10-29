@@ -1067,9 +1067,7 @@ pub struct XgViewApp {
     encrypt_export: bool,
     /// The passphrase prompt, while it is up: what seals an export, and what
     /// opens a sealed one. See [`Passphrase`].
-    passphrase: Option<Passphrase>,
-    /// First control of the prompt, to hand it the focus as it opens.
-    passphrase_anchor: Option<Id>,
+    passphrase: Modal<Passphrase>,
     /// The seal or open running on a thread of its own, if any. See [`Sealing`].
     sealing: Option<Sealing>,
     /// The test tone a camera's form asked for, while it is being played.
@@ -1078,8 +1076,6 @@ pub struct XgViewApp {
     /// half of socket work, and the window it was asked from stays open and
     /// responsive underneath it.
     talk_test: Option<Receiver<Result<(), ToneFailure>>>,
-    /// Watches the prompt for the frame it appears on.
-    passphrase_handoff: Handoff,
     /// The Android start-on-boot state - whether the app may draw over other
     /// apps, and whether it is the home app - and when it was last read. Read
     /// through `crate::android`, throttled: it only changes while the viewer is
@@ -1412,11 +1408,9 @@ impl XgViewApp {
             restore_focus: None,
             import_cameras_only: true,
             encrypt_export: true,
-            passphrase: None,
-            passphrase_anchor: None,
+            passphrase: Modal::default(),
             sealing: None,
             talk_test: None,
-            passphrase_handoff: Handoff::default(),
             #[cfg(target_os = "android")]
             android_boot: (false, false),
             #[cfg(target_os = "android")]
@@ -1478,8 +1472,8 @@ impl XgViewApp {
     /// being left without a focus, and at the start of one to give the focus
     /// back the moment a key says the viewer is on the keyboard again.
     fn panel_anchor(&self) -> Option<Id> {
-        if self.passphrase.is_some() {
-            self.passphrase_anchor
+        if self.passphrase.is_open() {
+            self.passphrase.anchor
         } else if self.remove_confirm.is_open() {
             self.remove_confirm.anchor
         } else if self.system_confirm.is_open() {
@@ -2116,9 +2110,9 @@ impl XgViewApp {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
-        if self.passphrase_handoff.entering(self.passphrase.is_some()) {
+        if self.passphrase.handoff.entering(self.passphrase.is_open()) {
             self.swallow_enter = 10;
-            if let Some(id) = self.passphrase_anchor {
+            if let Some(id) = self.passphrase.anchor {
                 // The caret starts after the last character, and the field's id
                 // is the same on every visit: dropping the persisted state hands
                 // the choice back to egui. See the edit window for the same.
