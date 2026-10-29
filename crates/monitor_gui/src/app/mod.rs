@@ -65,7 +65,6 @@ const TOOLBAR_REFERENCE_WIDTH: f32 = 960.0;
 /// Smallest the toolbar is allowed to shrink to, as a fraction of its text size.
 const TOOLBAR_MIN_SCALE: f32 = 0.6;
 
-
 /// How long the question the wall asks on the first Back stands.
 ///
 /// Back sits beside the arrows a remote is steered with, and a program that
@@ -84,8 +83,6 @@ const EXIT_WINDOW: Duration = Duration::from_secs(2);
 /// go, and a wall driven with the bars away keeps the ring it is aimed with. See
 /// [`XgViewApp::ring_follows_bars`].
 const RING_IDLE: Duration = Duration::from_secs(8);
-
-
 
 /// How long a pointer press may last and still be a tap, in seconds.
 ///
@@ -442,6 +439,38 @@ impl Handoff {
         self.open = open;
         entering
     }
+
+    /// Hands the focus to the control a window has just put up, on the one frame
+    /// it opens, and says whether it opened.
+    ///
+    /// `fresh_caret` is for a form whose fields carry the same id on every
+    /// visit. egui keeps the caret in the *persisted* state that id carries, so
+    /// a field that has never been focused starts the caret wherever the
+    /// previous visit left it - in the middle of the next camera's name.
+    /// Dropping the state hands the choice back to egui, which puts it at the
+    /// end.
+    ///
+    /// The order is the reason this is one function: the state has to be dropped
+    /// before the focus arrives, and a window that has a payload has no other
+    /// place to say so.
+    fn takes_focus(
+        &mut self,
+        ctx: &egui::Context,
+        open: bool,
+        anchor: Option<Id>,
+        fresh_caret: bool,
+    ) -> bool {
+        if !self.entering(open) {
+            return false;
+        }
+        if let Some(id) = anchor {
+            if fresh_caret {
+                egui::TextEdit::store_state(ctx, id, Default::default());
+            }
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+        true
+    }
 }
 
 /// What every modal window in this program carries.
@@ -552,8 +581,14 @@ impl<T> Modal<T> {
     fn take(&mut self) -> Option<T> {
         self.payload.take()
     }
-}
 
+    /// Hands the focus to the window on the frame it opens, and says whether it
+    /// opened. `fresh_caret` drops the caret state of a form whose fields carry
+    /// the same ids on every visit - see [`Handoff::takes_focus`].
+    fn hand_off(&mut self, ctx: &egui::Context, fresh_caret: bool) -> bool {
+        self.handoff.takes_focus(ctx, self.payload.is_some(), self.anchor, fresh_caret)
+    }
+}
 
 /// A camera the settings panel is editing, and the form bound to it.
 #[derive(Debug)]
@@ -2129,66 +2164,23 @@ impl XgViewApp {
         // A panel that appears takes the remote's focus, once: without it the
         // arrows would go on walking the wall behind it, which is the one thing
         // a viewer cannot see happening. See `Handoff`.
-        if self.settings_handoff.entering(self.show_settings) {
-            if let Some(id) = self.settings_anchor {
-                ctx.memory_mut(|memory| memory.request_focus(id));
-            }
-        }
-        if self.layout_picker.handoff.entering(self.layout_picker.is_open()) {
-            if let Some(id) = self.layout_picker.anchor {
-                ctx.memory_mut(|memory| memory.request_focus(id));
-            }
-        }
-        if self.portrait_aspect_picker.handoff.entering(self.portrait_aspect_picker.is_open()) {
-            if let Some(id) = self.portrait_aspect_picker.anchor {
-                ctx.memory_mut(|memory| memory.request_focus(id));
-            }
-        }
-        if self.combined_info_picker.handoff.entering(self.combined_info_picker.is_open()) {
-            if let Some(id) = self.combined_info_picker.anchor {
-                ctx.memory_mut(|memory| memory.request_focus(id));
-            }
-        }
-        if self.dialog_handoff.entering(self.discovery.open) {
-            if let Some(id) = self.discovery.focus_anchor {
-                ctx.memory_mut(|memory| memory.request_focus(id));
-            }
-        }
-        if self.camera_edit.handoff.entering(self.camera_edit.is_open()) {
+        self.settings_handoff
+            .takes_focus(ctx, self.show_settings, self.settings_anchor, false);
+        self.layout_picker.hand_off(ctx, false);
+        self.portrait_aspect_picker.hand_off(ctx, false);
+        self.combined_info_picker.hand_off(ctx, false);
+        self.dialog_handoff
+            .takes_focus(ctx, self.discovery.open, self.discovery.focus_anchor, false);
+        // The four a press on a control opens. The Enter that opened one is still
+        // in flight for a frame or two, and would confirm the control the window
+        // has just been given. See `swallow_enter`.
+        let mut opened = false;
+        opened |= self.camera_edit.hand_off(ctx, true);
+        opened |= self.remove_confirm.hand_off(ctx, false);
+        opened |= self.system_confirm.hand_off(ctx, false);
+        opened |= self.passphrase.hand_off(ctx, true);
+        if opened {
             self.swallow_enter = 10;
-            if let Some(id) = self.camera_edit.anchor {
-                // The caret of a text field that has never been focused starts
-                // after its last character - but egui keeps the cursor in the
-                // *persisted* state the field's id carries, and this form's ids
-                // are the same for every camera. Left alone, the caret would sit
-                // wherever the previous camera's editing left it: in the middle
-                // of the next camera's name. Dropping the state hands the choice
-                // back to egui, which puts it at the end.
-                egui::TextEdit::store_state(ctx, id, Default::default());
-                ctx.memory_mut(|memory| memory.request_focus(id));
-            }
-        }
-        if self.remove_confirm.handoff.entering(self.remove_confirm.is_open()) {
-            self.swallow_enter = 10;
-            if let Some(id) = self.remove_confirm.anchor {
-                ctx.memory_mut(|memory| memory.request_focus(id));
-            }
-        }
-        if self.system_confirm.handoff.entering(self.system_confirm.is_open()) {
-            self.swallow_enter = 10;
-            if let Some(id) = self.system_confirm.anchor {
-                ctx.memory_mut(|memory| memory.request_focus(id));
-            }
-        }
-        if self.passphrase.handoff.entering(self.passphrase.is_open()) {
-            self.swallow_enter = 10;
-            if let Some(id) = self.passphrase.anchor {
-                // The caret starts after the last character, and the field's id
-                // is the same on every visit: dropping the persisted state hands
-                // the choice back to egui. See the edit window for the same.
-                egui::TextEdit::store_state(ctx, id, Default::default());
-                ctx.memory_mut(|memory| memory.request_focus(id));
-            }
         }
         // The reorder mode is opened by a press on one frame, and its list is
         // drawn on the next; the first move button is only known once it has
@@ -2418,7 +2410,6 @@ impl XgViewApp {
             let dock = self.tile_bar.dock();
             self.tile_bar.show(dock, Instant::now());
         }
-
 
         // The magnified viewport's bar keeps a clock of its own, and the repaint
         // is asked for against it: a wall showing no live picture is not
