@@ -999,6 +999,71 @@ impl XgViewApp {
         }
     }
 
+    /// The magnified viewport's keys: one channel, not a grid.
+    ///
+    /// The strip owns them only where the remote is in it - its controls are
+    /// egui's own buttons on the navigation layer, and the arrows walk them. A
+    /// strip that is merely up - the upright default, or one a tap put there -
+    /// leaves the remote on the wall, so the arrows keep stepping channels and
+    /// the confirm key is what walks into the strip.
+    fn keys_of_the_magnified(&mut self, ctx: &egui::Context, keys: &Keys) {
+        let bar_owns_keys = self.tile_bar.is_open()
+            && ctx.memory(|memory| memory.focused()).is_some_and(tilebar::owns);
+        if !bar_owns_keys {
+            // A magnified viewport is one channel, not a grid: Right and Left
+            // are the next and previous channel in channel order, and Up and
+            // Down have no grid to walk, so they go straight to the bars.
+            if keys.left {
+                self.step_zoom(false);
+            }
+            if keys.right {
+                self.step_zoom(true);
+            }
+            if keys.down {
+                self.hand_off(ctx, Bar::Status);
+            }
+            if keys.up {
+                self.hand_off(ctx, Bar::Toolbar);
+            }
+            // The confirm key brings the viewport's bar up rather than unwinding
+            // the magnification: Back is the way out now, a layer at a time. A
+            // held key is not a second press. The bar appears without its
+            // selection drawn - the focus is put on its seat, not on a control -
+            // and the first arrow is what lights it. A bar that is already up is
+            // entered the same way, without being shown again.
+            //
+            // It comes up along the bottom: the remote asks for it without
+            // pointing at an edge, and the status side is where the hand and the
+            // eye expect a strip of controls.
+            if keys.enter && keys.enter_fresh {
+                if !self.tile_bar.is_open() {
+                    self.tile_bar.show(tilebar::Dock::Bottom, Instant::now());
+                }
+                ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
+            }
+        }
+    }
+
+    /// The wall's own arrows: they walk the grid, and the confirm key magnifies
+    /// what has the focus.
+    fn keys_of_the_grid(&mut self, ctx: &egui::Context, keys: &Keys) {
+        if keys.left {
+            self.navigate(Direction::Left);
+        }
+        if keys.right {
+            self.navigate(Direction::Right);
+        }
+        if keys.down && self.navigate(Direction::Down) == NavigateOutcome::Blocked {
+            self.hand_off(ctx, Bar::Status);
+        }
+        if keys.up && self.navigate(Direction::Up) == NavigateOutcome::Blocked {
+            self.hand_off(ctx, Bar::Toolbar);
+        }
+        if keys.enter {
+            self.zoom_in();
+        }
+    }
+
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
         // The file dialog owns the keyboard while it is up. Its own keybindings
         // and egui's focus walk are how a viewer moves around it, and the arrows
@@ -1288,65 +1353,9 @@ impl XgViewApp {
         }
 
         if self.scheduler.is_zoomed() {
-            // The strip owns the keys only where the remote is in it: its
-            // controls are egui's own buttons on the navigation layer, and the
-            // arrows walk them. A strip that is merely up - the upright default,
-            // or one a tap put there - leaves the remote on the wall, so the
-            // arrows keep stepping channels and the confirm key is what walks
-            // into the strip.
-            let bar_owns_keys = self.tile_bar.is_open()
-                && ctx.memory(|memory| memory.focused()).is_some_and(tilebar::owns);
-            if !bar_owns_keys {
-                // A magnified viewport is one channel, not a grid: Right and
-                // Left are the next and previous channel in channel order, and
-                // Up and Down have no grid to walk, so they go straight to the
-                // bars.
-                if keys.left {
-                    self.step_zoom(false);
-                }
-                if keys.right {
-                    self.step_zoom(true);
-                }
-                if keys.down {
-                    self.hand_off(ctx, Bar::Status);
-                }
-                if keys.up {
-                    self.hand_off(ctx, Bar::Toolbar);
-                }
-                // The confirm key brings the viewport's bar up rather than
-                // unwinding the magnification: Back is the way out now, a layer
-                // at a time. A held key is not a second press. The bar appears
-                // without its selection drawn - the focus is put on its seat, not
-                // on a control - and the first arrow is what lights it. A bar
-                // that is already up is entered the same way, without being
-                // shown again.
-                //
-                // It comes up along the bottom: the remote asks for it without
-                // pointing at an edge, and the status side is where the hand and
-                // the eye expect a strip of controls.
-                if keys.enter && keys.enter_fresh {
-                    if !self.tile_bar.is_open() {
-                        self.tile_bar.show(tilebar::Dock::Bottom, Instant::now());
-                    }
-                    ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
-                }
-            }
+            self.keys_of_the_magnified(ctx, &keys);
         } else {
-            if keys.left {
-                self.navigate(Direction::Left);
-            }
-            if keys.right {
-                self.navigate(Direction::Right);
-            }
-            if keys.down && self.navigate(Direction::Down) == NavigateOutcome::Blocked {
-                self.hand_off(ctx, Bar::Status);
-            }
-            if keys.up && self.navigate(Direction::Up) == NavigateOutcome::Blocked {
-                self.hand_off(ctx, Bar::Toolbar);
-            }
-            if keys.enter {
-                self.zoom_in();
-            }
+            self.keys_of_the_grid(ctx, &keys);
         }
         if keys.back {
             self.back(ctx);
