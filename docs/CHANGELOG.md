@@ -3,6 +3,56 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.5.77
+
+Changes since 1.5.60. **The wall comes back by itself after a reboot, and a
+camera that will not take its password says so instead of trying forever.**
+
+### Starting by itself
+
+- **The wall returns to the screen after a reboot on Android**, even when a
+  launcher gets there first. It used to start once and lose that race in
+  silence, so the box came up showing the launcher and stayed that way.
+- **A start the system drops is tried again**, and one that lands in a process
+  that has already been used recovers instead of leaving a window that never
+  draws.
+- **A device that failed to start once no longer keeps choosing a graphics
+  backend that cannot work on it**, which used to keep it off the screen until
+  the next release or a changed ROM.
+
+### The picture comes back with the window
+
+- **Returning to the viewer retries its cameras at once**, instead of waiting
+  out a delay that grew while the app was in the background.
+
+### A camera that refuses its password
+
+- **The channel stops and says what happened** - the tile shows the `401` the
+  camera answered - instead of counting down to the same refusal for as long as
+  the viewer watched it.
+- **Correcting the password reconnects the camera at once.** It used to need a
+  page turned away and back before the new password was ever used.
+- **A channel that gave up no longer leaves "switching to…" on the tile.**
+
+### Fixed
+
+- **A camera the machine cannot decode no longer takes the wall down.** A
+  channel whose decoder would not open could freeze the picture and then panic.
+- **Streams from Frigate and go2rtc play properly**, where four of the fields
+  their MP4 segments carry were being read from the wrong place.
+- **A broken or hostile stream can no longer freeze the viewer or crash it.** It
+  could make the viewer allocate its way out of memory, spin, or panic.
+- **A configuration interrupted while being saved comes back one change out of
+  date rather than with no cameras on it.** The previous version is kept beside
+  it and used when the file cannot be read.
+- **A password typed into a camera's address no longer appears in the log.**
+- **A login the viewer cannot send fails the session instead of the program.**
+
+### Smaller
+
+- **The downloads are smaller**, and a viewer left in the background no longer
+  accumulates measurements it will never read.
+
 ## 1.5.60
 
 Changes since 1.5.47.
