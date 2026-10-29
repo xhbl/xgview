@@ -1359,7 +1359,6 @@ impl XgViewApp {
             return;
         }
 
-
         self.keys_of_the_application(ctx, &keys);
         self.keys_of_the_wall(ctx, &keys);
 

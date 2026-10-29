@@ -1,5 +1,5 @@
 //! The settings panel, and the tabs that are about neither cameras nor sound:
-//! display, language, blackout, system and about.
+//! display (which holds the language), blackout, system and about.
 
 use super::*;
 
@@ -172,7 +172,6 @@ impl XgViewApp {
     /// The wall itself: the grid, what the tiles show, and how the window opens.
     pub(super) fn settings_display(&mut self, ui: &mut egui::Ui) -> bool {
         let mut dirty = false;
-
 
         ui.label(RichText::new(monitor_i18n::tr("settings-grid")).strong());
         ui.horizontal_wrapped(|ui| {

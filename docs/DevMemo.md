@@ -94,9 +94,9 @@ grep comes back empty, and the search moves on to the wrong suspect. Ours did
 exactly that for a whole afternoon.
 
 Keep a per session trace of the first N packets behind a counter while chasing
-something like this, then delete it. The traces in `pipeline.rs` that name the
-interleaved channel, the NAL type, the marker bit and the RTP timestamp found
-this bug; they are noise once the session is understood.
+something like this, then delete it. The traces in `pipeline/rtsp_session.rs`
+that name the interleaved channel, the NAL type, the marker bit and the RTP
+timestamp found this bug; they are noise once the session is understood.
 
 ---
 
@@ -3667,6 +3667,10 @@ with the same line under it.
 | `rtsp.rs:1717` | the handshake timed out |
 | `pipeline.rs:2188` | the picture stalled and the grace ran out |
 | `pipeline.rs:2270` | no media arrived at all |
+
+The line numbers are from the single `pipeline.rs` this was found in. 1.5.78 split
+that file into a directory of seven; both stalls are in `pipeline/rtsp_session.rs`
+now, one in `check_stall` and one where the wait runs out.
 
 Nothing downstream could tell them apart, so nothing downstream could act
 differently. `ReconnectPolicy::max_attempts` defaults to `0`, which means "retry

@@ -24,7 +24,6 @@ impl XgViewApp {
                 }
             }
 
-
             self.page_prev_id = Some(Id::new("portrait-prev-page"));
             self.page_next_id = Some(Id::new("portrait-next-page"));
             for (id_str, has) in [
@@ -333,7 +332,6 @@ impl XgViewApp {
                     let enabled = !self.fullscreen;
                     self.set_fullscreen(ui.ctx(), enabled);
                 }
-
 
                 let settings = icons::button(ui, Icon::Gear, self.show_settings, &monitor_i18n::tr("toolbar-settings-tip"));
                 items.push((settings.id, settings.rect));

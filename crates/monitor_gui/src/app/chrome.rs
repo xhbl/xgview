@@ -1,5 +1,8 @@
-//! The two bars, the focus ring and the toasts: what the frame puts around
-//! the wall, and when it takes it away.
+//! When the bars are up, the focus ring's clock and the toasts: what the frame
+//! puts around the wall, and when it takes it away.
+//!
+//! The bars' controls are in `bars`; this is their life - which one the remote is
+//! walking, when they fade, and what replaces them for a moment.
 
 use super::*;
 
