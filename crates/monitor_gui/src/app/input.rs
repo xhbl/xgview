@@ -785,6 +785,131 @@ impl XgViewApp {
         !nav_owns
     }
 
+    /// Reads the keys out of the queue, taking the ones this application acts on.
+    ///
+    /// What it takes depends on what has the focus, and the three answers are
+    /// arguments rather than fields: the wall keeps the arrows, Enter and Back
+    /// for itself; a control on the navigation layer has its arrows taken here
+    /// so that the widget does not also read them; a field keeps the letters.
+    /// Nothing of the application is read - the queue and those three answers
+    /// are the whole of the input.
+    fn parse_keys(
+        ctx: &egui::Context,
+        grid_owns: bool,
+        nav_owns: bool,
+        nav_kind: Option<Kind>,
+        typing: bool,
+    ) -> Keys {
+        ctx.input_mut(|input| {
+            let none = Modifiers::NONE;
+            let mut keys = Keys::default();
+            // Read before the press is consumed: `consume_key` matches key
+            // repeats too, and a repeated Enter must not press the magnified
+            // viewport's bar over and over. See `Keys::enter_fresh`.
+            keys.enter_fresh = input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key { key: Key::Enter | Key::Space, pressed: true, repeat: false, .. }
+                )
+            });
+            // Back is Escape on a keyboard and `BrowserBack` from an Android
+            // remote: winit maps `AKEYCODE_BACK` onto that, not onto Escape, so
+            // a remote that only ever sends BACK would otherwise have no way out
+            // of anything.
+            if grid_owns {
+                keys.left = input.consume_key(none, Key::ArrowLeft);
+                keys.right = input.consume_key(none, Key::ArrowRight);
+                keys.up = input.consume_key(none, Key::ArrowUp);
+                keys.down = input.consume_key(none, Key::ArrowDown);
+                keys.enter = input.consume_key(none, Key::Enter) || input.consume_key(none, Key::Space);
+                keys.back = input.consume_key(none, Key::Escape)
+                    || input.consume_key(none, Key::Backspace)
+                    || input.consume_key(none, Key::BrowserBack);
+            } else {
+                // A control of the navigation layer has its arrows taken out of
+                // the queue here: the layer decides where they go, and the
+                // widget must not also read them. Everything else is left in
+                // the queue for egui's own walk, which ran already.
+                if nav_owns {
+                    // On a remote Up and Down always move the focus. The two
+                    // value controls are adjusted sideways instead: the slider
+                    // reads the sideways keys itself, and a drag value has them
+                    // recorded on the layer for the widget to apply as it is
+                    // drawn (see `controls::drag_value`), because it steps with
+                    // Up / Down and those are the focus's.
+                    match nav_kind {
+                        Some(Kind::Slider) => {
+                            keys.left = input.key_pressed(Key::ArrowLeft);
+                            keys.right = input.key_pressed(Key::ArrowRight);
+                            keys.up = input.consume_key(none, Key::ArrowUp);
+                            keys.down = input.consume_key(none, Key::ArrowDown);
+                        }
+                        Some(Kind::DragValue) | Some(Kind::Cycle) => {
+                            // Taken so the field's caret does not move on them;
+                            // the value change happens at the widget.
+                            keys.up = input.consume_key(none, Key::ArrowUp);
+                            keys.down = input.consume_key(none, Key::ArrowDown);
+                            keys.left = input.consume_key(none, Key::ArrowLeft);
+                            keys.right = input.consume_key(none, Key::ArrowRight);
+                        }
+                        Some(Kind::Text) => {
+                            // The caret is the field's, so the sideways keys are
+                            // left in the queue for it. The vertical ones still
+                            // walk the form.
+                            keys.up = input.consume_key(none, Key::ArrowUp);
+                            keys.down = input.consume_key(none, Key::ArrowDown);
+                        }
+                        _ => {
+                            // A plain control: all four arrows move the focus.
+                            keys.left = input.consume_key(none, Key::ArrowLeft);
+                            keys.right = input.consume_key(none, Key::ArrowRight);
+                            keys.up = input.consume_key(none, Key::ArrowUp);
+                            keys.down = input.consume_key(none, Key::ArrowDown);
+                        }
+                    }
+                } else {
+                    keys.left = input.key_pressed(Key::ArrowLeft);
+                    keys.right = input.key_pressed(Key::ArrowRight);
+                    keys.up = input.key_pressed(Key::ArrowUp);
+                    keys.down = input.key_pressed(Key::ArrowDown);
+                }
+                keys.enter = input.key_pressed(Key::Enter) || input.key_pressed(Key::Space);
+                // Backspace is the field's own when a field has the focus: it
+                // deletes a character rather than unwinding a window.
+                keys.back = input.key_pressed(Key::Escape)
+                    || (!typing && input.key_pressed(Key::Backspace))
+                    || input.key_pressed(Key::BrowserBack);
+            }
+            // The rest belong to the application whatever has the focus, and
+            // are consumed so that nothing downstream acts on them as well.
+            keys.settings = input.consume_key(none, Key::F1);
+            keys.devices = input.consume_key(none, Key::F2);
+            keys.fullscreen = input.consume_key(none, Key::F11);
+            // The layout digits and the page keys are the exception: a field
+            // being typed into keeps them. An address is made of the digits -
+            // `192.168.1.4` - so consuming them changes the wall's shape under a
+            // viewer who was only naming a camera. The page keys are not text,
+            // but a page turning behind a dialog is the same surprise.
+            if !typing {
+                keys.page_prev = input.consume_key(none, Key::PageUp);
+                keys.page_next = input.consume_key(none, Key::PageDown);
+                keys.layout = [
+                    input.consume_key(none, Key::Num1),
+                    input.consume_key(none, Key::Num2),
+                    input.consume_key(none, Key::Num3),
+                    input.consume_key(none, Key::Num4),
+                    input.consume_key(none, Key::Num5),
+                    input.consume_key(none, Key::Num6),
+                    input.consume_key(none, Key::Num7),
+                    input.consume_key(none, Key::Num8),
+                    input.consume_key(none, Key::Num9),
+                    input.consume_key(none, Key::Num0),
+                ];
+            }
+            keys
+        })
+    }
+
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
         // The file dialog owns the keyboard while it is up. Its own keybindings
         // and egui's focus walk are how a viewer moves around it, and the arrows
@@ -909,114 +1034,7 @@ impl XgViewApp {
         }
 
         let grid_owns = self.owner == Owner::Grid;
-        let keys = ctx.input_mut(|input| {
-            let none = Modifiers::NONE;
-            let mut keys = Keys::default();
-            // Read before the press is consumed: `consume_key` matches key
-            // repeats too, and a repeated Enter must not press the magnified
-            // viewport's bar over and over. See `Keys::enter_fresh`.
-            keys.enter_fresh = input.events.iter().any(|event| {
-                matches!(
-                    event,
-                    egui::Event::Key { key: Key::Enter | Key::Space, pressed: true, repeat: false, .. }
-                )
-            });
-            // Back is Escape on a keyboard and `BrowserBack` from an Android
-            // remote: winit maps `AKEYCODE_BACK` onto that, not onto Escape, so
-            // a remote that only ever sends BACK would otherwise have no way out
-            // of anything.
-            if grid_owns {
-                keys.left = input.consume_key(none, Key::ArrowLeft);
-                keys.right = input.consume_key(none, Key::ArrowRight);
-                keys.up = input.consume_key(none, Key::ArrowUp);
-                keys.down = input.consume_key(none, Key::ArrowDown);
-                keys.enter = input.consume_key(none, Key::Enter) || input.consume_key(none, Key::Space);
-                keys.back = input.consume_key(none, Key::Escape)
-                    || input.consume_key(none, Key::Backspace)
-                    || input.consume_key(none, Key::BrowserBack);
-            } else {
-                // A control of the navigation layer has its arrows taken out of
-                // the queue here: the layer decides where they go, and the
-                // widget must not also read them. Everything else is left in
-                // the queue for egui's own walk, which ran already.
-                if nav_owns {
-                    // On a remote Up and Down always move the focus. The two
-                    // value controls are adjusted sideways instead: the slider
-                    // reads the sideways keys itself, and a drag value has them
-                    // recorded on the layer for the widget to apply as it is
-                    // drawn (see `controls::drag_value`), because it steps with
-                    // Up / Down and those are the focus's.
-                    match nav_kind {
-                        Some(Kind::Slider) => {
-                            keys.left = input.key_pressed(Key::ArrowLeft);
-                            keys.right = input.key_pressed(Key::ArrowRight);
-                            keys.up = input.consume_key(none, Key::ArrowUp);
-                            keys.down = input.consume_key(none, Key::ArrowDown);
-                        }
-                        Some(Kind::DragValue) | Some(Kind::Cycle) => {
-                            // Taken so the field's caret does not move on them;
-                            // the value change happens at the widget.
-                            keys.up = input.consume_key(none, Key::ArrowUp);
-                            keys.down = input.consume_key(none, Key::ArrowDown);
-                            keys.left = input.consume_key(none, Key::ArrowLeft);
-                            keys.right = input.consume_key(none, Key::ArrowRight);
-                        }
-                        Some(Kind::Text) => {
-                            // The caret is the field's, so the sideways keys are
-                            // left in the queue for it. The vertical ones still
-                            // walk the form.
-                            keys.up = input.consume_key(none, Key::ArrowUp);
-                            keys.down = input.consume_key(none, Key::ArrowDown);
-                        }
-                        _ => {
-                            // A plain control: all four arrows move the focus.
-                            keys.left = input.consume_key(none, Key::ArrowLeft);
-                            keys.right = input.consume_key(none, Key::ArrowRight);
-                            keys.up = input.consume_key(none, Key::ArrowUp);
-                            keys.down = input.consume_key(none, Key::ArrowDown);
-                        }
-                    }
-                } else {
-                    keys.left = input.key_pressed(Key::ArrowLeft);
-                    keys.right = input.key_pressed(Key::ArrowRight);
-                    keys.up = input.key_pressed(Key::ArrowUp);
-                    keys.down = input.key_pressed(Key::ArrowDown);
-                }
-                keys.enter = input.key_pressed(Key::Enter) || input.key_pressed(Key::Space);
-                // Backspace is the field's own when a field has the focus: it
-                // deletes a character rather than unwinding a window.
-                keys.back = input.key_pressed(Key::Escape)
-                    || (!typing && input.key_pressed(Key::Backspace))
-                    || input.key_pressed(Key::BrowserBack);
-            }
-            // The rest belong to the application whatever has the focus, and
-            // are consumed so that nothing downstream acts on them as well.
-            keys.settings = input.consume_key(none, Key::F1);
-            keys.devices = input.consume_key(none, Key::F2);
-            keys.fullscreen = input.consume_key(none, Key::F11);
-            // The layout digits and the page keys are the exception: a field
-            // being typed into keeps them. An address is made of the digits -
-            // `192.168.1.4` - so consuming them changes the wall's shape under a
-            // viewer who was only naming a camera. The page keys are not text,
-            // but a page turning behind a dialog is the same surprise.
-            if !typing {
-                keys.page_prev = input.consume_key(none, Key::PageUp);
-                keys.page_next = input.consume_key(none, Key::PageDown);
-                keys.layout = [
-                    input.consume_key(none, Key::Num1),
-                    input.consume_key(none, Key::Num2),
-                    input.consume_key(none, Key::Num3),
-                    input.consume_key(none, Key::Num4),
-                    input.consume_key(none, Key::Num5),
-                    input.consume_key(none, Key::Num6),
-                    input.consume_key(none, Key::Num7),
-                    input.consume_key(none, Key::Num8),
-                    input.consume_key(none, Key::Num9),
-                    input.consume_key(none, Key::Num0),
-                ];
-            }
-            keys
-        });
+        let keys = Self::parse_keys(ctx, grid_owns, nav_owns, nav_kind, typing);
 
         // The focus ring is armed here, before any of these keys is acted on:
         // what arms it is the keys that walk it, whatever else they end up
