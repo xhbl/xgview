@@ -672,628 +672,750 @@ pub(super) async fn run_session(
     audio: &AudioHub,
     talk: &TalkHub,
 ) -> Result<()> {
-    let Sinks { events, frames, stats } = sinks;
-    let Endpoint { index, camera_id, uri, credentials, stream, transport, talk: wants_talk, .. } = endpoint;
-    let camera_id = camera_id.as_str();
-    let uri = uri.as_str();
-    let mut client = RtspClient::connect_with_auth(uri, credentials.clone()).await?;
-    // A server may take one transport and refuse the other, which is worth a
-    // second attempt rather than a failed session: go2rtc answers every UDP
-    // `SETUP` with 461 on purpose, so that a client asking for UDP first falls
-    // back, and a preference must never cost a channel its picture. A UDP
-    // handshake that simply goes quiet from `SETUP` onwards is answered the same
-    // way - see `HandshakeFailure::worth_the_other_transport`. The session is
-    // opened afresh rather than patched, because the failed attempt left the
-    // old one half set up.
-    let mut transport = transport;
-    let tracks = match negotiate(&mut client, transport, handshake_timeout, index, wants_talk).await {
-        Ok(tracks) => tracks,
-        Err(failure) if failure.worth_the_other_transport(transport) => {
+    RtspSession::open(endpoint, prefer_hardware, handshake_timeout, sinks, audio, talk)
+        .await?
+        .pump()
+        .await
+}
+
+/// The state one RTSP session carries between packets.
+///
+/// Everything the loop carried from one iteration to the next is a field,
+/// because the loop is about to be split into methods that each answer one
+/// question - the clocks, the talk-back, one media packet - and a method cannot
+/// reach a local. The split is the reason the fields are here; the fields
+/// themselves are what the loop always held.
+struct RtspSession<'a> {
+    /// What it publishes through, and the two hubs it shares with the rest of
+    /// the application.
+    sinks: Sinks<'a>,
+    audio: &'a AudioHub,
+    talk: &'a TalkHub,
+    /// What the session is about, fixed once it has negotiated.
+    index: usize,
+    camera_id: String,
+    stream: StreamKind,
+    kind: Codec,
+    codec: Option<String>,
+    payload_type: Option<u8>,
+    keep_alive_interval: Duration,
+    /// The connection, and what it is carrying.
+    client: RtspClient,
+    transport: RtspTransport,
+    width: Option<u32>,
+    height: Option<u32>,
+    audio_decoder: Option<AudioTrack>,
+    talk_sender: Option<(TalkStream, u8)>,
+    /// The picture's path, from the packet to the frame store.
+    decoder: Option<Box<dyn VideoDecoder>>,
+    depacketizer: Depacketizer,
+    baseline_fix: BaselineFix,
+    sequence: u64,
+    decode_errors: u64,
+    sps_logged: bool,
+    /// What it counts, and what it has already announced.
+    window: StatsWindow,
+    total_frames: u64,
+    announced: bool,
+    /// The clocks it keeps: the probe, the report, the talk-back, and the one
+    /// that decides the session is dead.
+    last_keep_alive: Instant,
+    last_report: Instant,
+    last_talk: Instant,
+    stall: StallDeadline,
+    /// The numbers the receiver report carries.
+    source_ssrc: u32,
+    received_packets: bool,
+    sequence_window: SequenceWindow,
+    jitter: Jitter,
+}
+
+impl<'a> RtspSession<'a> {
+    /// Negotiates the session, and takes everything the packet loop will need.
+    async fn open(
+        endpoint: Endpoint,
+        prefer_hardware: bool,
+        handshake_timeout: Duration,
+        sinks: Sinks<'a>,
+        audio: &'a AudioHub,
+        talk: &'a TalkHub,
+    ) -> Result<Self> {
+        let Endpoint { index, camera_id, uri, credentials, stream, transport, talk: wants_talk, .. } =
+            endpoint;
+        let uri = uri.as_str();
+        let mut client = RtspClient::connect_with_auth(uri, credentials.clone()).await?;
+        // A server may take one transport and refuse the other, which is worth a
+        // second attempt rather than a failed session: go2rtc answers every UDP
+        // `SETUP` with 461 on purpose, so that a client asking for UDP first falls
+        // back, and a preference must never cost a channel its picture. A UDP
+        // handshake that simply goes quiet from `SETUP` onwards is answered the same
+        // way - see `HandshakeFailure::worth_the_other_transport`. The session is
+        // opened afresh rather than patched, because the failed attempt left the
+        // old one half set up.
+        let mut transport = transport;
+        let tracks = match negotiate(&mut client, transport, handshake_timeout, index, wants_talk).await {
+            Ok(tracks) => tracks,
+            Err(failure) if failure.worth_the_other_transport(transport) => {
+                tracing::debug!(
+                    target: "xgview::pipeline",
+                    index,
+                    "the udp session did not come up, reopening the session over tcp"
+                );
+                client = RtspClient::connect_with_auth(uri, credentials).await?;
+                transport = RtspTransport::Tcp;
+                negotiate(&mut client, transport, handshake_timeout, index, wants_talk)
+                    .await
+                    .map_err(HandshakeFailure::into_error)?
+            }
+            Err(failure) => return Err(failure.into_error()),
+        };
+        let video = tracks.iter().find(|track| track.is_video());
+        let codec = video.and_then(|track| track.encoding.clone());
+        // The SDP's resolution is a hint: `a=framesize` is optional, and where it
+        // is missing the size comes from the sequence parameter set below.
+        let mut width = video.and_then(|track| track.width);
+        let mut height = video.and_then(|track| track.height);
+        let payload_type = video.and_then(|track| track.payload_type);
+        let parameter_sets = video.map(|track| track.parameter_sets.clone()).unwrap_or_default();
+        let kind = Codec::from_encoding(codec.as_deref().unwrap_or_default());
+
+        // The camera's audio, when it carries a track the client receives. The
+        // decoder is opened once here and fed only while this channel is the audible
+        // one. A codec with no backend yet (AAC, until the FFmpeg path lands) fails
+        // at `configure`, and the channel simply plays no sound. The sound travels
+        // interleaved with the picture on the TCP transport only, so a UDP session
+        // has none to hear whatever its SDP lists.
+        let audio_decoder = if transport == RtspTransport::Tcp {
+            audio_track_decoder(&tracks)
+        } else {
+            None
+        };
+
+        // The talk-back track, when this session asked for one and the answer
+        // carried it. Its codec is the one the media advertises - PCMU or PCMA in
+        // practice - and a media this build cannot encode is reported as absent
+        // rather than half used: the bar's microphone is drawn on this flag.
+        let talk_track = tracks.iter().find(|track| track.is_audio() && track.is_sendonly());
+        let talk_codec = talk_track
+            .map(|track| AudioCodec::from_encoding(track.encoding.as_deref().unwrap_or_default()));
+        let talk_sender = client.talk_rtp_channel().and_then(|channel| {
+            let stream = TalkStream::new(talk_codec?)?;
+            Some((stream, channel))
+        });
+        let backchannel = talk_sender.is_some();
+        if backchannel {
+            // This session is the one carrying the microphone, which only happens
+            // when the camera would not take a call of its own. The handshake took
+            // as long here as it would have there, so the backlog the microphone
+            // built up is cut back the same way - see `talk_worker`.
+            talk.trim(2 * FRAME_SAMPLES);
+        }
+        if wants_talk && !backchannel {
             tracing::debug!(
                 target: "xgview::pipeline",
                 index,
-                "the udp session did not come up, reopening the session over tcp"
+                offered = ?talk_track.map(|track| track.encoding.clone()),
+                "this session offers no usable back channel, the camera cannot be talked to"
             );
-            client = RtspClient::connect_with_auth(uri, credentials).await?;
-            transport = RtspTransport::Tcp;
-            negotiate(&mut client, transport, handshake_timeout, index, wants_talk)
-                .await
-                .map_err(HandshakeFailure::into_error)?
         }
-        Err(failure) => return Err(failure.into_error()),
-    };
-    let video = tracks.iter().find(|track| track.is_video());
-    let codec = video.and_then(|track| track.encoding.clone());
-    // The SDP's resolution is a hint: `a=framesize` is optional, and where it
-    // is missing the size comes from the sequence parameter set below.
-    let mut width = video.and_then(|track| track.width);
-    let mut height = video.and_then(|track| track.height);
-    let payload_type = video.and_then(|track| track.payload_type);
-    let parameter_sets = video.map(|track| track.parameter_sets.clone()).unwrap_or_default();
-    let kind = Codec::from_encoding(codec.as_deref().unwrap_or_default());
 
-    // The camera's audio, when it carries a track the client receives. The
-    // decoder is opened once here and fed only while this channel is the audible
-    // one. A codec with no backend yet (AAC, until the FFmpeg path lands) fails
-    // at `configure`, and the channel simply plays no sound. The sound travels
-    // interleaved with the picture on the TCP transport only, so a UDP session
-    // has none to hear whatever its SDP lists.
-    let mut audio_decoder = if transport == RtspTransport::Tcp {
-        audio_track_decoder(&tracks)
-    } else {
-        None
-    };
+        // `a=framesize` is optional, but a decoder has to be sized before its first
+        // picture arrives: Android builds its image reader to that size, and a
+        // reader that does not match the stream cannot be read back at all. The
+        // sequence parameter set the SDP advertises carries the real size, so it is
+        // read from there when the SDP itself did not name one.
+        if width.is_none() || height.is_none() {
+            if let Some((sps_width, sps_height)) =
+                parameter_sets.iter().find_map(|nal| sps::picture_size(nal))
+            {
+                width = width.or(Some(sps_width));
+                height = height.or(Some(sps_height));
+            }
+        }
 
-    // The talk-back track, when this session asked for one and the answer
-    // carried it. Its codec is the one the media advertises - PCMU or PCMA in
-    // practice - and a media this build cannot encode is reported as absent
-    // rather than half used: the bar's microphone is drawn on this flag.
-    let talk_track = tracks.iter().find(|track| track.is_audio() && track.is_sendonly());
-    let talk_codec =
-        talk_track.map(|track| AudioCodec::from_encoding(track.encoding.as_deref().unwrap_or_default()));
-    let mut talk_sender = client.talk_rtp_channel().and_then(|channel| {
-        let stream = TalkStream::new(talk_codec?)?;
-        Some((stream, channel))
-    });
-    let backchannel = talk_sender.is_some();
-    if backchannel {
-        // This session is the one carrying the microphone, which only happens
-        // when the camera would not take a call of its own. The handshake took
-        // as long here as it would have there, so the backlog the microphone
-        // built up is cut back the same way - see `talk_worker`.
-        talk.trim(2 * FRAME_SAMPLES);
-    }
-    if wants_talk && !backchannel {
+        let decoder = video_decoder(kind, width, height, index, prefer_hardware);
+        // Each codec arrives in its own shape over RTP: an H.264 access unit spread
+        // over NAL units, an H.265 one in the RFC 7798 shape - two byte headers, AP
+        // and FU instead of STAP and FU-A - or the fragments of a single JPEG scan.
+        let depacketizer = match kind {
+            Codec::Mjpeg => Depacketizer::Jpeg(JpegDepacketizer::new(payload_type)),
+            Codec::H265 => Depacketizer::Hevc(HevcDepacketizer::new(payload_type, parameter_sets)),
+            _ => Depacketizer::H264(H264Depacketizer::new(payload_type, parameter_sets)),
+        };
+        let sequence: u64 = 0;
+        let decode_errors: u64 = 0;
+
         tracing::debug!(
             target: "xgview::pipeline",
             index,
-            offered = ?talk_track.map(|track| track.encoding.clone()),
-            "this session offers no usable back channel, the camera cannot be talked to"
+            codec = ?codec,
+            resolution = ?video.and_then(|track| track.resolution()),
+            // The size the decoder is actually opened with: `a=framesize` when the
+            // SDP carried one, the sequence parameter set's when it did not, and
+            // nothing when neither did. A hardware hwaccel is set up at open time,
+            // and a decoder opened without a size is one it can refuse - which is
+            // why this is worth a field of its own rather than left to the SDP's
+            // optional answer.
+            size = ?width.zip(height),
+            decoder = ?decoder.as_ref().map(|decoder| decoder.name()),
+            // The parameter sets the SDP advertised, by NAL type and length. A
+            // camera whose SDP carries none is served from the stream, which has to
+            // reach a key frame before the first picture decodes.
+            sets = ?depacketizer.parameter_sets(),
+            "session negotiated"
         );
+
+        sinks.stats.publish(StreamStats {
+            index,
+            camera_id: camera_id.clone(),
+            stream,
+            codec: codec.clone(),
+            width,
+            height,
+            hardware: uses_hardware(&decoder),
+            audio: audio_decoder.is_some(),
+            fps: 0.0,
+            bitrate_kbps: 0.0,
+            total_frames: 0,
+        });
+
+        let total_frames: u64 = 0;
+        // What this window has counted, and when the next sample is due. See
+        // `WindowCounters` for what each counter means.
+        let window = StatsWindow::new();
+        let announced = false;
+        // The stream's own parameter set, logged once per session. It is the only
+        // place the profile, the level, the chroma sampling and the bit depth
+        // appear, and a hardware decoder that turns a stream down is otherwise a
+        // refusal with no visible cause.
+        let sps_logged = false;
+        // The plain-Baseline declaration a hardware decoder has no mode for; the
+        // flag that says otherwise is set before any picture is handed over. See
+        // [`BaselineFix`].
+        let baseline_fix = BaselineFix::new();
+        // The server announces how much silence it tolerates. The probe is sent
+        // before the read, never after: a check placed after a blocking read is
+        // starved for as long as the camera stays quiet.
+        let keep_alive_interval = client.keep_alive_interval();
+        let last_keep_alive = Instant::now();
+        // When the report is due, and which stream it is about. The counters it
+        // carries are the two below.
+        let last_report = Instant::now();
+        let source_ssrc: u32 = 0;
+        let received_packets = false;
+        // The sequence numbers, folded the way the receiver report counts them, and
+        // the gaps the datagram transport leaves behind. Both accumulate over the
+        // session, which is the window RFC 3550 defines them in. See
+        // [`SequenceWindow`].
+        let sequence_window = SequenceWindow::new();
+        // RTP timestamp units per second, as the session description announced it.
+        let clock_rate = f64::from(video.and_then(|track| track.clock_rate).unwrap_or(90_000));
+        // Interarrival jitter, the third number the report carries: kept as the
+        // difference between consecutive packets rather than against a session
+        // origin, because the timestamp wraps and an absolute transit would read
+        // that wrap as one enormous jitter. See [`Jitter`].
+        let jitter = Jitter::new(clock_rate);
+        // How long this session may go without a picture, learned from the stream
+        // itself: see `StallDeadline`.
+        let stall = StallDeadline::new();
+
+        // The talk-back clock: one packet every 20 ms, silence included, which is
+        // what keeps the camera's speaker media alive while the viewer has the
+        // microphone switched on. Nothing is sent when the session has no back
+        // channel.
+        let last_talk = Instant::now();
+
+        Ok(Self {
+            sinks,
+            audio,
+            talk,
+            index,
+            camera_id,
+            stream,
+            kind,
+            codec,
+            payload_type,
+            keep_alive_interval,
+            client,
+            transport,
+            width,
+            height,
+            audio_decoder,
+            talk_sender,
+            decoder,
+            depacketizer,
+            baseline_fix,
+            sequence,
+            decode_errors,
+            sps_logged,
+            window,
+            total_frames,
+            announced,
+            last_keep_alive,
+            last_report,
+            last_talk,
+            stall,
+            source_ssrc,
+            received_packets,
+            sequence_window,
+            jitter,
+        })
     }
 
-    // `a=framesize` is optional, but a decoder has to be sized before its first
-    // picture arrives: Android builds its image reader to that size, and a
-    // reader that does not match the stream cannot be read back at all. The
-    // sequence parameter set the SDP advertises carries the real size, so it is
-    // read from there when the SDP itself did not name one.
-    if width.is_none() || height.is_none() {
-        if let Some((sps_width, sps_height)) =
-            parameter_sets.iter().find_map(|nal| sps::picture_size(nal))
-        {
-            width = width.or(Some(sps_width));
-            height = height.or(Some(sps_height));
-        }
-    }
-
-    let mut decoder = video_decoder(kind, width, height, index, prefer_hardware);
-    // Each codec arrives in its own shape over RTP: an H.264 access unit spread
-    // over NAL units, an H.265 one in the RFC 7798 shape - two byte headers, AP
-    // and FU instead of STAP and FU-A - or the fragments of a single JPEG scan.
-    let mut depacketizer = match kind {
-        Codec::Mjpeg => Depacketizer::Jpeg(JpegDepacketizer::new(payload_type)),
-        Codec::H265 => Depacketizer::Hevc(HevcDepacketizer::new(payload_type, parameter_sets)),
-        _ => Depacketizer::H264(H264Depacketizer::new(payload_type, parameter_sets)),
-    };
-    let mut sequence: u64 = 0;
-    let mut decode_errors: u64 = 0;
-
-    tracing::debug!(
-        target: "xgview::pipeline",
-        index,
-        codec = ?codec,
-        resolution = ?video.and_then(|track| track.resolution()),
-        // The size the decoder is actually opened with: `a=framesize` when the
-        // SDP carried one, the sequence parameter set's when it did not, and
-        // nothing when neither did. A hardware hwaccel is set up at open time,
-        // and a decoder opened without a size is one it can refuse - which is
-        // why this is worth a field of its own rather than left to the SDP's
-        // optional answer.
-        size = ?width.zip(height),
-        decoder = ?decoder.as_ref().map(|decoder| decoder.name()),
-        // The parameter sets the SDP advertised, by NAL type and length. A
-        // camera whose SDP carries none is served from the stream, which has to
-        // reach a key frame before the first picture decodes.
-        sets = ?depacketizer.parameter_sets(),
-        "session negotiated"
-    );
-
-    stats.publish(StreamStats {
-        index,
-        camera_id: camera_id.to_string(),
-        stream,
-        codec: codec.clone(),
-        width,
-        height,
-        hardware: uses_hardware(&decoder),
-        audio: audio_decoder.is_some(),
-        fps: 0.0,
-        bitrate_kbps: 0.0,
-        total_frames: 0,
-    });
-
-    let mut total_frames: u64 = 0;
-    // What this window has counted, and when the next sample is due. See
-    // `WindowCounters` for what each counter means.
-    let mut window = StatsWindow::new();
-    let mut announced = false;
-    // The stream's own parameter set, logged once per session. It is the only
-    // place the profile, the level, the chroma sampling and the bit depth
-    // appear, and a hardware decoder that turns a stream down is otherwise a
-    // refusal with no visible cause.
-    let mut sps_logged = false;
-    // The plain-Baseline declaration a hardware decoder has no mode for; the
-    // flag that says otherwise is set before any picture is handed over. See
-    // [`BaselineFix`].
-    let mut baseline_fix = BaselineFix::new();
-    // The server announces how much silence it tolerates. The probe is sent
-    // before the read, never after: a check placed after a blocking read is
-    // starved for as long as the camera stays quiet.
-    let keep_alive_interval = client.keep_alive_interval();
-    let mut last_keep_alive = Instant::now();
-    // When the report is due, and which stream it is about. The counters it
-    // carries are the two below.
-    let mut last_report = Instant::now();
-    let mut source_ssrc: u32 = 0;
-    let mut received_packets = false;
-    // The sequence numbers, folded the way the receiver report counts them, and
-    // the gaps the datagram transport leaves behind. Both accumulate over the
-    // session, which is the window RFC 3550 defines them in. See
-    // [`SequenceWindow`].
-    let mut sequence_window = SequenceWindow::new();
-    // RTP timestamp units per second, as the session description announced it.
-    let clock_rate = f64::from(video.and_then(|track| track.clock_rate).unwrap_or(90_000));
-    // Interarrival jitter, the third number the report carries: kept as the
-    // difference between consecutive packets rather than against a session
-    // origin, because the timestamp wraps and an absolute transit would read
-    // that wrap as one enormous jitter. See [`Jitter`].
-    let mut jitter = Jitter::new(clock_rate);
-    // How long this session may go without a picture, learned from the stream
-    // itself: see `StallDeadline`.
-    let mut stall = StallDeadline::new();
-
-    // The talk-back clock: one packet every 20 ms, silence included, which is
-    // what keeps the camera's speaker media alive while the viewer has the
-    // microphone switched on. Nothing is sent when the session has no back
-    // channel.
-    let mut last_talk = Instant::now();
-
-    loop {
-        // Talk-back, before waiting on the picture: the session's clock is the
-        // RTP clock, and it must not be tied to how often a camera sends video.
-        if let Some((stream, channel)) = talk_sender.as_mut() {
-            while last_talk.elapsed() >= talk_gap(talk.talking_on(index)) {
-                let talking = talk.talking_on(index);
-                let elapsed = last_talk.elapsed();
-                let packet = if talking {
-                    // A gap left by the idle rate is silence the speaker never
-                    // heard: the clock is moved over it before the voice starts,
-                    // so the talk does not begin a second in the past.
-                    if elapsed > TALK_INTERVAL * 2 {
-                        stream.skip(elapsed - TALK_INTERVAL);
+    /// The packet loop: one iteration per packet, or per clock that came due.
+    async fn pump(&mut self) -> Result<()> {
+        loop {
+            // Talk-back, before waiting on the picture: the session's clock is the
+            // RTP clock, and it must not be tied to how often a camera sends video.
+            if let Some((stream, channel)) = self.talk_sender.as_mut() {
+                while self.last_talk.elapsed() >= talk_gap(self.talk.talking_on(self.index)) {
+                    let talking = self.talk.talking_on(self.index);
+                    let elapsed = self.last_talk.elapsed();
+                    let packet = if talking {
+                        // A gap left by the idle rate is silence the speaker never
+                        // heard: the clock is moved over it before the voice starts,
+                        // so the talk does not begin a second in the past.
+                        if elapsed > TALK_INTERVAL * 2 {
+                            stream.skip(elapsed - TALK_INTERVAL);
+                        }
+                        stream.packet(&self.talk.take(FRAME_SAMPLES))
+                    } else {
+                        stream.silence_after(elapsed)
+                    };
+                    self.client.send_interleaved(*channel, &packet);
+                    if talking {
+                        self.last_talk += TALK_INTERVAL;
+                    } else {
+                        self.last_talk = Instant::now();
                     }
-                    stream.packet(&talk.take(FRAME_SAMPLES))
-                } else {
-                    stream.silence_after(elapsed)
-                };
-                client.send_interleaved(*channel, &packet);
-                if talking {
-                    last_talk += TALK_INTERVAL;
-                } else {
-                    last_talk = Instant::now();
-                }
-                // A loop that fell well behind - a stalled socket, a suspended
-                // process - is not worth a burst of catch-up packets: the
-                // camera's speaker wants the present, not the backlog.
-                if last_talk.elapsed() > TALK_INTERVAL * 4 {
-                    last_talk = Instant::now();
-                    break;
+                    // A loop that fell well behind - a stalled socket, a suspended
+                    // process - is not worth a burst of catch-up packets: the
+                    // camera's speaker wants the present, not the backlog.
+                    if self.last_talk.elapsed() > TALK_INTERVAL * 4 {
+                        self.last_talk = Instant::now();
+                        break;
+                    }
                 }
             }
-        }
-        // A channel with no decoder has no picture to expect - it shows a
-        // placeholder - and is left out of this entirely.
-        let patience = stall.patience();
-        let since_picture = stall.since_picture();
-        if decoder.is_some() && since_picture >= patience {
-            // Soft timeout: the picture has frozen, but the transport may
-            // still be alive. Hold the last frame and keep waiting rather than
-            // dropping to a black reconnect screen, which is the worse
-            // experience on a flaky link. The state is announced once, when
-            // the stall begins, so the grid can mark it without a flood of
-            // events.
-            if stall.stalled_since.is_none() {
-                stall.stalled_since = Some(Instant::now());
-                emit(
-                    events,
-                    StreamEvent::State {
-                        index,
-                        camera_id: camera_id.to_string(),
-                        state: ConnectionState::Stalled,
-                        detail: format!("stalled for {} s", since_picture.as_secs()),
-                    },
+            // A channel with no decoder has no picture to expect - it shows a
+            // placeholder - and is left out of this entirely.
+            let patience = self.stall.patience();
+            let since_picture = self.stall.since_picture();
+            if self.decoder.is_some() && since_picture >= patience {
+                // Soft timeout: the picture has frozen, but the transport may
+                // still be alive. Hold the last frame and keep waiting rather than
+                // dropping to a black reconnect screen, which is the worse
+                // experience on a flaky link. The state is announced once, when
+                // the stall begins, so the grid can mark it without a flood of
+                // events.
+                if self.stall.stalled_since.is_none() {
+                    self.stall.stalled_since = Some(Instant::now());
+                    emit(
+                        self.sinks.events,
+                        StreamEvent::State {
+                            index: self.index,
+                            camera_id: self.camera_id.clone(),
+                            state: ConnectionState::Stalled,
+                            detail: format!("stalled for {} s", since_picture.as_secs()),
+                        },
+                    );
+                }
+                // Hard timeout: the stall has gone on long enough that
+                // reconnecting is more likely to help than waiting.
+                if self.stall.stalled_since.unwrap().elapsed() >= STALL_HARD_TIMEOUT {
+                    return Err(crate::error::CoreError::timeout(format!(
+                        "stalled for {} s, giving up",
+                        since_picture.as_secs()
+                    )));
+                }
+            }
+            if self.last_keep_alive.elapsed() >= self.keep_alive_interval {
+                // Fire and forget. Waiting for the answer would discard every RTP
+                // packet that arrives first, and block the pump for good on a device
+                // that never answers. Only a failed write is an error.
+                self.client.send_keep_alive().await?;
+                self.last_keep_alive = Instant::now();
+            }
+            if self.received_packets && self.last_report.elapsed() >= REPORT_INTERVAL {
+                // Cameras differ in how much they care about being reported to. Some
+                // stream regardless, but one was measured sending a single key frame
+                // and then nothing but `SEI` until a receiver report arrived, which
+                // a viewer shows as a slideshow whose timecode jumps. The counts it
+                // carries are the session's real ones, so a camera that does adapt
+                // to them has something to adapt to.
+                let report = crate::rtcp::receiver_report(
+                    RECEIVER_SSRC,
+                    self.source_ssrc,
+                    self.sequence_window.highest(),
+                    self.sequence_window.lost().min(i32::MAX as u64) as i32,
+                    self.jitter.value(),
+                );
+                self.client.send_rtcp(&report);
+                self.last_report = Instant::now();
+            }
+
+            // Waiting no longer than the picture deadline allows, so that a session
+            // gone quiet is noticed on time rather than at the next packet. The wait
+            // is a peek at the transport and the packet is only read once something
+            // has arrived: a read cancelled part way through a packet takes the bytes
+            // it has already consumed with it, and every packet after them is then
+            // read at the wrong offset, which costs the session where the wait would
+            // only have cost a wait.
+            //
+            // While stalled the patience is already spent, so the wait would be
+            // zero and the loop would spin. A one second poll keeps it from
+            // busy-waiting without blocking long enough to miss the hard timeout.
+            // A channel with no decoder has no picture to wait for and no stall
+            // state to read: the only signal it has is whether packets are still
+            // arriving, so it waits for the full read timeout and lets that be the
+            // one that reports silence on the wire.
+            let wait = if self.decoder.is_some() && since_picture >= patience {
+                STALL_HARD_TIMEOUT
+                    .saturating_sub(self.stall.stalled_since.unwrap().elapsed())
+                    .min(Duration::from_secs(1))
+            } else if self.decoder.is_some() {
+                READ_TIMEOUT.min(patience.saturating_sub(since_picture))
+            } else {
+                READ_TIMEOUT
+            };
+            // A session feeding a camera's speaker has one more clock to honour:
+            // the wait is cut so that the next talk packet is written on time even
+            // while the picture keeps the loop from ever timing out. Idle, that
+            // clock is the keepalive's, not the frame rate's.
+            let talk_wait = self.talk_sender
+                .as_ref()
+                .map(|_| {
+                    talk_gap(self.talk.talking_on(self.index)).saturating_sub(self.last_talk.elapsed())
+                });
+            let wait = match talk_wait {
+                Some(talk_wait) => wait.min(talk_wait),
+                None => wait,
+            };
+            match tokio::time::timeout(wait, self.client.wait_for_media()).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    // The talk clock waking the loop is not silence on the wire.
+                    if self.talk_sender.is_some()
+                        && self.last_talk.elapsed() >= talk_gap(self.talk.talking_on(self.index))
+                    {
+                        continue;
+                    }
+                    // A wait that the picture deadline cut short is not silence on
+                    // the wire, and reporting it as such would name the wrong fault
+                    // and the wrong duration. The loop's own check reports that one.
+                    // A channel with no decoder is exempt: its wait was the full
+                    // read timeout, not a deadline slice, so an expiry here really
+                    // is silence on the wire.
+                    if self.decoder.is_some() && self.stall.since_picture() >= patience {
+                        continue;
+                    }
+                    return Err(crate::error::CoreError::timeout(format!(
+                        "no media received for {} s",
+                        READ_TIMEOUT.as_secs()
+                    )));
+                }
+            }
+            // Channel 0 carries RTP, channel 1 carries RTCP, on the interleaved
+            // transport. UDP has no channels: `read_media` returns RTP only and
+            // drains the control socket itself, so only RTP reaches here.
+            let (channel, payload) = match self.client.read_media().await? {
+                MediaPacket::Rtp(payload) => (0u8, payload),
+                MediaPacket::Rtcp(payload) => (1u8, payload),
+                MediaPacket::AudioRtp(payload) => (2u8, payload),
+                MediaPacket::AudioRtcp(_) => (3u8, Vec::new()),
+            };
+
+            // Channel 2 carries the audio RTP. It is decoded and played only while
+            // this channel is the one the user is listening to and the sink is open;
+            // otherwise the packet is dropped, which is what keeps the grid's nine
+            // tiles from all playing their microphones.
+            if channel == 2 {
+                if self.audio.wants(self.index) {
+                    if let Some(output) = self.audio.output().filter(|output| output.is_active()) {
+                        if let Some(track) = self.audio_decoder.as_mut() {
+                            if let Some(header) = parse_rtp_header(&payload) {
+                                let body = &payload[header.header_len..];
+                                let mut pcm: Vec<i16> = Vec::with_capacity(512);
+                                // RFC 3640 carries the AAC access units behind their
+                                // AU headers; G.711 is the payload as it stands. The
+                                // header field widths come from the track's fmtp.
+                                let result = if track.info.codec == AudioCodec::Aac {
+                                    crate::audio::aac_access_units(
+                                        body,
+                                        track.aac.size_length,
+                                        track.aac.index_length,
+                                    )
+                                    .into_iter()
+                                    .try_for_each(|range| track.decoder.decode(&body[range], &mut pcm))
+                                } else {
+                                    track.decoder.decode(body, &mut pcm)
+                                };
+                                if result.is_ok() && !pcm.is_empty() {
+                                    output.configure(&track.info);
+                                    output.push(&pcm);
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            if channel == 3 {
+                continue;
+            }
+
+            // Channel 0 carries RTP, channel 1 carries RTCP.
+            if channel == 0 {
+                if let Some(header) = parse_rtp_header(&payload) {
+                    // UDP reorders and duplicates. A stale fragment fed to the
+                    // depacketizer would be spliced into the picture being
+                    // assembled, so such a packet is dropped before it reaches it.
+                    // The interleaved transport never does either.
+                    if self.transport.is_udp() {
+                        match self.sequence_window.accept(header.sequence) {
+                            Arrival::Stale => {
+                                // A duplicate, or a straggler that belongs to a
+                                // picture already handed over.
+                                self.window.counters.reordered += 1;
+                                continue;
+                            }
+                            Arrival::Gap(missing) => {
+                                // The packets in between were lost, so the unit
+                                // being assembled is missing part of its picture. It
+                                // is written off rather than stitched together and
+                                // decoded into a screenful of corruption.
+                                self.window.counters.lost += u64::from(missing);
+                                self.depacketizer.invalidate();
+                            }
+                            Arrival::Next => {}
+                        }
+                    }
+                    self.window.counters.bytes += payload.len() as u64;
+                    // The receiver report counts sequence numbers the way RFC 3550
+                    // does: the 16 bit RTP field folded with the number of times it
+                    // has wrapped, so a long session does not look like it restarted.
+                    self.source_ssrc = header.ssrc;
+                    self.received_packets = true;
+                    self.sequence_window.see(header.sequence);
+                    // How far apart this packet and the last one were sent, against
+                    // how far apart they arrived. RFC 3550 smooths the difference
+                    // into the jitter the receiver report carries.
+                    self.jitter.observe(header.timestamp, Instant::now());
+                    // The marker bit is set on the last packet of an access unit.
+                    if header.marker && header.payload_type < 192 {
+                        self.window.counters.frames += 1;
+                        self.total_frames += 1;
+                    }
+                    if self.payload_type.is_some_and(|expected| header.payload_type != expected) {
+                        self.window.counters.foreign += 1;
+                    }
+                    announce_streaming(
+                        self.sinks.events,
+                        self.index,
+                        &self.camera_id,
+                        self.stream,
+                        &mut self.announced,
+                    );
+
+                    if let Some(decoder) = self.decoder.as_mut() {
+                        let payload = &payload[header.header_len..];
+                        // A packet completes at most two pictures: the one the RTP
+                        // timestamp change released, and the one its marker closed.
+                        let units = self.depacketizer.push(&header, payload);
+                        let completed_none = units.is_empty();
+                        for mut unit in units {
+                            self.window.counters.units += 1;
+                            self.window.counters.unit_bytes += unit.data.len() as u64;
+                            // Once per session, from the first access unit that
+                            // carries a parameter set of its own: a camera whose
+                            // SDP advertised none only ever says what it is here.
+                            // H.264's reader, so an H.265 access unit is left out of
+                            // it rather than read with H.264's layout.
+                            if self.kind == Codec::H264 && !self.sps_logged {
+                                if let Some(nal) = sps::access_unit_sps(&unit.data) {
+                                    if let Some(info) = sps::sps_info(nal) {
+                                        // What a hardware decoder screens the
+                                        // stream on: a profile or level it does not
+                                        // implement, a chroma sampling other than
+                                        // 4:2:0, more than eight bits per sample, a
+                                        // set carrying scaling matrices. One line
+                                        // per session, and the first place to look
+                                        // when a channel decodes on the CPU.
+                                        tracing::debug!(
+                                            target: "xgview::pipeline",
+                                            index = self.index,
+                                            profile = info.profile,
+                                            level = info.level,
+                                            chroma = info.chroma,
+                                            bit_depth = info.bit_depth,
+                                            scaling_matrices = info.scaling_matrices,
+                                            size = ?info.size,
+                                            "stream parameter set"
+                                        );
+                                        self.sps_logged = true;
+                                    }
+                                }
+                            }
+                            self.baseline_fix.observe(self.index, self.kind, &mut unit.data);
+                            self.stall.observe(unit.keyframe, Instant::now());
+                            let started = Instant::now();
+                            let decoded = decoder.decode(&unit.data, unit.pts_us(), unit.keyframe);
+                            self.window.counters.decode_took(started.elapsed());
+                            match decoded {
+                                Ok(decoded) => {
+                                    // A picture came out, whatever the renderer can
+                                    // do with it: on the platform whose frames stay
+                                    // in a GPU buffer there are no planes to publish,
+                                    // and the stream is no less alive for it.
+                                    if !decoded.is_empty() {
+                                        let was_stalled = self.stall.stalled_since.is_some();
+                                        self.stall.picture(Instant::now());
+                                        if was_stalled {
+                                            emit(
+                                                self.sinks.events,
+                                                StreamEvent::State {
+                                                    index: self.index,
+                                                    camera_id: self.camera_id.clone(),
+                                                    state: ConnectionState::Streaming,
+                                                    detail: format!(
+                                                        "receiving {} stream",
+                                                        self.stream.label()
+                                                    ),
+                                                },
+                                            );
+                                        }
+                                    }
+                                    self.window.counters.decoded += decoded.len() as u64;
+                                    if let Some((picture_width, picture_height)) =
+                                        publish_frames(
+                                            self.sinks.frames,
+                                            self.index,
+                                            &mut self.sequence,
+                                            decoded,
+                                        )
+                                    {
+                                        self.width = Some(picture_width);
+                                        self.height = Some(picture_height);
+                                    }
+                                }
+                                // One damaged picture is not worth a new session:
+                                // the encoder recovers at its next IDR.
+                                Err(err) => {
+                                    // Pictures refused before the session has shown
+                                    // one are its opening rather than damage. A
+                                    // camera that sends a run of pictures before its
+                                    // first IDR leaves the decoder nothing to
+                                    // reference - one here spends its first thirty
+                                    // five that way and then runs clean - so
+                                    // counting them as errors would report a
+                                    // working channel as a broken one at every
+                                    // connect. They are counted apart, and the
+                                    // warning is kept for a session that had a
+                                    // picture and then lost it.
+                                    if !self.stall.running {
+                                        self.window.counters.opening += 1;
+                                        if self.window.counters.opening == 1 {
+                                            tracing::debug!(
+                                                target: "xgview::pipeline",
+                                                index = self.index,
+                                                %err,
+                                                "no picture yet, waiting for the first key frame"
+                                            );
+                                        }
+                                    } else {
+                                        self.decode_errors += 1;
+                                        self.window.counters.errors += 1;
+                                        // The first rejections carry the payload
+                                        // that caused them, which names the NAL
+                                        // units the decoder was given.
+                                        if self.decode_errors <= 3 {
+                                            tracing::debug!(
+                                                target: "xgview::pipeline",
+                                                index = self.index,
+                                                len = unit.data.len(),
+                                                types = ?nal_types(&unit.data, self.kind),
+                                                keyframe = unit.keyframe,
+                                                au = %hex(&unit.data, 24),
+                                                cached = ?self.depacketizer.parameter_sets(),
+                                                "access unit rejected by the decoder"
+                                            );
+                                        }
+                                        if self.decode_errors == 1 {
+                                            tracing::warn!(
+                                                target: "xgview::pipeline",
+                                                index = self.index,
+                                                %err,
+                                                "decoding failed, waiting for the next key frame"
+                                            );
+                                        } else {
+                                            tracing::debug!(
+                                                target: "xgview::pipeline",
+                                                index = self.index,
+                                                errors = self.decode_errors,
+                                                %err,
+                                                "decoding failed"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if completed_none && header.marker {
+                            // The marker closed a picture but nothing came out of
+                            // it: the unit held no slice, or its head was lost.
+                            self.window.counters.dropped += 1;
+                        }
+                    }
+                }
+            }
+
+            if self.window.due() {
+                let seconds = self.window.seconds();
+                let fps = self.window.counters.fps(seconds);
+                let kbps = self.window.counters.kbps(seconds);
+                self.sinks.stats.publish(StreamStats {
+                    index: self.index,
+                    camera_id: self.camera_id.clone(),
+                    stream: self.stream,
+                    codec: self.codec.clone(),
+                    width: self.width,
+                    height: self.height,
+                    hardware: uses_hardware(&self.decoder),
+                    audio: self.audio_decoder.is_some(),
+                    fps,
+                    bitrate_kbps: kbps,
+                    total_frames: self.total_frames,
+                });
+                // `units` is what the network delivered, `decoded` what came out of
+                // the decoder: a frozen picture with a steady `units` blames the
+                // decoder (or the renderer), a `units` that drops to zero and then
+                // bursts blames the camera, the link, or this loop being starved.
+                let counted = self.window.close();
+                tracing::debug!(
+                    target: "xgview::pipeline",
+                    index = self.index,
+                    stream = self.stream.as_str(),
+                    hardware = uses_hardware(&self.decoder),
+                    // The picture deadline this session is being held to. It is
+                    // learned from the stream, so a channel cut off at a number of
+                    // seconds that is not the one in the source reads here as the
+                    // group of pictures that camera turned out to have.
+                    deadline_s = self.stall.patience().as_secs(),
+                    units = counted.units,
+                    unit_bytes = counted.unit_bytes,
+                    decoded = counted.decoded,
+                    errors = counted.errors,
+                    opening = counted.opening,
+                    dropped = counted.dropped,
+                    foreign = counted.foreign,
+                    reordered = counted.reordered,
+                    lost = counted.lost,
+                    slowest_decode_ms = counted.slowest.as_millis() as u64,
+                    fps,
+                    kbps,
+                    "stream window"
                 );
             }
-            // Hard timeout: the stall has gone on long enough that
-            // reconnecting is more likely to help than waiting.
-            if stall.stalled_since.unwrap().elapsed() >= STALL_HARD_TIMEOUT {
-                return Err(crate::error::CoreError::timeout(format!(
-                    "stalled for {} s, giving up",
-                    since_picture.as_secs()
-                )));
-            }
-        }
-        if last_keep_alive.elapsed() >= keep_alive_interval {
-            // Fire and forget. Waiting for the answer would discard every RTP
-            // packet that arrives first, and block the pump for good on a device
-            // that never answers. Only a failed write is an error.
-            client.send_keep_alive().await?;
-            last_keep_alive = Instant::now();
-        }
-        if received_packets && last_report.elapsed() >= REPORT_INTERVAL {
-            // Cameras differ in how much they care about being reported to. Some
-            // stream regardless, but one was measured sending a single key frame
-            // and then nothing but `SEI` until a receiver report arrived, which
-            // a viewer shows as a slideshow whose timecode jumps. The counts it
-            // carries are the session's real ones, so a camera that does adapt
-            // to them has something to adapt to.
-            let report = crate::rtcp::receiver_report(
-                RECEIVER_SSRC,
-                source_ssrc,
-                sequence_window.highest(),
-                sequence_window.lost().min(i32::MAX as u64) as i32,
-                jitter.value(),
-            );
-            client.send_rtcp(&report);
-            last_report = Instant::now();
-        }
-
-        // Waiting no longer than the picture deadline allows, so that a session
-        // gone quiet is noticed on time rather than at the next packet. The wait
-        // is a peek at the transport and the packet is only read once something
-        // has arrived: a read cancelled part way through a packet takes the bytes
-        // it has already consumed with it, and every packet after them is then
-        // read at the wrong offset, which costs the session where the wait would
-        // only have cost a wait.
-        //
-        // While stalled the patience is already spent, so the wait would be
-        // zero and the loop would spin. A one second poll keeps it from
-        // busy-waiting without blocking long enough to miss the hard timeout.
-        // A channel with no decoder has no picture to wait for and no stall
-        // state to read: the only signal it has is whether packets are still
-        // arriving, so it waits for the full read timeout and lets that be the
-        // one that reports silence on the wire.
-        let wait = if decoder.is_some() && since_picture >= patience {
-            STALL_HARD_TIMEOUT
-                .saturating_sub(stall.stalled_since.unwrap().elapsed())
-                .min(Duration::from_secs(1))
-        } else if decoder.is_some() {
-            READ_TIMEOUT.min(patience.saturating_sub(since_picture))
-        } else {
-            READ_TIMEOUT
-        };
-        // A session feeding a camera's speaker has one more clock to honour:
-        // the wait is cut so that the next talk packet is written on time even
-        // while the picture keeps the loop from ever timing out. Idle, that
-        // clock is the keepalive's, not the frame rate's.
-        let talk_wait = talk_sender
-            .as_ref()
-            .map(|_| talk_gap(talk.talking_on(index)).saturating_sub(last_talk.elapsed()));
-        let wait = match talk_wait {
-            Some(talk_wait) => wait.min(talk_wait),
-            None => wait,
-        };
-        match tokio::time::timeout(wait, client.wait_for_media()).await {
-            Ok(result) => result?,
-            Err(_) => {
-                // The talk clock waking the loop is not silence on the wire.
-                if talk_sender.is_some() && last_talk.elapsed() >= talk_gap(talk.talking_on(index)) {
-                    continue;
-                }
-                // A wait that the picture deadline cut short is not silence on
-                // the wire, and reporting it as such would name the wrong fault
-                // and the wrong duration. The loop's own check reports that one.
-                // A channel with no decoder is exempt: its wait was the full
-                // read timeout, not a deadline slice, so an expiry here really
-                // is silence on the wire.
-                if decoder.is_some() && stall.since_picture() >= patience {
-                    continue;
-                }
-                return Err(crate::error::CoreError::timeout(format!(
-                    "no media received for {} s",
-                    READ_TIMEOUT.as_secs()
-                )));
-            }
-        }
-        // Channel 0 carries RTP, channel 1 carries RTCP, on the interleaved
-        // transport. UDP has no channels: `read_media` returns RTP only and
-        // drains the control socket itself, so only RTP reaches here.
-        let (channel, payload) = match client.read_media().await? {
-            MediaPacket::Rtp(payload) => (0u8, payload),
-            MediaPacket::Rtcp(payload) => (1u8, payload),
-            MediaPacket::AudioRtp(payload) => (2u8, payload),
-            MediaPacket::AudioRtcp(_) => (3u8, Vec::new()),
-        };
-
-        // Channel 2 carries the audio RTP. It is decoded and played only while
-        // this channel is the one the user is listening to and the sink is open;
-        // otherwise the packet is dropped, which is what keeps the grid's nine
-        // tiles from all playing their microphones.
-        if channel == 2 {
-            if audio.wants(index) {
-                if let Some(output) = audio.output().filter(|output| output.is_active()) {
-                    if let Some(track) = audio_decoder.as_mut() {
-                        if let Some(header) = parse_rtp_header(&payload) {
-                            let body = &payload[header.header_len..];
-                            let mut pcm: Vec<i16> = Vec::with_capacity(512);
-                            // RFC 3640 carries the AAC access units behind their
-                            // AU headers; G.711 is the payload as it stands. The
-                            // header field widths come from the track's fmtp.
-                            let result = if track.info.codec == AudioCodec::Aac {
-                                crate::audio::aac_access_units(
-                                    body,
-                                    track.aac.size_length,
-                                    track.aac.index_length,
-                                )
-                                .into_iter()
-                                .try_for_each(|range| track.decoder.decode(&body[range], &mut pcm))
-                            } else {
-                                track.decoder.decode(body, &mut pcm)
-                            };
-                            if result.is_ok() && !pcm.is_empty() {
-                                output.configure(&track.info);
-                                output.push(&pcm);
-                            }
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-        if channel == 3 {
-            continue;
-        }
-
-        // Channel 0 carries RTP, channel 1 carries RTCP.
-        if channel == 0 {
-            if let Some(header) = parse_rtp_header(&payload) {
-                // UDP reorders and duplicates. A stale fragment fed to the
-                // depacketizer would be spliced into the picture being
-                // assembled, so such a packet is dropped before it reaches it.
-                // The interleaved transport never does either.
-                if transport.is_udp() {
-                    match sequence_window.accept(header.sequence) {
-                        Arrival::Stale => {
-                            // A duplicate, or a straggler that belongs to a
-                            // picture already handed over.
-                            window.counters.reordered += 1;
-                            continue;
-                        }
-                        Arrival::Gap(missing) => {
-                            // The packets in between were lost, so the unit
-                            // being assembled is missing part of its picture. It
-                            // is written off rather than stitched together and
-                            // decoded into a screenful of corruption.
-                            window.counters.lost += u64::from(missing);
-                            depacketizer.invalidate();
-                        }
-                        Arrival::Next => {}
-                    }
-                }
-                window.counters.bytes += payload.len() as u64;
-                // The receiver report counts sequence numbers the way RFC 3550
-                // does: the 16 bit RTP field folded with the number of times it
-                // has wrapped, so a long session does not look like it restarted.
-                source_ssrc = header.ssrc;
-                received_packets = true;
-                sequence_window.see(header.sequence);
-                // How far apart this packet and the last one were sent, against
-                // how far apart they arrived. RFC 3550 smooths the difference
-                // into the jitter the receiver report carries.
-                jitter.observe(header.timestamp, Instant::now());
-                // The marker bit is set on the last packet of an access unit.
-                if header.marker && header.payload_type < 192 {
-                    window.counters.frames += 1;
-                    total_frames += 1;
-                }
-                if payload_type.is_some_and(|expected| header.payload_type != expected) {
-                    window.counters.foreign += 1;
-                }
-                announce_streaming(events, index, camera_id, stream, &mut announced);
-
-                if let Some(decoder) = decoder.as_mut() {
-                    let payload = &payload[header.header_len..];
-                    // A packet completes at most two pictures: the one the RTP
-                    // timestamp change released, and the one its marker closed.
-                    let units = depacketizer.push(&header, payload);
-                    let completed_none = units.is_empty();
-                    for mut unit in units {
-                        window.counters.units += 1;
-                        window.counters.unit_bytes += unit.data.len() as u64;
-                        // Once per session, from the first access unit that
-                        // carries a parameter set of its own: a camera whose
-                        // SDP advertised none only ever says what it is here.
-                        // H.264's reader, so an H.265 access unit is left out of
-                        // it rather than read with H.264's layout.
-                        if kind == Codec::H264 && !sps_logged {
-                            if let Some(nal) = sps::access_unit_sps(&unit.data) {
-                                if let Some(info) = sps::sps_info(nal) {
-                                    // What a hardware decoder screens the
-                                    // stream on: a profile or level it does not
-                                    // implement, a chroma sampling other than
-                                    // 4:2:0, more than eight bits per sample, a
-                                    // set carrying scaling matrices. One line
-                                    // per session, and the first place to look
-                                    // when a channel decodes on the CPU.
-                                    tracing::debug!(
-                                        target: "xgview::pipeline",
-                                        index,
-                                        profile = info.profile,
-                                        level = info.level,
-                                        chroma = info.chroma,
-                                        bit_depth = info.bit_depth,
-                                        scaling_matrices = info.scaling_matrices,
-                                        size = ?info.size,
-                                        "stream parameter set"
-                                    );
-                                    sps_logged = true;
-                                }
-                            }
-                        }
-                        baseline_fix.observe(index, kind, &mut unit.data);
-                        stall.observe(unit.keyframe, Instant::now());
-                        let started = Instant::now();
-                        let decoded = decoder.decode(&unit.data, unit.pts_us(), unit.keyframe);
-                        window.counters.decode_took(started.elapsed());
-                        match decoded {
-                            Ok(decoded) => {
-                                // A picture came out, whatever the renderer can
-                                // do with it: on the platform whose frames stay
-                                // in a GPU buffer there are no planes to publish,
-                                // and the stream is no less alive for it.
-                                if !decoded.is_empty() {
-                                    let was_stalled = stall.stalled_since.is_some();
-                                    stall.picture(Instant::now());
-                                    if was_stalled {
-                                        emit(
-                                            events,
-                                            StreamEvent::State {
-                                                index,
-                                                camera_id: camera_id.to_string(),
-                                                state: ConnectionState::Streaming,
-                                                detail: format!(
-                                                    "receiving {} stream",
-                                                    stream.label()
-                                                ),
-                                            },
-                                        );
-                                    }
-                                }
-                                window.counters.decoded += decoded.len() as u64;
-                                if let Some((picture_width, picture_height)) =
-                                    publish_frames(frames, index, &mut sequence, decoded)
-                                {
-                                    width = Some(picture_width);
-                                    height = Some(picture_height);
-                                }
-                            }
-                            // One damaged picture is not worth a new session:
-                            // the encoder recovers at its next IDR.
-                            Err(err) => {
-                                // Pictures refused before the session has shown
-                                // one are its opening rather than damage. A
-                                // camera that sends a run of pictures before its
-                                // first IDR leaves the decoder nothing to
-                                // reference - one here spends its first thirty
-                                // five that way and then runs clean - so
-                                // counting them as errors would report a
-                                // working channel as a broken one at every
-                                // connect. They are counted apart, and the
-                                // warning is kept for a session that had a
-                                // picture and then lost it.
-                                if !stall.running {
-                                    window.counters.opening += 1;
-                                    if window.counters.opening == 1 {
-                                        tracing::debug!(
-                                            target: "xgview::pipeline",
-                                            index,
-                                            %err,
-                                            "no picture yet, waiting for the first key frame"
-                                        );
-                                    }
-                                } else {
-                                    decode_errors += 1;
-                                    window.counters.errors += 1;
-                                    // The first rejections carry the payload
-                                    // that caused them, which names the NAL
-                                    // units the decoder was given.
-                                    if decode_errors <= 3 {
-                                        tracing::debug!(
-                                            target: "xgview::pipeline",
-                                            index,
-                                            len = unit.data.len(),
-                                            types = ?nal_types(&unit.data, kind),
-                                            keyframe = unit.keyframe,
-                                            au = %hex(&unit.data, 24),
-                                            cached = ?depacketizer.parameter_sets(),
-                                            "access unit rejected by the decoder"
-                                        );
-                                    }
-                                    if decode_errors == 1 {
-                                        tracing::warn!(
-                                            target: "xgview::pipeline",
-                                            index,
-                                            %err,
-                                            "decoding failed, waiting for the next key frame"
-                                        );
-                                    } else {
-                                        tracing::debug!(
-                                            target: "xgview::pipeline",
-                                            index,
-                                            errors = decode_errors,
-                                            %err,
-                                            "decoding failed"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if completed_none && header.marker {
-                        // The marker closed a picture but nothing came out of
-                        // it: the unit held no slice, or its head was lost.
-                        window.counters.dropped += 1;
-                    }
-                }
-            }
-        }
-
-        if window.due() {
-            let seconds = window.seconds();
-            let fps = window.counters.fps(seconds);
-            let kbps = window.counters.kbps(seconds);
-            stats.publish(StreamStats {
-                index,
-                camera_id: camera_id.to_string(),
-                stream,
-                codec: codec.clone(),
-                width,
-                height,
-                hardware: uses_hardware(&decoder),
-                audio: audio_decoder.is_some(),
-                fps,
-                bitrate_kbps: kbps,
-                total_frames,
-            });
-            // `units` is what the network delivered, `decoded` what came out of
-            // the decoder: a frozen picture with a steady `units` blames the
-            // decoder (or the renderer), a `units` that drops to zero and then
-            // bursts blames the camera, the link, or this loop being starved.
-            let counted = window.close();
-            tracing::debug!(
-                target: "xgview::pipeline",
-                index,
-                stream = stream.as_str(),
-                hardware = uses_hardware(&decoder),
-                // The picture deadline this session is being held to. It is
-                // learned from the stream, so a channel cut off at a number of
-                // seconds that is not the one in the source reads here as the
-                // group of pictures that camera turned out to have.
-                deadline_s = stall.patience().as_secs(),
-                units = counted.units,
-                unit_bytes = counted.unit_bytes,
-                decoded = counted.decoded,
-                errors = counted.errors,
-                opening = counted.opening,
-                dropped = counted.dropped,
-                foreign = counted.foreign,
-                reordered = counted.reordered,
-                lost = counted.lost,
-                slowest_decode_ms = counted.slowest.as_millis() as u64,
-                fps,
-                kbps,
-                "stream window"
-            );
         }
     }
 }
