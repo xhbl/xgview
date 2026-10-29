@@ -213,6 +213,27 @@ impl StallDeadline {
             budget.clamp(FIRST_PICTURE_FLOOR, FIRST_PICTURE_CEILING)
         }
     }
+
+    /// The two numbers the loop compares, read together so that the wait and the
+    /// stall are judged by the same reading of the clock.
+    pub(super) fn lateness(&self) -> Lateness {
+        Lateness { since: self.since_picture(), patience: self.patience() }
+    }
+}
+
+/// How late the picture is, and how late it may be.
+///
+/// Read once per turn of the loop and carried as one value. Once, because the
+/// clock is read rather than stored - `since` is how long ago the last picture
+/// was, so asking twice gives two answers. As one value, because both numbers are
+/// `Duration`, and two arguments of the same type are two arguments that can be
+/// handed over the wrong way round.
+#[derive(Clone, Copy)]
+pub(super) struct Lateness {
+    /// How long the decoder has gone without producing a picture.
+    pub(super) since: Duration,
+    /// How long it may still go, learned from the stream.
+    pub(super) patience: Duration,
 }
 
 /// The RTP depacketizer a session pulls its pictures out of.
@@ -681,10 +702,10 @@ pub(super) async fn run_session(
 /// The state one RTSP session carries between packets.
 ///
 /// Everything the loop carried from one iteration to the next is a field,
-/// because the loop is about to be split into methods that each answer one
-/// question - the clocks, the talk-back, one media packet - and a method cannot
-/// reach a local. The split is the reason the fields are here; the fields
-/// themselves are what the loop always held.
+/// because the loop is being split into methods that each answer one question -
+/// the clocks, the talk-back, one media packet - and a method cannot reach a
+/// local. The split is the reason the fields are here; the fields themselves are
+/// what the loop always held.
 struct RtspSession<'a> {
     /// What it publishes through, and the two hubs it shares with the rest of
     /// the application.
@@ -967,130 +988,18 @@ impl<'a> RtspSession<'a> {
         loop {
             // Talk-back, before waiting on the picture: the session's clock is the
             // RTP clock, and it must not be tied to how often a camera sends video.
-            if let Some((stream, channel)) = self.talk_sender.as_mut() {
-                while self.last_talk.elapsed() >= talk_gap(self.talk.talking_on(self.index)) {
-                    let talking = self.talk.talking_on(self.index);
-                    let elapsed = self.last_talk.elapsed();
-                    let packet = if talking {
-                        // A gap left by the idle rate is silence the speaker never
-                        // heard: the clock is moved over it before the voice starts,
-                        // so the talk does not begin a second in the past.
-                        if elapsed > TALK_INTERVAL * 2 {
-                            stream.skip(elapsed - TALK_INTERVAL);
-                        }
-                        stream.packet(&self.talk.take(FRAME_SAMPLES))
-                    } else {
-                        stream.silence_after(elapsed)
-                    };
-                    self.client.send_interleaved(*channel, &packet);
-                    if talking {
-                        self.last_talk += TALK_INTERVAL;
-                    } else {
-                        self.last_talk = Instant::now();
-                    }
-                    // A loop that fell well behind - a stalled socket, a suspended
-                    // process - is not worth a burst of catch-up packets: the
-                    // camera's speaker wants the present, not the backlog.
-                    if self.last_talk.elapsed() > TALK_INTERVAL * 4 {
-                        self.last_talk = Instant::now();
-                        break;
-                    }
-                }
-            }
-            // A channel with no decoder has no picture to expect - it shows a
-            // placeholder - and is left out of this entirely.
-            let patience = self.stall.patience();
-            let since_picture = self.stall.since_picture();
-            if self.decoder.is_some() && since_picture >= patience {
-                // Soft timeout: the picture has frozen, but the transport may
-                // still be alive. Hold the last frame and keep waiting rather than
-                // dropping to a black reconnect screen, which is the worse
-                // experience on a flaky link. The state is announced once, when
-                // the stall begins, so the grid can mark it without a flood of
-                // events.
-                if self.stall.stalled_since.is_none() {
-                    self.stall.stalled_since = Some(Instant::now());
-                    emit(
-                        self.sinks.events,
-                        StreamEvent::State {
-                            index: self.index,
-                            camera_id: self.camera_id.clone(),
-                            state: ConnectionState::Stalled,
-                            detail: format!("stalled for {} s", since_picture.as_secs()),
-                        },
-                    );
-                }
-                // Hard timeout: the stall has gone on long enough that
-                // reconnecting is more likely to help than waiting.
-                if self.stall.stalled_since.unwrap().elapsed() >= STALL_HARD_TIMEOUT {
-                    return Err(crate::error::CoreError::timeout(format!(
-                        "stalled for {} s, giving up",
-                        since_picture.as_secs()
-                    )));
-                }
-            }
-            if self.last_keep_alive.elapsed() >= self.keep_alive_interval {
-                // Fire and forget. Waiting for the answer would discard every RTP
-                // packet that arrives first, and block the pump for good on a device
-                // that never answers. Only a failed write is an error.
-                self.client.send_keep_alive().await?;
-                self.last_keep_alive = Instant::now();
-            }
-            if self.received_packets && self.last_report.elapsed() >= REPORT_INTERVAL {
-                // Cameras differ in how much they care about being reported to. Some
-                // stream regardless, but one was measured sending a single key frame
-                // and then nothing but `SEI` until a receiver report arrived, which
-                // a viewer shows as a slideshow whose timecode jumps. The counts it
-                // carries are the session's real ones, so a camera that does adapt
-                // to them has something to adapt to.
-                let report = crate::rtcp::receiver_report(
-                    RECEIVER_SSRC,
-                    self.source_ssrc,
-                    self.sequence_window.highest(),
-                    self.sequence_window.lost().min(i32::MAX as u64) as i32,
-                    self.jitter.value(),
-                );
-                self.client.send_rtcp(&report);
-                self.last_report = Instant::now();
-            }
+            self.pump_talk();
+            let late = self.stall.lateness();
+            self.check_stall(late)?;
+            self.keep_alive().await?;
+            self.send_report();
+            let wait = self.next_wait(late);
 
-            // Waiting no longer than the picture deadline allows, so that a session
-            // gone quiet is noticed on time rather than at the next packet. The wait
-            // is a peek at the transport and the packet is only read once something
-            // has arrived: a read cancelled part way through a packet takes the bytes
-            // it has already consumed with it, and every packet after them is then
-            // read at the wrong offset, which costs the session where the wait would
-            // only have cost a wait.
-            //
-            // While stalled the patience is already spent, so the wait would be
-            // zero and the loop would spin. A one second poll keeps it from
-            // busy-waiting without blocking long enough to miss the hard timeout.
-            // A channel with no decoder has no picture to wait for and no stall
-            // state to read: the only signal it has is whether packets are still
-            // arriving, so it waits for the full read timeout and lets that be the
-            // one that reports silence on the wire.
-            let wait = if self.decoder.is_some() && since_picture >= patience {
-                STALL_HARD_TIMEOUT
-                    .saturating_sub(self.stall.stalled_since.unwrap().elapsed())
-                    .min(Duration::from_secs(1))
-            } else if self.decoder.is_some() {
-                READ_TIMEOUT.min(patience.saturating_sub(since_picture))
-            } else {
-                READ_TIMEOUT
-            };
-            // A session feeding a camera's speaker has one more clock to honour:
-            // the wait is cut so that the next talk packet is written on time even
-            // while the picture keeps the loop from ever timing out. Idle, that
-            // clock is the keepalive's, not the frame rate's.
-            let talk_wait = self.talk_sender
-                .as_ref()
-                .map(|_| {
-                    talk_gap(self.talk.talking_on(self.index)).saturating_sub(self.last_talk.elapsed())
-                });
-            let wait = match talk_wait {
-                Some(talk_wait) => wait.min(talk_wait),
-                None => wait,
-            };
+            // The wait is a peek at the transport and the packet is only read once
+            // something has arrived: a read cancelled part way through a packet
+            // takes the bytes it has already consumed with it, and every packet
+            // after them is then read at the wrong offset, which costs the session
+            // where the wait would only have cost a wait.
             match tokio::time::timeout(wait, self.client.wait_for_media()).await {
                 Ok(result) => result?,
                 Err(_) => {
@@ -1102,11 +1011,11 @@ impl<'a> RtspSession<'a> {
                     }
                     // A wait that the picture deadline cut short is not silence on
                     // the wire, and reporting it as such would name the wrong fault
-                    // and the wrong duration. The loop's own check reports that one.
+                    // and the wrong duration. The stall check reports that one.
                     // A channel with no decoder is exempt: its wait was the full
                     // read timeout, not a deadline slice, so an expiry here really
                     // is silence on the wire.
-                    if self.decoder.is_some() && self.stall.since_picture() >= patience {
+                    if self.decoder.is_some() && self.stall.since_picture() >= late.patience {
                         continue;
                     }
                     return Err(crate::error::CoreError::timeout(format!(
@@ -1416,6 +1325,146 @@ impl<'a> RtspSession<'a> {
                     "stream window"
                 );
             }
+        }
+    }
+
+    /// Writes the talk-back packets the clock owes. Nothing is written when the
+    /// session has no back channel.
+    fn pump_talk(&mut self) {
+        if let Some((stream, channel)) = self.talk_sender.as_mut() {
+            while self.last_talk.elapsed() >= talk_gap(self.talk.talking_on(self.index)) {
+                let talking = self.talk.talking_on(self.index);
+                let elapsed = self.last_talk.elapsed();
+                let packet = if talking {
+                    // A gap left by the idle rate is silence the speaker never
+                    // heard: the clock is moved over it before the voice starts,
+                    // so the talk does not begin a second in the past.
+                    if elapsed > TALK_INTERVAL * 2 {
+                        stream.skip(elapsed - TALK_INTERVAL);
+                    }
+                    stream.packet(&self.talk.take(FRAME_SAMPLES))
+                } else {
+                    stream.silence_after(elapsed)
+                };
+                self.client.send_interleaved(*channel, &packet);
+                if talking {
+                    self.last_talk += TALK_INTERVAL;
+                } else {
+                    self.last_talk = Instant::now();
+                }
+                // A loop that fell well behind - a stalled socket, a suspended
+                // process - is not worth a burst of catch-up packets: the camera's
+                // speaker wants the present, not the backlog.
+                if self.last_talk.elapsed() > TALK_INTERVAL * 4 {
+                    self.last_talk = Instant::now();
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Holds the last frame while the picture is frozen, and gives the session up
+    /// when it has been frozen for longer than reconnecting would take.
+    fn check_stall(&mut self, late: Lateness) -> Result<()> {
+        // A channel with no decoder has no picture to expect - it shows a
+        // placeholder - and is left out of this entirely.
+        if self.decoder.is_none() || late.since < late.patience {
+            return Ok(());
+        }
+        // Soft timeout: the picture has frozen, but the transport may still be
+        // alive. Hold the last frame and keep waiting rather than dropping to a
+        // black reconnect screen, which is the worse experience on a flaky link.
+        // The state is announced once, when the stall begins, so the grid can mark
+        // it without a flood of events.
+        if self.stall.stalled_since.is_none() {
+            self.stall.stalled_since = Some(Instant::now());
+            emit(
+                self.sinks.events,
+                StreamEvent::State {
+                    index: self.index,
+                    camera_id: self.camera_id.clone(),
+                    state: ConnectionState::Stalled,
+                    detail: format!("stalled for {} s", late.since.as_secs()),
+                },
+            );
+        }
+        // Hard timeout: the stall has gone on long enough that reconnecting is
+        // more likely to help than waiting.
+        if self.stall.stalled_since.unwrap().elapsed() >= STALL_HARD_TIMEOUT {
+            return Err(crate::error::CoreError::timeout(format!(
+                "stalled for {} s, giving up",
+                late.since.as_secs()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Sends the probe the server asked for, when it is due.
+    async fn keep_alive(&mut self) -> Result<()> {
+        if self.last_keep_alive.elapsed() < self.keep_alive_interval {
+            return Ok(());
+        }
+        // Fire and forget. Waiting for the answer would discard every RTP packet
+        // that arrives first, and block the pump for good on a device that never
+        // answers. Only a failed write is an error.
+        self.client.send_keep_alive().await?;
+        self.last_keep_alive = Instant::now();
+        Ok(())
+    }
+
+    /// Sends the receiver report, when it is due.
+    fn send_report(&mut self) {
+        if !self.received_packets || self.last_report.elapsed() < REPORT_INTERVAL {
+            return;
+        }
+        // Cameras differ in how much they care about being reported to. Some
+        // stream regardless, but one was measured sending a single key frame and
+        // then nothing but `SEI` until a receiver report arrived, which a viewer
+        // shows as a slideshow whose timecode jumps. The counts it carries are the
+        // session's real ones, so a camera that does adapt to them has something
+        // to adapt to.
+        let report = crate::rtcp::receiver_report(
+            RECEIVER_SSRC,
+            self.source_ssrc,
+            self.sequence_window.highest(),
+            self.sequence_window.lost().min(i32::MAX as u64) as i32,
+            self.jitter.value(),
+        );
+        self.client.send_rtcp(&report);
+        self.last_report = Instant::now();
+    }
+
+    /// How long the loop may block before it has to look at its clocks again.
+    ///
+    /// Waiting no longer than the picture deadline allows, so that a session gone
+    /// quiet is noticed on time rather than at the next packet.
+    ///
+    /// While stalled the patience is already spent, so the wait would be zero and
+    /// the loop would spin. A one second poll keeps it from busy-waiting without
+    /// blocking long enough to miss the hard timeout. A channel with no decoder has
+    /// no picture to wait for and no stall state to read: the only signal it has
+    /// is whether packets are still arriving, so it waits for the full read
+    /// timeout and lets that be the one that reports silence on the wire.
+    fn next_wait(&self, late: Lateness) -> Duration {
+        let wait = if self.decoder.is_some() && late.since >= late.patience {
+            STALL_HARD_TIMEOUT
+                .saturating_sub(self.stall.stalled_since.unwrap().elapsed())
+                .min(Duration::from_secs(1))
+        } else if self.decoder.is_some() {
+            READ_TIMEOUT.min(late.patience.saturating_sub(late.since))
+        } else {
+            READ_TIMEOUT
+        };
+        // A session feeding a camera's speaker has one more clock to honour: the
+        // wait is cut so that the next talk packet is written on time even while
+        // the picture keeps the loop from ever timing out. Idle, that clock is the
+        // keepalive's, not the frame rate's.
+        let talk_wait = self.talk_sender.as_ref().map(|_| {
+            talk_gap(self.talk.talking_on(self.index)).saturating_sub(self.last_talk.elapsed())
+        });
+        match talk_wait {
+            Some(talk_wait) => wait.min(talk_wait),
+            None => wait,
         }
     }
 }
