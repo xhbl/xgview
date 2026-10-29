@@ -80,7 +80,7 @@ mod shared;
 mod supervisor;
 mod ws_session;
 
-use supervisor::supervisor;
+use supervisor::Supervisor;
 
 // The MSE socket is opened by the discovery probe as well as by the channel
 // that streams it, so it keeps the name it had before the split.
@@ -429,18 +429,21 @@ impl ChannelManager {
         let stats = Arc::new(StatsStore::default());
         let audio = AudioHub::new();
         let talk = TalkHub::new();
-        handle.spawn(supervisor(
-            command_rx,
-            command_tx.clone(),
-            event_tx,
-            frames.clone(),
-            stats.clone(),
-            audio.clone(),
-            talk.clone(),
-            Arc::new(Mutex::new(SessionSettings { reconnect: policy, handshake_timeout })),
-            prefer_hardware,
-            handle.clone(),
-        ));
+        handle.spawn(
+            Supervisor::new(
+                command_rx,
+                command_tx.clone(),
+                event_tx,
+                frames.clone(),
+                stats.clone(),
+                audio.clone(),
+                talk.clone(),
+                Arc::new(Mutex::new(SessionSettings { reconnect: policy, handshake_timeout })),
+                prefer_hardware,
+                handle.clone(),
+            )
+            .run(),
+        );
         Self { commands: command_tx, events: event_rx, frames, stats, audio, talk, handle: handle.clone() }
     }
 
