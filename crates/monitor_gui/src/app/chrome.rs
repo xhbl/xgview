@@ -259,7 +259,7 @@ impl XgViewApp {
         // viewer just opened would strand it. The layout picker is a modal of
         // its own and counts the same way - it is opened from the toolbar, and
         // a bar that faded under it would take its own trigger away.
-        if self.show_settings || self.discovery.open || self.layout_picker || self.portrait_aspect_picker || self.combined_info_picker {
+        if self.show_settings || self.discovery.open || self.layout_picker.open || self.portrait_aspect_picker.open || self.combined_info_picker.open {
             self.chrome.visible = true;
             self.chrome.hide_now = false;
             self.chrome.last_input = Instant::now();

@@ -605,8 +605,8 @@ impl XgViewApp {
                 || input.consume_key(none, Key::Backspace)
         });
         if back {
-            self.combined_info_picker = false;
-            self.restore_focus = self.combined_info_picker_from.take();
+            self.combined_info_picker.open = false;
+            self.restore_focus = self.combined_info_picker.from.take();
             return;
         }
 
@@ -711,7 +711,7 @@ impl XgViewApp {
         // selection within and between columns, Enter moves an item, Back
         // closes.  All consumed here so the rest of `handle_keys` — the wall,
         // the nav walk — does not also act on them.
-        if self.combined_info_picker {
+        if self.combined_info_picker.open {
             self.handle_combined_info_keys(ctx);
             return;
         }
@@ -1019,10 +1019,10 @@ impl XgViewApp {
             || self.passphrase.is_some();
         // The layout picker is a modal of its own, and it owns the keys while
         // it is up: opening a panel behind it would stack two of them.
-        if keys.settings && !dialog_open && !self.layout_picker && !self.portrait_aspect_picker && !self.combined_info_picker && !self.is_portrait() {
+        if keys.settings && !dialog_open && !self.layout_picker.open && !self.portrait_aspect_picker.open && !self.combined_info_picker.open && !self.is_portrait() {
             self.show_settings = !self.show_settings;
         }
-        if keys.devices && !dialog_open && !self.layout_picker && !self.portrait_aspect_picker && !self.combined_info_picker {
+        if keys.devices && !dialog_open && !self.layout_picker.open && !self.portrait_aspect_picker.open && !self.combined_info_picker.open {
             self.discovery.open = !self.discovery.open;
             // Opened from the keyboard, so there is no button to hand the focus
             // back to when it closes.
@@ -1047,7 +1047,7 @@ impl XgViewApp {
         // The picker is a modal: while it is up the wall's own keys - page
         // turns and the layout digits - are spent, so a press cannot change the
         // wall behind it. Back is answered below, where the panels are unwound.
-        if !self.layout_picker && !self.portrait_aspect_picker && !self.combined_info_picker {
+        if !self.layout_picker.open && !self.portrait_aspect_picker.open && !self.combined_info_picker.open {
             // A page key turns the page from wherever the focus is, but the
             // bounce a turn at the edge makes - to the other page button -
             // belongs to a focus that was standing on one of those buttons: the
@@ -1180,12 +1180,12 @@ impl XgViewApp {
                 } else if self.tile_bar.is_open() {
                     self.tile_bar.hide();
                     self.leave_controls(ctx);
-                } else if self.layout_picker {
-                    self.layout_picker = false;
-                    self.restore_focus = self.layout_picker_from.take();
-                } else if self.portrait_aspect_picker {
-                    self.portrait_aspect_picker = false;
-                    self.restore_focus = self.portrait_aspect_picker_from.take();
+                } else if self.layout_picker.open {
+                    self.layout_picker.open = false;
+                    self.restore_focus = self.layout_picker.from.take();
+                } else if self.portrait_aspect_picker.open {
+                    self.portrait_aspect_picker.open = false;
+                    self.restore_focus = self.portrait_aspect_picker.from.take();
                 } else if self.discovery.open {
                     self.discovery.open = false;
                     self.restore_focus = self.discovery.from.take();

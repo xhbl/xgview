@@ -67,9 +67,9 @@ impl XgViewApp {
         self.slide = Slide::default();
         // The settings panel and the layout picker are built for landscape.
         self.show_settings = false;
-        self.layout_picker = false;
-        self.portrait_aspect_picker = false;
-        self.combined_info_picker = false;
+        self.layout_picker.open = false;
+        self.portrait_aspect_picker.open = false;
+        self.combined_info_picker.open = false;
         self.config.android_orientation = wanted;
         self.needs_sync = true;
         self.mark_dirty();

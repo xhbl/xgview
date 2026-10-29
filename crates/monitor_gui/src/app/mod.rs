@@ -444,6 +444,27 @@ impl Handoff {
     }
 }
 
+/// What every modal window in this program carries.
+///
+/// The four things a window needs and nothing else: whether it is up, the frame
+/// it appeared on, the control it opens on, and the one it gives the focus back
+/// to when it closes. They were four fields per window, written out seven times
+/// and told apart by a suffix; the pickers are the first to be moved onto it.
+#[derive(Debug, Default)]
+struct Modal {
+    /// Whether the window is up.
+    open: bool,
+    /// Watched for the frame it appears on, so the remote's focus lands on its
+    /// first control instead of walking the wall behind it.
+    handoff: Handoff,
+    /// First control of the window, to be handed the focus as it opens.
+    anchor: Option<Id>,
+    /// The button that opened it, to give it back its focus when it closes.
+    /// `None` when it was opened with a pointer, which moves no focus.
+    from: Option<Id>,
+}
+
+
 /// A camera the settings panel is editing, and the form bound to it.
 #[derive(Debug)]
 struct CameraEdit {
@@ -834,7 +855,7 @@ pub struct XgViewApp {
     show_settings: bool,
     /// Whether the layout picker is open: the panel that offers the layouts
     /// that have no button of their own.
-    layout_picker: bool,
+    layout_picker: Modal,
     /// Tab the settings panel is on.
     settings_tab: SettingsTab,
     /// First control of the settings panel, so the panel can be handed the
@@ -842,25 +863,13 @@ pub struct XgViewApp {
     settings_anchor: Option<Id>,
     /// The panel and the device window, watched for the frame they appear on.
     settings_handoff: Handoff,
-    /// The layout picker, watched for the frame it appears on so the remote's
-    /// focus lands on its first entry instead of walking the wall behind it.
-    layout_picker_handoff: Handoff,
-    layout_picker_anchor: Option<Id>,
-    /// The button that opened the layout picker, to give it back its focus when
-    /// the picker closes - the toolbar's or the settings panel's `…`.
-    layout_picker_from: Option<Id>,
     /// Whether the portrait aspect picker is open: the modal that lists the
     /// cameras on the current page and lets the remote cycle each one's fit.
-    portrait_aspect_picker: bool,
-    portrait_aspect_picker_handoff: Handoff,
-    portrait_aspect_picker_anchor: Option<Id>,
-    portrait_aspect_picker_from: Option<Id>,
-    /// Whether the combined-info editor is open, and which slot (0-3) it edits.
-    combined_info_picker: bool,
+    portrait_aspect_picker: Modal,
+    /// The combined-info editor: the modal that edits one of the four slots.
+    combined_info_picker: Modal,
+    /// Which slot (0-3) the editor is on.
     combined_info_picker_slot: usize,
-    combined_info_picker_handoff: Handoff,
-    combined_info_picker_anchor: Option<Id>,
-    combined_info_picker_from: Option<Id>,
     /// A scroll asked for by a direction press that had nowhere left to move the
     /// focus inside the settings body, in points.
     ///
@@ -1316,22 +1325,13 @@ impl XgViewApp {
             hardware_decoder: capabilities.hardware,
             decoder_selectable: capabilities.selectable,
             show_settings: false,
-            layout_picker: false,
+            layout_picker: Modal::default(),
             settings_tab: SettingsTab::default(),
             settings_anchor: None,
             settings_handoff: Handoff::default(),
-            layout_picker_handoff: Handoff::default(),
-            layout_picker_anchor: None,
-            layout_picker_from: None,
-            portrait_aspect_picker: false,
-            portrait_aspect_picker_handoff: Handoff::default(),
-            portrait_aspect_picker_anchor: None,
-            portrait_aspect_picker_from: None,
-            combined_info_picker: false,
+            portrait_aspect_picker: Modal::default(),
+            combined_info_picker: Modal::default(),
             combined_info_picker_slot: 0,
-            combined_info_picker_handoff: Handoff::default(),
-            combined_info_picker_anchor: None,
-            combined_info_picker_from: None,
             body_scroll: None,
             dialog_handoff: Handoff::default(),
             discovery,
@@ -1468,12 +1468,12 @@ impl XgViewApp {
             self.camera_edit_anchor
         } else if self.discovery.open {
             self.discovery.focus_anchor
-        } else if self.layout_picker {
-            self.layout_picker_anchor
-        } else if self.portrait_aspect_picker {
-            self.portrait_aspect_picker_anchor
-        } else if self.combined_info_picker {
-            self.combined_info_picker_anchor
+        } else if self.layout_picker.open {
+            self.layout_picker.anchor
+        } else if self.portrait_aspect_picker.open {
+            self.portrait_aspect_picker.anchor
+        } else if self.combined_info_picker.open {
+            self.combined_info_picker.anchor
         } else if self.reorder.is_some() {
             self.reorder_anchor
         } else if self.show_settings {
@@ -1974,7 +1974,7 @@ impl XgViewApp {
         // wall stands upright. Close them if the wall was turned with them open.
         if self.is_portrait() {
             self.show_settings = false;
-            self.layout_picker = false;
+            self.layout_picker.open = false;
         }
         // Tell the activity which way to stand, once per change. A no-op on the
         // other platforms, which have no orientation to ask for.
@@ -2050,18 +2050,18 @@ impl XgViewApp {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
-        if self.layout_picker_handoff.entering(self.layout_picker) {
-            if let Some(id) = self.layout_picker_anchor {
+        if self.layout_picker.handoff.entering(self.layout_picker.open) {
+            if let Some(id) = self.layout_picker.anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
-        if self.portrait_aspect_picker_handoff.entering(self.portrait_aspect_picker) {
-            if let Some(id) = self.portrait_aspect_picker_anchor {
+        if self.portrait_aspect_picker.handoff.entering(self.portrait_aspect_picker.open) {
+            if let Some(id) = self.portrait_aspect_picker.anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
-        if self.combined_info_picker_handoff.entering(self.combined_info_picker) {
-            if let Some(id) = self.combined_info_picker_anchor {
+        if self.combined_info_picker.handoff.entering(self.combined_info_picker.open) {
+            if let Some(id) = self.combined_info_picker.anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
@@ -2728,7 +2728,7 @@ impl XgViewApp {
         if self.show_settings {
             what.push_str(&format!(" settings={:?}", self.settings_tab));
         }
-        if self.layout_picker {
+        if self.layout_picker.open {
             what.push_str(" layouts");
         }
         if self.blackout_on {

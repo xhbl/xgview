@@ -18,7 +18,7 @@ impl XgViewApp {
     /// painted into it. The three rows are three scopes of the navigation
     /// layer, and the vertical arrows cross between them at the same column.
     pub(super) fn draw_layout_picker(&mut self, ctx: &egui::Context) {
-        if !self.layout_picker {
+        if !self.layout_picker.open {
             return;
         }
         let mut chosen: Option<GridLayout> = None;
@@ -43,7 +43,7 @@ impl XgViewApp {
             // Three to a row, each row a scope of the navigation layer: the
             // sideways arrows walk a row and the vertical ones cross between
             // them at the same column, so a remote reaches all nine.
-            self.layout_picker_anchor = None;
+            self.layout_picker.anchor = None;
             for (row, chunk) in GridLayout::EXTENDED.chunks(3).enumerate() {
                 let scope = LAYOUT_PICKER_ROWS[row];
                 ui.horizontal(|ui| {
@@ -52,8 +52,8 @@ impl XgViewApp {
                         let selected = self.scheduler.layout() == *layout;
                         let (rect, response) =
                             ui.allocate_exact_size(vec2(108.0, 84.0), Sense::click());
-                        if self.layout_picker_anchor.is_none() {
-                            self.layout_picker_anchor = Some(response.id);
+                        if self.layout_picker.anchor.is_none() {
+                            self.layout_picker.anchor = Some(response.id);
                         }
                         if ui.is_rect_visible(rect) {
                             let painter = ui.painter();
@@ -102,11 +102,11 @@ impl XgViewApp {
 
         if let Some(layout) = chosen {
             self.set_layout(layout);
-            self.layout_picker = false;
-            self.restore_focus = self.layout_picker_from.take();
+            self.layout_picker.open = false;
+            self.restore_focus = self.layout_picker.from.take();
         } else if close {
-            self.layout_picker = false;
-            self.restore_focus = self.layout_picker_from.take();
+            self.layout_picker.open = false;
+            self.restore_focus = self.layout_picker.from.take();
         }
     }
 
@@ -115,7 +115,7 @@ impl XgViewApp {
     /// its name, and the aspect it is drawn at - a press on the row turns the
     /// aspect to the next of the five.
     pub(super) fn draw_portrait_aspect_picker(&mut self, ctx: &egui::Context) {
-        if !self.portrait_aspect_picker {
+        if !self.portrait_aspect_picker.open {
             return;
         }
         let mut close = false;
@@ -123,7 +123,7 @@ impl XgViewApp {
 
         egui::Modal::new(Id::new("xgview-portrait-aspect-picker")).show(ctx, |ui| {
             ui.set_width(300.0);
-            self.portrait_aspect_picker_anchor = None;
+            self.portrait_aspect_picker.anchor = None;
             self.nav.open("aspect-picker");
             let bar = dialogs::title_bar(
                 ui,
@@ -147,7 +147,7 @@ impl XgViewApp {
                 egui::Sense::focusable_noninteractive(),
             );
             self.nav.item(&hint_focus);
-            self.portrait_aspect_picker_anchor = Some(hint_focus.id);
+            self.portrait_aspect_picker.anchor = Some(hint_focus.id);
             ui.add_space(theme::space::M);
 
             let layout = self.scheduler.layout();
@@ -196,8 +196,8 @@ impl XgViewApp {
             self.mark_dirty();
         }
         if close {
-            self.portrait_aspect_picker = false;
-            self.restore_focus = self.portrait_aspect_picker_from.take();
+            self.portrait_aspect_picker.open = false;
+            self.restore_focus = self.portrait_aspect_picker.from.take();
         }
     }
 
@@ -206,7 +206,7 @@ impl XgViewApp {
     /// on the right.  Keyboard is handled in `handle_combined_info_keys`;
     /// this method only draws the UI and handles mouse clicks.
     pub(super) fn draw_combined_info_picker(&mut self, ctx: &egui::Context) {
-        if !self.combined_info_picker {
+        if !self.combined_info_picker.open {
             return;
         }
         let slot = self.combined_info_picker_slot;
@@ -243,7 +243,7 @@ impl XgViewApp {
                 egui::Sense::focusable_noninteractive(),
             );
             self.nav.item(&anchor);
-            self.combined_info_picker_anchor = Some(anchor.id);
+            self.combined_info_picker.anchor = Some(anchor.id);
             ui.add_space(4.0);
 
             let available: Vec<OsdItem> = OsdItem::ATOMIC
@@ -320,8 +320,8 @@ impl XgViewApp {
             self.mark_dirty();
         }
         if close {
-            self.combined_info_picker = false;
-            self.restore_focus = self.combined_info_picker_from.take();
+            self.combined_info_picker.open = false;
+            self.restore_focus = self.combined_info_picker.from.take();
         }
     }
 }
