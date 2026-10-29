@@ -217,121 +217,131 @@ impl XgViewApp {
     /// on the right.  Keyboard is handled in `handle_combined_info_keys`;
     /// this method only draws the UI and handles mouse clicks.
     pub(super) fn draw_combined_info_picker(&mut self, ctx: &egui::Context) {
-        if !self.combined_info_picker.is_open() {
-            return;
-        }
-        let slot = self.combined_info_picker_slot;
-        let mut selected: Vec<OsdItem> = self.config.combined_info[slot].clone();
-        let mut close = false;
-        let mut changed = false;
-        let mut click_add: Option<usize> = None;
+        self.modal_frame(
+            ctx,
+            "xgview-combined-info-picker",
+            420.0,
+            |app| &mut app.combined_info_picker,
+            |app, ui, ()| {
+                let slot = app.combined_info_picker_slot;
+                let mut selected: Vec<OsdItem> = app.config.combined_info[slot].clone();
+                let mut close = false;
+                let mut changed = false;
+                let mut click_add: Option<usize> = None;
 
-        let focus_id = Id::new("xgview-combined-info-focus");
-        let (mut focus_col, mut focus_idx): (usize, usize) =
-            ctx.data(|d| d.get_temp(focus_id).unwrap_or((0, 0)));
+                let focus_id = Id::new("xgview-combined-info-focus");
+                let (mut focus_col, mut focus_idx): (usize, usize) =
+                    ui.ctx().data(|d| d.get_temp(focus_id).unwrap_or((0, 0)));
 
-        egui::Modal::new(Id::new("xgview-combined-info-picker")).show(ctx, |ui| {
-            ui.set_width(420.0);
+                app.nav.open("combined-info-picker");
 
-            self.nav.open("combined-info-picker");
-
-            let bar = dialogs::title_bar(
-                ui,
-                &monitor_i18n::tr_args("combined-info-title", &[("n", (slot + 1).to_string().into())]),
-                true,
-                &monitor_i18n::tr("dialog-close"),
-            );
-            if let Some(close_btn) = bar.close {
-                if self.nav.tracked(close_btn).clicked() {
-                    close = true;
-                }
-            }
-            // The rule is the dialog's first stop; the bar's own rule runs to
-            // the border, so the focus ring is kept inside the content.
-            let anchor = ui.interact(
-                bar.rule.shrink2(vec2(f32::from(ui.style().spacing.menu_margin.left), 0.0)),
-                ui.id().with("title-anchor"),
-                egui::Sense::focusable_noninteractive(),
-            );
-            self.nav.item(&anchor);
-            self.combined_info_picker.anchor = Some(anchor.id);
-            ui.add_space(4.0);
-
-            let available: Vec<OsdItem> = OsdItem::ATOMIC
-                .iter()
-                .filter(|atom| !selected.contains(atom))
-                .copied()
-                .collect();
-
-
-            let mut click_remove: Option<usize> = None;
-
-            ui.columns(2, |columns| {
-                columns[0].spacing_mut().item_spacing.y = 2.0;
-                columns[0].label(
-                    RichText::new(monitor_i18n::tr("combined-info-available")).small().strong(),
+                let bar = dialogs::title_bar(
+                    ui,
+                    &monitor_i18n::tr_args(
+                        "combined-info-title",
+                        &[("n", (slot + 1).to_string().into())],
+                    ),
+                    true,
+                    &monitor_i18n::tr("dialog-close"),
                 );
-                for (i, atom) in available.iter().enumerate() {
-                    let is_focused = focus_col == 0 && focus_idx == i;
-                    let response = columns[0].selectable_label(
-                        is_focused,
-                        RichText::new(monitor_i18n::tr(atom.label())).small(),
+                if let Some(close_btn) = bar.close {
+                    if app.nav.tracked(close_btn).clicked() {
+                        close = true;
+                    }
+                }
+                // The rule is the dialog's first stop; the bar's own rule runs
+                // to the border, so the focus ring is kept inside the content.
+                let anchor = ui.interact(
+                    bar.rule
+                        .shrink2(vec2(f32::from(ui.style().spacing.menu_margin.left), 0.0)),
+                    ui.id().with("title-anchor"),
+                    egui::Sense::focusable_noninteractive(),
+                );
+                app.nav.item(&anchor);
+                app.combined_info_picker.anchor = Some(anchor.id);
+                ui.add_space(4.0);
+
+                let available: Vec<OsdItem> = OsdItem::ATOMIC
+                    .iter()
+                    .filter(|atom| !selected.contains(atom))
+                    .copied()
+                    .collect();
+
+                let mut click_remove: Option<usize> = None;
+
+                ui.columns(2, |columns| {
+                    columns[0].spacing_mut().item_spacing.y = 2.0;
+                    columns[0].label(
+                        RichText::new(monitor_i18n::tr("combined-info-available"))
+                            .small()
+                            .strong(),
                     );
-                    if response.clicked() {
-                        click_add = Some(i);
+                    for (i, atom) in available.iter().enumerate() {
+                        let is_focused = focus_col == 0 && focus_idx == i;
+                        let response = columns[0].selectable_label(
+                            is_focused,
+                            RichText::new(monitor_i18n::tr(atom.label())).small(),
+                        );
+                        if response.clicked() {
+                            click_add = Some(i);
+                        }
+                    }
+
+                    columns[1].spacing_mut().item_spacing.y = 2.0;
+                    columns[1].label(
+                        RichText::new(monitor_i18n::tr("combined-info-selected"))
+                            .small()
+                            .strong(),
+                    );
+                    for (i, atom) in selected.iter().enumerate() {
+                        let is_focused = focus_col == 1 && focus_idx == i;
+                        let response = columns[1].selectable_label(
+                            is_focused,
+                            RichText::new(monitor_i18n::tr(atom.label())).small(),
+                        );
+                        if response.clicked() {
+                            click_remove = Some(i);
+                        }
+                    }
+                });
+
+                if let Some(i) = click_add {
+                    let atom = available[i];
+                    selected.push(atom);
+                    changed = true;
+                    if available.len() > 1 {
+                        focus_col = 0;
+                        focus_idx = i.min(available.len() - 2);
+                    } else {
+                        focus_col = 1;
+                        focus_idx = selected.len() - 1;
+                    }
+                }
+                if let Some(i) = click_remove {
+                    selected.remove(i);
+                    changed = true;
+                    if selected.is_empty() {
+                        focus_col = 0;
+                        focus_idx = i.min(available.len().saturating_sub(1));
+                    } else {
+                        focus_col = 1;
+                        focus_idx = i.min(selected.len() - 1);
                     }
                 }
 
-                columns[1].spacing_mut().item_spacing.y = 2.0;
-                columns[1].label(
-                    RichText::new(monitor_i18n::tr("combined-info-selected")).small().strong(),
-                );
-                for (i, atom) in selected.iter().enumerate() {
-                    let is_focused = focus_col == 1 && focus_idx == i;
-                    let response = columns[1].selectable_label(
-                        is_focused,
-                        RichText::new(monitor_i18n::tr(atom.label())).small(),
-                    );
-                    if response.clicked() {
-                        click_remove = Some(i);
-                    }
-                }
-            });
+                app.nav.close();
 
-            if let Some(i) = click_add {
-                let atom = available[i];
-                selected.push(atom);
-                changed = true;
-                if available.len() > 1 {
-                    focus_col = 0;
-                    focus_idx = i.min(available.len() - 2);
+                if changed {
+                    ui.ctx().data_mut(|d| d.insert_temp(focus_id, (focus_col, focus_idx)));
+                    app.config.combined_info[slot] = selected;
+                    app.mark_dirty();
+                }
+                if close {
+                    Answer::CLOSE
                 } else {
-                    focus_col = 1;
-                    focus_idx = selected.len() - 1;
+                    Answer::STAY
                 }
-            }
-            if let Some(i) = click_remove {
-                selected.remove(i);
-                changed = true;
-                if selected.is_empty() {
-                    focus_col = 0;
-                    focus_idx = i.min(available.len().saturating_sub(1));
-                } else {
-                    focus_col = 1;
-                    focus_idx = i.min(selected.len() - 1);
-                }
-            }
-
-            self.nav.close();
-        });
-
-        if changed {
-            ctx.data_mut(|d| d.insert_temp(focus_id, (focus_col, focus_idx)));
-            self.config.combined_info[slot] = selected;
-            self.mark_dirty();
-        }
-        if close {
-            self.restore_focus = self.combined_info_picker.close_restoring();
-        }
+            },
+        );
     }
 }
