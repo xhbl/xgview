@@ -111,9 +111,7 @@ impl XgViewApp {
         dirty
     }
 
-    /// Which group the wall is showing, as a strip of tabs with the button that
-    /// adds one at its end. The buttons under it add to that group, and the list
-    /// below it is that group's.
+    /// The group selector: a tab per group, and the button that adds one.
     fn group_strip(&mut self, ui: &mut egui::Ui) -> bool {
         let mut dirty = false;
 
@@ -194,9 +192,8 @@ impl XgViewApp {
         ui.add_space(theme::space::S);
     }
 
-    /// The cameras of the group on the wall, and what pressing their controls
-    /// does. Only this group: the slot is a position in the whole list, which
-    /// is what the actions write back through.
+    /// The cameras of the group on the wall, and the actions their controls ask
+    /// for.
     fn camera_rows(&mut self, ui: &mut egui::Ui) -> bool {
         let mut dirty = false;
 
@@ -274,10 +271,8 @@ impl XgViewApp {
         dirty
     }
 
-    /// One camera of the group: its name, what it is pulling, and the four
-    /// controls that change it - on two lines, because the address and the mode
-    /// do not fit beside them. What was pressed is left in `actions` for the
-    /// caller to apply once the whole list has been drawn.
+    /// One camera of the group, on two lines. What was pressed is left in
+    /// `actions` for the caller to apply once the whole list has been drawn.
     fn camera_row(&mut self, ui: &mut egui::Ui, slot: usize, actions: &mut RowActions) {
         let camera = &mut self.config.cameras[slot];
         ui.horizontal(|ui| {
@@ -400,8 +395,7 @@ impl XgViewApp {
         ui.add_space(theme::space::XS);
     }
 
-    /// The button that starts rearranging. It changes nothing yet: the mode works
-    /// on a copy of the order, written back only when it is confirmed.
+    /// The button that starts rearranging.
     fn reorder_trigger(&mut self, ui: &mut egui::Ui) {
         // Rearranging begins here, and changes nothing yet: the mode works on a
         // copy of the order and the configuration is written only when it is
@@ -431,8 +425,7 @@ impl XgViewApp {
         }
     }
 
-    /// Renaming and removing the group on the wall - the uncommon half of the
-    /// selector, so they are at the foot of the page rather than in the strip.
+    /// The group's own name, and its removal.
     fn group_foot(&mut self, ui: &mut egui::Ui) -> bool {
         let mut dirty = false;
 
