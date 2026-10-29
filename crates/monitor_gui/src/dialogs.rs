@@ -1322,37 +1322,12 @@ fn synology_tab(
 
     let synology = &mut config.synology;
     let before = synology.clone();
-    egui::Grid::new("synology").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-        ui.label(monitor_i18n::tr("dialog-host"));
-        // The first control of this tab, and the one the strip's Down lands on.
-        text_field(ui, nav, &mut synology.host, &monitor_i18n::tr("dialog-host"), false, false, |s| {
-            egui::TextEdit::singleline(s).hint_text(theme::hint("192.168.1.10")).desired_width(220.0)
-        });
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-port"));
-        // A text box rather than a drag value: a port is typed, and on Android a
-        // typed field is the one the floating input box mirrors. Only digits are
-        // kept, at most five; the number is taken from the text while it names a
-        // valid port, so the box can be cleared to retype it without the port
-        // being lost, and shows the port in use again once it is left.
-        let port_text = state.synology_port.get_or_insert_with(|| synology.port.to_string());
-        let port_field = text_field(ui, nav, port_text, &monitor_i18n::tr("dialog-port"), false, false, |s| {
-            egui::TextEdit::singleline(s).desired_width(220.0).char_limit(5)
-        });
-        port_text.retain(|c| c.is_ascii_digit());
-        if let Ok(port) = port_text.parse::<u16>() {
-            if port >= 1 {
-                synology.port = port;
-            }
-        }
-        if !port_field.has_focus() {
-            *port_text = synology.port.to_string();
-        }
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-scheme"));
-        nav.tracked(ui.checkbox(&mut synology.https, monitor_i18n::tr("dialog-https")));
-        ui.end_row();
-    });
+    let port = synology.port;
+    let port_box = state.synology_port.get_or_insert_with(|| port.to_string());
+    server_grid(
+        ui, nav, "synology", &mut synology.host, &mut synology.port, port_box,
+        &mut synology.https,
+    );
 
     // The login is a server parameter like the address above it, so it stays on
     // the near side of the separator; the list it acts on is beyond it.
@@ -1391,35 +1366,55 @@ fn synology_tab(
     if state.synology_cameras.is_empty() {
         ui.label(RichText::new(monitor_i18n::tr("dialog-nothing-fetched")).small().color(theme::TEXT_DIM));
     }
-    let mut to_add: Option<(CameraSource, AddOffer)> = None;
-    for camera in &state.synology_cameras {
-        let offer = add_offer(config, camera);
-        ui.horizontal(|ui| {
-            let (label, enabled) = match offer {
-                AddOffer::Add => (monitor_i18n::tr("dialog-add"), true),
-                AddOffer::Update => (monitor_i18n::tr("dialog-update"), true),
-                AddOffer::Added => (monitor_i18n::tr("dialog-added"), false),
-            };
-            if nav.tracked(ui.add_enabled(enabled, egui::Button::new(label))).clicked() {
-                to_add = Some((camera.clone(), offer));
-            }
-            ui.label(RichText::new(camera.short_label(24)).strong());
-            ui.label(RichText::new(&camera.host).monospace().color(theme::TEXT_DIM));
-            if camera.rtsp_sub.is_some() {
-                ui.label(RichText::new(monitor_i18n::tr("dialog-sub-tag")).small().color(theme::ACCENT));
-            }
-            if offer == AddOffer::Update {
-                ui.label(RichText::new(monitor_i18n::tr("dialog-already-added")).small().color(theme::WARN));
-            }
-        });
-    }
-    if let Some((camera, offer)) = to_add {
+    if let Some((camera, offer)) = camera_rows(ui, nav, config, &state.synology_cameras) {
         apply_add(config, state, Tab::Synology, camera, offer);
         changed = true;
     }
 
     status_lines(ui, state, Tab::Synology);
     changed
+}
+
+/// Where a server is, which port it answers on, and whether the connection is
+/// over TLS - the three fields every tab that reaches out asks for first.
+///
+/// One function because the port is typed in all three, and a typed port is the
+/// same dance each time: a text box rather than a drag value, because on Android
+/// a typed field is the one the floating input box mirrors; only digits kept, at
+/// most five; the number taken from the text while it names a valid port, so the
+/// box can be cleared to retype it without the port being lost; and the port in
+/// use shown again once the box is left.
+fn server_grid(
+    ui: &mut egui::Ui,
+    nav: &mut Nav,
+    id: &str,
+    host: &mut String,
+    port: &mut u16,
+    port_box: &mut String,
+    https: &mut bool,
+) {
+    egui::Grid::new(id).num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+        ui.label(monitor_i18n::tr("dialog-host"));
+        // The first control of its tab, and the one the strip's Down lands on.
+        text_field(ui, nav, host, &monitor_i18n::tr("dialog-host"), false, false, |s| {
+            egui::TextEdit::singleline(s).hint_text(theme::hint("192.168.1.10")).desired_width(220.0)
+        });
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-port"));
+        let field = port_field(ui, nav, port_box, &monitor_i18n::tr("dialog-port"), 220.0);
+        if let Ok(typed) = port_box.parse::<u16>() {
+            if typed >= 1 {
+                *port = typed;
+            }
+        }
+        if !field.has_focus() {
+            *port_box = port.to_string();
+        }
+        ui.end_row();
+        ui.label(monitor_i18n::tr("dialog-scheme"));
+        nav.tracked(ui.checkbox(https, monitor_i18n::tr("dialog-https")));
+        ui.end_row();
+    });
 }
 
 /// The user and password fields of one credential set, on one row.
@@ -1439,6 +1434,27 @@ fn credentials_row(ui: &mut egui::Ui, nav: &mut Nav, username: &mut String, pass
     });
 }
 
+/// A port box, and the one rule every port in this program is typed under.
+///
+/// A text box rather than a drag value, because a port is typed and on Android a
+/// typed field is the one the floating input box mirrors. Only digits are kept,
+/// at most five. What the text then means belongs to the caller: a port that is
+/// required takes it while it names one, and an optional one is cleared with the
+/// box - see [`restream_port_row`] for that half.
+fn port_field(
+    ui: &mut egui::Ui,
+    nav: &mut Nav,
+    text: &mut String,
+    tip: &str,
+    width: f32,
+) -> egui::Response {
+    let field = text_field(ui, nav, text, tip, false, false, |s| {
+        egui::TextEdit::singleline(s).desired_width(width).char_limit(5)
+    });
+    text.retain(|c| c.is_ascii_digit());
+    field
+}
+
 /// Draws the restream-port field: empty reads the port from the server.
 ///
 /// The box keeps only digits; the port follows it while the text names a valid
@@ -1446,10 +1462,7 @@ fn credentials_row(ui: &mut egui::Ui, nav: &mut Nav, username: &mut String, pass
 fn restream_port_row(ui: &mut egui::Ui, nav: &mut Nav, text: &mut String, port: &mut Option<u16>) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(monitor_i18n::tr("dialog-rtsp-port")).small());
-        let field = text_field(ui, nav, text, &monitor_i18n::tr("dialog-rtsp-port"), false, false, |s| {
-            egui::TextEdit::singleline(s).desired_width(70.0).char_limit(5)
-        });
-        text.retain(|c| c.is_ascii_digit());
+        let field = port_field(ui, nav, text, &monitor_i18n::tr("dialog-rtsp-port"), 70.0);
         *port = text.parse::<u16>().ok().filter(|port| *port >= 1);
         if !field.has_focus() {
             *text = port_text(*port);
@@ -1466,8 +1479,9 @@ fn port_text(port: Option<u16>) -> String {
 /// Draws a list of fetched cameras, one row each, and reports the one whose
 /// button was pressed.
 ///
-/// What the Frigate and go2rtc tabs list before any of it is added, like the
-/// Synology list they mirror.
+/// What all three server tabs list before any of it is added: the Synology box,
+/// the Frigate server and the go2rtc one fetch the same shape and offer the same
+/// three answers.
 fn camera_rows(
     ui: &mut egui::Ui,
     nav: &mut Nav,
@@ -1628,31 +1642,12 @@ fn frigate_tab(
 
     let frigate = &mut config.frigate;
     let before = frigate.clone();
-    egui::Grid::new("frigate").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-        ui.label(monitor_i18n::tr("dialog-host"));
-        text_field(ui, nav, &mut frigate.host, &monitor_i18n::tr("dialog-host"), false, false, |s| {
-            egui::TextEdit::singleline(s).hint_text(theme::hint("192.168.1.10")).desired_width(220.0)
-        });
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-port"));
-        let port_text = state.frigate_port.get_or_insert_with(|| frigate.port.to_string());
-        let port_field = text_field(ui, nav, port_text, &monitor_i18n::tr("dialog-port"), false, false, |s| {
-            egui::TextEdit::singleline(s).desired_width(220.0).char_limit(5)
-        });
-        port_text.retain(|c| c.is_ascii_digit());
-        if let Ok(port) = port_text.parse::<u16>() {
-            if port >= 1 {
-                frigate.port = port;
-            }
-        }
-        if !port_field.has_focus() {
-            *port_text = frigate.port.to_string();
-        }
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-scheme"));
-        nav.tracked(ui.checkbox(&mut frigate.https, monitor_i18n::tr("dialog-https")));
-        ui.end_row();
-    });
+    let port = frigate.port;
+    let port_box = state.frigate_port.get_or_insert_with(|| port.to_string());
+    server_grid(
+        ui, nav, "frigate", &mut frigate.host, &mut frigate.port, port_box,
+        &mut frigate.https,
+    );
 
     // The login is a server parameter like the address above it, so it stays on
     // the near side of the separator.
@@ -1766,31 +1761,12 @@ fn go2rtc_tab(
 
     let go2rtc = &mut config.go2rtc;
     let before = go2rtc.clone();
-    egui::Grid::new("go2rtc").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-        ui.label(monitor_i18n::tr("dialog-host"));
-        text_field(ui, nav, &mut go2rtc.host, &monitor_i18n::tr("dialog-host"), false, false, |s| {
-            egui::TextEdit::singleline(s).hint_text(theme::hint("192.168.1.10")).desired_width(220.0)
-        });
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-port"));
-        let port_text = state.go2rtc_port.get_or_insert_with(|| go2rtc.port.to_string());
-        let port_field = text_field(ui, nav, port_text, &monitor_i18n::tr("dialog-port"), false, false, |s| {
-            egui::TextEdit::singleline(s).desired_width(220.0).char_limit(5)
-        });
-        port_text.retain(|c| c.is_ascii_digit());
-        if let Ok(port) = port_text.parse::<u16>() {
-            if port >= 1 {
-                go2rtc.port = port;
-            }
-        }
-        if !port_field.has_focus() {
-            *port_text = go2rtc.port.to_string();
-        }
-        ui.end_row();
-        ui.label(monitor_i18n::tr("dialog-scheme"));
-        nav.tracked(ui.checkbox(&mut go2rtc.https, monitor_i18n::tr("dialog-https")));
-        ui.end_row();
-    });
+    let port = go2rtc.port;
+    let port_box = state.go2rtc_port.get_or_insert_with(|| port.to_string());
+    server_grid(
+        ui, nav, "go2rtc", &mut go2rtc.host, &mut go2rtc.port, port_box,
+        &mut go2rtc.https,
+    );
 
     // The API login is a server parameter, so it stays on the near side of the
     // separator.
