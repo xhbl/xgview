@@ -81,13 +81,17 @@ impl XgViewApp {
                     let aspect = icons::button(
                         ui,
                         Icon::AspectRatio,
-                        self.portrait_aspect_picker.open,
+                        self.portrait_aspect_picker.is_open(),
                         &monitor_i18n::tr("toolbar-portrait-aspect-tip"),
                     );
                     items.push((aspect.id, aspect.rect));
                     self.name(&aspect, "toolbar-portrait-aspect");
                     if aspect.clicked() {
-                        self.portrait_aspect_picker.open = !self.portrait_aspect_picker.open;
+                        if self.portrait_aspect_picker.is_open() {
+                            self.portrait_aspect_picker.close();
+                        } else {
+                            self.portrait_aspect_picker.open(());
+                        }
                         self.portrait_aspect_picker.from =
                             (!aspect.clicked_by(egui::PointerButton::Primary))
                                 .then_some(aspect.id);
@@ -228,15 +232,19 @@ impl XgViewApp {
             // button: it shows the number of the one in use, and an ellipsis
             // while the wall is on a layout that has a button of its own.
             let active = !current.is_standard() && !self.scheduler.is_zoomed();
-            let more = ui.selectable_label(active || self.layout_picker.open, current.numeric_label().unwrap_or("…"));
+            let more = ui.selectable_label(active || self.layout_picker.is_open(), current.numeric_label().unwrap_or("…"));
             items.push((more.id, more.rect));
             self.name(&more, "toolbar-layout-more");
             if more.clicked() {
-                self.layout_picker.open = !self.layout_picker.open;
+                if self.layout_picker.is_open() {
+                    self.layout_picker.close();
+                } else {
+                    self.layout_picker.open(());
+                }
                 // Only for a press that came from the keyboard or a remote: a
                 // pointer does not move the focus anywhere else in this program,
                 // so it must not appear to move it here either.
-                self.layout_picker.from = (self.layout_picker.open
+                self.layout_picker.from = (self.layout_picker.is_open()
                     && !more.clicked_by(egui::PointerButton::Primary))
                 .then_some(more.id);
             }

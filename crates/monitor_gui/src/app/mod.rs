@@ -446,14 +446,20 @@ impl Handoff {
 
 /// What every modal window in this program carries.
 ///
-/// The four things a window needs and nothing else: whether it is up, the frame
-/// it appeared on, the control it opens on, and the one it gives the focus back
-/// to when it closes. They were four fields per window, written out seven times
-/// and told apart by a suffix; the pickers are the first to be moved onto it.
-#[derive(Debug, Default)]
-struct Modal {
-    /// Whether the window is up.
-    open: bool,
+/// The four things a window needs and nothing else: the payload it is showing -
+/// or `None`, which is a window that is not up - the frame it appeared on, the
+/// control it opens on, and the one it gives the focus back to when it closes.
+/// They were four fields per window, written out seven times and told apart by a
+/// suffix.
+///
+/// The payload is what makes one type serve both kinds of window: a picker has
+/// nothing to carry and holds `()`, while the camera form holds the draft being
+/// edited. Whether a window is up is not a field of its own, so it cannot say
+/// one thing while the payload says another.
+#[derive(Debug)]
+struct Modal<T> {
+    /// What the window is showing, or `None` while it is closed.
+    payload: Option<T>,
     /// Watched for the frame it appears on, so the remote's focus lands on its
     /// first control instead of walking the wall behind it.
     handoff: Handoff,
@@ -462,6 +468,30 @@ struct Modal {
     /// The button that opened it, to give it back its focus when it closes.
     /// `None` when it was opened with a pointer, which moves no focus.
     from: Option<Id>,
+}
+
+impl<T> Default for Modal<T> {
+    fn default() -> Self {
+        Self { payload: None, handoff: Handoff::default(), anchor: None, from: None }
+    }
+}
+
+impl<T> Modal<T> {
+    /// Whether the window is up.
+    fn is_open(&self) -> bool {
+        self.payload.is_some()
+    }
+
+    /// Opens the window on `payload`, replacing whatever it was showing.
+    fn open(&mut self, payload: T) {
+        self.payload = Some(payload);
+    }
+
+    /// Closes the window, and drops the control it had put the focus on.
+    fn close(&mut self) {
+        self.payload = None;
+        self.anchor = None;
+    }
 }
 
 
@@ -855,7 +885,7 @@ pub struct XgViewApp {
     show_settings: bool,
     /// Whether the layout picker is open: the panel that offers the layouts
     /// that have no button of their own.
-    layout_picker: Modal,
+    layout_picker: Modal<()>,
     /// Tab the settings panel is on.
     settings_tab: SettingsTab,
     /// First control of the settings panel, so the panel can be handed the
@@ -865,9 +895,9 @@ pub struct XgViewApp {
     settings_handoff: Handoff,
     /// Whether the portrait aspect picker is open: the modal that lists the
     /// cameras on the current page and lets the remote cycle each one's fit.
-    portrait_aspect_picker: Modal,
+    portrait_aspect_picker: Modal<()>,
     /// The combined-info editor: the modal that edits one of the four slots.
-    combined_info_picker: Modal,
+    combined_info_picker: Modal<()>,
     /// Which slot (0-3) the editor is on.
     combined_info_picker_slot: usize,
     /// A scroll asked for by a direction press that had nowhere left to move the
@@ -1468,11 +1498,11 @@ impl XgViewApp {
             self.camera_edit_anchor
         } else if self.discovery.open {
             self.discovery.focus_anchor
-        } else if self.layout_picker.open {
+        } else if self.layout_picker.is_open() {
             self.layout_picker.anchor
-        } else if self.portrait_aspect_picker.open {
+        } else if self.portrait_aspect_picker.is_open() {
             self.portrait_aspect_picker.anchor
-        } else if self.combined_info_picker.open {
+        } else if self.combined_info_picker.is_open() {
             self.combined_info_picker.anchor
         } else if self.reorder.is_some() {
             self.reorder_anchor
@@ -1974,7 +2004,7 @@ impl XgViewApp {
         // wall stands upright. Close them if the wall was turned with them open.
         if self.is_portrait() {
             self.show_settings = false;
-            self.layout_picker.open = false;
+            self.layout_picker.close();
         }
         // Tell the activity which way to stand, once per change. A no-op on the
         // other platforms, which have no orientation to ask for.
@@ -2050,17 +2080,17 @@ impl XgViewApp {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
-        if self.layout_picker.handoff.entering(self.layout_picker.open) {
+        if self.layout_picker.handoff.entering(self.layout_picker.is_open()) {
             if let Some(id) = self.layout_picker.anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
-        if self.portrait_aspect_picker.handoff.entering(self.portrait_aspect_picker.open) {
+        if self.portrait_aspect_picker.handoff.entering(self.portrait_aspect_picker.is_open()) {
             if let Some(id) = self.portrait_aspect_picker.anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
-        if self.combined_info_picker.handoff.entering(self.combined_info_picker.open) {
+        if self.combined_info_picker.handoff.entering(self.combined_info_picker.is_open()) {
             if let Some(id) = self.combined_info_picker.anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
@@ -2728,7 +2758,7 @@ impl XgViewApp {
         if self.show_settings {
             what.push_str(&format!(" settings={:?}", self.settings_tab));
         }
-        if self.layout_picker.open {
+        if self.layout_picker.is_open() {
             what.push_str(" layouts");
         }
         if self.blackout_on {

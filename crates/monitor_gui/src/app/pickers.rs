@@ -18,7 +18,7 @@ impl XgViewApp {
     /// painted into it. The three rows are three scopes of the navigation
     /// layer, and the vertical arrows cross between them at the same column.
     pub(super) fn draw_layout_picker(&mut self, ctx: &egui::Context) {
-        if !self.layout_picker.open {
+        if !self.layout_picker.is_open() {
             return;
         }
         let mut chosen: Option<GridLayout> = None;
@@ -102,10 +102,10 @@ impl XgViewApp {
 
         if let Some(layout) = chosen {
             self.set_layout(layout);
-            self.layout_picker.open = false;
+            self.layout_picker.close();
             self.restore_focus = self.layout_picker.from.take();
         } else if close {
-            self.layout_picker.open = false;
+            self.layout_picker.close();
             self.restore_focus = self.layout_picker.from.take();
         }
     }
@@ -115,7 +115,7 @@ impl XgViewApp {
     /// its name, and the aspect it is drawn at - a press on the row turns the
     /// aspect to the next of the five.
     pub(super) fn draw_portrait_aspect_picker(&mut self, ctx: &egui::Context) {
-        if !self.portrait_aspect_picker.open {
+        if !self.portrait_aspect_picker.is_open() {
             return;
         }
         let mut close = false;
@@ -196,7 +196,7 @@ impl XgViewApp {
             self.mark_dirty();
         }
         if close {
-            self.portrait_aspect_picker.open = false;
+            self.portrait_aspect_picker.close();
             self.restore_focus = self.portrait_aspect_picker.from.take();
         }
     }
@@ -206,7 +206,7 @@ impl XgViewApp {
     /// on the right.  Keyboard is handled in `handle_combined_info_keys`;
     /// this method only draws the UI and handles mouse clicks.
     pub(super) fn draw_combined_info_picker(&mut self, ctx: &egui::Context) {
-        if !self.combined_info_picker.open {
+        if !self.combined_info_picker.is_open() {
             return;
         }
         let slot = self.combined_info_picker_slot;
@@ -320,7 +320,7 @@ impl XgViewApp {
             self.mark_dirty();
         }
         if close {
-            self.combined_info_picker.open = false;
+            self.combined_info_picker.close();
             self.restore_focus = self.combined_info_picker.from.take();
         }
     }

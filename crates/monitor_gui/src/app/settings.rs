@@ -188,14 +188,18 @@ impl XgViewApp {
             let active = !current.is_standard();
             let more = self
                 .nav
-                .tracked(ui.selectable_label(active || self.layout_picker.open, current.numeric_label().unwrap_or("…")));
+                .tracked(ui.selectable_label(active || self.layout_picker.is_open(), current.numeric_label().unwrap_or("…")));
             self.name(&more, "toolbar-layout-more");
             if more.clicked() {
-                self.layout_picker.open = !self.layout_picker.open;
+                if self.layout_picker.is_open() {
+                    self.layout_picker.close();
+                } else {
+                    self.layout_picker.open(());
+                }
                 // Only for a press that came from the keyboard or a remote: a
                 // pointer does not move the focus anywhere else in this program,
                 // so it must not appear to move it here either.
-                self.layout_picker.from = (self.layout_picker.open
+                self.layout_picker.from = (self.layout_picker.is_open()
                     && !more.clicked_by(egui::PointerButton::Primary))
                 .then_some(more.id);
             }
@@ -241,7 +245,7 @@ impl XgViewApp {
                 let response = self.nav.tracked(ui.button(label));
                 self.name(&response, "combined-info-button");
                 if response.clicked() {
-                    self.combined_info_picker.open = true;
+                    self.combined_info_picker.open(());
                     self.combined_info_picker_slot = slot;
                     self.combined_info_picker.from =
                         (!response.clicked_by(egui::PointerButton::Primary)).then_some(response.id);
