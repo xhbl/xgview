@@ -200,46 +200,62 @@ impl XgViewApp {
     /// answers. Its own buttons (or Back) are the only way out, and the dialog
     /// opens on the answer that changes nothing.
     pub(super) fn system_confirm_window(&mut self, ctx: &egui::Context) {
-        if self.system_confirm.take().is_none() {
-            return;
-        }
-        let from = self.system_confirm.from;
-        let mut confirm = false;
-        let mut cancel = false;
+        // The one window whose work is not done when it closes: a reboot ends
+        // the process, so it is asked for after the window is gone and the
+        // focus has been settled.
+        let mut reboot_now = false;
+        self.modal_frame(
+            ctx,
+            "xgview-system-confirm",
+            380.0,
+            |app| &mut app.system_confirm,
+            |app, ui, ()| {
+                let mut confirm = false;
+                let mut cancel = false;
 
-        egui::Modal::new(Id::new("xgview-system-confirm")).show(ctx, |ui| {
-            self.nav.open("confirm-body");
-            ui.set_width(380.0);
-            dialogs::title_bar(ui, &monitor_i18n::tr("reboot-confirm-title"), false, "");
-            ui.label(
-                RichText::new(monitor_i18n::tr("reboot-confirm-hint"))
-                    .small()
-                    .color(theme::TEXT_DIM),
-            );
-            ui.add_space(theme::space::M);
-            ui.horizontal(|ui| {
-                let cancel_label = monitor_i18n::tr("action-cancel");
-                let reboot_label = monitor_i18n::tr("action-reboot");
-                ui.add_space(Self::center_offset(ui, &[&cancel_label, &reboot_label]));
-                let cancel_button = self.nav.tracked(ui.button(cancel_label));
-                // The dialog opens on the answer that changes nothing.
-                self.system_confirm.anchor = Some(cancel_button.id);
-                if cancel_button.clicked() {
-                    cancel = true;
-                }
-                if self
-                    .nav
-                    .tracked(ui.button(RichText::new(reboot_label).color(theme::ERROR)))
-                    .clicked()
-                {
-                    confirm = true;
-                }
-            });
-            self.nav.close();
-        });
+                app.nav.open("confirm-body");
+                dialogs::title_bar(ui, &monitor_i18n::tr("reboot-confirm-title"), false, "");
+                ui.label(
+                    RichText::new(monitor_i18n::tr("reboot-confirm-hint"))
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                ui.add_space(theme::space::M);
+                ui.horizontal(|ui| {
+                    let cancel_label = monitor_i18n::tr("action-cancel");
+                    let reboot_label = monitor_i18n::tr("action-reboot");
+                    ui.add_space(Self::center_offset(ui, &[&cancel_label, &reboot_label]));
+                    let cancel_button = app.nav.tracked(ui.button(cancel_label));
+                    // The dialog opens on the answer that changes nothing.
+                    app.system_confirm.anchor = Some(cancel_button.id);
+                    if cancel_button.clicked() {
+                        cancel = true;
+                    }
+                    if app
+                        .nav
+                        .tracked(ui.button(RichText::new(reboot_label).color(theme::ERROR)))
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                });
+                app.nav.close();
 
-        if confirm {
-            self.system_confirm.close();
+                if confirm {
+                    reboot_now = true;
+                    // The focus is not given back yet: the machine is about to
+                    // restart, and the answer below may still need it.
+                    return Answer::CLOSE_LEAVING_THE_FOCUS;
+                }
+                if cancel {
+                    Answer::CLOSE
+                } else {
+                    Answer::STAY
+                }
+            },
+        );
+
+        if reboot_now {
             // Save first: a reboot ends the process, and the debounced save
             // would otherwise never happen.
             self.save_now();
@@ -254,17 +270,10 @@ impl XgViewApp {
                         ToastKind::Error,
                     );
                     // The machine was not restarted, so the viewer is still
-                    // here — give the button its focus back.
-                    self.restore_focus = from;
+                    // here - give the button its focus back.
+                    self.restore_focus = self.system_confirm.from.take();
                 }
             }
-            return;
-        }
-        if !cancel {
-            self.system_confirm.open(());
-        } else {
-            self.system_confirm.close();
-            self.restore_focus = from;
         }
     }
 
