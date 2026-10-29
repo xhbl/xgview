@@ -1064,6 +1064,80 @@ impl XgViewApp {
         }
     }
 
+    /// The keys a control of the navigation layer answers.
+    ///
+    /// The arrow moves by declaration - the scope's order, then its exits - and
+    /// not by geometry. Answered before the Back handling below, so that Back
+    /// still unwinds a window.
+    fn keys_of_the_layer(
+        &mut self,
+        ctx: &egui::Context,
+        keys: &Keys,
+        nav_kind: Option<Kind>,
+    ) {
+        // A value control - a drag value, or the language button - takes
+        // its step from the sideways presses recorded here; the widget
+        // applies it as it is drawn this frame. Left steps down and Right
+        // up, the way a slider reads them.
+        if matches!(nav_kind, Some(Kind::DragValue) | Some(Kind::Cycle)) {
+            if keys.left {
+                self.nav.step_value(-1);
+            }
+            if keys.right {
+                self.nav.step_value(1);
+            }
+        }
+        // Up and Down always move the focus. A value control - slider, drag
+        // value, text field or cycling button - answers its sideways keys
+        // itself, so they never reach here; a plain control walks with all
+        // four.
+        let dir = match nav_kind {
+            Some(Kind::Slider) | Some(Kind::DragValue) | Some(Kind::Text) | Some(Kind::Cycle) => {
+                if keys.up {
+                    Some(Dir::Up)
+                } else if keys.down {
+                    Some(Dir::Down)
+                } else {
+                    None
+                }
+            }
+            _ => {
+                if keys.up {
+                    Some(Dir::Up)
+                } else if keys.down {
+                    Some(Dir::Down)
+                } else if keys.left {
+                    Some(Dir::Left)
+                } else if keys.right {
+                    Some(Dir::Right)
+                } else {
+                    None
+                }
+            }
+        };
+        if let (Some(dir), Some(focused)) = (dir, ctx.memory(|memory| memory.focused())) {
+            match self.nav.step(focused, dir) {
+                Some(target) => {
+                    ctx.memory_mut(|memory| memory.request_focus(target));
+                }
+                None => {
+                    if dir == Dir::Down && self.nav.scope_of(focused) == Some("settings-body") {
+                        // The press had nowhere to move the focus, which is
+                        // the case at the end of a tab: what follows the last
+                        // control - the adb line, the table of keys - is text
+                        // and has no control to be walked onto. A remote has
+                        // no wheel, so the press moves the body instead.
+                        // Asked for here rather than applied here: only a
+                        // scroll area that is being drawn reads a scroll
+                        // request, and this runs before anything is drawn.
+                        let points = ctx.screen_rect().height() * REMOTE_SCROLL_FRACTION;
+                        self.body_scroll = Some(points);
+                    }
+                }
+            }
+        }
+    }
+
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
         // The file dialog owns the keyboard while it is up. Its own keybindings
         // and egui's focus walk are how a viewer moves around it, and the arrows
@@ -1224,68 +1298,9 @@ impl XgViewApp {
         // A control of the navigation layer: the arrow moves by declaration -
         // the scope's order, then its exits - and not by geometry. Answered
         // before the Back handling below, so that Back still unwinds a window.
+        // See `keys_of_the_layer`.
         if nav_owns {
-            // A value control - a drag value, or the language button - takes
-            // its step from the sideways presses recorded here; the widget
-            // applies it as it is drawn this frame. Left steps down and Right
-            // up, the way a slider reads them.
-            if matches!(nav_kind, Some(Kind::DragValue) | Some(Kind::Cycle)) {
-                if keys.left {
-                    self.nav.step_value(-1);
-                }
-                if keys.right {
-                    self.nav.step_value(1);
-                }
-            }
-            // Up and Down always move the focus. A value control - slider, drag
-            // value, text field or cycling button - answers its sideways keys
-            // itself, so they never reach here; a plain control walks with all
-            // four.
-            let dir = match nav_kind {
-                Some(Kind::Slider) | Some(Kind::DragValue) | Some(Kind::Text) | Some(Kind::Cycle) => {
-                    if keys.up {
-                        Some(Dir::Up)
-                    } else if keys.down {
-                        Some(Dir::Down)
-                    } else {
-                        None
-                    }
-                }
-                _ => {
-                    if keys.up {
-                        Some(Dir::Up)
-                    } else if keys.down {
-                        Some(Dir::Down)
-                    } else if keys.left {
-                        Some(Dir::Left)
-                    } else if keys.right {
-                        Some(Dir::Right)
-                    } else {
-                        None
-                    }
-                }
-            };
-            if let (Some(dir), Some(focused)) = (dir, ctx.memory(|memory| memory.focused())) {
-                match self.nav.step(focused, dir) {
-                    Some(target) => {
-                        ctx.memory_mut(|memory| memory.request_focus(target));
-                    }
-                    None => {
-                        if dir == Dir::Down && self.nav.scope_of(focused) == Some("settings-body") {
-                            // The press had nowhere to move the focus, which is
-                            // the case at the end of a tab: what follows the last
-                            // control - the adb line, the table of keys - is text
-                            // and has no control to be walked onto. A remote has
-                            // no wheel, so the press moves the body instead.
-                            // Asked for here rather than applied here: only a
-                            // scroll area that is being drawn reads a scroll
-                            // request, and this runs before anything is drawn.
-                            let points = ctx.screen_rect().height() * REMOTE_SCROLL_FRACTION;
-                            self.body_scroll = Some(points);
-                        }
-                    }
-                }
-            }
+            self.keys_of_the_layer(ctx, &keys, nav_kind);
         }
 
         if !grid_owns {
