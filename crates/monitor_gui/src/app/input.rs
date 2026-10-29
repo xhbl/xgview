@@ -692,37 +692,97 @@ impl XgViewApp {
         }
     }
 
-    /// Whether Back closed one of the windows this application opened.
+    /// Whether the keys belonged to the field that has the focus.
     ///
-    /// The innermost layer, whatever has the focus inside it: a field's caret
-    /// must not hold a window open - Back on the first field would otherwise
-    /// hand the focus back to that same field, and the window could never be
-    /// left. A prompt whose passphrase is being stretched is the exception: it
-    /// is the one thing on this side of the answer that cannot be backed out of,
-    /// because the answer would then have nowhere to go.
-    fn keys_of_the_window(&mut self, ctx: &egui::Context) -> bool {
-        let waiting = (self.passphrase.payload.as_ref().is_some_and(|prompt| !prompt.working))
-            || self.camera_edit.is_open()
-            || self.remove_confirm.is_open()
-            || self.system_confirm.is_open();
-        if !(waiting && self.dialog_back_pressed(ctx)) {
-            return false;
+    /// Called only when the focused control takes typed text. A field being
+    /// typed into owns the letters, the paste and the caret keys; two kinds of
+    /// key are taken away from it here.
+    ///
+    /// Back, because it is the remote control's only way out of a field: it
+    /// leaves the field and not the panel - one step - and the press after it
+    /// closes the panel.
+    ///
+    /// And the four directions, because a form with a field in the middle has to
+    /// be walkable past it. `TextEdit` reads its input through `filtered_events`,
+    /// so taking the arrows out of the queue before the field is drawn keeps it
+    /// from spending them on its caret. The focus still moves: egui read the
+    /// same events for its focus walk in `begin_pass`, which happens before the
+    /// keys are handed out.
+    ///
+    /// This is deliberately *not* `Context::wants_keyboard_input`, which is true
+    /// for any focused widget at all. The bars hand the focus to a button
+    /// whenever a panel opens, so asking that question would leave a viewer
+    /// unable to press anything - F1, F2, BACK, anything - from the moment a
+    /// panel appeared.
+    ///
+    /// A control on the navigation layer is the exception: its arrows are
+    /// answered by [`crate::nav`], a field among them included, because a field
+    /// in the middle of a form still has to be walkable past. Only the keys that
+    /// are not the arrows - the letters, Back - fall through to the field.
+    // `nav_kind` is read by the Android arm alone: what kind of control has the
+    // focus decides only whether Enter confirms a field for the soft keyboard,
+    // and there is no soft keyboard anywhere else.
+    #[cfg_attr(not(target_os = "android"), allow(unused_variables))]
+    fn keys_of_the_field(
+        &mut self,
+        ctx: &egui::Context,
+        nav_owns: bool,
+        nav_kind: Option<Kind>,
+    ) -> bool {
+        // Android: the soft keyboard is not raised by focus alone. Enter on
+        // a text field that is not yet being edited confirms it - `editing`
+        // takes the focus and the keyboard comes up next frame; the Enter
+        // itself is consumed so `TextEdit` does not read it as a submit. A
+        // drag value is left out: it is stepped, not typed into, on Android.
+        // Back on a field that is being edited drops the keyboard but keeps
+        // the focus, so the viewer can read the field and re-confirm it.
+        // Back on a field that is not being edited falls through to `leave`
+        // below and walks the focus out, as on the desktop. A touch click is
+        // handled at the end of the frame, where it can be told apart from a
+        // DPAD walk.
+        #[cfg(target_os = "android")]
+        {
+            let focused = ctx.memory(|memory| memory.focused());
+            let none = Modifiers::NONE;
+            if self.editing == focused {
+                if ctx.input_mut(|input| {
+                    input.consume_key(none, Key::Escape)
+                        || input.consume_key(none, Key::BrowserBack)
+                }) {
+                    self.editing = None;
+                    return true;
+                }
+            } else if nav_kind.is_some_and(Self::soft_keyboard)
+                && ctx.input_mut(|input| input.consume_key(none, Key::Enter))
+            {
+                self.editing = focused;
+                return true;
+            }
         }
-        if self.passphrase.is_open() {
-            self.passphrase.close();
-            // Backing out of it leaves the export or import unasked for, and the
-            // button behind the prompt takes the focus again.
-            self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
-        } else if self.remove_confirm.is_open() {
-            // The focus goes back to the button that opened it, which is then
-            // forgotten: a closed window does not keep pointing at one.
-            self.restore_focus = self.remove_confirm.close_restoring();
-        } else if self.system_confirm.is_open() {
-            self.restore_focus = self.system_confirm.close_restoring();
-        } else if self.camera_edit.is_open() {
-            self.restore_focus = self.camera_edit.close_restoring();
+        // Back leaves the field; the arrows walk the form. Where a field
+        // keeps its caret keys for itself - the bars and the wall - the
+        // arrows are taken out of the queue here, as before; on the
+        // navigation layer they are left for the layer to move the focus.
+        let leave = ctx.input_mut(|input| {
+            let none = Modifiers::NONE;
+            let leave = input.consume_key(none, Key::Escape)
+                || input.consume_key(none, Key::BrowserBack);
+            if !nav_owns {
+                for key in [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown] {
+                    input.consume_key(none, key);
+                }
+            }
+            leave
+        });
+        if leave {
+            if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+                ctx.memory_mut(|memory| memory.surrender_focus(focused));
+            }
+            return true;
         }
-        true
+        // The arrows are the layer's, and the field took only the letters
+        // and Back: there is nothing left for this frame to stop.
+        !nav_owns
     }
 
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
@@ -776,8 +836,32 @@ impl XgViewApp {
         }
 
         // A window this application opened is the innermost layer: Back closes
-        // it, whatever inside it has the focus. See `keys_of_the_window`.
-        if self.keys_of_the_window(ctx) {
+        // it, whatever inside it has the focus. A field's caret must not hold it
+        // open - Back on the first field would otherwise hand the focus back to
+        // that same field, and the window could never be left.
+        // A prompt whose passphrase is being stretched is the exception: it is
+        // the one thing on this side of the answer that cannot be backed out of,
+        // because the answer would then have nowhere to go.
+        if ((self.passphrase.payload.as_ref().is_some_and(|prompt| !prompt.working))
+            || self.camera_edit.is_open()
+            || self.remove_confirm.is_open()
+            || self.system_confirm.is_open())
+            && self.dialog_back_pressed(ctx)
+        {
+            if self.passphrase.is_open() {
+                self.passphrase.close();
+                // Backing out of it leaves the export or import unasked for, and
+                // the button behind the prompt takes the focus again.
+                self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
+            } else if self.remove_confirm.is_open() {
+                // The focus goes back to the button that opened it, which is
+                // then forgotten: a closed window does not keep pointing at one.
+                self.restore_focus = self.remove_confirm.close_restoring();
+            } else if self.system_confirm.is_open() {
+                self.restore_focus = self.system_confirm.close_restoring();
+            } else if self.camera_edit.is_open() {
+                self.restore_focus = self.camera_edit.close_restoring();
+            }
             return;
         }
 
@@ -820,62 +904,10 @@ impl XgViewApp {
         // is one that registered as a kind that takes typed text - the same
         // answer `typing` gives at the end of the frame.
         let typing = nav_kind.is_some_and(Self::types);
-        if typing {
-            // Android: the soft keyboard is not raised by focus alone. Enter on
-            // a text field that is not yet being edited confirms it - `editing`
-            // takes the focus and the keyboard comes up next frame; the Enter
-            // itself is consumed so `TextEdit` does not read it as a submit. A
-            // drag value is left out: it is stepped, not typed into, on Android.
-            // Back on a field that is being edited drops the keyboard but keeps
-            // the focus, so the viewer can read the field and re-confirm it.
-            // Back on a field that is not being edited falls through to `leave`
-            // below and walks the focus out, as on the desktop. A touch click is
-            // handled at the end of the frame, where it can be told apart from a
-            // DPAD walk.
-            #[cfg(target_os = "android")]
-            {
-                let focused = ctx.memory(|memory| memory.focused());
-                let none = Modifiers::NONE;
-                if self.editing == focused {
-                    if ctx.input_mut(|input| {
-                        input.consume_key(none, Key::Escape)
-                            || input.consume_key(none, Key::BrowserBack)
-                    }) {
-                        self.editing = None;
-                        return;
-                    }
-                } else if nav_kind.is_some_and(Self::soft_keyboard)
-                    && ctx.input_mut(|input| input.consume_key(none, Key::Enter))
-                {
-                    self.editing = focused;
-                    return;
-                }
-            }
-            // Back leaves the field; the arrows walk the form. Where a field
-            // keeps its caret keys for itself - the bars and the wall - the
-            // arrows are taken out of the queue here, as before; on the
-            // navigation layer they are left for the layer to move the focus.
-            let leave = ctx.input_mut(|input| {
-                let none = Modifiers::NONE;
-                let leave = input.consume_key(none, Key::Escape)
-                    || input.consume_key(none, Key::BrowserBack);
-                if !nav_owns {
-                    for key in [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown] {
-                        input.consume_key(none, key);
-                    }
-                }
-                leave
-            });
-            if leave {
-                if let Some(focused) = ctx.memory(|memory| memory.focused()) {
-                    ctx.memory_mut(|memory| memory.surrender_focus(focused));
-                }
-                return;
-            }
-            if !nav_owns {
-                return;
-            }
+        if typing && self.keys_of_the_field(ctx, nav_owns, nav_kind) {
+            return;
         }
+
         let grid_owns = self.owner == Owner::Grid;
         let keys = ctx.input_mut(|input| {
             let none = Modifiers::NONE;
