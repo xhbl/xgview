@@ -1874,6 +1874,96 @@ fn clock_field(nav: &mut crate::nav::Nav, ui: &mut egui::Ui, minutes: &mut u16) 
 
 impl eframe::App for XgViewApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let start = self.begin_frame(ctx);
+        self.pump_background(ctx);
+        self.collect_events(ctx);
+        let focus_before = self.route_keys(ctx);
+        self.draw_chrome(ctx);
+        self.draw_wall(ctx);
+        self.end_frame(ctx, start, focus_before);
+    }
+}
+/// What the frame's beginning read and its end will need.
+///
+/// The three values `update` used to carry from its first line to its last: the
+/// clock the frame is measured by, whether the bars were up as it began, and
+/// where the wall's cursor stood. The ring is drawn against the last two, which
+/// is why they cannot simply be read at the end - by then the frame has moved
+/// both.
+struct FrameStart {
+    /// `None` unless `XGVIEW_FRAME_MS` asks for the frame to be measured.
+    clock: Option<Instant>,
+    /// Whether the top and bottom bars were on screen as the frame began.
+    bars_was_up: bool,
+    /// The wall's cursor as the frame began: the page, and the focused channel.
+    cursor_was: (usize, Option<usize>),
+}
+
+impl XgViewApp {
+    /// The keys, and the focus they leave behind.
+    ///
+    /// The navigation layer starts its frame here - the layout it collects while
+    /// the widgets are drawn below is the one the next frame's arrows read - and
+    /// the keys are handed out against that layer. Where they leave the focus is
+    /// read once they are done, because a value control confirms with Enter and
+    /// gives the focus up as it is drawn, and the form passes it on.
+    fn route_keys(&mut self, ctx: &egui::Context) -> Option<Id> {
+        // The navigation layer starts its frame here: the layout it collects
+        // while the widgets are drawn below becomes the one the next frame's
+        // arrows read. The keys handed out just above used the previous one.
+        self.nav.begin();
+        // The next control of a form was chosen after it had been drawn, so the
+        // scroll it asked for is armed now: the frame it is drawn in.
+        if let Some(next) = self.reveal_next.take() {
+            self.nav.arm_reveal(next);
+        }
+        // A window handed the focus back to the button it was opened from:
+        // applied here, before anything this frame has a chance to move it.
+        if let Some(id) = self.restore_focus.take() {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+        // The Enter that opened a window is still in flight for a frame or two:
+        // taken out before any control is drawn, so it cannot land on the one
+        // the window has just put under the focus.
+        if self.swallow_enter > 0 {
+            self.swallow_enter -= 1;
+            ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
+        }
+        // While the wall is blank the keys belong to it: `update_blackout` has
+        // already emptied the queue, and skipping this stops a held modifier
+        // from being read as a shortcut.
+        if !self.blackout_on {
+            self.handle_keys(ctx);
+        }
+        // The reorder mode belongs to the Cameras tab: leaving the tab, or the
+        // panel, drops the arrangement that was being previewed. The focus is
+        // not sent back - the control it would return to is leaving too.
+        if self.reorder.is_some()
+            && (!self.show_settings || self.settings_tab != SettingsTab::Cameras)
+        {
+            self.reorder = None;
+            self.reorder_focus = false;
+        }
+        // Who holds the focus as the frame is drawn. A value control confirms
+        // with Enter and gives the focus up while it is drawn, and the form
+        // hands it on - see the anchor at the end of the frame.
+        let focus_before = ctx.memory(|memory| memory.focused());
+        self.advance_animations(ctx);
+        self.sync();
+        self.upload_frames();
+
+        // Rebuilt as the frame is drawn: a control that is gone has no name to
+        // offer the status line. See `focus_names`.
+        self.focus_names.clear();
+        focus_before
+    }
+
+    /// Reads the state the frame is drawn against, before anything is.
+    ///
+    /// The blank is settled here too, and before any widget can read the input
+    /// queue: what is behind the black must not answer the press that takes the
+    /// wall out of it.
+    fn begin_frame(&mut self, ctx: &egui::Context) -> FrameStart {
         // The frame is timed from here to the end of it, and only when
         // `XGVIEW_FRAME_MS` asks: `start` reads a clock, which is cheap, but the
         // `Option` in front of it is cheaper and the default is that nobody is
@@ -1944,61 +2034,14 @@ impl eframe::App for XgViewApp {
         {
             self.tile_bar.hide();
         }
+        FrameStart { clock: frame_start, bars_was_up, cursor_was }
+    }
 
-        self.pump_background(ctx);
-
-        self.pump_events(ctx);
-        // The navigation layer starts its frame here: the layout it collects
-        // while the widgets are drawn below becomes the one the next frame's
-        // arrows read. The keys handed out just above used the previous one.
-        self.nav.begin();
-        // The next control of a form was chosen after it had been drawn, so the
-        // scroll it asked for is armed now: the frame it is drawn in.
-        if let Some(next) = self.reveal_next.take() {
-            self.nav.arm_reveal(next);
-        }
-        // A window handed the focus back to the button it was opened from:
-        // applied here, before anything this frame has a chance to move it.
-        if let Some(id) = self.restore_focus.take() {
-            ctx.memory_mut(|memory| memory.request_focus(id));
-        }
-        // The Enter that opened a window is still in flight for a frame or two:
-        // taken out before any control is drawn, so it cannot land on the one
-        // the window has just put under the focus.
-        if self.swallow_enter > 0 {
-            self.swallow_enter -= 1;
-            ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
-        }
-        // While the wall is blank the keys belong to it: `update_blackout` has
-        // already emptied the queue, and skipping this stops a held modifier
-        // from being read as a shortcut.
-        if !self.blackout_on {
-            self.handle_keys(ctx);
-        }
-        // The reorder mode belongs to the Cameras tab: leaving the tab, or the
-        // panel, drops the arrangement that was being previewed. The focus is
-        // not sent back - the control it would return to is leaving too.
-        if self.reorder.is_some()
-            && (!self.show_settings || self.settings_tab != SettingsTab::Cameras)
-        {
-            self.reorder = None;
-            self.reorder_focus = false;
-        }
-        // Who holds the focus as the frame is drawn. A value control confirms
-        // with Enter and gives the focus up while it is drawn, and the form
-        // hands it on - see the anchor at the end of the frame.
-        let focus_before = ctx.memory(|memory| memory.focused());
-        self.advance_animations(ctx);
-        self.sync();
-        self.upload_frames();
-
-        // Rebuilt as the frame is drawn: a control that is gone has no name to
-        // offer the status line. See `focus_names`.
-        self.focus_names.clear();
-
-        self.draw_chrome(ctx);
-        self.draw_wall(ctx);
-
+    /// Ends the frame: the focus handover, the ring, the repaint and the report.
+    ///
+    /// It is the half that reads what the beginning wrote, which is why the two
+    /// are methods taking a `FrameStart` rather than one long body.
+    fn end_frame(&mut self, ctx: &egui::Context, start: FrameStart, focus_before: Option<Id>) {
         // A panel that appears takes the remote's focus, once: without it the
         // arrows would go on walking the wall behind it, which is the one thing
         // a viewer cannot see happening. See `Handoff`.
@@ -2265,7 +2308,7 @@ impl eframe::App for XgViewApp {
         // over - the drawing already saw the old state, and the state read at
         // the start of the next frame has it gone already. One frame of delay,
         // and only for the frame the ring is drawn in. See `ring_follows_bars`.
-        self.ring_seen = Self::ring_follows_bars(self.ring_seen, self.chrome.visible, bars_was_up, Instant::now());
+        self.ring_seen = Self::ring_follows_bars(self.ring_seen, self.chrome.visible, start.bars_was_up, Instant::now());
         // And the wall moving its own cursor takes down a ring that is showing:
         // a page turned by a key, a button pressed by a remote or a pointer, or a
         // swipe, and a layout that re-places the focus under the viewer, all land
@@ -2273,7 +2316,7 @@ impl eframe::App for XgViewApp {
         self.ring_seen = Self::ring_follows_cursor(
             self.ring_seen,
             (self.scheduler.page(), self.scheduler.focus()),
-            cursor_was,
+            start.cursor_was,
             self.ring_aimed,
         );
 
@@ -2327,7 +2370,7 @@ impl eframe::App for XgViewApp {
         // the description is built only for a frame that is going to be
         // reported, and the clock is taken by name first so that reading the
         // scene does not hold a borrow of it.
-        if let Some(start) = frame_start {
+        if let Some(start) = start.clock {
             let took = start.elapsed();
             if self.frame_clock.as_ref().is_some_and(|clock| clock.wants(took)) {
                 let scene = self.describe_scene();
@@ -2405,7 +2448,10 @@ impl XgViewApp {
 
     /// What the background jobs answered since the last frame, and the press in
     /// flight - both read before anything is drawn.
-    pub(super) fn pump_events(&mut self, ctx: &egui::Context) {
+    ///
+    /// `poll_events` is the manager's queue; this is everything that has to be
+    /// in hand before a widget is drawn, which includes it.
+    pub(super) fn collect_events(&mut self, ctx: &egui::Context) {
         // Read before the keys are handed out: `handle_keys` takes the ones the
         // application acts on out of the queue, and the bars still have to know
         // a viewer was there. What counts as asking for them is the whole of
