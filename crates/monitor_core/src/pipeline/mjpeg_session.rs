@@ -2,7 +2,9 @@
 
 use super::*;
 
-use super::shared::{Sinks, emit, open_decoder, publish_frames, uses_hardware};
+use super::shared::{
+    Sinks, StatsWindow, announce_streaming, open_decoder, publish_frames, uses_hardware,
+};
 
 /// One MJPEG session: one JPEG part after another, decoded as they arrive.
 ///
@@ -58,14 +60,9 @@ pub(super) async fn run_mjpeg_session(
     let mut height: Option<u32> = None;
     let mut sequence: u64 = 0;
     let mut total_frames: u64 = 0;
-    let mut window_frames: u64 = 0;
-    // Pictures handed to the renderer, against `window_frames` which counts the
-    // parts read: the two differing means the decoder or the renderer is where
-    // the stream is being lost, not the network.
-    let mut window_pictures: u64 = 0;
-    let mut window_bytes: u64 = 0;
-    let mut window_errors: u64 = 0;
-    let mut window_start = Instant::now();
+    // What this window has counted, and when the next sample is due. See
+    // `WindowCounters` for what each counter means.
+    let mut window = StatsWindow::new();
     let mut announced = false;
 
     stats.publish(StreamStats {
@@ -96,26 +93,15 @@ pub(super) async fn run_mjpeg_session(
             }
         };
 
-        window_frames += 1;
+        window.counters.frames += 1;
         total_frames += 1;
-        window_bytes += picture.len() as u64;
-        if !announced {
-            announced = true;
-            emit(
-                events,
-                StreamEvent::State {
-                    index,
-                    camera_id: camera_id.to_string(),
-                    state: ConnectionState::Streaming,
-                    detail: format!("receiving {} stream", stream.label()),
-                },
-            );
-        }
+        window.counters.bytes += picture.len() as u64;
+        announce_streaming(events, index, camera_id, stream, &mut announced);
 
         if let Some(decoder) = decoder.as_mut() {
             match decoder.decode(&picture, 0, true) {
                 Ok(decoded) => {
-                    window_pictures += decoded.len() as u64;
+                    window.counters.decoded += decoded.len() as u64;
                     if let Some((picture_width, picture_height)) =
                         publish_frames(frames, index, &mut sequence, decoded)
                     {
@@ -126,7 +112,7 @@ pub(super) async fn run_mjpeg_session(
                 // One unreadable picture is not worth a new session: the next
                 // part is a self contained JPEG and needs nothing from this one.
                 Err(err) => {
-                    window_errors += 1;
+                    window.counters.errors += 1;
                     tracing::debug!(
                         target: "xgview::pipeline",
                         index,
@@ -138,10 +124,10 @@ pub(super) async fn run_mjpeg_session(
             }
         }
 
-        let elapsed = window_start.elapsed();
-        if elapsed >= STATS_INTERVAL {
-            let seconds = elapsed.as_secs_f32().max(0.001);
-            let fps = window_frames as f32 / seconds;
+        if window.due() {
+            let seconds = window.seconds();
+            let fps = window.counters.fps(seconds);
+            let kbps = window.counters.kbps(seconds);
             stats.publish(StreamStats {
                 index,
                 camera_id: camera_id.to_string(),
@@ -152,27 +138,23 @@ pub(super) async fn run_mjpeg_session(
                 hardware: uses_hardware(&decoder),
                 audio: false,
                 fps,
-                bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                bitrate_kbps: kbps,
                 total_frames,
             });
+            let counted = window.close();
             tracing::debug!(
                 target: "xgview::pipeline",
                 index,
                 stream = stream.as_str(),
-                frames = window_frames,
-                pictures = window_pictures,
-                bytes = window_bytes,
-                errors = window_errors,
+                frames = counted.frames,
+                pictures = counted.decoded,
+                bytes = counted.bytes,
+                errors = counted.errors,
                 resolution = ?width.zip(height),
                 fps,
-                kbps = (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                kbps,
                 "mjpeg window"
             );
-            window_start = Instant::now();
-            window_frames = 0;
-            window_pictures = 0;
-            window_bytes = 0;
-            window_errors = 0;
         }
     }
 }

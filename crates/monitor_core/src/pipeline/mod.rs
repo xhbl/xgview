@@ -724,7 +724,7 @@ mod tests {
     use super::rtsp_session::{
         HandshakeFailure, StallDeadline, negotiate, takes_the_picture_session,
     };
-    use super::shared::BaselineFix;
+    use super::shared::{BaselineFix, StatsWindow};
     use super::supervisor::TalkEntry;
     use super::ws_session::is_frigate_mse;
     use super::*;
@@ -1090,5 +1090,42 @@ mod tests {
         }
         assert!(saw_failure, "the channel must report a failure for a dead endpoint");
         manager.shutdown();
+    }
+
+    /// A window hands back what it counted and starts again, so that the sample
+    /// published and the line that logs it describe the same seconds - and so
+    /// that the reset cannot be forgotten, which it could be in three places.
+    #[test]
+    fn a_window_hands_back_what_it_counted_and_starts_again() {
+        let mut window = StatsWindow::new();
+        assert!(!window.due(), "a window that has just started is not due");
+
+        window.counters.frames = 50;
+        window.counters.bytes = 100_000;
+        window.counters.decode_took(Duration::from_millis(12));
+        window.counters.decode_took(Duration::from_millis(7));
+        assert_eq!(
+            window.counters.slowest,
+            Duration::from_millis(12),
+            "the slowest decode of the window, not the last one"
+        );
+
+        let counted = window.close();
+        assert_eq!(counted.frames, 50);
+        assert_eq!(counted.bytes, 100_000);
+        assert_eq!(counted.slowest, Duration::from_millis(12));
+        assert_eq!(window.counters.frames, 0, "the next window starts empty");
+        assert!(!window.due(), "and the clock has started again with it");
+    }
+
+    /// The two numbers every session publishes, from the counters it kept.
+    #[test]
+    fn a_window_divides_by_the_seconds_it_lasted() {
+        let mut window = StatsWindow::new();
+        window.counters.frames = 50;
+        window.counters.bytes = 125_000;
+
+        assert_eq!(window.counters.fps(2.0), 25.0);
+        assert_eq!(window.counters.kbps(2.0), 500.0, "125 kB over two seconds");
     }
 }

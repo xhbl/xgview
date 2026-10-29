@@ -153,6 +153,140 @@ pub(super) fn uses_hardware(decoder: &Option<Box<dyn VideoDecoder>>) -> bool {
     decoder.as_ref().and_then(|decoder| decoder.info()).is_some_and(|info| info.hardware)
 }
 
+/// The counters of one statistics window.
+///
+/// A live view that freezes and then runs to catch up is either a starving
+/// network or a lagging decoder, and only these numbers tell the two apart -
+/// which is why they are counted per window rather than over the session.
+///
+/// Every session publishes the same sample - a rate, a bitrate and the pictures
+/// since it started - but each counts what its own protocol can lose. An RTSP
+/// session knows about access units it could not assemble and packets that
+/// arrived twice; a JPEG stream has no sequence number to miss; an MSE one is a
+/// sequence of fragments with no packets at all. What a session does not count
+/// stays zero, and its own log line is the one that does not print it.
+#[derive(Debug, Default)]
+pub(super) struct WindowCounters {
+    /// Pictures the window closed.
+    pub(super) frames: u64,
+    /// Bytes the network delivered.
+    pub(super) bytes: u64,
+    /// Access units assembled, and their bytes. Compared against `bytes` the two
+    /// say whether the pictures arrive whole: assembled bytes far below what
+    /// arrived mean fragments are being thrown away.
+    pub(super) units: u64,
+    pub(super) unit_bytes: u64,
+    /// Pictures the decoder produced, and the ones it refused.
+    ///
+    /// Counted against `frames`, which is what arrived: the two differing means
+    /// the decoder or the renderer is where the stream is being lost, not the
+    /// link.
+    pub(super) decoded: u64,
+    pub(super) errors: u64,
+    /// Refusals before the session had shown a picture, which are its opening
+    /// rather than damage - see `run_session`.
+    pub(super) opening: u64,
+    /// Markers that assembled no access unit, and packets that do not carry the
+    /// negotiated payload type. A channel whose pictures never assemble is
+    /// either fragmenting them in a way the depacketizer does not recognise or
+    /// sending them under a second payload type, and the two are
+    /// indistinguishable without these counters.
+    pub(super) dropped: u64,
+    pub(super) foreign: u64,
+    /// Duplicate or late packets, and the ones the sequence numbers say never
+    /// arrived. Only a UDP session has either, so both stay zero on TCP.
+    pub(super) reordered: u64,
+    pub(super) lost: u64,
+    /// The slowest single decode of the window.
+    pub(super) slowest: Duration,
+}
+
+impl WindowCounters {
+    /// Keeps the slowest decode the window has seen.
+    pub(super) fn decode_took(&mut self, took: Duration) {
+        self.slowest = self.slowest.max(took);
+    }
+
+    /// Pictures per second over `seconds`.
+    pub(super) fn fps(&self, seconds: f32) -> f32 {
+        self.frames as f32 / seconds
+    }
+
+    /// Kilobits per second over `seconds`.
+    pub(super) fn kbps(&self, seconds: f32) -> f32 {
+        (self.bytes as f32 * 8.0 / 1000.0) / seconds
+    }
+}
+
+/// One statistics window: what has been counted since the last sample, and when
+/// the next one is due.
+///
+/// The clock and the arithmetic are the whole of this type - every session
+/// publishes the same sample by the same sum - while each logs its own counters
+/// under its own names, because what an RTSP session can lose and what a JPEG
+/// one can are not the same fault.
+#[derive(Debug)]
+pub(super) struct StatsWindow {
+    pub(super) counters: WindowCounters,
+    started: Instant,
+}
+
+impl StatsWindow {
+    pub(super) fn new() -> Self {
+        Self { counters: WindowCounters::default(), started: Instant::now() }
+    }
+
+    /// Whether a sample is due.
+    pub(super) fn due(&self) -> bool {
+        self.started.elapsed() >= STATS_INTERVAL
+    }
+
+    /// How long the window that is closing lasted, floored so that a sample
+    /// taken right after the previous one cannot divide by zero.
+    pub(super) fn seconds(&self) -> f32 {
+        self.started.elapsed().as_secs_f32().max(0.001)
+    }
+
+    /// Ends the window: hands back what it counted and starts the next one.
+    ///
+    /// The counters come back rather than being read first, so that the sample
+    /// published and the line logged describe the same window - and so that the
+    /// reset cannot be forgotten, which it could be in three places at once.
+    pub(super) fn close(&mut self) -> WindowCounters {
+        self.started = Instant::now();
+        std::mem::take(&mut self.counters)
+    }
+}
+
+/// Says, once per session, that pictures are arriving.
+///
+/// Every session reported the same transition and each wrote it out - the flag,
+/// the event and the sentence. The flag is what keeps it to one; a session that
+/// recovers from a stall says so again from where it noticed, which is why this
+/// is called where a picture has just been produced rather than from a state
+/// machine.
+pub(super) fn announce_streaming(
+    events: &Sender<StreamEvent>,
+    index: usize,
+    camera_id: &str,
+    stream: StreamKind,
+    announced: &mut bool,
+) {
+    if *announced {
+        return;
+    }
+    *announced = true;
+    emit(
+        events,
+        StreamEvent::State {
+            index,
+            camera_id: camera_id.to_string(),
+            state: ConnectionState::Streaming,
+            detail: format!("receiving {} stream", stream.label()),
+        },
+    );
+}
+
 pub(super) fn emit(events: &Sender<StreamEvent>, event: StreamEvent) {
     // A closed receiver simply means the UI has shut down.
     let _ = events.send(event);

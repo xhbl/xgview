@@ -4,7 +4,8 @@
 use super::*;
 
 use super::shared::{
-    BaselineFix, Sinks, emit, publish_frames, uses_hardware, video_decoder,
+    BaselineFix, Sinks, StatsWindow, announce_streaming, emit, publish_frames, uses_hardware,
+    video_decoder,
 };
 
 /// An audio track the session feeds the hub, with the decoder opened for it.
@@ -674,38 +675,11 @@ pub(super) async fn run_session(
     });
 
     let mut total_frames: u64 = 0;
-    let mut window_frames: u64 = 0;
-    let mut window_bytes: u64 = 0;
-    // Per window counters. A live view that freezes and then runs to catch up is
-    // either a starving network or a lagging decoder, and only these numbers
-    // tell the two apart.
-    let mut window_units: u64 = 0;
-    // Annex-B bytes handed to the decoder. Compared against the bitrate of the
-    // window it tells whether the pictures arrive whole: assembled bytes far
-    // below what the RTP packets carried mean fragments are being thrown away.
-    let mut window_unit_bytes: u64 = 0;
-    let mut window_decoded: u64 = 0;
-    let mut window_errors: u64 = 0;
-    // Pictures refused while the session is still waiting for its first one.
-    // Kept apart from the errors, which count a session that had a picture and
-    // then lost it.
-    let mut window_opening: u64 = 0;
-    // Marker terminated packets that assembled no access unit, and packets that
-    // do not carry the negotiated payload type. A channel whose pictures never
-    // assemble is either fragmenting them in a way the depacketizer does not
-    // recognise or sending them under a second payload type, and the two are
-    // indistinguishable without these counters.
-    let mut window_dropped: u64 = 0;
-    let mut window_foreign: u64 = 0;
-    // Duplicate or late RTP packets dropped on a UDP session. Neither happens
-    // on TCP, so the counter stays zero there.
-    let mut window_reordered: u64 = 0;
-    // RTP packets the sequence numbers say were lost on a UDP session.
-    let mut window_lost: u64 = 0;
+    // What this window has counted, and when the next sample is due. See
+    // `WindowCounters` for what each counter means.
+    let mut window = StatsWindow::new();
     // Sequence number of the last RTP packet accepted on a UDP session.
     let mut last_sequence: Option<u16> = None;
-    let mut slowest_decode = Duration::ZERO;
-    let mut window_start = Instant::now();
     let mut announced = false;
     // The stream's own parameter set, logged once per session. It is the only
     // place the profile, the level, the chroma sampling and the bit depth
@@ -963,7 +937,7 @@ pub(super) async fn run_session(
                         if delta == 0 || delta > 0x8000 {
                             // A duplicate, or a straggler that belongs to a
                             // picture already handed over.
-                            window_reordered += 1;
+                            window.counters.reordered += 1;
                             continue;
                         }
                         if delta > 1 {
@@ -972,14 +946,14 @@ pub(super) async fn run_session(
                             // picture. It is written off rather than stitched
                             // together and decoded into a screenful of
                             // corruption.
-                            window_lost += u64::from(delta) - 1;
+                            window.counters.lost += u64::from(delta) - 1;
                             total_lost += u64::from(delta) - 1;
                             depacketizer.invalidate();
                         }
                     }
                     last_sequence = Some(header.sequence);
                 }
-                window_bytes += payload.len() as u64;
+                window.counters.bytes += payload.len() as u64;
                 // The receiver report counts sequence numbers the way RFC 3550
                 // does: the 16 bit RTP field folded with the number of times it
                 // has wrapped, so a long session does not look like it restarted.
@@ -1007,24 +981,13 @@ pub(super) async fn run_session(
                 last_arrival = Some((now, header.timestamp));
                 // The marker bit is set on the last packet of an access unit.
                 if header.marker && header.payload_type < 192 {
-                    window_frames += 1;
+                    window.counters.frames += 1;
                     total_frames += 1;
                 }
                 if payload_type.is_some_and(|expected| header.payload_type != expected) {
-                    window_foreign += 1;
+                    window.counters.foreign += 1;
                 }
-                if !announced {
-                    announced = true;
-                    emit(
-                        events,
-                        StreamEvent::State {
-                            index,
-                            camera_id: camera_id.to_string(),
-                            state: ConnectionState::Streaming,
-                            detail: format!("receiving {} stream", stream.label()),
-                        },
-                    );
-                }
+                announce_streaming(events, index, camera_id, stream, &mut announced);
 
                 if let Some(decoder) = decoder.as_mut() {
                     let payload = &payload[header.header_len..];
@@ -1033,8 +996,8 @@ pub(super) async fn run_session(
                     let units = depacketizer.push(&header, payload);
                     let completed_none = units.is_empty();
                     for mut unit in units {
-                        window_units += 1;
-                        window_unit_bytes += unit.data.len() as u64;
+                        window.counters.units += 1;
+                        window.counters.unit_bytes += unit.data.len() as u64;
                         // Once per session, from the first access unit that
                         // carries a parameter set of its own: a camera whose
                         // SDP advertised none only ever says what it is here.
@@ -1069,7 +1032,7 @@ pub(super) async fn run_session(
                         stall.observe(unit.keyframe, Instant::now());
                         let started = Instant::now();
                         let decoded = decoder.decode(&unit.data, unit.pts_us(), unit.keyframe);
-                        slowest_decode = slowest_decode.max(started.elapsed());
+                        window.counters.decode_took(started.elapsed());
                         match decoded {
                             Ok(decoded) => {
                                 // A picture came out, whatever the renderer can
@@ -1094,7 +1057,7 @@ pub(super) async fn run_session(
                                         );
                                     }
                                 }
-                                window_decoded += decoded.len() as u64;
+                                window.counters.decoded += decoded.len() as u64;
                                 if let Some((picture_width, picture_height)) =
                                     publish_frames(frames, index, &mut sequence, decoded)
                                 {
@@ -1117,8 +1080,8 @@ pub(super) async fn run_session(
                                 // warning is kept for a session that had a
                                 // picture and then lost it.
                                 if !stall.running {
-                                    window_opening += 1;
-                                    if window_opening == 1 {
+                                    window.counters.opening += 1;
+                                    if window.counters.opening == 1 {
                                         tracing::debug!(
                                             target: "xgview::pipeline",
                                             index,
@@ -1128,7 +1091,7 @@ pub(super) async fn run_session(
                                     }
                                 } else {
                                     decode_errors += 1;
-                                    window_errors += 1;
+                                    window.counters.errors += 1;
                                     // The first rejections carry the payload
                                     // that caused them, which names the NAL
                                     // units the decoder was given.
@@ -1167,15 +1130,16 @@ pub(super) async fn run_session(
                     if completed_none && header.marker {
                         // The marker closed a picture but nothing came out of
                         // it: the unit held no slice, or its head was lost.
-                        window_dropped += 1;
+                        window.counters.dropped += 1;
                     }
                 }
             }
         }
 
-        let elapsed = window_start.elapsed();
-        if elapsed >= STATS_INTERVAL {
-            let seconds = elapsed.as_secs_f32().max(0.001);
+        if window.due() {
+            let seconds = window.seconds();
+            let fps = window.counters.fps(seconds);
+            let kbps = window.counters.kbps(seconds);
             stats.publish(StreamStats {
                 index,
                 camera_id: camera_id.to_string(),
@@ -1185,14 +1149,15 @@ pub(super) async fn run_session(
                 height,
                 hardware: uses_hardware(&decoder),
                 audio: audio_decoder.is_some(),
-                fps: window_frames as f32 / seconds,
-                bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                fps,
+                bitrate_kbps: kbps,
                 total_frames,
             });
             // `units` is what the network delivered, `decoded` what came out of
             // the decoder: a frozen picture with a steady `units` blames the
             // decoder (or the renderer), a `units` that drops to zero and then
             // bursts blames the camera, the link, or this loop being starved.
+            let counted = window.close();
             tracing::debug!(
                 target: "xgview::pipeline",
                 index,
@@ -1203,33 +1168,20 @@ pub(super) async fn run_session(
                 // seconds that is not the one in the source reads here as the
                 // group of pictures that camera turned out to have.
                 deadline_s = stall.patience().as_secs(),
-                units = window_units,
-                unit_bytes = window_unit_bytes,
-                decoded = window_decoded,
-                errors = window_errors,
-                opening = window_opening,
-                dropped = window_dropped,
-                foreign = window_foreign,
-                reordered = window_reordered,
-                lost = window_lost,
-                slowest_decode_ms = slowest_decode.as_millis() as u64,
-                fps = window_frames as f32 / seconds,
-                kbps = (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                units = counted.units,
+                unit_bytes = counted.unit_bytes,
+                decoded = counted.decoded,
+                errors = counted.errors,
+                opening = counted.opening,
+                dropped = counted.dropped,
+                foreign = counted.foreign,
+                reordered = counted.reordered,
+                lost = counted.lost,
+                slowest_decode_ms = counted.slowest.as_millis() as u64,
+                fps,
+                kbps,
                 "stream window"
             );
-            window_start = Instant::now();
-            window_frames = 0;
-            window_bytes = 0;
-            window_units = 0;
-            window_unit_bytes = 0;
-            window_decoded = 0;
-            window_errors = 0;
-            window_opening = 0;
-            window_dropped = 0;
-            window_foreign = 0;
-            window_reordered = 0;
-            window_lost = 0;
-            slowest_decode = Duration::ZERO;
         }
     }
 }

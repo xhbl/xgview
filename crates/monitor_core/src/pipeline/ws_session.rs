@@ -4,7 +4,8 @@
 use super::*;
 
 use super::shared::{
-    BaselineFix, Sinks, emit, publish_frames, uses_hardware, video_decoder,
+    BaselineFix, Sinks, StatsWindow, announce_streaming, publish_frames, uses_hardware,
+    video_decoder,
 };
 
 /// Accept any server certificate — the LAN Frigate box uses a self-signed cert
@@ -254,11 +255,9 @@ pub(super) async fn run_ws_session(
     let mut height: Option<u32> = None;
     let mut sequence: u64 = 0;
     let mut total_frames: u64 = 0;
-    let mut window_frames: u64 = 0;
-    let mut window_pictures: u64 = 0;
-    let mut window_bytes: u64 = 0;
-    let mut window_errors: u64 = 0;
-    let mut window_start = Instant::now();
+    // What this window has counted, and when the next sample is due. See
+    // `WindowCounters` for what each counter means.
+    let mut window = StatsWindow::new();
     let mut announced = false;
 
     loop {
@@ -293,7 +292,7 @@ pub(super) async fn run_ws_session(
             _ => continue,
         };
 
-        window_bytes += data.len() as u64;
+        window.counters.bytes += data.len() as u64;
 
         let parsed = parser.parse_message(&data)?;
 
@@ -376,21 +375,10 @@ pub(super) async fn run_ws_session(
 
         // Media segment: decode each access unit.
         for mut sample in parsed.samples {
-            window_frames += 1;
+            window.counters.frames += 1;
             total_frames += 1;
 
-            if !announced {
-                announced = true;
-                emit(
-                    events,
-                    StreamEvent::State {
-                        index,
-                        camera_id: camera_id_str.to_string(),
-                        state: ConnectionState::Streaming,
-                        detail: format!("receiving {} stream", stream.label()),
-                    },
-                );
-            }
+            announce_streaming(events, index, camera_id_str, stream, &mut announced);
 
             // The same plain-Baseline fix the RTSP path applies - an in-band
             // sequence parameter set is the only place it could still be decided
@@ -402,14 +390,14 @@ pub(super) async fn run_ws_session(
             if let Some(dec) = decoder.as_mut() {
                 match dec.decode(&sample.data, sample.pts_us, sample.keyframe) {
                     Ok(decoded) => {
-                        window_pictures += decoded.len() as u64;
+                        window.counters.decoded += decoded.len() as u64;
                         if let Some((w, h)) = publish_frames(frames, index, &mut sequence, decoded) {
                             width = Some(w);
                             height = Some(h);
                         }
                     }
                     Err(err) => {
-                        window_errors += 1;
+                        window.counters.errors += 1;
                         tracing::debug!(
                             target: "xgview::pipeline",
                             index,
@@ -422,10 +410,10 @@ pub(super) async fn run_ws_session(
             }
         }
 
-        let elapsed = window_start.elapsed();
-        if elapsed >= STATS_INTERVAL {
-            let seconds = elapsed.as_secs_f32().max(0.001);
-            let fps = window_frames as f32 / seconds;
+        if window.due() {
+            let seconds = window.seconds();
+            let fps = window.counters.fps(seconds);
+            let kbps = window.counters.kbps(seconds);
             stats.publish(StreamStats {
                 index,
                 camera_id: camera_id_str.to_string(),
@@ -436,27 +424,23 @@ pub(super) async fn run_ws_session(
                 hardware: uses_hardware(&decoder),
                 audio: audio_decoder.is_some(),
                 fps,
-                bitrate_kbps: (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                bitrate_kbps: kbps,
                 total_frames,
             });
+            let counted = window.close();
             tracing::debug!(
                 target: "xgview::pipeline",
                 index,
                 stream = stream.as_str(),
-                frames = window_frames,
-                pictures = window_pictures,
-                bytes = window_bytes,
-                errors = window_errors,
+                frames = counted.frames,
+                pictures = counted.decoded,
+                bytes = counted.bytes,
+                errors = counted.errors,
                 resolution = ?width.zip(height),
                 fps,
-                kbps = (window_bytes as f32 * 8.0 / 1000.0) / seconds,
+                kbps,
                 "mse window",
             );
-            window_start = Instant::now();
-            window_frames = 0;
-            window_pictures = 0;
-            window_bytes = 0;
-            window_errors = 0;
         }
     }
 }
