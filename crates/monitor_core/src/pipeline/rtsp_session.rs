@@ -262,6 +262,144 @@ impl Depacketizer {
     }
 }
 
+/// Interarrival jitter, in the form RFC 3550 §6.4.1 defines it.
+///
+/// Kept as the difference between consecutive packets rather than against a
+/// session origin: the RTP timestamp wraps every thirteen hours or so, and an
+/// absolute transit would read that wrap as one enormous jitter.
+pub(super) struct Jitter {
+    /// RTP timestamp units per second, as the session description announced it.
+    clock_rate: f64,
+    /// The smoothed estimate, in those units.
+    value: f64,
+    /// When the last packet arrived, and the timestamp it carried. `None` until
+    /// the first, because a jitter is a difference between two.
+    last: Option<(Instant, u32)>,
+}
+
+impl Jitter {
+    pub(super) fn new(clock_rate: f64) -> Self {
+        Self { clock_rate, value: 0.0, last: None }
+    }
+
+    /// Folds in one packet. The first is the baseline and adds nothing.
+    pub(super) fn observe(&mut self, timestamp: u32, now: Instant) {
+        if let Some((previous_arrival, previous_timestamp)) = self.last {
+            let arrived =
+                now.saturating_duration_since(previous_arrival).as_secs_f64() * self.clock_rate;
+            // How far apart the two were *sent*, read as a signed distance:
+            // `wrapping_sub` already carries the counter over its wrap, and the
+            // cast is what makes a packet whose timestamp is behind the last one
+            // a short step back rather than four billion units on.
+            let sent = f64::from(timestamp.wrapping_sub(previous_timestamp) as i32);
+            let difference = (arrived - sent).abs();
+            // The smoothing constant the RFC names: a sixteenth of the new
+            // difference, so one late packet moves the estimate a little.
+            self.value += (difference - self.value) / 16.0;
+        }
+        self.last = Some((now, timestamp));
+    }
+
+    /// The estimate, in the units the receiver report carries.
+    pub(super) fn value(&self) -> u32 {
+        self.value.round() as u32
+    }
+}
+
+/// What a session knows about the sequence numbers it has received.
+///
+/// Two questions are answered here, and they are asked over different
+/// transports: the gaps and the stragglers are what UDP does, while the
+/// extended highest sequence number the receiver report carries is counted on
+/// both.
+pub(super) struct SequenceWindow {
+    /// The last sequence number accepted, `None` until the first packet. Only
+    /// UDP moves it, since the interleaved transport neither reorders nor
+    /// duplicates.
+    last: Option<u16>,
+    /// The highest sequence number seen, with its cycles folded into the high
+    /// half the way RFC 3550 counts it, `None` until the first packet.
+    highest: Option<u32>,
+    /// What the gaps say was never delivered, over the whole session.
+    lost: u64,
+}
+
+/// What a packet's sequence number says about the ones before it.
+pub(super) enum Arrival {
+    /// The packet follows the last one accepted.
+    Next,
+    /// A duplicate, or a straggler that belongs to a picture already handed
+    /// over.
+    Stale,
+    /// The packets in between were lost; this many.
+    Gap(u16),
+}
+
+impl SequenceWindow {
+    pub(super) fn new() -> Self {
+        Self { last: None, highest: None, lost: 0 }
+    }
+
+    /// Folds one sequence number into the extended count, on either transport.
+    ///
+    /// The first packet is the origin. Folding it against a zero base instead
+    /// would read every number in the top half of the range as a straggler from
+    /// the previous cycle: half of all sessions held at zero, and a count that
+    /// is a whole cycle short from then on, because it can only climb once the
+    /// sequence numbers have wrapped round to it - minutes of reports that say
+    /// the session has just started.
+    pub(super) fn see(&mut self, sequence: u16) {
+        let Some(highest) = self.highest else {
+            self.highest = Some(u32::from(sequence));
+            return;
+        };
+        // The same cycle as the highest seen so far, until one of the two
+        // bounds below says otherwise.
+        let candidate = (highest & 0xffff_0000) | u32::from(sequence);
+        let folded = if candidate + 0x8000 < highest {
+            // More than half the range behind: it has wrapped forwards.
+            candidate + 0x1_0000
+        } else if candidate > highest + 0x8000 {
+            // More than half the range ahead: it belongs to the cycle before.
+            candidate.saturating_sub(0x1_0000)
+        } else {
+            candidate
+        };
+        // The count is the highest received, so a straggler may be folded but
+        // may not pull it backwards.
+        self.highest = Some(highest.max(folded));
+    }
+
+    /// What a packet's sequence number says about the ones before it, for the
+    /// transport that reorders and duplicates.
+    pub(super) fn accept(&mut self, sequence: u16) -> Arrival {
+        if let Some(previous) = self.last {
+            let delta = sequence.wrapping_sub(previous);
+            if delta == 0 || delta > 0x8000 {
+                return Arrival::Stale;
+            }
+            if delta > 1 {
+                let missing = delta - 1;
+                self.lost += u64::from(missing);
+                self.last = Some(sequence);
+                return Arrival::Gap(missing);
+            }
+        }
+        self.last = Some(sequence);
+        Arrival::Next
+    }
+
+    /// The extended highest sequence number, for the receiver report.
+    pub(super) fn highest(&self) -> u32 {
+        self.highest.unwrap_or(0)
+    }
+
+    /// Everything the gaps have said was never delivered, over the session.
+    pub(super) fn lost(&self) -> u64 {
+        self.lost
+    }
+}
+
 /// How an attempt at establishing a session ended.
 ///
 /// The two failures that are worth answering with the other transport are kept
@@ -678,8 +816,6 @@ pub(super) async fn run_session(
     // What this window has counted, and when the next sample is due. See
     // `WindowCounters` for what each counter means.
     let mut window = StatsWindow::new();
-    // Sequence number of the last RTP packet accepted on a UDP session.
-    let mut last_sequence: Option<u16> = None;
     let mut announced = false;
     // The stream's own parameter set, logged once per session. It is the only
     // place the profile, the level, the chroma sampling and the bit depth
@@ -695,29 +831,23 @@ pub(super) async fn run_session(
     // starved for as long as the camera stays quiet.
     let keep_alive_interval = client.keep_alive_interval();
     let mut last_keep_alive = Instant::now();
-    // What the receiver report has to carry: the SSRC of the stream and how far
-    // its sequence numbers have run.
+    // When the report is due, and which stream it is about. The counters it
+    // carries are the two below.
     let mut last_report = Instant::now();
     let mut source_ssrc: u32 = 0;
-    let mut highest_sequence: u32 = 0;
     let mut received_packets = false;
-    // Beyond the sequence numbers, the report also says how badly the stream is
-    // arriving. Both of these accumulate over the session, which is the window
-    // RFC 3550 defines them in.
-    //
-    // `total_lost` is what the sequence gaps between packets say was never
-    // delivered. A camera that honours the report can only act on a count, so
-    // reporting the zero a TCP-shaped client would send tells it nothing about
-    // a link that is dropping datagrams.
-    let mut total_lost: u64 = 0;
-    // Interarrival jitter, kept as the difference between consecutive packets
-    // rather than against a session origin: the RTP timestamp wraps every
-    // thirteen hours or so, and an absolute transit would read that wrap as one
-    // enormous jitter.
-    let mut jitter: f64 = 0.0;
-    let mut last_arrival: Option<(Instant, u32)> = None;
+    // The sequence numbers, folded the way the receiver report counts them, and
+    // the gaps the datagram transport leaves behind. Both accumulate over the
+    // session, which is the window RFC 3550 defines them in. See
+    // [`SequenceWindow`].
+    let mut sequence_window = SequenceWindow::new();
     // RTP timestamp units per second, as the session description announced it.
     let clock_rate = f64::from(video.and_then(|track| track.clock_rate).unwrap_or(90_000));
+    // Interarrival jitter, the third number the report carries: kept as the
+    // difference between consecutive packets rather than against a session
+    // origin, because the timestamp wraps and an absolute transit would read
+    // that wrap as one enormous jitter. See [`Jitter`].
+    let mut jitter = Jitter::new(clock_rate);
     // How long this session may go without a picture, learned from the stream
     // itself: see `StallDeadline`.
     let mut stall = StallDeadline::new();
@@ -810,9 +940,9 @@ pub(super) async fn run_session(
             let report = crate::rtcp::receiver_report(
                 RECEIVER_SSRC,
                 source_ssrc,
-                highest_sequence,
-                total_lost.min(i32::MAX as u64) as i32,
-                jitter.round() as u32,
+                sequence_window.highest(),
+                sequence_window.lost().min(i32::MAX as u64) as i32,
+                jitter.value(),
             );
             client.send_rtcp(&report);
             last_report = Instant::now();
@@ -932,26 +1062,23 @@ pub(super) async fn run_session(
                 // assembled, so such a packet is dropped before it reaches it.
                 // The interleaved transport never does either.
                 if transport.is_udp() {
-                    if let Some(previous) = last_sequence {
-                        let delta = header.sequence.wrapping_sub(previous);
-                        if delta == 0 || delta > 0x8000 {
+                    match sequence_window.accept(header.sequence) {
+                        Arrival::Stale => {
                             // A duplicate, or a straggler that belongs to a
                             // picture already handed over.
                             window.counters.reordered += 1;
                             continue;
                         }
-                        if delta > 1 {
-                            // A gap: the packets in between were lost, so the
-                            // unit being assembled is missing part of its
-                            // picture. It is written off rather than stitched
-                            // together and decoded into a screenful of
-                            // corruption.
-                            window.counters.lost += u64::from(delta) - 1;
-                            total_lost += u64::from(delta) - 1;
+                        Arrival::Gap(missing) => {
+                            // The packets in between were lost, so the unit
+                            // being assembled is missing part of its picture. It
+                            // is written off rather than stitched together and
+                            // decoded into a screenful of corruption.
+                            window.counters.lost += u64::from(missing);
                             depacketizer.invalidate();
                         }
+                        Arrival::Next => {}
                     }
-                    last_sequence = Some(header.sequence);
                 }
                 window.counters.bytes += payload.len() as u64;
                 // The receiver report counts sequence numbers the way RFC 3550
@@ -959,26 +1086,11 @@ pub(super) async fn run_session(
                 // has wrapped, so a long session does not look like it restarted.
                 source_ssrc = header.ssrc;
                 received_packets = true;
-                let candidate = (highest_sequence & 0xffff_0000) | u32::from(header.sequence);
-                highest_sequence = if candidate + 0x8000 < highest_sequence {
-                    candidate + 0x1_0000
-                } else if candidate > highest_sequence + 0x8000 {
-                    candidate.saturating_sub(0x1_0000)
-                } else {
-                    candidate
-                };
+                sequence_window.see(header.sequence);
                 // How far apart this packet and the last one were sent, against
                 // how far apart they arrived. RFC 3550 smooths the difference
                 // into the jitter the receiver report carries.
-                let now = Instant::now();
-                if let Some((previous_arrival, previous_timestamp)) = last_arrival {
-                    let arrived = now.saturating_duration_since(previous_arrival).as_secs_f64()
-                        * clock_rate;
-                    let sent = f64::from(header.timestamp.wrapping_sub(previous_timestamp) as i32);
-                    let difference = (arrived - sent).abs();
-                    jitter += (difference - jitter) / 16.0;
-                }
-                last_arrival = Some((now, header.timestamp));
+                jitter.observe(header.timestamp, Instant::now());
                 // The marker bit is set on the last packet of an access unit.
                 if header.marker && header.payload_type < 192 {
                     window.counters.frames += 1;

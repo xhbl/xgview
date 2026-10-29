@@ -725,7 +725,8 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endp
 #[cfg(test)]
 mod tests {
     use super::rtsp_session::{
-        HandshakeFailure, StallDeadline, negotiate, takes_the_picture_session,
+        Arrival, HandshakeFailure, Jitter, SequenceWindow, StallDeadline, negotiate,
+        takes_the_picture_session,
     };
     use super::shared::{BaselineFix, StatsWindow};
     use super::supervisor::TalkEntry;
@@ -936,6 +937,141 @@ mod tests {
 
         stall.picture(base + Duration::from_secs(2));
         assert_eq!(stall.patience(), STALL_FLOOR);
+    }
+
+    /// A jitter is a difference between two packets, so the first one has
+    /// nothing to be different from.
+    #[test]
+    fn the_first_packet_is_the_baseline_and_adds_no_jitter() {
+        let base = Instant::now();
+        let mut jitter = Jitter::new(90_000.0);
+        jitter.observe(1_000, base);
+        assert_eq!(jitter.value(), 0);
+    }
+
+    /// A packet that arrives exactly as far apart as it was sent is the case the
+    /// estimate exists to sit at zero on.
+    #[test]
+    fn a_packet_that_arrives_as_it_was_sent_is_no_jitter() {
+        let base = Instant::now();
+        let mut jitter = Jitter::new(90_000.0);
+        jitter.observe(0, base);
+        // Twenty milliseconds at ninety kilohertz.
+        jitter.observe(1_800, base + Duration::from_millis(20));
+        assert_eq!(jitter.value(), 0);
+    }
+
+    /// One sixteenth of the new difference, which is the smoothing RFC 3550
+    /// names: a single late packet moves the estimate a little, not to it.
+    #[test]
+    fn a_late_packet_moves_the_estimate_by_a_sixteenth() {
+        let base = Instant::now();
+        let mut jitter = Jitter::new(90_000.0);
+        jitter.observe(0, base);
+        // It took twenty milliseconds to arrive, and the sender's clock says the
+        // two were only two hundred units - about two milliseconds - apart.
+        jitter.observe(200, base + Duration::from_millis(20));
+        assert_eq!(jitter.value(), 100, "1600 units of difference, over sixteen");
+    }
+
+    /// The RTP timestamp is thirty-two bits and wraps: read as an absolute
+    /// transit, the wrap is four billion units of jitter.
+    #[test]
+    fn a_timestamp_that_wrapped_is_a_short_step_forward() {
+        let base = Instant::now();
+        let mut jitter = Jitter::new(8_000.0);
+        jitter.observe(0xffff_fff0, base);
+        jitter.observe(0x0000_0010, base + Duration::from_millis(20));
+        // Thirty-two units sent, a hundred and sixty arrived, a hundred and
+        // twenty-eight of difference over sixteen.
+        assert_eq!(jitter.value(), 8);
+    }
+
+    /// And the same read the other way: a packet whose timestamp is behind the
+    /// last one is a short step back, not four billion units on.
+    #[test]
+    fn a_timestamp_behind_the_last_one_is_a_short_step_back() {
+        let base = Instant::now();
+        let mut jitter = Jitter::new(8_000.0);
+        jitter.observe(0x0000_0100, base);
+        jitter.observe(0x0000_00f0, base + Duration::from_millis(20));
+        // Sixteen units back and a hundred and sixty arrived: a hundred and
+        // seventy-six over sixteen.
+        assert_eq!(jitter.value(), 11);
+    }
+
+    /// The extended count starts at the first packet, whichever half of the
+    /// range it lands in. Folding it against a zero base would read every number
+    /// above 32767 as a straggler from the cycle before, and hold the count at
+    /// zero until the counter wrapped.
+    #[test]
+    fn the_first_packet_is_the_origin_of_the_extended_count() {
+        let mut window = SequenceWindow::new();
+        window.see(40_000);
+        assert_eq!(window.highest(), 40_000);
+    }
+
+    /// The count is the sixteen bit field with its cycles folded into the high
+    /// half, so a session that runs past the wrap does not look like one that
+    /// restarted.
+    #[test]
+    fn the_extended_count_carries_the_cycles() {
+        let mut window = SequenceWindow::new();
+        for sequence in [65_534, 65_535, 0, 1] {
+            window.see(sequence);
+        }
+        assert_eq!(window.highest(), 65_537);
+    }
+
+    /// A packet from the cycle before is folded to where it belongs, and the
+    /// count - being the highest received - stays where it was.
+    #[test]
+    fn a_straggler_does_not_pull_the_extended_count_backwards() {
+        let mut window = SequenceWindow::new();
+        window.see(65_535);
+        window.see(2);
+        assert_eq!(window.highest(), 65_538);
+        window.see(65_534);
+        assert_eq!(window.highest(), 65_538, "the straggler is not the highest");
+    }
+
+    /// A duplicate and a straggler are the same answer: the picture that packet
+    /// belonged to has already been handed over.
+    #[test]
+    fn a_duplicate_and_a_straggler_are_both_stale() {
+        let mut window = SequenceWindow::new();
+        assert!(matches!(window.accept(100), Arrival::Next));
+        assert!(matches!(window.accept(101), Arrival::Next));
+        assert!(matches!(window.accept(101), Arrival::Stale), "a duplicate");
+        assert!(matches!(window.accept(100), Arrival::Stale), "a straggler");
+        assert_eq!(window.lost(), 0, "neither is a loss");
+        // The stale packets did not move what the next one is measured from.
+        assert!(matches!(window.accept(102), Arrival::Next));
+    }
+
+    /// The sequence numbers wrap too, and the packet after the wrap is the next
+    /// one - not a straggler half a range behind it.
+    #[test]
+    fn the_packet_after_the_wrap_is_the_next_one() {
+        let mut window = SequenceWindow::new();
+        assert!(matches!(window.accept(65_535), Arrival::Next));
+        assert!(matches!(window.accept(0), Arrival::Next), "one on, over the wrap");
+        assert_eq!(window.lost(), 0, "and nothing was missed in between");
+    }
+
+    /// A gap is what the packets in between were, and it is counted once: the
+    /// packet after the gap is measured from the packet that closed it.
+    #[test]
+    fn a_gap_says_how_many_were_missing() {
+        let mut window = SequenceWindow::new();
+        assert!(matches!(window.accept(100), Arrival::Next));
+        match window.accept(104) {
+            Arrival::Gap(missing) => assert_eq!(missing, 3),
+            _ => panic!("three packets were lost"),
+        }
+        assert_eq!(window.lost(), 3);
+        assert!(matches!(window.accept(105), Arrival::Next), "and the gap is closed");
+        assert_eq!(window.lost(), 3, "and counted once");
     }
 
     /// A sample describes the stream as it is now, so a newer one replaces it:
