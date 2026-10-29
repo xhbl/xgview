@@ -105,6 +105,29 @@ fn percent(used: u64, total: u64) -> Option<u32> {
     Some(((used as f64 * 100.0 / total as f64).round() as u32).min(100))
 }
 
+/// The busy share of the ticks that passed since the previous reading, as a
+/// percentage.
+///
+/// The platform supplies the two counters - busy and total - and the arithmetic
+/// is the same on all three: what is left here is the subtraction and the guard.
+/// A sample taken twice inside the same tick has nothing to divide by and
+/// reports nothing, and a counter that went backwards - a reset, a suspend that
+/// the platform did not account for - is read as no time having passed rather
+/// than as a negative load.
+///
+/// Compiled only where a platform reads counters. Android has no readable ones
+/// and the fallback has no platform at all, so both answer `None` without ever
+/// reaching this - and a function nothing calls is a warning.
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
+fn cpu_between(previous: (u64, u64), now: (u64, u64)) -> Option<f32> {
+    let busy = now.0.saturating_sub(previous.0);
+    let total = now.1.saturating_sub(previous.1);
+    if total == 0 {
+        return None;
+    }
+    Some(busy as f32 * 100.0 / total as f32)
+}
+
 /// The `MemTotal` and `MemAvailable` of a `/proc/meminfo`, in bytes.
 ///
 /// Both are named in kilobytes there; a kernel too old to report `MemAvailable`
@@ -244,6 +267,21 @@ mod tests {
         assert_eq!(percent(0, 0), None);
         assert_eq!(percent(10, 10), Some(100));
         assert_eq!(percent(11, 10), Some(100));
+    }
+
+    /// The load is the difference between two readings of the same counters: what
+    /// changed, over how much time changed with it. A sample with no ticks behind
+    /// it has nothing to divide by and reports nothing.
+    #[test]
+    fn the_load_is_the_busy_share_of_the_ticks_between_two_readings() {
+        assert_eq!(cpu_between((100, 200), (150, 300)), Some(50.0));
+        assert_eq!(cpu_between((100, 200), (100, 200)), None, "no tick passed");
+        assert_eq!(cpu_between((100, 200), (200, 300)), Some(100.0), "all of it busy");
+        assert_eq!(
+            cpu_between((150, 300), (100, 200)),
+            None,
+            "a counter that went back is no time at all, not a negative load"
+        );
     }
 
     /// The platforms the module answers on are asked for a real reading: a name

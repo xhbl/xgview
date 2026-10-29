@@ -65,13 +65,7 @@ impl Platform {
 
     pub(super) fn cpu(&mut self) -> Option<f32> {
         let now = cpu_ticks()?;
-        let previous = self.cpu.replace(now)?;
-        let busy = now.0.saturating_sub(previous.0);
-        let total = now.1.saturating_sub(previous.1);
-        if total == 0 {
-            return None;
-        }
-        Some(busy as f32 * 100.0 / total as f32)
+        super::cpu_between(self.cpu.replace(now)?, now)
     }
 }
 
