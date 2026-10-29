@@ -3649,3 +3649,118 @@ four minutes after the actual boot, and the wall came up from it. It is the
 system giving a newly installed package the boot broadcast it missed, it is not
 a bug in the receiver, and it means an update puts the wall back on screen by
 itself.
+
+## 48. A refused password was one of four failures wearing the same name
+
+*Landed 2026-10-28, in 1.5.77.*
+
+**The report was "the camera keeps reconnecting and the picture never comes
+back".** The password in the form was wrong. What the tile said was
+`reconnecting`, forever, and the log said `session failed` every thirty seconds
+with the same line under it.
+
+`CoreError::rtsp(...)` was carrying four different faults:
+
+| Where it was built | What it meant |
+| --- | --- |
+| `rtsp.rs:1237` | the camera rejected the credentials, `401` |
+| `rtsp.rs:1717` | the handshake timed out |
+| `pipeline.rs:2188` | the picture stalled and the grace ran out |
+| `pipeline.rs:2270` | no media arrived at all |
+
+Nothing downstream could tell them apart, so nothing downstream could act
+differently. `ReconnectPolicy::max_attempts` defaults to `0`, which means "retry
+forever", so a rejected password was retried at the thirty-second ceiling for as
+long as the viewer watched - and every attempt was logged the same way, with the
+`401` buried in the message.
+
+**It cost more than a spinner.** `talk_worker` read a plain `Rtsp` failure as the
+camera refusing the *shape* of a call session, and reopened the picture's session
+to carry the microphone on it instead. A camera with a wrong password refuses
+that session too, so pressing the microphone blanked a picture that had been
+fine.
+
+**Failures carry a kind beside their message now** - `Auth`, `Refused`,
+`Timeout`, `Unreachable`, `Protocol`, `Local` - and the channel acts on the kind
+rather than on the text. `Auth` and `Local` stop it: the answer cannot change
+with time, so the countdown would only delay the one line that says what is
+wrong. Everything else is retried exactly as before.
+
+The `Auth` message is carried without the `rtsp error: ` prefix the other
+variants wear, because it is what the viewer reads on the tile and the tile shows
+forty-six characters - `401 Unauthorized` has to be among them.
+
+**Two things on the way back were wrong as well**, and both are older than this
+change: neither could be reached until a channel could give up.
+
+*Correcting the password reached nothing.* The plan a scheduler compares carried
+the URL, the transport and the connection mode, but not the credentials, so an
+edit produced no change, no `Activate`, and the channel kept the password it was
+started with. What worked was a page turned away and back, because `Suspend`
+drops the runtime and `Activate` builds a new one. The plan carries a fingerprint
+of both logins now - a fingerprint and not the strings, because a plan is `Debug`
+and lands in logs, and nothing reads the value, only whether it moved.
+
+*The band that holds the last frame let go only on a sample from a session that
+had produced a picture*, which a refused one never does. It stayed over the
+failure panel for as long as the failure lasted, the one thing on the tile still
+claiming that something was on its way. A channel that has given up lets go of
+the frame: holding it is a promise.
+
+## 49. Splitting seven files, and the four ways a scripted move lies
+
+*Landed 2026-10-28, in 1.5.78 to 1.5.97.*
+
+The refactor itself is recorded in `priv/docs/REFACTOR-PLAN.md`, which is not
+committed. What belongs here is what it cost.
+
+**A move is only a move if nothing but position changed**, and the checks that
+look like they prove it do not all do.
+
+*The line multiset proves content, not order.* Sorting a function's lines into a
+counter catches a lost line and says nothing about a reordered one - and order is
+the whole of what `update` was. What works is to concatenate the new methods in
+the order the caller invokes them and diff that against the old body: 733 lines
+against 733, no difference, for the frame split.
+
+*Filtering comments out of that check hides the damage.* A move script that
+replaces identifiers does not know a comment from code, so `channels` became
+`self.channels` inside a sentence - "Only the self.channels waiting out a
+backoff care" - and inside an assertion message. Fifteen lines. The check that
+would have caught it is the one that keeps comments in.
+
+*Braces do not tell you where a block ends.* Counting `{` and `}` across a block
+of Rust is fooled by a brace in a comment or a string, and `let keys =
+ctx.input_mut(|input| { ... })` is a hundred and ten lines inside one call. What
+works in this tree is the indentation of the closing line: a block opened at
+eight spaces closes at exactly eight spaces plus a brace, and everything inside
+is deeper. Assert that the block's own braces balance before writing anything.
+
+*A block's start is its doc comment, and its end is the next block's start.* Cut
+from the `fn` line and the previous block keeps the next one's `///`, which then
+lands in the wrong file as a dangling doc comment - six of them, on the first
+attempt at the pipeline split.
+
+Two more that cost a round each. Anchors repeat: `if nav_owns {` appears at eight
+spaces and again at sixteen inside a nested block, so a script must match the
+whole line including its indentation. And a moved method needs `pub(super)` -
+which is not a widening: a private method was visible to its module and
+everything below it, and `pub(super)` from a child module says exactly that.
+
+**The GUI split was the one that went cleanly**, because it moved methods between
+files without touching a body: 132 methods, nothing missing, comments included.
+
+**A modal is a payload, and being open is not a field.** Seven windows each
+carried four fields - open, handoff, anchor, from - told apart by a suffix and
+written out seven times. They are seven `Modal<T>` now, and `is_open()` is
+`payload.is_some()`, so a window cannot say it is up while carrying nothing. The
+two ends of every window - take the payload, draw it in a modal of a fixed width,
+then put it back or close it and give the focus back - are one function, and what
+is left in each window is the part in the middle.
+
+That last one has a rule worth writing down, because it was got wrong twice: a
+window that may still be **put back** copies its `from`, since it has to hand it
+on to the next frame; whoever **gives the focus back** takes it. Taking it at the
+top of a window that then decides to stay loses the button for the next frame,
+and the focus never returns - which compiles, and looks like the window closing
+correctly.
