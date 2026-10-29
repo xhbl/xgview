@@ -3,6 +3,22 @@
 
 use super::*;
 
+/// What the camera list collected while it was drawn.
+///
+/// Every control in a row writes here rather than to the configuration: the
+/// row borrows its camera in order to draw it, and the actions that change
+/// one are applied once the whole list has been drawn.
+#[derive(Default)]
+struct RowActions {
+    toggle: Option<(usize, bool)>,
+    ask_remove: Option<(usize, String, Option<Id>)>,
+    edit: Option<(usize, Option<Id>)>,
+    aspect_change: Option<(usize, TileAspect)>,
+    infer: Option<usize>,
+    connect_change: Option<usize>,
+    stream_change: Option<usize>,
+}
+
 impl XgViewApp {
     /// The cameras the wall shows, and the way to add more.
     pub(super) fn settings_cameras(&mut self, ui: &mut egui::Ui) -> bool {
@@ -84,7 +100,21 @@ impl XgViewApp {
 
     /// The camera list as configured, with the button that opens the reorder
     /// mode at its foot. Returns `true` when the configuration changed.
+    /// The Cameras tab: the group selector, the list, and the group's own
+    /// two uncommon actions at the foot.
     pub(super) fn cameras_list(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut dirty = self.group_strip(ui);
+        self.add_buttons(ui);
+        dirty |= self.camera_rows(ui);
+        self.reorder_trigger(ui);
+        dirty |= self.group_foot(ui);
+        dirty
+    }
+
+    /// Which group the wall is showing, as a strip of tabs with the button that
+    /// adds one at its end. The buttons under it add to that group, and the list
+    /// below it is that group's.
+    fn group_strip(&mut self, ui: &mut egui::Ui) -> bool {
         let mut dirty = false;
 
         // Which group the wall is showing comes first, as a strip of tabs like
@@ -134,7 +164,12 @@ impl XgViewApp {
             dirty = true;
         }
         ui.add_space(theme::space::S);
+        dirty
+    }
 
+    /// The two ways a camera gets into the group: found on the network, or
+    /// typed in. Both open the discovery window on the tab that asks for it.
+    fn add_buttons(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let devices = ui.button(monitor_i18n::tr("cameras-add-devices"));
             self.nav.item(&devices);
@@ -157,14 +192,15 @@ impl XgViewApp {
             }
         });
         ui.add_space(theme::space::S);
+    }
 
-        let mut toggle: Option<(usize, bool)> = None;
-        let mut ask_remove: Option<(usize, String, Option<Id>)> = None;
-        let mut edit: Option<(usize, Option<Id>)> = None;
-        let mut aspect_change: Option<(usize, TileAspect)> = None;
-        let mut infer: Option<usize> = None;
-        let mut connect_change: Option<usize> = None;
-        let mut stream_change: Option<usize> = None;
+    /// The cameras of the group on the wall, and what pressing their controls
+    /// does. Only this group: the slot is a position in the whole list, which
+    /// is what the actions write back through.
+    fn camera_rows(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut dirty = false;
+
+        let mut actions = RowActions::default();
         // Only the group the selector chose. The slot is a position in the whole
         // list, which is what the actions below write back through.
         let active = self.config.active_group;
@@ -177,127 +213,9 @@ impl XgViewApp {
             .map(|(slot, _)| slot)
             .collect();
         for slot in slots {
-            let camera = &mut self.config.cameras[slot];
-            ui.horizontal(|ui| {
-                let mut camera_enabled = camera.enabled;
-                let enable = ui.checkbox(&mut camera_enabled, "");
-                self.nav.item(&enable);
-                if enable.changed() {
-                    toggle = Some((slot, camera_enabled));
-                }
-                ui.label(RichText::new(camera.short_label(18)).strong());
-                if let Some(sub) = camera.rtsp_sub.as_deref() {
-                    let inferred = sub_is_derived(camera, sub);
-                    ui.label(
-                        RichText::new(monitor_i18n::tr(if inferred { "cameras-sub-derived" } else { "cameras-sub-set" }))
-                            .small()
-                            .color(theme::ACCENT),
-                    );
-                } else if !camera.is_restream() && infer_sub_stream(&camera.rtsp_main).is_some() {
-                    // The vendor sub-stream rules only match a camera's own
-                    // address; a go2rtc or Frigate restream is a stream name, so
-                    // the offer is drawn only where there is something to infer.
-                    let infer_button = ui.small_button(monitor_i18n::tr("cameras-infer-sub"));
-                    self.nav.item(&infer_button);
-                    if infer_button.clicked() {
-                        infer = Some(slot);
-                    }
-                }
-                // The stream switch: a press moves this tile between the sub
-                // stream the wall pulls on every other one and the main stream
-                // the viewer pinned it to. It reads the tag the tile's corner
-                // reads - see `grid`'s stream item - under the same dot, so the
-                // row and the picture say the same thing, and it is drawn only
-                // where there is a second address to pull: with one address both
-                // of its stops are the same stream.
-                if camera.has_sub() {
-                    let stream_button = ui
-                        .small_button(
-                            RichText::new(format!("● {}", monitor_i18n::tr(camera.grid_stream().tag())))
-                                .small()
-                                .color(theme::ACCENT),
-                        )
-                        .on_hover_text(monitor_i18n::tr("cameras-stream-tip"));
-                    self.nav.item(&stream_button);
-                    if stream_button.clicked() {
-                        stream_change = Some(slot);
-                    }
-                }
-                // The connection switch: a press moves the camera on to the next
-                // stop it offers - `AUTO/RTSP/MSE` for a camera with an MSE
-                // address, `TCP/UDP` for one on RTSP alone. Its tip names what it
-                // switches: the protocol where there are two to choose from, the
-                // RTSP transport where there is only RTSP. A camera carried over
-                // a WebSocket url has a single transport, so it has nothing to
-                // switch and the button is left off.
-                if !camera.is_ws_stream() {
-                    let tip = if camera.has_mse() { "cameras-connect-tip" } else { "cameras-transport-tip" };
-                    let connect_button = ui
-                        .small_button(RichText::new(camera.connection_label()).small().color(theme::ACCENT))
-                        .on_hover_text(monitor_i18n::tr(tip));
-                    self.nav.item(&connect_button);
-                    if connect_button.clicked() {
-                        connect_change = Some(slot);
-                    }
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // Drawn right to left so the pair reads edit, remove;
-                    // registered edit first, so the walk reaches the control
-                    // that changes before the one that deletes.
-                    let remove_button = icons::button_sized(ui, Icon::Trash, false, false, &monitor_i18n::tr("cameras-remove-tip"), ROW_ICON);
-                    let edit_button = icons::button_sized(ui, Icon::Edit, false, false, &monitor_i18n::tr("cameras-edit-tip"), ROW_ICON);
-                    self.nav.item(&edit_button);
-                    self.focus_names.insert(edit_button.id, "cameras-edit-name");
-                    self.nav.item(&remove_button);
-                    self.focus_names.insert(remove_button.id, "cameras-remove-name");
-                    if remove_button.clicked() {
-                        // Only for a press that came from the keyboard or a
-                        // remote: a pointer does not move the focus anywhere else
-                        // in this program, so it must not appear to move it here
-                        // either.
-                        let from = (!remove_button.clicked_by(egui::PointerButton::Primary))
-                            .then_some(remove_button.id);
-                        ask_remove = Some((slot, camera.name.clone(), from));
-                    }
-                    if edit_button.clicked() {
-                        let from = (!edit_button.clicked_by(egui::PointerButton::Primary))
-                            .then_some(edit_button.id);
-                        edit = Some((slot, from));
-                    }
-                });
-            });
-            // The address, the display mode and where the camera came from, on
-            // a line of their own: squeezed onto the row above, they ran into
-            // each other. The mode is a button - a press moves it on to the
-            // next one - and the tile carries the same mode in its corner.
-            ui.horizontal(|ui| {
-                ui.add_space(theme::space::S);
-                let aspect = camera.aspect;
-                let aspect_button = ui
-                    .small_button(RichText::new(monitor_i18n::tr(aspect.label())).small().color(theme::ACCENT))
-                    .on_hover_text(monitor_i18n::tr("cameras-aspect-tip"));
-                self.nav.item(&aspect_button);
-                self.focus_names.insert(aspect_button.id, "cameras-aspect-name");
-                if aspect_button.clicked() {
-                    aspect_change = Some((slot, aspect.next()));
-                }
-                // The address follows the connection mode, so a camera on MSE
-                // reads out its MSE address. Where there is a second address,
-                // the tooltip names both.
-                let address = theme::truncate(&camera.masked_uri(StreamKind::Main), 26);
-                let address_label = ui.label(RichText::new(address).small().monospace().color(theme::TEXT_DIM));
-                if let Some(mse) = camera.masked_mse_uri(StreamKind::Main) {
-                    address_label.on_hover_text(format!(
-                        "rtsp: {}\nmse:  {}",
-                        camera.masked_rtsp_uri(StreamKind::Main),
-                        mse
-                    ));
-                }
-                ui.label(RichText::new(monitor_i18n::tr(camera.origin.label())).small().color(theme::TEXT_DIM));
-            });
-            ui.add_space(theme::space::XS);
+            self.camera_row(ui, slot, &mut actions);
         }
-        if let Some((slot, aspect)) = aspect_change {
+        if let Some((slot, aspect)) = actions.aspect_change {
             if let Some(camera) = self.config.cameras.get_mut(slot) {
                 camera.aspect = aspect;
             }
@@ -305,18 +223,18 @@ impl XgViewApp {
             // differently from this frame on.
             dirty = true;
         }
-        if let Some((slot, name, from)) = ask_remove {
+        if let Some((slot, name, from)) = actions.ask_remove {
             self.remove_confirm.open(RemoveConfirm { slot, name });
             self.remove_confirm.from = from;
         }
-        if let Some((slot, enabled)) = toggle {
+        if let Some((slot, enabled)) = actions.toggle {
             if let Some(camera) = self.config.cameras.get_mut(slot) {
                 camera.enabled = enabled;
             }
             self.needs_sync = true;
             dirty = true;
         }
-        if let Some(slot) = infer {
+        if let Some(slot) = actions.infer {
             if let Some(camera) = self.config.cameras.get_mut(slot) {
                 if camera.apply_sub_inference() {
                     self.needs_sync = true;
@@ -326,14 +244,14 @@ impl XgViewApp {
                 }
             }
         }
-        if let Some((slot, from)) = edit {
+        if let Some((slot, from)) = actions.edit {
             let draft = self.config.cameras.get(slot).map(CameraDraft::from_source);
             if let Some(draft) = draft {
                 self.camera_edit.open(CameraEdit { slot, draft });
                 self.camera_edit.from = from;
             }
         }
-        if let Some(slot) = connect_change {
+        if let Some(slot) = actions.connect_change {
             if let Some(camera) = self.config.cameras.get_mut(slot) {
                 camera.advance_connection();
             }
@@ -342,7 +260,7 @@ impl XgViewApp {
             self.needs_sync = true;
             dirty = true;
         }
-        if let Some(slot) = stream_change {
+        if let Some(slot) = actions.stream_change {
             if let Some(camera) = self.config.cameras.get_mut(slot) {
                 camera.advance_stream();
             }
@@ -353,6 +271,138 @@ impl XgViewApp {
             dirty = true;
         }
 
+        dirty
+    }
+
+    /// One camera of the group: its name, what it is pulling, and the four
+    /// controls that change it - on two lines, because the address and the mode
+    /// do not fit beside them. What was pressed is left in `actions` for the
+    /// caller to apply once the whole list has been drawn.
+    fn camera_row(&mut self, ui: &mut egui::Ui, slot: usize, actions: &mut RowActions) {
+        let camera = &mut self.config.cameras[slot];
+        ui.horizontal(|ui| {
+            let mut camera_enabled = camera.enabled;
+            let enable = ui.checkbox(&mut camera_enabled, "");
+            self.nav.item(&enable);
+            if enable.changed() {
+                actions.toggle = Some((slot, camera_enabled));
+            }
+            ui.label(RichText::new(camera.short_label(18)).strong());
+            if let Some(sub) = camera.rtsp_sub.as_deref() {
+                let inferred = sub_is_derived(camera, sub);
+                ui.label(
+                    RichText::new(monitor_i18n::tr(if inferred { "cameras-sub-derived" } else { "cameras-sub-set" }))
+                        .small()
+                        .color(theme::ACCENT),
+                );
+            } else if !camera.is_restream() && infer_sub_stream(&camera.rtsp_main).is_some() {
+                // The vendor sub-stream rules only match a camera's own
+                // address; a go2rtc or Frigate restream is a stream name, so
+                // the offer is drawn only where there is something to infer.
+                let infer_button = ui.small_button(monitor_i18n::tr("cameras-infer-sub"));
+                self.nav.item(&infer_button);
+                if infer_button.clicked() {
+                    actions.infer = Some(slot);
+                }
+            }
+            // The stream switch: a press moves this tile between the sub
+            // stream the wall pulls on every other one and the main stream
+            // the viewer pinned it to. It reads the tag the tile's corner
+            // reads - see `grid`'s stream item - under the same dot, so the
+            // row and the picture say the same thing, and it is drawn only
+            // where there is a second address to pull: with one address both
+            // of its stops are the same stream.
+            if camera.has_sub() {
+                let stream_button = ui
+                    .small_button(
+                        RichText::new(format!("● {}", monitor_i18n::tr(camera.grid_stream().tag())))
+                            .small()
+                            .color(theme::ACCENT),
+                    )
+                    .on_hover_text(monitor_i18n::tr("cameras-stream-tip"));
+                self.nav.item(&stream_button);
+                if stream_button.clicked() {
+                    actions.stream_change = Some(slot);
+                }
+            }
+            // The connection switch: a press moves the camera on to the next
+            // stop it offers - `AUTO/RTSP/MSE` for a camera with an MSE
+            // address, `TCP/UDP` for one on RTSP alone. Its tip names what it
+            // switches: the protocol where there are two to choose from, the
+            // RTSP transport where there is only RTSP. A camera carried over
+            // a WebSocket url has a single transport, so it has nothing to
+            // switch and the button is left off.
+            if !camera.is_ws_stream() {
+                let tip = if camera.has_mse() { "cameras-connect-tip" } else { "cameras-transport-tip" };
+                let connect_button = ui
+                    .small_button(RichText::new(camera.connection_label()).small().color(theme::ACCENT))
+                    .on_hover_text(monitor_i18n::tr(tip));
+                self.nav.item(&connect_button);
+                if connect_button.clicked() {
+                    actions.connect_change = Some(slot);
+                }
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // Drawn right to left so the pair reads edit, remove;
+                // registered edit first, so the walk reaches the control
+                // that changes before the one that deletes.
+                let remove_button = icons::button_sized(ui, Icon::Trash, false, false, &monitor_i18n::tr("cameras-remove-tip"), ROW_ICON);
+                let edit_button = icons::button_sized(ui, Icon::Edit, false, false, &monitor_i18n::tr("cameras-edit-tip"), ROW_ICON);
+                self.nav.item(&edit_button);
+                self.focus_names.insert(edit_button.id, "cameras-edit-name");
+                self.nav.item(&remove_button);
+                self.focus_names.insert(remove_button.id, "cameras-remove-name");
+                if remove_button.clicked() {
+                    // Only for a press that came from the keyboard or a
+                    // remote: a pointer does not move the focus anywhere else
+                    // in this program, so it must not appear to move it here
+                    // either.
+                    let from = (!remove_button.clicked_by(egui::PointerButton::Primary))
+                        .then_some(remove_button.id);
+                    actions.ask_remove = Some((slot, camera.name.clone(), from));
+                }
+                if edit_button.clicked() {
+                    let from = (!edit_button.clicked_by(egui::PointerButton::Primary))
+                        .then_some(edit_button.id);
+                    actions.edit = Some((slot, from));
+                }
+            });
+        });
+        // The address, the display mode and where the camera came from, on
+        // a line of their own: squeezed onto the row above, they ran into
+        // each other. The mode is a button - a press moves it on to the
+        // next one - and the tile carries the same mode in its corner.
+        ui.horizontal(|ui| {
+            ui.add_space(theme::space::S);
+            let aspect = camera.aspect;
+            let aspect_button = ui
+                .small_button(RichText::new(monitor_i18n::tr(aspect.label())).small().color(theme::ACCENT))
+                .on_hover_text(monitor_i18n::tr("cameras-aspect-tip"));
+            self.nav.item(&aspect_button);
+            self.focus_names.insert(aspect_button.id, "cameras-aspect-name");
+            if aspect_button.clicked() {
+                actions.aspect_change = Some((slot, aspect.next()));
+            }
+            // The address follows the connection mode, so a camera on MSE
+            // reads out its MSE address. Where there is a second address,
+            // the tooltip names both.
+            let address = theme::truncate(&camera.masked_uri(StreamKind::Main), 26);
+            let address_label = ui.label(RichText::new(address).small().monospace().color(theme::TEXT_DIM));
+            if let Some(mse) = camera.masked_mse_uri(StreamKind::Main) {
+                address_label.on_hover_text(format!(
+                    "rtsp: {}\nmse:  {}",
+                    camera.masked_rtsp_uri(StreamKind::Main),
+                    mse
+                ));
+            }
+            ui.label(RichText::new(monitor_i18n::tr(camera.origin.label())).small().color(theme::TEXT_DIM));
+        });
+        ui.add_space(theme::space::XS);
+    }
+
+    /// The button that starts rearranging. It changes nothing yet: the mode works
+    /// on a copy of the order, written back only when it is confirmed.
+    fn reorder_trigger(&mut self, ui: &mut egui::Ui) {
         // Rearranging begins here, and changes nothing yet: the mode works on a
         // copy of the order and the configuration is written only when it is
         // confirmed. Hidden with fewer than two cameras - there is nothing to
@@ -379,6 +429,12 @@ impl XgViewApp {
                 self.flash(monitor_i18n::tr("toast-reorder"), ToastKind::Info);
             }
         }
+    }
+
+    /// Renaming and removing the group on the wall - the uncommon half of the
+    /// selector, so they are at the foot of the page rather than in the strip.
+    fn group_foot(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut dirty = false;
 
         // Renaming and removing a group are the uncommon half of the selector,
         // so they are down here rather than in the strip: one field and one
@@ -477,6 +533,7 @@ impl XgViewApp {
                 dirty = true;
             }
         }
+
 
         dirty
     }
