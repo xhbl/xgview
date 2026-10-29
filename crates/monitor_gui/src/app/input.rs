@@ -752,7 +752,7 @@ impl XgViewApp {
         // because the answer would then have nowhere to go.
         if ((self.passphrase.as_ref().is_some_and(|prompt| !prompt.working))
             || self.camera_edit.is_some()
-            || self.remove_confirm.is_some()
+            || self.remove_confirm.is_open()
             || self.system_confirm.is_open())
             && self.dialog_back_pressed(ctx)
         {
@@ -761,12 +761,14 @@ impl XgViewApp {
                 // Backing out of it leaves the export or import unasked for, and
                 // the button behind the prompt takes the focus again.
                 self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
-            } else if let Some(confirm) = self.remove_confirm.take() {
-                self.remove_confirm_anchor = None;
-                self.restore_focus = confirm.from;
+            } else if self.remove_confirm.is_open() {
+                // The focus goes back to the button that opened it, which is
+                // then forgotten: a closed window does not keep pointing at one.
+                self.restore_focus = self.remove_confirm.from.take();
+                self.remove_confirm.close();
             } else if self.system_confirm.is_open() {
+                self.restore_focus = self.system_confirm.from.take();
                 self.system_confirm.close();
-                self.restore_focus = self.system_confirm.from;
             } else if let Some(edit) = self.camera_edit.take() {
                 self.camera_edit_anchor = None;
                 self.restore_focus = edit.from;
@@ -1014,7 +1016,7 @@ impl XgViewApp {
         // dialog can never be stacked on another.
         let dialog_open = self.discovery.open
             || self.camera_edit.is_some()
-            || self.remove_confirm.is_some()
+            || self.remove_confirm.is_open()
             || self.system_confirm.is_open()
             || self.passphrase.is_some();
         // The layout picker is a modal of its own, and it owns the keys while

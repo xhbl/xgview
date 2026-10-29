@@ -306,7 +306,8 @@ impl XgViewApp {
             dirty = true;
         }
         if let Some((slot, name, from)) = ask_remove {
-            self.remove_confirm = Some(RemoveConfirm { slot, name, from });
+            self.remove_confirm.open(RemoveConfirm { slot, name });
+            self.remove_confirm.from = from;
         }
         if let Some((slot, enabled)) = toggle {
             if let Some(camera) = self.config.cameras.get_mut(slot) {

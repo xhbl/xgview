@@ -134,9 +134,10 @@ impl XgViewApp {
     pub(super) fn remove_confirm_window(&mut self, ctx: &egui::Context) -> bool {
         // Taken for the frame, like the edit window, so the layer and the
         // question can be borrowed apart.
-        let Some(RemoveConfirm { slot, name, from }) = self.remove_confirm.take() else {
+        let Some(RemoveConfirm { slot, name }) = self.remove_confirm.take() else {
             return false;
         };
+        let from = self.remove_confirm.from;
         let mut remove = false;
         let mut cancel = false;
 
@@ -173,7 +174,7 @@ impl XgViewApp {
                 ui.add_space(Self::center_offset(ui, &[&keep_label, &remove_label]));
                 let keep_button = self.nav.tracked(ui.button(keep_label));
                 // The dialog opens on the answer that changes nothing.
-                self.remove_confirm_anchor = Some(keep_button.id);
+                self.remove_confirm.anchor = Some(keep_button.id);
                 if keep_button.clicked() {
                     cancel = true;
                 }
@@ -190,14 +191,14 @@ impl XgViewApp {
                 // The row is gone, so there is no button to hand the focus
                 // back to; the panel anchor picks it up.
                 self.needs_sync = true;
-                self.remove_confirm_anchor = None;
+                self.remove_confirm.close();
                 return true;
             }
         }
         if !cancel {
-            self.remove_confirm = Some(RemoveConfirm { slot, name, from });
+            self.remove_confirm.open(RemoveConfirm { slot, name });
         } else {
-            self.remove_confirm_anchor = None;
+            self.remove_confirm.close();
             self.restore_focus = from;
         }
         false

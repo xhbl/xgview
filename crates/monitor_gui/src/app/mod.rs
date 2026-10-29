@@ -450,7 +450,7 @@ impl Handoff {
 /// or `None`, which is a window that is not up - the frame it appeared on, the
 /// control it opens on, and the one it gives the focus back to when it closes.
 /// They were four fields per window, written out seven times and told apart by a
-/// suffix.
+/// suffix; five of the seven windows are on this type now.
 ///
 /// The payload is what makes one type serve both kinds of window: a picker has
 /// nothing to carry and holds `()`, while the camera form holds the draft being
@@ -467,6 +467,12 @@ struct Modal<T> {
     anchor: Option<Id>,
     /// The button that opened it, to give it back its focus when it closes.
     /// `None` when it was opened with a pointer, which moves no focus.
+    ///
+    /// A window that may still be put back copies it, because it has to hand it
+    /// on to the next frame; whoever gives the focus back takes it, so the modal
+    /// stops pointing at a button. One closed by the thing it was asking about -
+    /// a camera row that is no longer there - has nothing to give the focus back
+    /// to, and keeps it until the next `open` replaces it.
     from: Option<Id>,
 }
 
@@ -530,11 +536,6 @@ struct CameraEdit {
 struct RemoveConfirm {
     slot: usize,
     name: String,
-    /// The remove button that opened the window, to give it back its focus.
-    ///
-    /// `None` when the window was opened with a pointer - see
-    /// [`CameraEdit::from`].
-    from: Option<Id>,
 }
 
 /// What a passphrase prompt is for.
@@ -1101,11 +1102,7 @@ pub struct XgViewApp {
     /// Asked for in a window, so that a press on a bin icon - a shape, one
     /// press away from its neighbour - cannot drop a camera on its own, and so
     /// that the question cannot be walked past and left open.
-    remove_confirm: Option<RemoveConfirm>,
-    /// First control of the remove window, to hand it the focus as it opens.
-    remove_confirm_anchor: Option<Id>,
-    /// Watches the remove window for the frame it appears on.
-    remove_confirm_handoff: Handoff,
+    remove_confirm: Modal<RemoveConfirm>,
     /// A system action (exit or reboot) the settings panel is asking about.
     ///
     /// Asked for in a window, so that a press on a button beside its neighbour
@@ -1426,9 +1423,7 @@ impl XgViewApp {
             camera_edit: None,
             camera_edit_anchor: None,
             camera_edit_handoff: Handoff::default(),
-            remove_confirm: None,
-            remove_confirm_anchor: None,
-            remove_confirm_handoff: Handoff::default(),
+            remove_confirm: Modal::default(),
             system_confirm: Modal::default(),
             focus_group_name: false,
             group_remove: None,
@@ -1484,8 +1479,8 @@ impl XgViewApp {
     fn panel_anchor(&self) -> Option<Id> {
         if self.passphrase.is_some() {
             self.passphrase_anchor
-        } else if self.remove_confirm.is_some() {
-            self.remove_confirm_anchor
+        } else if self.remove_confirm.is_open() {
+            self.remove_confirm.anchor
         } else if self.system_confirm.is_open() {
             self.system_confirm.anchor
         } else if self.camera_edit.is_some() {
@@ -2108,9 +2103,9 @@ impl XgViewApp {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
-        if self.remove_confirm_handoff.entering(self.remove_confirm.is_some()) {
+        if self.remove_confirm.handoff.entering(self.remove_confirm.is_open()) {
             self.swallow_enter = 10;
-            if let Some(id) = self.remove_confirm_anchor {
+            if let Some(id) = self.remove_confirm.anchor {
                 ctx.memory_mut(|memory| memory.request_focus(id));
             }
         }
