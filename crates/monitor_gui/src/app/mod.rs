@@ -499,6 +499,17 @@ impl<T> Modal<T> {
         self.anchor = None;
     }
 
+    /// Closes the window and hands back the control the focus came from.
+    ///
+    /// One call rather than two, because the two have an order: the focus has to
+    /// be taken before the window is closed, or the modal has already stopped
+    /// remembering where it came from. See [`Modal::from`].
+    fn close_restoring(&mut self) -> Option<Id> {
+        self.payload = None;
+        self.anchor = None;
+        self.from.take()
+    }
+
     /// Takes the payload out for the frame it is being drawn on.
     ///
     /// The window is drawn with the payload in hand and the rest of the

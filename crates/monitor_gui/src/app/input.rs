@@ -605,8 +605,7 @@ impl XgViewApp {
                 || input.consume_key(none, Key::Backspace)
         });
         if back {
-            self.combined_info_picker.close();
-            self.restore_focus = self.combined_info_picker.from.take();
+            self.restore_focus = self.combined_info_picker.close_restoring();
             return;
         }
 
@@ -764,11 +763,9 @@ impl XgViewApp {
             } else if self.remove_confirm.is_open() {
                 // The focus goes back to the button that opened it, which is
                 // then forgotten: a closed window does not keep pointing at one.
-                self.restore_focus = self.remove_confirm.from.take();
-                self.remove_confirm.close();
+                self.restore_focus = self.remove_confirm.close_restoring();
             } else if self.system_confirm.is_open() {
-                self.restore_focus = self.system_confirm.from.take();
-                self.system_confirm.close();
+                self.restore_focus = self.system_confirm.close_restoring();
             } else if let Some(edit) = self.camera_edit.take() {
                 self.camera_edit_anchor = None;
                 self.restore_focus = edit.from;
@@ -1183,11 +1180,9 @@ impl XgViewApp {
                     self.tile_bar.hide();
                     self.leave_controls(ctx);
                 } else if self.layout_picker.is_open() {
-                    self.layout_picker.close();
-                    self.restore_focus = self.layout_picker.from.take();
+                    self.restore_focus = self.layout_picker.close_restoring();
                 } else if self.portrait_aspect_picker.is_open() {
-                    self.portrait_aspect_picker.close();
-                    self.restore_focus = self.portrait_aspect_picker.from.take();
+                    self.restore_focus = self.portrait_aspect_picker.close_restoring();
                 } else if self.discovery.open {
                     self.discovery.open = false;
                     self.restore_focus = self.discovery.from.take();

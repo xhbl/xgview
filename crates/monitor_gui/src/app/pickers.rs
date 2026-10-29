@@ -102,11 +102,9 @@ impl XgViewApp {
 
         if let Some(layout) = chosen {
             self.set_layout(layout);
-            self.layout_picker.close();
-            self.restore_focus = self.layout_picker.from.take();
+            self.restore_focus = self.layout_picker.close_restoring();
         } else if close {
-            self.layout_picker.close();
-            self.restore_focus = self.layout_picker.from.take();
+            self.restore_focus = self.layout_picker.close_restoring();
         }
     }
 
@@ -196,8 +194,7 @@ impl XgViewApp {
             self.mark_dirty();
         }
         if close {
-            self.portrait_aspect_picker.close();
-            self.restore_focus = self.portrait_aspect_picker.from.take();
+            self.restore_focus = self.portrait_aspect_picker.close_restoring();
         }
     }
 
@@ -320,8 +317,7 @@ impl XgViewApp {
             self.mark_dirty();
         }
         if close {
-            self.combined_info_picker.close();
-            self.restore_focus = self.combined_info_picker.from.take();
+            self.restore_focus = self.combined_info_picker.close_restoring();
         }
     }
 }
