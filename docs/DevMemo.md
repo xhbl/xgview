@@ -3707,7 +3707,7 @@ failure panel for as long as the failure lasted, the one thing on the tile still
 claiming that something was on its way. A channel that has given up lets go of
 the frame: holding it is a promise.
 
-## 49. Splitting seven files, and the four ways a scripted move lies
+## 49. Splitting seven files, and the five ways a scripted move lies
 
 *Landed 2026-10-28, in 1.5.78 to 1.5.97.*
 
@@ -3722,6 +3722,16 @@ counter catches a lost line and says nothing about a reordered one - and order i
 the whole of what `update` was. What works is to concatenate the new methods in
 the order the caller invokes them and diff that against the old body: 733 lines
 against 733, no difference, for the frame split.
+
+*And the multiset is blind to an equal substitution.* It balances in total, and
+only in total: a line dropped from one method and an identical line added to
+another cancel, and the count comes back even with the code broken. The
+`handle_keys` split read as seven lines missing and forty-six added - `});`,
+three `return;`, `if typing {`, `if !nav_owns {`, `ctx.input_mut(|input| {` -
+and the counter could say that the totals had moved and nothing about where
+those seven had gone. Each was traced by hand to the method that now holds it.
+A removed line is accounted for when it can be named where it went; the counter
+is where the search starts, not where it ends.
 
 *Filtering comments out of that check hides the damage.* A move script that
 replaces identifiers does not know a comment from code, so `channels` became

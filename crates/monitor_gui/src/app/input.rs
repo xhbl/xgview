@@ -1138,6 +1138,74 @@ impl XgViewApp {
         }
     }
 
+    /// The keys the bars, the panels and the windows answer, while the wall does
+    /// not have them.
+    ///
+    /// The layer ends the chain: with the wall not holding the keys, one of
+    /// these surfaces has them, and nothing below this point is reached.
+    fn keys_off_the_grid(&mut self, ctx: &egui::Context, keys: &Keys) {
+        // The magnified viewport's bar opens on its seat, which is not one
+        // of its controls: the first arrow is what steps off it, onto the
+        // first control - the handset while a call is up - and no arrow ever
+        // walks back onto it. See `tilebar::seat`.
+        if self.tile_bar.is_open()
+            && ctx.memory(|memory| memory.focused()) == Some(tilebar::seat())
+            && (keys.left || keys.right || keys.up || keys.down)
+        {
+            ctx.memory_mut(|memory| memory.request_focus(tilebar::control(0)));
+        }
+        // egui has walked the focus already - and dropped it, if this was
+        // Escape. Back is therefore one step out of the controls and not
+        // two: a panel opened over the wall closes, and otherwise the wall
+        // takes the keys back.
+        if keys.back {
+            #[cfg(juanz)]
+            if crate::juanz::close(ctx) {
+                return;
+            }
+            // Back unwinds one layer at a time, and the magnified viewport's
+            // bar is a layer: it goes first, before the panels behind it and
+            // long before the magnification. The focus goes back to the wall
+            // with it, or the next press would be read by nothing at all.
+            //
+            // A call is a layer of its own, above the bar: Back ends it, the
+            // same as the handset, and leaves the picture where it is.
+            if self.talking {
+                self.set_talking(false);
+            } else if self.tile_bar.is_open() {
+                self.tile_bar.hide();
+                self.leave_controls(ctx);
+            } else if self.layout_picker.is_open() {
+                self.restore_focus = self.layout_picker.close_restoring();
+            } else if self.portrait_aspect_picker.is_open() {
+                self.restore_focus = self.portrait_aspect_picker.close_restoring();
+            } else if self.discovery.open {
+                self.discovery.open = false;
+                self.restore_focus = self.discovery.from.take();
+            } else if self.show_settings {
+                self.show_settings = false;
+            } else {
+                self.leave_controls(ctx);
+            }
+        } else if keys.down && !self.show_settings && self.toolbar_has_focus(ctx) {
+            // Below the bar there is only the wall, so the arrow that walks
+            // off the bottom of it hands the keys back.
+            self.leave_controls(ctx);
+        } else if keys.up && self.status_has_focus(ctx) {
+            // The status row is below the wall, so the arrow back to the
+            // wall from it is Up, the mirror of the one that came down.
+            self.leave_controls(ctx);
+        }
+        if keys.enter {
+            let focused = ctx.memory(|memory| memory.focused());
+            if focused == Some(Id::new("portrait-prev-page")) {
+                self.advance(false, true);
+            } else if focused == Some(Id::new("portrait-next-page")) {
+                self.advance(true, true);
+            }
+        }
+    }
+
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
         // The file dialog owns the keyboard while it is up. Its own keybindings
         // and egui's focus walk are how a viewer moves around it, and the arrows
@@ -1304,66 +1372,7 @@ impl XgViewApp {
         }
 
         if !grid_owns {
-            // The magnified viewport's bar opens on its seat, which is not one
-            // of its controls: the first arrow is what steps off it, onto the
-            // first control - the handset while a call is up - and no arrow ever
-            // walks back onto it. See `tilebar::seat`.
-            if self.tile_bar.is_open()
-                && ctx.memory(|memory| memory.focused()) == Some(tilebar::seat())
-                && (keys.left || keys.right || keys.up || keys.down)
-            {
-                ctx.memory_mut(|memory| memory.request_focus(tilebar::control(0)));
-            }
-            // egui has walked the focus already - and dropped it, if this was
-            // Escape. Back is therefore one step out of the controls and not
-            // two: a panel opened over the wall closes, and otherwise the wall
-            // takes the keys back.
-            if keys.back {
-                #[cfg(juanz)]
-                if crate::juanz::close(ctx) {
-                    return;
-                }
-                // Back unwinds one layer at a time, and the magnified viewport's
-                // bar is a layer: it goes first, before the panels behind it and
-                // long before the magnification. The focus goes back to the wall
-                // with it, or the next press would be read by nothing at all.
-                //
-                // A call is a layer of its own, above the bar: Back ends it, the
-                // same as the handset, and leaves the picture where it is.
-                if self.talking {
-                    self.set_talking(false);
-                } else if self.tile_bar.is_open() {
-                    self.tile_bar.hide();
-                    self.leave_controls(ctx);
-                } else if self.layout_picker.is_open() {
-                    self.restore_focus = self.layout_picker.close_restoring();
-                } else if self.portrait_aspect_picker.is_open() {
-                    self.restore_focus = self.portrait_aspect_picker.close_restoring();
-                } else if self.discovery.open {
-                    self.discovery.open = false;
-                    self.restore_focus = self.discovery.from.take();
-                } else if self.show_settings {
-                    self.show_settings = false;
-                } else {
-                    self.leave_controls(ctx);
-                }
-            } else if keys.down && !self.show_settings && self.toolbar_has_focus(ctx) {
-                // Below the bar there is only the wall, so the arrow that walks
-                // off the bottom of it hands the keys back.
-                self.leave_controls(ctx);
-            } else if keys.up && self.status_has_focus(ctx) {
-                // The status row is below the wall, so the arrow back to the
-                // wall from it is Up, the mirror of the one that came down.
-                self.leave_controls(ctx);
-            }
-            if keys.enter {
-                let focused = ctx.memory(|memory| memory.focused());
-                if focused == Some(Id::new("portrait-prev-page")) {
-                    self.advance(false, true);
-                } else if focused == Some(Id::new("portrait-next-page")) {
-                    self.advance(true, true);
-                }
-            }
+            self.keys_off_the_grid(ctx, &keys);
             return;
         }
 
