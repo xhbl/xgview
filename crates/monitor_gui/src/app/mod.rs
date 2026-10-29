@@ -484,6 +484,35 @@ impl<T> Default for Modal<T> {
     }
 }
 
+/// What a window's body decided about itself.
+///
+/// The two questions are separate: whether the window stays up, and whether what
+/// it did changed the configuration. A third decides what happens to the focus,
+/// because one of them - the question about a camera that has just been removed -
+/// closes with nothing left to give it back to.
+#[derive(Debug, Clone, Copy)]
+struct Answer {
+    /// Whether the window stays up for another frame.
+    keep: bool,
+    /// Whether what it did changed the configuration, which the caller is told.
+    changed: bool,
+    /// Whether the focus goes back to the button the window was opened from.
+    restore: bool,
+}
+
+impl Answer {
+    /// Stay up, having changed nothing.
+    const STAY: Answer = Answer { keep: true, changed: false, restore: false };
+    /// Stay up, having changed the configuration.
+    const STAY_CHANGED: Answer = Answer { keep: true, changed: true, restore: false };
+    /// Close, and give the focus back.
+    const CLOSE: Answer = Answer { keep: false, changed: false, restore: true };
+    /// Close, give the focus back, and say the configuration changed.
+    const CLOSE_CHANGED: Answer = Answer { keep: false, changed: true, restore: true };
+    /// Close without giving the focus back: what it asked about is gone.
+    const CLOSE_LEAVING_THE_FOCUS: Answer = Answer { keep: false, changed: true, restore: false };
+}
+
 impl<T> Modal<T> {
     /// Whether the window is up.
     fn is_open(&self) -> bool {
@@ -1170,6 +1199,45 @@ mod wall;
 mod windows;
 
 impl XgViewApp {
+    /// Draws one window: takes its payload, hands it to `body`, and puts it back
+    /// or closes it on the answer.
+    ///
+    /// A modal rather than a panel, for all seven of them: centred, and its
+    /// backdrop swallows the presses that would otherwise reach the wall behind
+    /// it. A window is left only by its own buttons, or by Back.
+    ///
+    /// `body` is handed the application too, because most of these windows do
+    /// more than draw - one saves a camera, one starts a reboot, one leaves a
+    /// passphrase stretching on a thread. What they all do *around* that is the
+    /// same, and it is here: take the payload, draw it in a modal of the given
+    /// width, then put it back or close it and give the focus back.
+    fn modal_frame<T>(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+        width: f32,
+        slot: impl Fn(&mut Self) -> &mut Modal<T>,
+        body: impl FnOnce(&mut Self, &mut egui::Ui, &mut T) -> Answer,
+    ) -> Answer {
+        let Some(mut payload) = slot(self).take() else {
+            return Answer::STAY;
+        };
+        let mut answer = Answer::STAY;
+        egui::Modal::new(Id::new(id)).show(ctx, |ui| {
+            ui.set_width(width);
+            answer = body(self, ui, &mut payload);
+        });
+        if answer.keep {
+            slot(self).open(payload);
+        } else if answer.restore {
+            let from = slot(self).close_restoring();
+            self.restore_focus = from;
+        } else {
+            slot(self).close();
+        }
+        answer
+    }
+
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         options: RunOptions,

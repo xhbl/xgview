@@ -11,195 +11,187 @@ impl XgViewApp {
     /// entry it is editing, so a changed url repoints the camera instead of
     /// adding a second one. Returns `true` when the configuration changed.
     pub(super) fn camera_edit_window(&mut self, ctx: &egui::Context) -> bool {
-        // Taken for the frame, so the form and the navigation layer can be
-        // borrowed apart; put back unless the window was closed or saved.
-        let Some(CameraEdit { slot, mut draft }) = self.camera_edit.take() else {
-            return false;
-        };
-        let mut save = false;
-        let mut cancel = false;
-        let mut detach = false;
-        let mut test = false;
-        // The form edits the camera where it lives, so the heading names the
-        // group it is in - when there is more than one to tell apart.
-        let group = self
-            .config
-            .cameras
-            .get(slot)
-            .map(|camera| usize::from(camera.group))
-            .unwrap_or(0);
-        let title = dialogs::group_heading(
-            &self.config,
-            group,
-            "camera-edit-title",
-            "camera-edit-title-group",
-        );
-        // The form reads the entry to decide what it draws - greyed addresses
-        // for an imported camera, and no "infer sub" offer on a restream. It is
-        // read afresh each frame, so pressing Detach unlocks it on the spot.
-        let camera = self.config.cameras.get(slot);
+        self.modal_frame(
+            ctx,
+            "xgview-edit-camera",
+            560.0,
+            |app| &mut app.camera_edit,
+            |app, ui, edit| {
+                // The form edits the camera where it lives, so the heading names
+                // the group it is in - when there is more than one to tell apart.
+                let group = app
+                    .config
+                    .cameras
+                    .get(edit.slot)
+                    .map(|camera| usize::from(camera.group))
+                    .unwrap_or(0);
+                let title = dialogs::group_heading(
+                    &app.config,
+                    group,
+                    "camera-edit-title",
+                    "camera-edit-title-group",
+                );
+                // The form reads the entry to decide what it draws - greyed
+                // addresses for an imported camera, and no "infer sub" offer on a
+                // restream. It is read afresh each frame, so pressing Detach
+                // unlocks it on the spot.
+                let camera = app.config.cameras.get(edit.slot);
 
-        // A modal: centred, and its backdrop swallows the presses that would
-        // otherwise reach the panel it was opened from. It is left only by its
-        // own buttons (or Back) - a press on the backdrop does nothing.
-        egui::Modal::new(Id::new("xgview-edit-camera")).show(ctx, |ui| {
-            ui.set_width(560.0);
-            dialogs::title_bar(ui, &title, false, "");
-            self.nav.open("edit-body");
-            let fields = dialogs::camera_fields(ui, &mut self.nav, "edit-camera", &mut draft, camera);
-            // The dialog opens on the first control of the form.
-            self.camera_edit.anchor = fields.first;
-            if fields.detach {
-                detach = true;
-            }
-            if fields.test {
-                test = true;
-            }
-            if fields.inferred {
-                ui.label(RichText::new(monitor_i18n::tr("camera-edit-sub-derived")).small().color(theme::LIVE));
-            }
-            ui.add_space(theme::space::M);
-            ui.horizontal(|ui| {
-                let save_label = monitor_i18n::tr("save");
-                let cancel_label = monitor_i18n::tr("cancel");
-                ui.add_space(Self::center_offset(ui, &[&save_label, &cancel_label]));
-                if self.nav.tracked(ui.button(save_label)).clicked() {
-                    save = true;
+                dialogs::title_bar(ui, &title, false, "");
+                app.nav.open("edit-body");
+                let fields =
+                    dialogs::camera_fields(ui, &mut app.nav, "edit-camera", &mut edit.draft, camera);
+                // The dialog opens on the first control of the form.
+                app.camera_edit.anchor = fields.first;
+                if fields.inferred {
+                    ui.label(
+                        RichText::new(monitor_i18n::tr("camera-edit-sub-derived"))
+                            .small()
+                            .color(theme::LIVE),
+                    );
                 }
-                if self.nav.tracked(ui.button(cancel_label)).clicked() {
-                    cancel = true;
-                }
-            });
-            self.nav.close();
-        });
-
-        if test {
-            match draft.build() {
-                Ok(source) => self.spawn_test_tone(source),
-                Err(error) => self.flash(error, ToastKind::Error),
-            }
-        }
-
-        if detach {
-            // The camera leaves the import's hands: its MSE address and login go
-            // with the mark, so its addresses can be edited by hand without one
-            // falling out of step. The window stays open, now unlocked.
-            if let Some(camera) = self.config.cameras.get_mut(slot) {
-                camera.detach();
-            }
-            self.needs_sync = true;
-            self.camera_edit.open(CameraEdit { slot, draft });
-            return true;
-        }
-
-        if save {
-            match draft.build() {
-                Ok(source) => {
-                    // Only what the form shows is written back. The entry keeps
-                    // its identifier, its origin, its transport and everything
-                    // else the form has no field for - the display aspect among
-                    // them - so an edit to a name or a url cannot reset them.
-                    match self.config.cameras.get_mut(slot) {
-                        Some(camera) => camera.apply_edit(&source),
-                        None => {
-                            self.config.upsert_camera(source);
-                        }
+                ui.add_space(theme::space::M);
+                let mut save = false;
+                let mut cancel = false;
+                ui.horizontal(|ui| {
+                    let save_label = monitor_i18n::tr("save");
+                    let cancel_label = monitor_i18n::tr("cancel");
+                    ui.add_space(Self::center_offset(ui, &[&save_label, &cancel_label]));
+                    if app.nav.tracked(ui.button(save_label)).clicked() {
+                        save = true;
                     }
-                    self.needs_sync = true;
-                    // The focus goes back to the button the window was opened
-                    // from, not to the first control of the panel - and only
-                    // when that button was reached with the keyboard or a
-                    // remote. See `Modal::from`.
-                    self.restore_focus = self.camera_edit.close_restoring();
-                    return true;
+                    if app.nav.tracked(ui.button(cancel_label)).clicked() {
+                        cancel = true;
+                    }
+                });
+                app.nav.close();
+
+                if fields.test {
+                    match edit.draft.build() {
+                        Ok(source) => app.spawn_test_tone(source),
+                        Err(error) => app.flash(error, ToastKind::Error),
+                    }
                 }
-                Err(error) => self.flash(error, ToastKind::Error),
-            }
-        }
-        if !cancel {
-            self.camera_edit.open(CameraEdit { slot, draft });
-        } else {
-            self.restore_focus = self.camera_edit.close_restoring();
-        }
-        false
+
+                if fields.detach {
+                    // The camera leaves the import's hands: its MSE address and
+                    // login go with the mark, so its addresses can be edited by
+                    // hand without one falling out of step. The window stays
+                    // open, now unlocked.
+                    if let Some(camera) = app.config.cameras.get_mut(edit.slot) {
+                        camera.detach();
+                    }
+                    app.needs_sync = true;
+                    return Answer::STAY_CHANGED;
+                }
+
+                if save {
+                    match edit.draft.build() {
+                        Ok(source) => {
+                            // Only what the form shows is written back. The entry
+                            // keeps its identifier, its origin, its transport and
+                            // everything else the form has no field for - the
+                            // display aspect among them - so an edit to a name or
+                            // a url cannot reset them.
+                            match app.config.cameras.get_mut(edit.slot) {
+                                Some(camera) => camera.apply_edit(&source),
+                                None => {
+                                    app.config.upsert_camera(source);
+                                }
+                            }
+                            app.needs_sync = true;
+                            // The focus goes back to the button the window was
+                            // opened from, not to the first control of the panel -
+                            // and only when that button was reached with the
+                            // keyboard or a remote. See `Modal::from`.
+                            return Answer::CLOSE_CHANGED;
+                        }
+                        Err(error) => app.flash(error, ToastKind::Error),
+                    }
+                }
+
+                if cancel {
+                    Answer::CLOSE
+                } else {
+                    Answer::STAY
+                }
+            },
+        )
+        .changed
     }
 
     /// The window the settings panel asks about removing a camera in.
     ///
-    /// A window rather than a question drawn into the row: a row that turns
-    /// into its own question can be walked past and left that way, while a
-    /// window has one way out. Returns `true` when the configuration changed.
+    /// A window rather than a question drawn into the row: a row that turns into
+    /// its own question can be walked past and left that way, while a window has
+    /// one way out. Returns `true` when the camera was removed.
     pub(super) fn remove_confirm_window(&mut self, ctx: &egui::Context) -> bool {
-        // Taken for the frame, like the edit window, so the layer and the
-        // question can be borrowed apart.
-        let Some(RemoveConfirm { slot, name }) = self.remove_confirm.take() else {
-            return false;
-        };
-        let from = self.remove_confirm.from;
-        let mut remove = false;
-        let mut cancel = false;
+        let answer = self.modal_frame(
+            ctx,
+            "xgview-remove-camera",
+            380.0,
+            |app| &mut app.remove_confirm,
+            |app, ui, confirm| {
+                // The heading names the group the camera is leaving when there is
+                // more than one to tell apart, as the edit window's names the
+                // group it is in: two groups can hold a camera of the same name.
+                let group = app
+                    .config
+                    .cameras
+                    .get(confirm.slot)
+                    .map(|camera| usize::from(camera.group))
+                    .unwrap_or(0);
+                let title = dialogs::remove_title(&app.config, group, &confirm.name);
 
-        // The heading names the group the camera is leaving when there is more
-        // than one to tell apart, as the edit window's names the group it is in:
-        // two groups can hold a camera of the same name.
-        let group = self
-            .config
-            .cameras
-            .get(slot)
-            .map(|camera| usize::from(camera.group))
-            .unwrap_or(0);
-        let title = dialogs::remove_title(&self.config, group, &name);
+                // The question is its own column of the navigation layer, as the
+                // edit window is: without it the two answers are not registered
+                // at all, and the arrows are left to egui's geometric walk -
+                // which the panel behind then takes away from them.
+                app.nav.open("confirm-body");
+                dialogs::title_bar(ui, &title, false, "");
+                ui.label(
+                    RichText::new(monitor_i18n::tr("remove-hint"))
+                        .small()
+                        .color(theme::TEXT_DIM),
+                );
+                ui.add_space(theme::space::M);
+                let mut remove = false;
+                let mut cancel = false;
+                ui.horizontal(|ui| {
+                    let keep_label = monitor_i18n::tr("action-keep");
+                    let remove_label = monitor_i18n::tr("action-remove");
+                    ui.add_space(Self::center_offset(ui, &[&keep_label, &remove_label]));
+                    let keep_button = app.nav.tracked(ui.button(keep_label));
+                    // The dialog opens on the answer that changes nothing.
+                    app.remove_confirm.anchor = Some(keep_button.id);
+                    if keep_button.clicked() {
+                        cancel = true;
+                    }
+                    if app
+                        .nav
+                        .tracked(ui.button(RichText::new(remove_label).color(theme::ERROR)))
+                        .clicked()
+                    {
+                        remove = true;
+                    }
+                });
+                app.nav.close();
 
-        // A modal, like the edit window: centred, and nothing behind it answers.
-        // Its own buttons (or Back) are the only way out.
-        egui::Modal::new(Id::new("xgview-remove-camera")).show(ctx, |ui| {
-            // The question is its own column of the navigation layer, as the
-            // edit window is: without it the two answers are not registered at
-            // all, and the arrows are left to egui's geometric walk - which the
-            // panel behind then takes away from them.
-            self.nav.open("confirm-body");
-            ui.set_width(380.0);
-            dialogs::title_bar(ui, &title, false, "");
-            ui.label(
-                RichText::new(monitor_i18n::tr("remove-hint"))
-                    .small()
-                    .color(theme::TEXT_DIM),
-            );
-            ui.add_space(theme::space::M);
-            ui.horizontal(|ui| {
-                let keep_label = monitor_i18n::tr("action-keep");
-                let remove_label = monitor_i18n::tr("action-remove");
-                ui.add_space(Self::center_offset(ui, &[&keep_label, &remove_label]));
-                let keep_button = self.nav.tracked(ui.button(keep_label));
-                // The dialog opens on the answer that changes nothing.
-                self.remove_confirm.anchor = Some(keep_button.id);
-                if keep_button.clicked() {
-                    cancel = true;
+                if remove && confirm.slot < app.config.cameras.len() {
+                    app.config.cameras.remove(confirm.slot);
+                    // The row is gone, so there is no button to hand the focus
+                    // back to; the panel anchor picks it up.
+                    app.needs_sync = true;
+                    return Answer::CLOSE_LEAVING_THE_FOCUS;
                 }
-                if self.nav.tracked(ui.button(RichText::new(remove_label).color(theme::ERROR))).clicked() {
-                    remove = true;
+                if cancel {
+                    Answer::CLOSE
+                } else {
+                    Answer::STAY
                 }
-            });
-            self.nav.close();
-        });
-
-        if remove {
-            if slot < self.config.cameras.len() {
-                self.config.cameras.remove(slot);
-                // The row is gone, so there is no button to hand the focus
-                // back to; the panel anchor picks it up.
-                self.needs_sync = true;
-                self.remove_confirm.close();
-                return true;
-            }
-        }
-        if !cancel {
-            self.remove_confirm.open(RemoveConfirm { slot, name });
-        } else {
-            self.remove_confirm.close();
-            self.restore_focus = from;
-        }
-        false
+            },
+        );
+        answer.changed
     }
 
     /// The reboot confirmation window.
