@@ -2285,6 +2285,24 @@ sprop-vps=QAEMAf//AWAAAAMAkAAAAwAAAwB4mcCQ";
         writer.flush().await.unwrap();
     }
 
+    /// The answer a server gives `DESCRIBE`: the session description it was handed,
+    /// with the length it needs.
+    ///
+    /// Every server below says the same thing here, and the only part that differs
+    /// between them is the sequence number.
+    async fn answer_describe(writer: &mut OwnedWriteHalf, cseq: u32, sdp: &str) {
+        write_response(
+            writer,
+            &format!(
+                "RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nContent-Type: application/sdp\r\n\
+                 Content-Length: {}\r\n\r\n{sdp}",
+                sdp.len()
+            ),
+        )
+        .await;
+    }
+
+
     #[tokio::test]
     async fn answers_a_digest_challenge_and_replays_the_request() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2317,15 +2335,7 @@ sprop-vps=QAEMAf//AWAAAAMAkAAAAwAAAwB4mcCQ";
                 .expect("replayed request carries an Authorization header");
 
             let sdp = "v=0\r\nm=video 0 RTP/AVP 96\r\na=control:trackID=1\r\n";
-            write_response(
-                &mut write_half,
-                &format!(
-                    "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
-                     Content-Length: {}\r\n\r\n{sdp}",
-                    sdp.len()
-                ),
-            )
-            .await;
+            answer_describe(&mut write_half, 2, sdp).await;
             authorization
         });
 
@@ -2430,15 +2440,7 @@ sprop-vps=QAEMAf//AWAAAAMAkAAAAwAAAwB4mcCQ";
                 if method.starts_with("OPTIONS") {
                     write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
                 } else if method.starts_with("DESCRIBE") {
-                    write_response(
-                        &mut write_half,
-                        &format!(
-                            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
-                             Content-Length: {}\r\n\r\n{sdp}",
-                            sdp.len()
-                        ),
-                    )
-                    .await;
+                    answer_describe(&mut write_half, 2, sdp).await;
                 } else if method.starts_with("SETUP") {
                     write_response(
                         &mut write_half,
@@ -2490,15 +2492,7 @@ a=control:trackID=1\r\n";
                 if method.starts_with("OPTIONS") {
                     write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
                 } else if method.starts_with("DESCRIBE") {
-                    write_response(
-                        &mut write_half,
-                        &format!(
-                            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
-                             Content-Length: {}\r\n\r\n{sdp}",
-                            sdp.len()
-                        ),
-                    )
-                    .await;
+                    answer_describe(&mut write_half, 2, sdp).await;
                 } else if method.starts_with("SETUP") {
                     // Confirm a pair of its own rather than the requested 0-1.
                     write_response(
@@ -2579,15 +2573,7 @@ a=sendonly\r\n";
                 } else if method.starts_with("DESCRIBE") {
                     assert_eq!(method, format!("DESCRIBE rtsp://127.0.0.1:{port}/cam RTSP/1.0"));
                     assert!(request.iter().any(|line| line.contains("ver20/backchannel")));
-                    write_response(
-                        &mut write_half,
-                        &format!(
-                            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
-                             Content-Length: {}\r\n\r\n{sdp}",
-                            sdp.len()
-                        ),
-                    )
-                    .await;
+                    answer_describe(&mut write_half, 2, sdp).await;
                 } else if method.starts_with("SETUP") {
                     let transport = request
                         .iter()
@@ -2667,15 +2653,7 @@ a=sendonly\r\n";
                     write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
                 } else if method.starts_with("DESCRIBE") {
                     assert!(request.iter().any(|line| line.contains("ver20/backchannel")));
-                    write_response(
-                        &mut write_half,
-                        &format!(
-                            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
-                             Content-Length: {}\r\n\r\n{sdp}",
-                            sdp.len()
-                        ),
-                    )
-                    .await;
+                    answer_describe(&mut write_half, 2, sdp).await;
                 } else if method.starts_with("SETUP") {
                     let transport = request
                         .iter()
@@ -2755,15 +2733,7 @@ a=sendonly\r\n";
                         .await;
                     } else {
                         plain_describes += 1;
-                        write_response(
-                            &mut write_half,
-                            &format!(
-                                "RTSP/1.0 200 OK\r\nCSeq: 3\r\nContent-Type: application/sdp\r\n\
-                                 Content-Length: {}\r\n\r\n{sdp}",
-                                sdp.len()
-                            ),
-                        )
-                        .await;
+                        answer_describe(&mut write_half, 3, sdp).await;
                     }
                 } else if method.starts_with("SETUP") {
                     write_response(
@@ -2827,15 +2797,7 @@ a=sendonly\r\n";
                     write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
                 } else if method.starts_with("DESCRIBE") {
                     assert_eq!(method, format!("DESCRIBE rtsp://127.0.0.1:{port}/videoMain RTSP/1.0"));
-                    write_response(
-                        &mut write_half,
-                        &format!(
-                            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
-                             Content-Length: {}\r\n\r\n{sdp}",
-                            sdp.len()
-                        ),
-                    )
-                    .await;
+                    answer_describe(&mut write_half, 2, sdp).await;
                 } else if method.starts_with("SETUP") {
                     assert_eq!(
                         method,
@@ -2909,15 +2871,7 @@ a=sendonly\r\n";
                         )
                         .await;
                     } else {
-                        write_response(
-                            &mut write_half,
-                            &format!(
-                                "RTSP/1.0 200 OK\r\nCSeq: 4\r\nContent-Type: application/sdp\r\n\
-                                 Content-Length: {}\r\n\r\n{sdp}",
-                                sdp.len()
-                            ),
-                        )
-                        .await;
+                        answer_describe(&mut write_half, 4, sdp).await;
                     }
                 } else if method.starts_with("SETUP") {
                     write_response(
@@ -3017,15 +2971,7 @@ a=sendonly\r\n";
                 if method.starts_with("OPTIONS") {
                     write_response(&mut write_half, "RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
                 } else if method.starts_with("DESCRIBE") {
-                    write_response(
-                        &mut write_half,
-                        &format!(
-                            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\n\
-                             Content-Length: {}\r\n\r\n{sdp}",
-                            sdp.len()
-                        ),
-                    )
-                    .await;
+                    answer_describe(&mut write_half, 2, sdp).await;
                 } else if method.starts_with("SETUP") {
                     let transport = request
                         .iter()
