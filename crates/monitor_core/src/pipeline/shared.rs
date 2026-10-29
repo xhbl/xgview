@@ -1,5 +1,6 @@
-//! What every session shares: where it publishes, what it opens to decode,
-//! and the one H.264 declaration a hardware decoder has no mode for.
+//! What every session shares: the sinks it publishes through, the window it
+//! counts its numbers in, the decoder it opens, and the one H.264 declaration a
+//! hardware decoder has no mode for.
 
 use super::*;
 
