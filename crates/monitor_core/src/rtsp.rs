@@ -1234,7 +1234,10 @@ impl RtspClient {
                 Some((user, _)) => format!("user name {user:?} was rejected"),
                 None => "no credentials are configured for this camera".to_string(),
             };
-            return Err(CoreError::rtsp(format!(
+            // Not `Rtsp`: the status is the camera's answer about the account,
+            // and the pipeline reads a plain `Rtsp` failure as "this shape of
+            // session was refused, try another one". See `CoreError::Auth`.
+            return Err(CoreError::auth(format!(
                 "{method} failed: 401 Unauthorized ({scheme}) - {hint}"
             )));
         }
@@ -2369,7 +2372,12 @@ sprop-vps=QAEMAf//AWAAAAMAkAAAAwAAAwB4mcCQ";
         let mut client = RtspClient::connect_with_auth(&url, Some(("admin".into(), "wrong".into())))
             .await
             .unwrap();
-        let error = client.describe().await.unwrap_err().to_string();
+        let error = client.describe().await.unwrap_err();
+        // The variant is the point: the pipeline reads a plain `Rtsp` failure
+        // as a refusal of the session's shape and opens a different one, so a
+        // rejected password has to be recognisable on its own.
+        assert_eq!(error.kind(), crate::error::FailureKind::Auth, "got {error}");
+        let error = error.to_string();
         assert!(error.contains("401"), "got {error}");
         assert!(error.contains("digest authentication"), "got {error}");
         assert!(error.contains("admin"), "got {error}");

@@ -25,7 +25,7 @@ use monitor_codec::{Codec, ColorSpace, DecodedFrame, DecoderConfig, VideoDecoder
 
 use crate::audio::{AacRtpParams, AudioHub};
 use crate::config::ReconnectPolicy;
-use crate::error::Result;
+use crate::error::{FailureKind, Result};
 use crate::h264::{nal_unit_type, AccessUnit, H264Depacketizer, START_CODE};
 use crate::hevc::{nal_unit_type as hevc_nal_unit_type, HevcDepacketizer};
 use crate::mjpeg::{JpegDepacketizer, MjpegClient};
@@ -1368,6 +1368,10 @@ async fn run_channel(
         stats.clear(index);
 
         let lived = started.elapsed();
+        // What the attempt failed with: as text, which is what the viewer reads
+        // on the tile, and as a kind, which is what decides whether waiting can
+        // change the answer. `None` while the attempt ended cleanly.
+        let mut kind = None;
         match outcome {
             Ok(()) => failure = "stream closed by peer".to_string(),
             Err(err) => {
@@ -1384,6 +1388,7 @@ async fn run_channel(
                     err = %describe(&err),
                     "session failed"
                 );
+                kind = Some(err.kind());
                 failure = err.to_string();
             }
         }
@@ -1396,6 +1401,30 @@ async fn run_channel(
         // single quick retry would have brought it back.
         if frames.published(index) > published {
             attempt = 0;
+        }
+
+        // A rejected password is not a slow network. The countdown below exists
+        // because the next attempt might meet something different; where it
+        // cannot, waiting only delays the one line that says what is wrong, and
+        // the attempt that followed would reopen the same session with the same
+        // credentials and be refused the same way.
+        //
+        // The channel is left failed until something reopens it: an edit to the
+        // camera, which `Endpoint::is_same_stream` sees as a different stream,
+        // or the scheduler parking the channel and putting it back - a page
+        // away and back is enough, because `Suspend` drops the runtime and
+        // `Activate` then starts a fresh attempt.
+        if kind.is_some_and(FailureKind::is_permanent) {
+            emit(
+                &events,
+                StreamEvent::State {
+                    index,
+                    camera_id: endpoint.camera_id.clone(),
+                    state: ConnectionState::Failed,
+                    detail: failure,
+                },
+            );
+            return;
         }
 
         // The snapshot taken at the top of the attempt is what this reads: one
@@ -1714,7 +1743,10 @@ impl HandshakeFailure {
                     Some(RtspStage::Play) => " during PLAY",
                     None => "",
                 };
-                CoreError::rtsp(format!(
+                // A timeout and not a plain `Rtsp` failure: the connection was
+                // up and the peer stopped answering, which is a different fault
+                // from a peer that answered wrongly. See `FailureKind`.
+                CoreError::timeout(format!(
                     "the session handshake timed out after {} s{stage}",
                     timeout.as_secs()
                 ))
@@ -1754,6 +1786,25 @@ async fn negotiate(
             Err(HandshakeFailure::TimedOut { stage, timeout })
         }
     }
+}
+
+/// Whether a failed call says something about the *shape* of the session it
+/// asked for, and so whether the picture's own session is worth trying instead.
+///
+/// A camera that will not take a `SETUP` of its own can still carry the
+/// microphone on the session it is already streaming, and that is what
+/// `TalkFallback` reopens for. Nothing else is worth reopening: a rejected
+/// password, a peer that stopped answering and an address that cannot be
+/// reached all say the same thing about the second session as about the first,
+/// and reopening it would cost the picture a connect for nothing. A refusal of
+/// the transport is a different question with an answer of its own - the other
+/// transport, inside the session that asked - so it is not this one either.
+///
+/// The question used to be asked as `matches!(err, CoreError::Rtsp(_))`, which
+/// answered yes for a `401` - the one failure that is certainly not about the
+/// shape of anything. See [`crate::error::FailureKind`].
+fn takes_the_picture_session(err: &crate::error::CoreError) -> bool {
+    err.kind() == crate::error::FailureKind::Protocol
 }
 
 /// One call: a session of its own that carries the microphone and nothing else.
@@ -1799,7 +1850,7 @@ async fn talk_worker(
             // shape* of session, and the picture's own session can still carry
             // the media - that is the fallback. A transport failure says nothing
             // about the shape, and reopening would only repeat it.
-            if matches!(err, crate::error::CoreError::Rtsp(_)) {
+            if takes_the_picture_session(&err) {
                 tracing::debug!(
                     target: "xgview::talk",
                     camera = %camera_id,
@@ -2185,7 +2236,7 @@ async fn run_session(
             // Hard timeout: the stall has gone on long enough that
             // reconnecting is more likely to help than waiting.
             if stall.stalled_since.unwrap().elapsed() >= STALL_HARD_TIMEOUT {
-                return Err(crate::error::CoreError::rtsp(format!(
+                return Err(crate::error::CoreError::timeout(format!(
                     "stalled for {} s, giving up",
                     since_picture.as_secs()
                 )));
@@ -2267,7 +2318,7 @@ async fn run_session(
                 if decoder.is_some() && stall.since_picture() >= patience {
                     continue;
                 }
-                return Err(crate::error::CoreError::rtsp(format!(
+                return Err(crate::error::CoreError::timeout(format!(
                     "no media received for {} s",
                     READ_TIMEOUT.as_secs()
                 )));
@@ -2676,7 +2727,7 @@ async fn run_mjpeg_session(
                     timeout_s = handshake_timeout.as_secs(),
                     "the stream did not answer, giving up on this attempt"
                 );
-                return Err(crate::error::CoreError::network(format!(
+                return Err(crate::error::CoreError::timeout(format!(
                     "the stream did not answer within {} s",
                     handshake_timeout.as_secs()
                 )));
@@ -2727,7 +2778,7 @@ async fn run_mjpeg_session(
         let picture = match tokio::time::timeout(MJPEG_IDLE_TIMEOUT, client.next_frame()).await {
             Ok(result) => result?,
             Err(_) => {
-                return Err(crate::error::CoreError::network(format!(
+                return Err(crate::error::CoreError::timeout(format!(
                     "no picture received for {} s",
                     MJPEG_IDLE_TIMEOUT.as_secs()
                 )))
@@ -2907,7 +2958,9 @@ async fn frigate_ws_login(ws_url: &str, user: &str, pass: &str, timeout: Duratio
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(crate::error::CoreError::network("Frigate rejected the login"));
+        // The account, not the address: retrying with the same password only
+        // draws the same `401`. See `CoreError::Auth`.
+        return Err(crate::error::CoreError::auth("Frigate rejected the login"));
     }
     if !status.is_success() {
         return Err(crate::error::CoreError::network(format!(
@@ -2998,7 +3051,7 @@ pub(crate) async fn open_mse(
             return Err(crate::error::CoreError::network(format!("WebSocket handshake failed: {e}")));
         }
         Err(_) => {
-            return Err(crate::error::CoreError::network(format!(
+            return Err(crate::error::CoreError::timeout(format!(
                 "the stream did not answer within {} s",
                 handshake_timeout.as_secs()
             )));
@@ -3081,7 +3134,7 @@ async fn run_ws_session(
                 ));
             }
             Err(_) => {
-                return Err(crate::error::CoreError::network(format!(
+                return Err(crate::error::CoreError::timeout(format!(
                     "no data received for {} s",
                     MJPEG_IDLE_TIMEOUT.as_secs()
                 )));
@@ -3383,6 +3436,32 @@ mod tests {
         entry.route = TalkRoute::Unknown;
         entry.answered = None;
         assert!(!entry.fresh(), "a failed probe caches nothing");
+    }
+
+    /// The fallback reopens the picture's session so the microphone can ride on
+    /// it, which costs the picture a connect. That is worth paying when the
+    /// camera refused the *shape* of the call, and not when it refused the
+    /// account: the picture's session is opened with the same credentials and
+    /// is refused the same way, so the fallback would only blank the wall.
+    #[test]
+    fn only_a_protocol_refusal_takes_the_picture_session() {
+        use crate::error::CoreError;
+
+        assert!(takes_the_picture_session(&CoreError::rtsp(
+            "SETUP failed: 453 Not Enough Bandwidth"
+        )));
+        assert!(takes_the_picture_session(&CoreError::parse("no SDP body")));
+
+        assert!(!takes_the_picture_session(&CoreError::auth(
+            "SETUP failed: 401 Unauthorized (digest authentication)"
+        )));
+        assert!(!takes_the_picture_session(&CoreError::timeout(
+            "the session handshake timed out after 10 s during SETUP"
+        )));
+        assert!(!takes_the_picture_session(&CoreError::network("connection refused")));
+        assert!(!takes_the_picture_session(&CoreError::transport(
+            "SETUP refused the transport: 461 Unsupported Transport"
+        )));
     }
 
     fn camera(id: &str, uri: &str) -> CameraSource {

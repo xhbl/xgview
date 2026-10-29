@@ -83,11 +83,18 @@ impl MjpegClient {
             .build()?;
         let response = http.get(url).send().await?;
         if !response.status().is_success() {
-            return Err(CoreError::network(format!(
+            let message = format!(
                 "mjpeg stream answered {} {}",
                 response.status().as_u16(),
                 response.status().canonical_reason().unwrap_or("")
-            )));
+            );
+            // A refused account is the one answer that will not change by being
+            // asked again, and the server says which it is in the status. See
+            // `CoreError::Auth`.
+            return Err(match response.status().as_u16() {
+                401 | 403 => CoreError::auth(message),
+                _ => CoreError::network(message),
+            });
         }
         tracing::debug!(
             target: "xgview::mjpeg",

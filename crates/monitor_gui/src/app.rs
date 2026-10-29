@@ -233,6 +233,17 @@ impl ChannelUi {
                     self.bitrate_kbps = 0.0;
                     self.total_frames = 0;
                 }
+                // A channel that has given up will never deliver the picture the
+                // switch is waiting for, and the band that says "switching to X,
+                // holding the last frame" would then sit over the failure panel
+                // for as long as the failure lasts - the one thing on the tile
+                // that still claims something is coming. Only the sample of a
+                // session that produced a picture clears it otherwise, and a
+                // session that was refused never produces one. See
+                // `ChannelUi::apply_stats`.
+                if state == ConnectionState::Failed {
+                    self.switching_from = None;
+                }
             }
             StreamEvent::Transition { from, to, .. } => {
                 self.switching_from = from.filter(|from| *from != to);
@@ -9807,5 +9818,39 @@ mod tests {
         assert_eq!(channel.switching_from, Some(StreamKind::Sub), "the held frame is still held");
         assert_eq!(channel.fps, 0.0);
         assert_eq!(channel.stream, Some(StreamKind::Main), "and the channel is still on the new stream");
+    }
+
+    /// The held frame is a promise that a new one is coming. A channel that has
+    /// given up cannot keep it, and the band that says so would otherwise stay
+    /// over the failure panel - the one thing on the tile still claiming that
+    /// something is on its way.
+    #[test]
+    fn a_channel_that_gives_up_stops_holding_the_last_frame() {
+        let mut channel = ChannelUi::default();
+        channel.apply(StreamEvent::Transition {
+            index: 0,
+            camera_id: "cam".to_string(),
+            from: Some(StreamKind::Sub),
+            to: StreamKind::Main,
+        });
+        assert_eq!(channel.switching_from, Some(StreamKind::Sub));
+
+        // A retry is still a wait for the picture, so the frame is held.
+        channel.apply(StreamEvent::State {
+            index: 0,
+            camera_id: "cam".to_string(),
+            state: ConnectionState::Reconnecting,
+            detail: "connection refused | retry in 1000 ms".to_string(),
+        });
+        assert_eq!(channel.switching_from, Some(StreamKind::Sub), "a retry still expects a picture");
+
+        // A channel that has stopped asking is not waiting for anything.
+        channel.apply(StreamEvent::State {
+            index: 0,
+            camera_id: "cam".to_string(),
+            state: ConnectionState::Failed,
+            detail: "SETUP failed: 401 Unauthorized (digest authentication)".to_string(),
+        });
+        assert_eq!(channel.switching_from, None, "nothing is coming to replace it");
     }
 }

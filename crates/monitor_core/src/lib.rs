@@ -57,7 +57,7 @@ pub mod talk;
 pub mod supervise;
 pub mod vitals;
 
-pub use error::{CoreError, Result};
+pub use error::{CoreError, FailureKind, Result};
 pub use h264::{AccessUnit, H264Depacketizer};
 pub use hevc::HevcDepacketizer;
 pub use layout::{Cell, Direction, GridLayout, NavigateOutcome, PageInfo};

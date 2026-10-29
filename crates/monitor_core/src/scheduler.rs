@@ -58,6 +58,37 @@ pub struct ChannelPlan {
     /// started, and a camera switched to `off` keeps answering `auto` until
     /// something makes it reopen.
     pub talk: TalkMode,
+    /// Fingerprint of the logins the channel is opened with, both pairs.
+    ///
+    /// Part of the plan for the same reason the URL is: a worker reopens only
+    /// when its plan changes, so a password that has just been corrected has to
+    /// move something. Without it the channel keeps being refused with the old
+    /// one until something else reopens it - a page away and back, in practice.
+    ///
+    /// A fingerprint rather than the strings: a plan is `Debug` and lands in
+    /// logs, and a password must not be printable. Nothing reads the value,
+    /// only whether it changed, so a hash carries all the meaning and none of
+    /// the secret. Both pairs are in it because which one a channel uses
+    /// depends on `connect` - see [`credentials_fingerprint`].
+    pub credentials: u64,
+}
+
+/// Fingerprint of the logins a camera is opened with.
+///
+/// Both pairs, because which one a channel is opened with depends on its
+/// connection mode: the MSE login for a camera pulled over MSE, the RTSP one
+/// otherwise, and the MSE one again as the fallback of an `Auto` camera. The
+/// plan does not need to know which is which - only that a channel whose
+/// password was just corrected has something different to open with.
+fn credentials_fingerprint(camera: &CameraSource) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    camera.username.hash(&mut hasher);
+    camera.password.hash(&mut hasher);
+    camera.mse_username.hash(&mut hasher);
+    camera.mse_password.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The complete decoding plan derived from layout, page, zoom and focus.
@@ -487,6 +518,7 @@ impl Scheduler {
                     transport: camera.transport,
                     connect: camera.connect,
                     talk: camera.talk,
+                    credentials: credentials_fingerprint(camera),
                 }
             })
             .collect();
@@ -759,6 +791,36 @@ mod tests {
         assert!(matches!(
             &changes[0],
             ScheduleChange::Activate { index: 1, stream: StreamKind::Sub, .. }
+        ));
+    }
+
+    /// A camera whose password was corrected has to be asked again with it: the
+    /// channel stays refused until it is, and a plan that did not move would
+    /// leave it refused until something else reopened it - a page away and
+    /// back, in practice.
+    #[test]
+    fn a_corrected_password_reactivates_the_channel() {
+        let mut cameras = cameras(4);
+        cameras[1].username = Some("admin".to_string());
+        cameras[1].password = Some("wrong".to_string());
+        let mut scheduler = Scheduler::new(GridLayout::G2x2, 0, Some(0), cameras.len());
+        assert_eq!(scheduler.refresh(&cameras).len(), 4);
+        assert!(scheduler.refresh(&cameras).is_empty());
+
+        // Typing the same password again is not a change.
+        let mut unchanged = cameras.clone();
+        unchanged[1].password = Some("wrong".to_string());
+        assert!(scheduler.refresh(&unchanged).is_empty());
+
+        // A corrected one is, and only for the channel it belongs to. The
+        // stream did not move, so the channel reconnects without the band that
+        // holds the last frame of a stream being left behind.
+        cameras[1].password = Some("right".to_string());
+        let changes = scheduler.refresh(&cameras);
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(
+            &changes[0],
+            ScheduleChange::Activate { index: 1, stream: StreamKind::Sub, previous_stream: None, .. }
         ));
     }
 
