@@ -3,6 +3,19 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 1.5.118
+
+Changes since 1.5.77. **Nothing on screen changes: this release is the code
+rearranged.**
+
+- **The streaming pipeline and the main window are split into the files they are
+  made of**, and the parts that had been written out several times are one
+  function each. Nothing is meant to behave differently - if something does not
+  work as it did before, that is a fault in this release.
+- **A camera is told the truth about the stream it is sending.** The receiver
+  report sent back to it carried a sequence number that never left zero, so a
+  link losing packets looked clean from the camera's end.
+
 ## 1.5.77
 
 Changes since 1.5.60. **The wall comes back by itself after a reboot, and a

@@ -25,12 +25,12 @@ paging beyond that. No cloud, no account, MIT licensed.
 
 **Download:** [latest release](../../releases/latest)
 
-| Platform                           | File                                                                                                                |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Android / Android TV (arm64, 8.1+) | [`xgview-1.5.77-android-arm64-v8a.apk`](../../releases/download/xgview-v1.5.77/xgview-1.5.77-android-arm64-v8a.apk) |
-| Windows x64                        | [`xgview-1.5.77-windows-x86_64.zip`](../../releases/download/xgview-v1.5.77/xgview-1.5.77-windows-x86_64.zip)       |
-| Linux x64                          | [`xgview-1.5.77-linux-x86_64.tar.gz`](../../releases/download/xgview-v1.5.77/xgview-1.5.77-linux-x86_64.tar.gz)     |
-| macOS (universal)                  | [`xgview-1.5.77-macos-universal.zip`](../../releases/download/xgview-v1.5.77/xgview-1.5.77-macos-universal.zip)     |
+| Platform                           | File                                                                                                                   |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Android / Android TV (arm64, 8.1+) | [`xgview-1.5.118-android-arm64-v8a.apk`](../../releases/download/xgview-v1.5.118/xgview-1.5.118-android-arm64-v8a.apk) |
+| Windows x64                        | [`xgview-1.5.118-windows-x86_64.zip`](../../releases/download/xgview-v1.5.118/xgview-1.5.118-windows-x86_64.zip)       |
+| Linux x64                          | [`xgview-1.5.118-linux-x86_64.tar.gz`](../../releases/download/xgview-v1.5.118/xgview-1.5.118-linux-x86_64.tar.gz)     |
+| macOS (universal)                  | [`xgview-1.5.118-macos-universal.zip`](../../releases/download/xgview-v1.5.118/xgview-1.5.118-macos-universal.zip)     |
 
 **Note: This is a personal project, shared as-is, with no warranty.** It was developed with **AI assistance** under my direction and testing; please review the code before using
 it in sensitive setups.
