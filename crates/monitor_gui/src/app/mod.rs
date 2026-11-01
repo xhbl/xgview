@@ -1771,6 +1771,24 @@ impl XgViewApp {
                         ToastKind::Info,
                     ));
                 }
+                BackgroundEvent::PlaybackReady { channel, camera_id, origin, credentials, window } => {
+                    match window {
+                        Some(window) => self.start_playback(
+                            *channel,
+                            camera_id.clone(),
+                            origin.clone(),
+                            credentials.clone(),
+                            *window,
+                        ),
+                        // The camera is there and its server answered; there is
+                        // simply nothing recorded to play. Said once, and the
+                        // viewport stays where it was.
+                        None => self.flash(
+                            monitor_i18n::tr("toast-no-recording"),
+                            ToastKind::Error,
+                        ),
+                    }
+                }
                 BackgroundEvent::Go2rtcFailed(error) => {
                     toast = Some((
                         monitor_i18n::tr_args("toast-go2rtc-failed", &[("error", error.to_string().into())]),

@@ -9,6 +9,10 @@ use super::*;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use monitor_core::config::FrigateConfig;
+use monitor_core::discovery::frigate::{FrigateClient, window_at};
+use monitor_core::model::FrigateOrigin;
+
 /// One camera's recordings, playing in the magnified viewport.
 pub(super) struct Playback {
     /// The channel whose picture this is - the camera's own slot, which keeps
@@ -92,12 +96,13 @@ impl XgViewApp {
         matches!(&self.playback, Some(playback) if playback.slot == slot)
     }
 
-    /// Plays the last minute of a camera's recordings in the magnified
-    /// viewport.
+    /// Asks a camera's server what there is to play, and plays it.
     ///
-    /// A minute ending now is the stretch that is certain to exist: the segment
-    /// list is not read yet, so this is what a viewer means by "what just
-    /// happened" rather than a window built around an event.
+    /// The window is read from the segment list rather than guessed: a window
+    /// is only playable where a segment covers it, and it has to begin where a
+    /// segment begins - a clip cut mid-segment opens on whatever frame is there,
+    /// and the moment each picture is of is counted from the window's start. So
+    /// this is a request, and what it answers arrives as an event.
     pub(super) fn enter_playback(&mut self) {
         let Some(channel) = self.scheduler.zoom() else {
             return;
@@ -112,16 +117,38 @@ impl XgViewApp {
         }) else {
             return;
         };
+        start_window(
+            &self.handle,
+            &self.events_tx,
+            channel,
+            camera_id,
+            origin,
+            credentials,
+            epoch_now(),
+        );
+    }
+
+    /// Opens a playback channel on the stretch that was read.
+    ///
+    /// Separate from [`Self::enter_playback`] because it is what the answer to
+    /// the question arrives at, a request later.
+    pub(super) fn start_playback(
+        &mut self,
+        channel: usize,
+        camera_id: String,
+        origin: FrigateOrigin,
+        credentials: Option<(String, String)>,
+        window: (i64, i64),
+    ) {
         let index = self.playback_index();
-        let to = epoch_now();
-        let from = to - 60;
+        let (from, to) = window;
         let uri = format!(
             "{}/api/{}/start/{from}/end/{to}/clip.mp4",
             origin.base_url.trim_end_matches('/'),
             origin.camera
         );
         tracing::debug!(target: "xgview::app", channel, index, %uri, "playing a recording");
-        self.manager.play_clip(index, uri, camera_id.clone(), credentials, (from, to));
+        self.manager.play_clip(index, uri, camera_id.clone(), credentials, window);
         self.playback = Some(Playback { slot: channel, index, camera: camera_id });
         // The speaker belongs to the channel whose picture is on screen, and
         // that has just become the recording's.
@@ -148,6 +175,50 @@ impl XgViewApp {
             "the recording is put away"
         );
     }
+}
+
+/// How far back the segment list is read when a playback channel is opened.
+///
+/// The window itself is a minute; the list is read over an hour so that a
+/// camera whose recording is not continuous still has a segment to align to.
+const LOOKBACK: i64 = 3600;
+
+/// How much of a recording a channel is given at once.
+const WINDOW: i64 = 60;
+
+/// Reads what a camera has recorded and sends back the stretch to play.
+///
+/// The address is the camera's own rather than the import's configuration: the
+/// server may have been edited since, and the camera carries where it answers.
+fn start_window(
+    handle: &Handle,
+    events: &Sender<BackgroundEvent>,
+    channel: usize,
+    camera_id: String,
+    origin: FrigateOrigin,
+    credentials: Option<(String, String)>,
+    now: i64,
+) {
+    let sender = events.clone();
+    handle.spawn(async move {
+        let (user, pass) = credentials.clone().unwrap_or_default();
+        let config = FrigateConfig::at(&origin.base_url, &user, &pass);
+        let window = match FrigateClient::new(config) {
+            Ok(mut client) => client
+                .segments(&origin.camera, now - LOOKBACK, now)
+                .await
+                .ok()
+                .and_then(|segments| window_at(&segments, now - WINDOW, WINDOW)),
+            Err(_) => None,
+        };
+        let _ = sender.send(BackgroundEvent::PlaybackReady {
+            channel,
+            camera_id,
+            origin,
+            credentials,
+            window,
+        });
+    });
 }
 
 /// Seconds since the epoch.

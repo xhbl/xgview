@@ -233,6 +233,12 @@ pub struct FrigateConfig {
     pub protocol: StreamProtocol,
 }
 
+/// The port Frigate answers on when an address does not name one: the
+/// authenticated UI port over TLS, the internal one without.
+fn default_frigate_port(https: bool) -> u16 {
+    if https { 8971 } else { 5000 }
+}
+
 impl Default for FrigateConfig {
     fn default() -> Self {
         Self {
@@ -253,6 +259,38 @@ impl FrigateConfig {
     pub fn base_url(&self) -> String {
         let scheme = if self.https { "https" } else { "http" };
         format!("{scheme}://{}:{}", self.host, self.port)
+    }
+
+    /// The configuration a camera's own address describes.
+    ///
+    /// A camera that came from an import carries where its recordings answer -
+    /// scheme, host and port - and its own login. A client for it can be built
+    /// from those alone, which matters because the import's configuration is
+    /// not the same thing: it may have been edited, or the camera may belong to
+    /// a server this machine no longer has in its list.
+    pub fn at(base_url: &str, username: &str, password: &str) -> Self {
+        let (scheme, rest) = base_url.split_once("://").unwrap_or(("http", base_url));
+        let https = scheme.eq_ignore_ascii_case("https");
+        let authority = rest.split('/').next().unwrap_or(rest);
+        // A bracketed address ends at its closing bracket: what follows that is
+        // a port, and a bracket with nothing after it is the whole host.
+        let fallback = default_frigate_port(https);
+        let (host, port) = if authority.ends_with(']') {
+            (authority.to_string(), fallback)
+        } else {
+            match authority.rsplit_once(':') {
+                Some((host, port)) => (host.to_string(), port.parse().unwrap_or(fallback)),
+                None => (authority.to_string(), fallback),
+            }
+        };
+        Self {
+            host,
+            port,
+            https,
+            username: username.to_string(),
+            password: password.to_string(),
+            ..Self::default()
+        }
     }
 
     /// A host is all Frigate needs: with no login, the unauthenticated internal
@@ -1397,6 +1435,37 @@ fn keep_previous(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A camera carries the address its recordings answer on, and a client for
+    /// it is built from that alone - the import's configuration may have been
+    /// edited since, or the server may not be in it at all.
+    #[test]
+    fn a_camera_address_becomes_a_server_configuration() {
+        let tls = FrigateConfig::at("https://192.168.17.88:8971", "admin", "secret");
+        assert!(tls.https);
+        assert_eq!(tls.host, "192.168.17.88");
+        assert_eq!(tls.port, 8971);
+        assert_eq!(tls.base_url(), "https://192.168.17.88:8971");
+        assert_eq!(tls.username, "admin");
+
+        let plain = FrigateConfig::at("http://box.local:8500", "", "");
+        assert!(!plain.https);
+        assert_eq!(plain.host, "box.local");
+        assert_eq!(plain.port, 8500);
+
+        // No port named: the authenticated one over TLS, the internal one
+        // without, which are the two Frigate listens on.
+        assert_eq!(FrigateConfig::at("https://box", "", "").port, 8971);
+        assert_eq!(FrigateConfig::at("http://box", "", "").port, 5000);
+        assert_eq!(FrigateConfig::at("box", "", "").port, 5000);
+
+        // A bracketed address ends at its closing bracket.
+        let v6 = FrigateConfig::at("http://[::1]:5000", "", "");
+        assert_eq!(v6.host, "[::1]");
+        assert_eq!(v6.port, 5000);
+        assert_eq!(v6.base_url(), "http://[::1]:5000");
+        assert_eq!(FrigateConfig::at("http://[::1]", "", "").port, 5000);
+    }
 
     #[test]
     fn missing_file_yields_defaults() {

@@ -336,6 +336,7 @@ toast-decoding-cpu = channels reopening on the CPU
 toast-no-sub = no sub stream pattern recognized
 toast-no-microphone = no microphone to talk into
 toast-microphone-permission = allow microphone access, then press it again
+toast-no-recording = Nothing recorded here yet
 toast-talk-unavailable = this camera has nothing to talk into
 toast-talk-failed = the call could not be opened
 toast-reorder = Reorder: Up / Down to move · Confirm to apply · Back to cancel

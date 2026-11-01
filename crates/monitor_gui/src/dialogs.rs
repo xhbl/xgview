@@ -21,7 +21,7 @@ use monitor_core::discovery::frigate::{
     extract_rtsp_port, extract_stream, mse_url as frigate_mse_url, rtsp_url as frigate_rtsp_url,
 };
 use monitor_core::discovery::go2rtc::{mse_url as go2rtc_mse_url, restream_url as go2rtc_rtsp_url};
-use monitor_core::model::{infer_sub_stream, is_stream_url, CameraSource, TalkMode};
+use monitor_core::model::{infer_sub_stream, is_stream_url, CameraSource, FrigateOrigin, TalkMode};
 
 use crate::controls;
 use crate::icons::{self, Icon};
@@ -108,6 +108,15 @@ pub enum BackgroundEvent {
     Go2rtcDone(Go2rtcImport),
     /// The go2rtc fetch failed.
     Go2rtcFailed(String),
+    /// A playback channel has been given the stretch of recording to play, or
+    /// has been told there is none: `window` is `None` then.
+    PlaybackReady {
+        channel: usize,
+        camera_id: String,
+        origin: FrigateOrigin,
+        credentials: Option<(String, String)>,
+        window: Option<(i64, i64)>,
+    },
 }
 
 /// Tab of the "Add devices" window.
@@ -411,6 +420,9 @@ impl DiscoveryUi {
     /// Applies an event produced by a background job.
     pub fn apply(&mut self, event: BackgroundEvent) {
         match event {
+            // Answered by the window, not by the device list: nothing about a
+            // camera's recordings belongs in these panels.
+            BackgroundEvent::PlaybackReady { .. } => {}
             BackgroundEvent::Discovery(event) => match event {
                 DiscoveryEvent::Phase(phase) => self.phase = phase,
                 DiscoveryEvent::DeviceFound(device) => self.push_device(&device),
