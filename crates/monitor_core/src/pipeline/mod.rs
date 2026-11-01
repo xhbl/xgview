@@ -529,6 +529,10 @@ impl ChannelManager {
     ///
     /// The credentials are Frigate's own login, the one its WebSocket is
     /// reached with, not the restream account.
+    ///
+    /// Calling it twice with the same address plays that stretch again from its
+    /// first frame - it is a command, not a state - so a caller that repaints
+    /// has to keep its own answer to "is this already what is playing".
     pub fn play_clip(
         &self,
         index: usize,

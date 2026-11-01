@@ -317,9 +317,13 @@ fn complete_groups(buf: &[u8]) -> usize {
 /// Opens the request that carries one window of a recording.
 ///
 /// Frigate's own port serves a self-signed certificate, so the client accepts
-/// one - the same decision the MSE WebSocket makes, for the same reason. The
-/// login is the same JWT: the WebSocket carries it as a Bearer header, and so
-/// does this.
+/// one - the same decision the MSE WebSocket makes, for the same reason.
+///
+/// The request goes out without a token first, and a `401` is what asks for a
+/// login. Asking first would tie every recording to an account: Frigate's
+/// internal port serves the same recordings without one, and a login it does
+/// not need - refused, because the box has authentication switched off - is a
+/// permanent failure, which would leave that box with no playback at all.
 async fn open_clip(uri: &str, credentials: Option<&(String, String)>) -> Result<reqwest::Response> {
     let http = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -328,24 +332,32 @@ async fn open_clip(uri: &str, credentials: Option<&(String, String)>) -> Result<
         .connect_timeout(Duration::from_secs(10))
         .build()?;
 
-    let mut request = http.get(uri);
-    if let Some((user, pass)) = credentials {
-        let base = api_base(uri)
-            .ok_or_else(|| crate::error::CoreError::network("not an http address"))?;
-        let token = frigate_api_login(base, user, pass, Duration::from_secs(10)).await?;
-        request = request.bearer_auth(token);
-    }
+    let response = http.get(uri).send().await?;
+    let response = match (response.status(), credentials) {
+        (reqwest::StatusCode::UNAUTHORIZED, Some((user, pass))) => {
+            let base = api_base(uri)
+                .ok_or_else(|| crate::error::CoreError::network("not an http address"))?;
+            let token = frigate_api_login(base, user, pass, Duration::from_secs(10)).await?;
+            http.get(uri).bearer_auth(token).send().await?
+        }
+        _ => response,
+    };
 
-    let response = request.send().await?;
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err(crate::error::CoreError::auth(
             "Frigate refused the account for this recording",
         ));
     }
+    if status == reqwest::StatusCode::BAD_REQUEST {
+        // The range is real and Frigate read it; there is simply nothing
+        // recorded in it. Worth its own words: it is the one answer the viewer
+        // can act on, by picking another time.
+        return Err(crate::error::CoreError::network(
+            "no recording in that range",
+        ));
+    }
     if !status.is_success() {
-        // A range with no recording in it answers `400`; that is an answer
-        // about the recording, not a broken connection.
         return Err(crate::error::CoreError::network(format!(
             "the recording answered {status}"
         )));
