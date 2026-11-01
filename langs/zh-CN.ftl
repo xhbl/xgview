@@ -386,6 +386,7 @@ state-streaming = 在线
 state-stalled = 冻结
 state-reconnecting = 重连中...
 state-failed = 失败
+state-finished = 已播完
 origin-manual = 手动
 origin-onvif = ONVIF
 origin-synology = Synology

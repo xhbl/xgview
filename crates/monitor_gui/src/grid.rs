@@ -272,7 +272,10 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
     let state = tile.channel.map(|channel| channel.state).unwrap_or(ConnectionState::Idle);
     let detail = tile.channel.map(|channel| channel.detail.as_str()).unwrap_or("");
     match state {
-        ConnectionState::Streaming | ConnectionState::Stalled => {
+        // A recording that has played to its end keeps the last picture it
+        // drew, exactly as a stalled live stream does: there is nothing to
+        // report and nothing to cover it with.
+        ConnectionState::Streaming | ConnectionState::Stalled | ConnectionState::Finished => {
             live_canvas(&painter, body, tile, tier)
         }
         ConnectionState::Failed => {

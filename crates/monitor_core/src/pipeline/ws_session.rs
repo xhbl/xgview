@@ -86,7 +86,20 @@ async fn frigate_ws_login(ws_url: &str, user: &str, pass: &str, timeout: Duratio
     };
     let authority = rest.split(['/', '?']).next().unwrap_or(rest);
     let base_url = format!("{http_scheme}://{authority}");
+    frigate_api_login(&base_url, user, pass, timeout).await
+}
 
+/// Logs in to Frigate's API and returns the JWT it hands back.
+///
+/// The token is what both of the box's authenticated doors want, as a Bearer
+/// header: the WebSocket for the picture, and the API for a recording. So the
+/// login lives here and both callers use it.
+pub(super) async fn frigate_api_login(
+    base_url: &str,
+    user: &str,
+    pass: &str,
+    timeout: Duration,
+) -> Result<String> {
     let http = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(timeout)

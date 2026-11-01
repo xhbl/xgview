@@ -74,6 +74,7 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const RECEIVER_SSRC: u32 = 0x5847_5631;
 
 mod channel;
+mod clip_session;
 mod mjpeg_session;
 mod rtsp_session;
 mod shared;
@@ -392,6 +393,17 @@ enum ChannelCommand {
     /// picture's session instead - the way it was carried before the split.
     /// Only used when a call has already been refused.
     TalkFallback { index: usize },
+    /// Play one stretch of a recording on this channel, replacing whatever it
+    /// was pulling. The address is the whole request - camera, start and end -
+    /// so nothing about it belongs in a camera's configuration.
+    PlayClip {
+        index: usize,
+        uri: String,
+        /// The camera the recording belongs to, for the events the channel
+        /// emits. A playback channel has no camera of its own.
+        camera_id: String,
+        credentials: Option<(String, String)>,
+    },
     /// The viewer came back to the window. Every channel waiting out a backoff
     /// retries at once instead: the failures it counted happened while the
     /// process was in the background, and waiting them out now would only add
@@ -508,6 +520,30 @@ impl ChannelManager {
         self.send(ChannelCommand::Call { index });
     }
 
+    /// Plays one stretch of a recording on a channel of its own.
+    ///
+    /// `uri` is the whole request - Frigate's `clip.mp4` for a camera between
+    /// two instants - so nothing about it belongs in a camera's configuration.
+    /// The channel plays it at the speed it was recorded and stops at its last
+    /// frame; the state it reports then is [`ConnectionState::Finished`].
+    ///
+    /// The credentials are Frigate's own login, the one its WebSocket is
+    /// reached with, not the restream account.
+    pub fn play_clip(
+        &self,
+        index: usize,
+        uri: impl Into<String>,
+        camera_id: impl Into<String>,
+        credentials: Option<(String, String)>,
+    ) {
+        let _ = self.commands.send(ChannelCommand::PlayClip {
+            index,
+            uri: uri.into(),
+            camera_id: camera_id.into(),
+            credentials,
+        });
+    }
+
     /// The runtime used by the streaming tasks (the UI uses it to spawn the
     /// discovery and import jobs as well).
     /// Retries every channel that is waiting out a backoff, at once.
@@ -593,6 +629,19 @@ impl ChannelManager {
     }
 }
 
+/// What a channel is pulling.
+///
+/// The two are different sessions over different transports - a camera's own
+/// stream as it happens, or one stretch of its recording - and the scheme no
+/// longer tells them apart: both can be `http://` or `https://`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EndpointKind {
+    /// A camera's own stream, as it is happening.
+    Live,
+    /// A stretch of a camera's recording, played back.
+    Clip,
+}
+
 /// The stream a channel pulls, and everything needed to open it again: after a
 /// failure, and after a change that only the supervisor knows about, such as the
 /// decoding preference.
@@ -600,6 +649,8 @@ impl ChannelManager {
 struct Endpoint {
     index: usize,
     camera_id: String,
+    /// Which session this endpoint opens. See [`EndpointKind`].
+    kind: EndpointKind,
     uri: String,
     credentials: Option<(String, String)>,
     stream: StreamKind,
@@ -646,11 +697,11 @@ impl Endpoint {
     /// and its sub stream on HTTP MJPEG, so one `Endpoint` shape has to serve
     /// either and the URL is what picks the session it opens.
     fn is_mjpeg(&self) -> bool {
-        is_http_url(&self.uri)
+        self.kind == EndpointKind::Live && is_http_url(&self.uri)
     }
 
     fn is_ws(&self) -> bool {
-        is_ws_url(&self.uri)
+        self.kind == EndpointKind::Live && is_ws_url(&self.uri)
     }
 
     /// Asks the same address for the camera's back channel, or stops asking.
@@ -712,6 +763,7 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endp
     Endpoint {
         index,
         camera_id: source.id.clone(),
+        kind: EndpointKind::Live,
         uri,
         credentials,
         stream,
@@ -719,6 +771,34 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endp
         talk: false,
         talk_mode: source.talk,
         fallback,
+    }
+}
+
+impl Endpoint {
+    /// The endpoint a playback channel pulls: one stretch of a recording.
+    ///
+    /// It carries no transport, no fallback and no back channel. A recording is
+    /// one HTTP request - there is nothing to fall back to when it fails, and
+    /// nothing to talk to.
+    fn clip(
+        index: usize,
+        camera_id: String,
+        uri: String,
+        credentials: Option<(String, String)>,
+        stream: StreamKind,
+    ) -> Self {
+        Self {
+            index,
+            camera_id,
+            kind: EndpointKind::Clip,
+            uri,
+            credentials,
+            stream,
+            transport: RtspTransport::default(),
+            talk: false,
+            talk_mode: TalkMode::default(),
+            fallback: None,
+        }
     }
 }
 

@@ -2,13 +2,31 @@
 
 use super::*;
 
+use super::clip_session::run_clip_session;
 use super::shared::{Sinks, describe, emit};
 use super::{mjpeg_session::run_mjpeg_session, rtsp_session::run_session, ws_session::run_ws_session};
 
-/// Runs one attempt on one endpoint, opening the session its address calls for.
+/// How one attempt on one endpoint ended.
 ///
-/// The scheme is what decides: an `http://` address is an MJPEG stream, a
-/// `ws://`/`wss://` one go2rtc's MSE, and anything else an RTSP session.
+/// The three are not the same thing to the loop around them: a live stream that
+/// closes is a stream to reopen, a broken one is a stream to reopen after a
+/// wait, and a recording that reached its last frame is neither - asking for it
+/// again would replay it from the start, for ever.
+enum SessionEnd {
+    /// Played to its end. Nothing is retried.
+    Finished,
+    /// The peer closed a live stream. Reopened, as it always has been.
+    Closed,
+    /// The session broke, with the reason the viewer is shown.
+    Failed(crate::error::CoreError),
+}
+
+/// Runs one attempt on one endpoint, opening the session its kind calls for.
+///
+/// A playback channel is one HTTP request for one stretch of a recording, and
+/// the recording's end is an answer rather than a failure. Everything else
+/// opens by scheme: an `http://` address is an MJPEG stream, a `ws://`/`wss://`
+/// one go2rtc's MSE, and anything else an RTSP session.
 async fn run_once(
     endpoint: &Endpoint,
     prefer_hardware: bool,
@@ -16,13 +34,23 @@ async fn run_once(
     sinks: Sinks<'_>,
     audio: &AudioHub,
     talk: &TalkHub,
-) -> Result<()> {
-    if endpoint.is_mjpeg() {
+) -> SessionEnd {
+    if endpoint.kind == EndpointKind::Clip {
+        return match run_clip_session(endpoint.clone(), prefer_hardware, sinks, audio).await {
+            Ok(()) => SessionEnd::Finished,
+            Err(err) => SessionEnd::Failed(err),
+        };
+    }
+    let outcome = if endpoint.is_mjpeg() {
         run_mjpeg_session(endpoint.clone(), handshake_timeout, sinks).await
     } else if endpoint.is_ws() {
         run_ws_session(endpoint.clone(), prefer_hardware, handshake_timeout, sinks, audio).await
     } else {
         run_session(endpoint.clone(), prefer_hardware, handshake_timeout, sinks, audio, talk).await
+    };
+    match outcome {
+        Ok(()) => SessionEnd::Closed,
+        Err(err) => SessionEnd::Failed(err),
     }
 }
 
@@ -91,7 +119,10 @@ pub(super) async fn run_channel(
         // backoff - which is the whole point of keeping two addresses. Only when
         // the attempt put nothing on screen: a stream that worked and was then
         // cut keeps to RTSP, so a healthy channel does not flap between the two.
-        if outcome.is_err() && endpoint.fallback.is_some() && frames.published(index) == published {
+        if matches!(outcome, SessionEnd::Failed(_))
+            && endpoint.fallback.is_some()
+            && frames.published(index) == published
+        {
             let fallback = endpoint.fallback.clone().expect("checked above");
             tracing::debug!(
                 target: "xgview::pipeline",
@@ -123,8 +154,28 @@ pub(super) async fn run_channel(
         // change the answer. `None` while the attempt ended cleanly.
         let mut kind = None;
         match outcome {
-            Ok(()) => failure = "stream closed by peer".to_string(),
-            Err(err) => {
+            // The recording reached its last frame. The channel stops here:
+            // reopening the same address would replay the same stretch from
+            // the beginning, and the viewer would see it loop for ever.
+            SessionEnd::Finished => {
+                emit(
+                    &events,
+                    StreamEvent::State {
+                        index,
+                        camera_id: endpoint.camera_id.clone(),
+                        state: ConnectionState::Finished,
+                        detail: String::new(),
+                    },
+                );
+                tracing::debug!(
+                    target: "xgview::pipeline",
+                    index,
+                    "the recording reached its end"
+                );
+                return;
+            }
+            SessionEnd::Closed => failure = "stream closed by peer".to_string(),
+            SessionEnd::Failed(err) => {
                 // A failing session is the only clue the user gets about a
                 // rejected password or an unreachable device, so it is
                 // reported at `warn` rather than hidden behind `debug`. The

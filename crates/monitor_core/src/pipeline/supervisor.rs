@@ -116,6 +116,9 @@ impl Supervisor {
                 ChannelCommand::Activate { index, source, stream, previous_stream } => {
                     self.activate(index, source, stream, previous_stream)
                 }
+                ChannelCommand::PlayClip { index, uri, camera_id, credentials } => {
+                    self.play_clip(index, uri, camera_id, credentials)
+                }
                 ChannelCommand::Suspend { index } => self.suspend(index),
                 ChannelCommand::Wake => self.wake(),
                 ChannelCommand::PreferHardware(prefer) => self.prefer_hardware(prefer),
@@ -204,6 +207,34 @@ impl Supervisor {
             stream = stream.as_str(),
             "starting channel"
         );
+        self.spawn_channel(endpoint, Arc::new(Notify::new()));
+    }
+
+    /// Plays one stretch of a recording on `index`, replacing whatever that
+    /// channel was pulling.
+    ///
+    /// It is its own command rather than an `Activate` because there is no
+    /// camera to activate: the address is the whole request, and the camera's
+    /// name is carried only so the events the channel emits say whose
+    /// recording it is.
+    fn play_clip(
+        &mut self,
+        index: usize,
+        uri: String,
+        camera_id: String,
+        credentials: Option<(String, String)>,
+    ) {
+        if let Some(existing) = self.channels.remove(&index) {
+            existing.task.abort();
+            self.stats.clear(index);
+        }
+        tracing::debug!(
+            target: "xgview::pipeline",
+            index,
+            camera = %camera_id,
+            "playing a recording"
+        );
+        let endpoint = Endpoint::clip(index, camera_id, uri, credentials, StreamKind::Main);
         self.spawn_channel(endpoint, Arc::new(Notify::new()));
     }
 

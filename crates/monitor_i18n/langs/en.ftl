@@ -419,6 +419,7 @@ state-streaming = Live
 state-stalled = Stalled
 state-reconnecting = Reconnecting...
 state-failed = Failed
+state-finished = Finished
 origin-manual = Manual
 origin-onvif = ONVIF
 origin-synology = Synology

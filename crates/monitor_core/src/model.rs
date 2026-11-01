@@ -65,6 +65,10 @@ pub enum ConnectionState {
     Reconnecting,
     /// Retries exhausted, waiting for an explicit user action.
     Failed,
+    /// Played to its end: a recording reached its last frame. Nothing will
+    /// arrive until something asks for another stretch, so the channel is not
+    /// retried - the picture it last showed is the picture that stays.
+    Finished,
 }
 
 impl ConnectionState {
@@ -77,6 +81,7 @@ impl ConnectionState {
             ConnectionState::Stalled => "state-stalled",
             ConnectionState::Reconnecting => "state-reconnecting",
             ConnectionState::Failed => "state-failed",
+            ConnectionState::Finished => "state-finished",
         }
     }
 
