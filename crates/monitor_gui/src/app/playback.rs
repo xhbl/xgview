@@ -16,6 +16,10 @@ pub(super) struct Playback {
     slot: usize,
     /// The channel the recording plays on. See [`XgViewApp::playback_index`].
     pub(super) index: usize,
+    /// The camera it belongs to. The wall can change the camera behind a slot
+    /// without changing how many there are - another group - so the slot alone
+    /// does not say whose recording this is.
+    pub(super) camera: String,
 }
 
 impl XgViewApp {
@@ -69,6 +73,20 @@ impl XgViewApp {
         self.textures.get(&view).or_else(|| self.textures.get(&slot))
     }
 
+    /// Whether the recording on this slot still belongs to the camera behind
+    /// it. A wall that changed length moves the reservation; one that changed
+    /// group leaves it where it is and puts a different camera in front of it.
+    pub(super) fn playback_is_stale(&self, index: usize) -> bool {
+        let Some(playback) = &self.playback else {
+            return false;
+        };
+        if playback.index != index {
+            return true;
+        }
+        let cameras = self.config.active_cameras();
+        cameras.get(playback.slot).map(|camera| camera.id.as_str()) != Some(playback.camera.as_str())
+    }
+
     /// Whether a recording is playing on this slot.
     pub(super) fn is_playing_back(&self, slot: usize) -> bool {
         matches!(&self.playback, Some(playback) if playback.slot == slot)
@@ -103,8 +121,11 @@ impl XgViewApp {
             origin.camera
         );
         tracing::debug!(target: "xgview::app", channel, index, %uri, "playing a recording");
-        self.manager.play_clip(index, uri, camera_id, credentials);
-        self.playback = Some(Playback { slot: channel, index });
+        self.manager.play_clip(index, uri, camera_id.clone(), credentials);
+        self.playback = Some(Playback { slot: channel, index, camera: camera_id });
+        // The speaker belongs to the channel whose picture is on screen, and
+        // that has just become the recording's.
+        self.apply_audio();
     }
 
     /// Puts the recording away and goes back to the camera's own stream.
@@ -119,6 +140,8 @@ impl XgViewApp {
         self.channels.remove(&playback.index);
         self.textures.remove(&playback.index);
         self.video.release(playback.index);
+        // And back to the camera's own sound, which never stopped playing.
+        self.apply_audio();
         tracing::debug!(
             target: "xgview::app",
             index = playback.index,

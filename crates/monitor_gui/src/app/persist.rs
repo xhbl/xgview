@@ -35,7 +35,7 @@ impl XgViewApp {
         // a wall that changed length leaves it on an index a camera now owns:
         // it goes first, and the recording with it.
         let playback_index = self.playback_index();
-        if self.playback.as_ref().is_some_and(|playback| playback.index != playback_index) {
+        if self.playback_is_stale(playback_index) {
             self.leave_playback();
         }
         self.channels.retain(|index, _| *index < count || *index == playback_index);

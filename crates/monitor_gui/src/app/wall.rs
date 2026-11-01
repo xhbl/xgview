@@ -108,7 +108,7 @@ impl XgViewApp {
         let cell = view.cells.iter().position(|slot| *slot == Some(index))?;
         let rect = grid::tile_rect(wall.translate(vec2(dx, 0.0)), view.layout, cell, grid::LINE);
         let camera = cameras.get(index)?;
-        let size = self.textures.get(&self.view_index(index))?.surface.size;
+        let size = self.view_texture(index)?.surface.size;
         let aspect = self.tile_aspect(camera);
         // Upright, the magnified picture is the one that may be drawn sideways -
         // the same answer the tile is drawn with. See `paint_view`.
@@ -576,6 +576,7 @@ impl XgViewApp {
             return vec![(tilebar::Control::Hangup, TileBarAction::Hangup)];
         }
         let mut entries = Vec::new();
+        let playing = self.scheduler.zoom().is_some_and(|channel| self.is_playing_back(channel));
         if self.is_portrait() {
             entries.push((tilebar::Control::Icon(Icon::Rotate), TileBarAction::Rotate));
         }
@@ -584,16 +585,17 @@ impl XgViewApp {
             let icon = if self.sound_on { Icon::Sound } else { Icon::Mute };
             entries.push((tilebar::Control::Icon(icon), TileBarAction::Sound));
         }
-        if self.magnified_has_backchannel() {
+        // Not while a recording plays: a microphone is something to hold to a
+        // camera, and there is nothing behind a recording to hear it.
+        if !playing && self.magnified_has_backchannel() {
             entries.push((tilebar::Control::Icon(Icon::Mic), TileBarAction::Mic));
         }
         // The way into this camera's recordings, for a camera that came from a
-        // server which keeps them. It is the last control: the four before it
+        // server which keeps them. It is the last control: the ones before it
         // are about watching this stream, and this one is about leaving it.
         // Not while it is already playing: the way in is not also the way out,
         // and pressing it again would ask for the same stretch from its first
         // frame. Back leaves the viewport, and the recording with it.
-        let playing = self.scheduler.zoom().is_some_and(|channel| self.is_playing_back(channel));
         if !playing && self.magnified_camera().is_some_and(|camera| camera.frigate.is_some()) {
             entries.push((tilebar::Control::Icon(Icon::History), TileBarAction::Playback));
         }

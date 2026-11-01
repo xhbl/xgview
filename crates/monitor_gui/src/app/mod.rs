@@ -1631,6 +1631,14 @@ impl XgViewApp {
     /// [`FrameStore`]: monitor_core::pipeline::FrameStore
     fn upload_frames(&mut self) {
         for index in self.channels.keys().copied().collect::<Vec<_>>() {
+            // A slot whose picture is coming from somewhere else - a recording
+            // playing over the camera - is decoded but never drawn, and a
+            // texture of it would be three megabytes a frame uploaded for
+            // nobody. Its last one stays where it is, which is what the
+            // viewport falls back to when the recording has nothing yet.
+            if self.view_index(index) != index {
+                continue;
+            }
             let Some(frame) = self.manager.frames().latest(index) else {
                 continue;
             };

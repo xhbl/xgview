@@ -33,7 +33,13 @@ impl XgViewApp {
             sink.set_volume(self.config.volume);
         }
         let index = self.scheduler.zoom();
-        self.manager.audio().set_index(index);
+        // The sound follows the picture: while a recording plays, the channel
+        // that is audible is the one playing it, not the camera's own - which
+        // is still running underneath and would otherwise be the only one the
+        // hub ever hands the speaker to.
+        self.manager.audio().set_index(index.map(|slot| self.view_index(slot)));
+        // A call is placed to the camera and never to a recording: the playback
+        // channel carries no back channel, and nothing is behind it to talk to.
         self.manager.set_talk(index);
         if self.talking && self.talk_index != index {
             self.set_talking(false);
@@ -436,9 +442,11 @@ impl XgViewApp {
     /// carries no audio track, so it never flickers in and out while a session
     /// is coming up.
     pub(super) fn magnified_has_audio(&self) -> bool {
+        // The picture's channel, not the camera's: a recording that carries
+        // sound shows the switch, and one that does not takes it away.
         self.scheduler
             .zoom()
-            .map_or(false, |index| self.channels.get(&index).map_or(true, |channel| channel.audio))
+            .map_or(false, |index| self.view_channel(index).map_or(true, |channel| channel.audio))
     }
 
     /// Whether the magnified camera offers a talk-back media.
