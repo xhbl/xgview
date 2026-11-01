@@ -1565,6 +1565,13 @@ fn rewrite_frigate_urls(frigate: &FrigateConfig, cameras: &mut [CameraSource]) {
             camera.mse_username = None;
             camera.mse_password = None;
         }
+        // The recordings' address moves with the rest. It is the API's own
+        // host, port and scheme - not the restream's - and a server whose
+        // address was just edited would otherwise leave playback pointing at
+        // the one it used to answer on.
+        if let Some(origin) = camera.frigate.as_mut() {
+            origin.base_url = frigate.base_url();
+        }
     }
 }
 

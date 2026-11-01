@@ -27,7 +27,7 @@ use serde_json::{Map, Value};
 
 use crate::config::FrigateConfig;
 use crate::error::{CoreError, Result};
-use crate::model::{CameraOrigin, CameraSource};
+use crate::model::{CameraOrigin, CameraSource, FrigateOrigin};
 use crate::rtsp::RtspUrl;
 
 use super::go2rtc::{port_of_listen, restream_url, RESTREAM_PORT};
@@ -400,6 +400,13 @@ fn source_for(
     let mut source = CameraSource::new(name, rtsp_url(config, port, stream));
     source.host = config.host.clone();
     source.origin = CameraOrigin::Frigate;
+    // Which camera of which server, kept apart from every address: the
+    // recordings live behind Frigate's API, not behind the restream this
+    // entry pulls its picture from.
+    source.frigate = Some(FrigateOrigin {
+        base_url: config.base_url(),
+        camera: name.to_string(),
+    });
     source.imported = true;
     source.tags = vec!["frigate".to_string()];
     // Both addresses are captured, always: which one is reachable depends on the
@@ -789,5 +796,24 @@ mod tests {
         assert_eq!(extract_rtsp_port("rtsp://192.168.17.88:8554/cam_1"), Some(8554));
         assert_eq!(extract_rtsp_port("rtsp://192.168.17.88:9000/cam_1"), Some(9000));
         assert_eq!(extract_rtsp_port("wss://192.168.17.88:8971/live/mse/api/ws?src=cam_1"), None);
+    }
+
+    /// An imported camera remembers which camera of which server it is, and it
+    /// is the API's address that is remembered - not the restream's, which is a
+    /// different port on the same box and carries no recordings.
+    #[test]
+    fn an_imported_camera_remembers_the_camera_and_the_server() {
+        let mut config = frigate_config();
+        config.port = 8971;
+        config.https = true;
+
+        let camera = source_for(&config, 8554, "cam_front_door", "cam_front_door_1", &None);
+
+        let origin = camera.frigate.expect("an imported camera knows its own");
+        assert_eq!(origin.base_url, "https://192.168.17.88:8971");
+        assert_eq!(origin.camera, "cam_front_door");
+        // The two addresses are kept apart: the picture comes from the
+        // restream, the recordings from the API.
+        assert!(camera.rtsp_main.contains(":8554/"), "{}", camera.rtsp_main);
     }
 }

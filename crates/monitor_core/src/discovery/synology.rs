@@ -292,6 +292,7 @@ impl SynologyClient {
             enabled: camera.enabled,
             tags: vec!["synology".to_string()],
             origin: CameraOrigin::Synology,
+            frigate: None,
             imported: true,
             transport: RtspTransport::default(),
             stream: None,

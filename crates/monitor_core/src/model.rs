@@ -445,6 +445,25 @@ impl Default for Osd {
     }
 }
 
+/// Which camera of which Frigate server this entry came from.
+///
+/// `origin` says an import brought the camera in; this says *which* camera on
+/// *which* server, which is what reaching that camera's recordings needs. The
+/// two cannot be derived from each other: `name` is the viewer's own label and
+/// they may change it, and the stream name in `rtsp_main` is not the camera
+/// name either - Frigate serves `<camera>` and `<camera>_sub`, but a restream
+/// configured by hand can call them anything.
+///
+/// A camera added by hand, or imported from go2rtc or a NAS, has none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrigateOrigin {
+    /// Where Frigate answers, scheme and port included - `http://host:5000`,
+    /// or the authenticated `https://host:8971`.
+    pub base_url: String,
+    /// Frigate's own name for the camera, as its `/api/config` spells it.
+    pub camera: String,
+}
+
 /// A single surveillance camera / NVR channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CameraSource {
@@ -497,6 +516,10 @@ pub struct CameraSource {
     pub tags: Vec<String>,
     #[serde(default)]
     pub origin: CameraOrigin,
+    /// Which Frigate camera this entry is, when an import brought it in. See
+    /// [`FrigateOrigin`].
+    #[serde(default)]
+    pub frigate: Option<FrigateOrigin>,
     /// Whether a server import set this camera's addresses and still manages
     /// them. While set, the edit form shows the address and credential fields
     /// read-only: hand-editing one address of a managed pair - a Frigate or
@@ -574,6 +597,7 @@ impl CameraSource {
             enabled: true,
             tags: Vec::new(),
             origin: CameraOrigin::Manual,
+            frigate: None,
             imported: false,
             transport: RtspTransport::default(),
             stream: None,
@@ -1091,6 +1115,40 @@ pub fn infer_sub_stream(main: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An edit through the form writes back only what the form shows, so the
+    /// camera an import brought in survives a rename or a url change - and a
+    /// form cannot point an entry at a different camera on the server.
+    #[test]
+    fn an_edit_keeps_the_frigate_camera_it_came_from() {
+        let mut camera =
+            CameraSource::new("cam_living_room", "rtsp://192.168.17.88:8554/cam_living_room_1");
+        camera.frigate = Some(FrigateOrigin {
+            base_url: "http://192.168.17.88:8500".into(),
+            camera: "cam_living_room".into(),
+        });
+
+        let mut form = CameraSource::new("renamed", "rtsp://192.168.17.88:8554/other_1");
+        form.username = Some("admin".into());
+        camera.apply_edit(&form);
+
+        assert_eq!(camera.name, "renamed");
+        assert_eq!(
+            camera.frigate.as_ref().map(|origin| origin.camera.as_str()),
+            Some("cam_living_room"),
+            "the form has no field for it, so an edit cannot forget it"
+        );
+    }
+
+    /// A configuration written before the field existed still reads: the camera
+    /// is simply one with no recordings to reach.
+    #[test]
+    fn a_configuration_from_before_the_field_still_reads() {
+        let camera: CameraSource =
+            serde_json::from_str(r#"{"id":"a","name":"n","host":"h","rtsp_main":"rtsp://h:554/s"}"#)
+                .unwrap();
+        assert_eq!(camera.frigate, None);
+    }
 
     /// The cycle button walks every mode once and comes back to the first.
     #[test]

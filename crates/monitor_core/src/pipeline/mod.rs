@@ -805,6 +805,7 @@ mod tests {
             enabled: true,
             tags: Vec::new(),
             origin: CameraOrigin::Manual,
+            frigate: None,
             imported: false,
             transport: RtspTransport::default(),
             stream: None,
