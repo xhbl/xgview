@@ -277,6 +277,15 @@ impl Supervisor {
         // them. They are started again from here because the scheduler
         // has no reason to see a change: nothing about the cameras did.
         for (index, runtime) in self.channels.drain().collect::<Vec<_>>() {
+            // A recording is not reopened: its address is one window, and
+            // starting it again would play that window from its first frame -
+            // a setting change would look like the recording jumping back to
+            // the beginning. It picks the new preference up when the next
+            // window is asked for, which is the next time a decoder is chosen.
+            if runtime.endpoint.kind == EndpointKind::Clip {
+                self.channels.insert(index, runtime);
+                continue;
+            }
             runtime.task.abort();
             // Reopened, not continued: the sample described the decoder
             // this channel is leaving behind, and `hardware` in it would
