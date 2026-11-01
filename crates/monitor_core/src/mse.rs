@@ -111,7 +111,7 @@ impl MseParser {
         let mut audio = None;
         let mut samples = Vec::new();
         let mut audio_samples = Vec::new();
-        let mut pending_run: Option<TrackRun> = None;
+        let mut pending_runs: Vec<TrackRun> = Vec::new();
 
         for (box_type, content) in iter_boxes(data) {
             match box_type {
@@ -120,9 +120,9 @@ impl MseParser {
                     init = moov.video;
                     audio = moov.audio;
                 }
-                b"moof" => pending_run = Some(self.parse_moof(content, content.len() + 8)?),
+                b"moof" => pending_runs = self.parse_moof(content, content.len() + 8)?,
                 b"mdat" => {
-                    if let Some(run) = pending_run.take() {
+                    for run in pending_runs.drain(..) {
                         self.extract_samples(&run, content, &mut samples, &mut audio_samples)?;
                     }
                 }
@@ -320,16 +320,27 @@ impl MseParser {
         Ok(None)
     }
 
-    fn parse_moof(&self, data: &[u8], moof_size: usize) -> Result<TrackRun> {
+    /// Every track a `moof` describes, in the order the fragment lists them.
+    ///
+    /// A fragment may carry one `traf` per track - a recorded clip from Frigate
+    /// carries two, video then audio - and each `trun` points into the same
+    /// `mdat`. Returning only the first is why a recording with audio read as
+    /// video-only: the samples were there, and the audio `traf` was never
+    /// looked at.
+    fn parse_moof(&self, data: &[u8], moof_size: usize) -> Result<Vec<TrackRun>> {
+        let mut runs = Vec::new();
         for (box_type, content) in iter_boxes(data) {
             if box_type == b"traf" {
                 if let Some(mut run) = self.parse_traf(content)? {
                     run.moof_size = moof_size;
-                    return Ok(run);
+                    runs.push(run);
                 }
             }
         }
-        Err(CoreError::network("moof had no usable traf"))
+        if runs.is_empty() {
+            return Err(CoreError::network("moof had no usable traf"));
+        }
+        Ok(runs)
     }
 
     fn parse_traf(&self, data: &[u8]) -> Result<Option<TrackRun>> {
@@ -1197,6 +1208,41 @@ mod tests {
         assert_eq!(samples.len(), 2);
         assert!(samples[0].keyframe, "the first sample is the IDR the muxer named");
         assert!(!samples[1].keyframe, "the rest of the run depends on it");
+    }
+
+    #[test]
+    fn a_moof_with_a_traf_per_track_yields_every_one() {
+        // What a recorded clip from Frigate looks like: one fragment carries a
+        // `traf` per track - video then audio - and each `trun` points into the
+        // same `mdat`. Reading only the first is why a recording that has audio
+        // read as video-only: 1100 video samples and not one audio sample.
+        fn wrap(name: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut out = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(name);
+            out.extend_from_slice(body);
+            out
+        }
+
+        let mut moof = Vec::new();
+        for track in 1..=2u32 {
+            // tfhd: version+flags with no optional field, then the track id.
+            let mut tfhd = vec![0, 0, 0, 0];
+            tfhd.extend_from_slice(&track.to_be_bytes());
+            // trun: version+flags, then one sample. No per-sample fields, which
+            // `parse_trun` returns early on - this test is about the trafs.
+            let mut trun = vec![0, 0, 0, 0];
+            trun.extend_from_slice(&1u32.to_be_bytes());
+
+            let mut traf = wrap(b"tfhd", &tfhd);
+            traf.extend_from_slice(&wrap(b"trun", &trun));
+            moof.extend_from_slice(&wrap(b"traf", &traf));
+        }
+
+        let parser = MseParser::new();
+        let runs = parser.parse_moof(&moof, moof.len() + 8).unwrap();
+        assert_eq!(runs.len(), 2, "both trafs, not just the first");
+        assert_eq!(runs[0].track_id, 1);
+        assert_eq!(runs[1].track_id, 2);
     }
 
     #[test]
