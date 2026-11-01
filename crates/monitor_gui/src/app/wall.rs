@@ -443,12 +443,22 @@ impl XgViewApp {
         }
 
         let rotated = self.magnified_rotated();
+        // The panel carries a timeline only where there is black under the
+        // picture to hold it: over the picture it would be a strip of controls
+        // covering the very thing it is about. `Stretch` is the one fit with no
+        // black at all, and a phone held upright is the one screen where the
+        // band is thin.
+        let playing = self.scheduler.zoom().is_some_and(|slot| self.is_playing_back(slot));
+        let band = self
+            .magnified_area(&self.config.active_cameras(), view, wall, dx)
+            .map_or(0.0, |picture| rect.bottom() - picture.bottom());
+        let timeline = playing && band >= tilebar::EDGE + tilebar::FULL;
         // The controls are read again below, after the press, so a press that
         // changes the picture fit also redraws the bar with the set it has in the
         // same frame it changes it. Every control is a square.
         let controls = self.tile_bar_controls();
         let widths = vec![tilebar::icon_width(); controls.len()];
-        let layout = tilebar::layout(rect, rotated, self.tile_bar.dock(), &widths);
+        let layout = tilebar::layout(rect, rotated, self.tile_bar.dock(), &widths, timeline);
         let now = Instant::now();
         let mut consumed = false;
 
@@ -512,7 +522,7 @@ impl XgViewApp {
         // one.
         let entries = self.tile_bar_entries();
         let widths = vec![tilebar::icon_width(); entries.len()];
-        let layout = tilebar::layout(rect, rotated, self.tile_bar.dock(), &widths);
+        let layout = tilebar::layout(rect, rotated, self.tile_bar.dock(), &widths, timeline);
 
         // A double press in the band is the bar being asked for, not the
         // viewport being put back: its first press has already opened the bar,

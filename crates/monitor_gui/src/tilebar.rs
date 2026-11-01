@@ -57,11 +57,28 @@ const GUARD: Duration = Duration::from_millis(300);
 /// core's audio hub follows.
 pub const SOUND: bool = true;
 
+/// Height of the timeline row, under the controls.
+///
+/// Deep enough for a track, the ticks over it and a row of labels under that,
+/// and no deeper: the panel covers the picture wherever it has no black to sit
+/// in.
+pub const TIMELINE: f32 = 48.0;
+
+/// The panel's whole depth when it carries a timeline: the controls, the gap
+/// under them, and the timeline.
+pub const FULL: f32 = THICK + GAP + TIMELINE;
+
+/// The widest the panel is drawn, timeline or not.
+///
+/// A timeline wider than this asks the eye to travel further than it can follow
+/// a scrub; the picture may be wider still.
+const WIDEST: f32 = 1180.0;
+
 /// Distance kept from the picture edge, in points.
 ///
 /// Also what keeps the bar out of the band a touch screen's own gesture
 /// navigation claims along the screen's edge.
-const EDGE: f32 = 24.0;
+pub const EDGE: f32 = 24.0;
 
 /// Thickness of the strip, across the picture's edge.
 const THICK: f32 = 56.0;
@@ -271,6 +288,11 @@ pub struct Layout {
     pub bar: Rect,
     /// One rectangle per control, in the picture's left-to-right order.
     pub buttons: Vec<Rect>,
+    /// The row under the controls, when the panel carries a timeline.
+    ///
+    /// In the picture's own frame like everything else here, so a turned
+    /// picture carries a timeline running down the screen.
+    pub timeline: Option<Rect>,
 }
 
 impl Layout {
@@ -302,31 +324,56 @@ impl Layout {
 /// The side it is docked to is the picture's own: `Dock::Bottom` is the edge the
 /// status bar would be on in a landscape wall, and the screen's left edge once
 /// the picture is turned.
-pub fn layout(tile: Rect, rotated: bool, dock: Dock, widths: &[f32]) -> Layout {
+pub fn layout(tile: Rect, rotated: bool, dock: Dock, widths: &[f32], timeline: bool) -> Layout {
     let local = if rotated { vec2(tile.height(), tile.width()) } else { tile.size() };
-    let length = widths.iter().sum::<f32>()
+    let controls = widths.iter().sum::<f32>()
         + widths.len().saturating_sub(1) as f32 * GAP
         + 2.0 * PAD;
+    // A timeline wants the width of the picture, less the margin it keeps from
+    // the edge - and no more than `WIDEST`, where a scrub would ask the eye to
+    // travel further than it can follow. The controls are centred in whatever
+    // it turns out to be.
+    let length = if timeline {
+        controls.max((local.x - 2.0 * EDGE).min(WIDEST))
+    } else {
+        controls
+    };
+    let depth = if timeline { FULL } else { THICK };
     let x = ((local.x - length) * 0.5).max(0.0);
     let y = match dock {
         Dock::Top => EDGE,
-        Dock::Bottom => (local.y - EDGE - THICK).max(EDGE),
+        Dock::Bottom => (local.y - EDGE - depth).max(EDGE),
     };
 
-    let bar = Rect::from_min_size(egui::pos2(x, y), vec2(length, THICK));
+    let bar = Rect::from_min_size(egui::pos2(x, y), vec2(length, depth));
+    // The controls sit against the picture, away from the edge the panel is
+    // docked to: the timeline is the row nearest that edge, so the controls
+    // rise by one row when it appears rather than jumping to another edge.
+    let top = match dock {
+        Dock::Top => y + depth - THICK,
+        Dock::Bottom => y,
+    };
     let mut left = x + PAD;
     let buttons: Vec<Rect> = widths
         .iter()
         .map(|width| {
-            let top = y + (THICK - BUTTON_H) * 0.5;
-            let rect = Rect::from_min_size(egui::pos2(left, top), vec2(*width, BUTTON_H));
+            let at = top + (THICK - BUTTON_H) * 0.5;
+            let rect = Rect::from_min_size(egui::pos2(left, at), vec2(*width, BUTTON_H));
             left += *width + GAP;
             rect
         })
         .collect();
+    let row = match dock {
+        Dock::Top => Rect::from_min_max(egui::pos2(x + PAD, y + PAD), egui::pos2(x + length - PAD, y + TIMELINE)),
+        Dock::Bottom => Rect::from_min_max(
+            egui::pos2(x + PAD, y + THICK + GAP),
+            egui::pos2(x + length - PAD, y + depth - PAD),
+        ),
+    };
     Layout {
         bar: to_screen_rect(bar, tile, rotated),
         buttons: buttons.into_iter().map(|rect| to_screen_rect(rect, tile, rotated)).collect(),
+        timeline: timeline.then(|| to_screen_rect(row, tile, rotated)),
     }
 }
 
@@ -375,6 +422,28 @@ pub fn draw(
         Stroke::new(1.0_f32, Color32::from_white_alpha(28)),
         StrokeKind::Inside,
     );
+
+    // The timeline's track, drawn here so the row is a row and not a gap. What
+    // goes on it - the stretches that were recorded, the events in them, the
+    // cursor - is drawn by the playback view, which is the only thing that knows
+    // what a camera recorded.
+    if let Some(row) = layout.timeline {
+        // The track runs along the row's long side, which on screen is across
+        // for a picture as it arrives and down for one drawn turned.
+        let middle = row.center();
+        let track = if row.width() > row.height() {
+            Rect::from_min_max(
+                egui::pos2(row.left(), middle.y - 1.0),
+                egui::pos2(row.right(), middle.y + 1.0),
+            )
+        } else {
+            Rect::from_min_max(
+                egui::pos2(middle.x - 1.0, row.top()),
+                egui::pos2(middle.x + 1.0, row.bottom()),
+            )
+        };
+        painter.rect_filled(track, CornerRadius::same(1), Color32::from_white_alpha(26));
+    }
 
     nav.open(scope(rotated));
     // The seat is a focus target, not a stop of the walk: it is claimed (as
@@ -429,7 +498,36 @@ mod tests {
     }
 
     fn placed(tile: Rect, rotated: bool, dock: Dock, widths: &[f32]) -> Layout {
-        layout(tile, rotated, dock, widths)
+        layout(tile, rotated, dock, widths, false)
+    }
+
+    /// The same, with a timeline row under the controls.
+    fn playing(tile: Rect, dock: Dock, widths: &[f32]) -> Layout {
+        layout(tile, false, dock, widths, true)
+    }
+
+    /// With a timeline the panel is deeper and wider, and its controls rise by
+    /// one row: the strip grows under them rather than moving them to another
+    /// edge, so a press that enters playback does not move what the finger was
+    /// on.
+    #[test]
+    fn a_timeline_deepens_the_panel_and_raises_the_controls() {
+        let widths = [icon_width(), icon_width()];
+        let plain = placed(landscape(), false, Dock::Bottom, &widths);
+        let full = playing(landscape(), Dock::Bottom, &widths);
+
+        assert!((full.bar.height() - plain.bar.height() - (TIMELINE + GAP)).abs() < 0.5);
+        // The edge it is docked to has not moved; only the far side has.
+        assert!((full.bar.bottom() - plain.bar.bottom()).abs() < 0.5);
+        assert!((plain.buttons[0].top() - full.buttons[0].top() - (TIMELINE + GAP)).abs() < 0.5);
+
+        let row = full.timeline.expect("a timeline");
+        assert!(row.top() >= full.buttons[0].bottom(), "the row is under the controls");
+        assert!(inside(full.bar, row));
+        assert!(plain.timeline.is_none());
+        // Wider, because a timeline is read across the picture and the controls
+        // are centred in whatever room it needs.
+        assert!(full.bar.width() > plain.bar.width());
     }
 
     /// The strip is inside the tile and against the picture edge it was docked
