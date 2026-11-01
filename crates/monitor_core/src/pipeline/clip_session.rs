@@ -31,6 +31,14 @@ use super::shared::{
 use super::ws_session::frigate_api_login;
 use super::*;
 
+/// How long the response may go quiet before the session is treated as broken.
+///
+/// A recording is sent as fast as the network allows, so a pause this long is
+/// not buffering - it is a server that stopped. Failing is what lets the
+/// channel ask for the window again, rather than sit on a picture that will
+/// never move with nothing on screen to say why.
+const STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The longest a sample is waited for.
 ///
 /// A timestamp that jumps - a stream whose first fragment carries a time far
@@ -78,13 +86,19 @@ pub(super) async fn run_clip_session(
     let mut first: Option<i64> = None;
 
     loop {
-        let chunk = match response.chunk().await {
-            Ok(Some(chunk)) => chunk,
+        let chunk = match tokio::time::timeout(STALL_TIMEOUT, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => chunk,
             // The end of the response is the end of the recording.
-            Ok(None) => break,
-            Err(err) => {
+            Ok(Ok(None)) => break,
+            Ok(Err(err)) => {
                 return Err(crate::error::CoreError::network(format!(
                     "the recording stopped being sent: {err}"
+                )));
+            }
+            Err(_) => {
+                return Err(crate::error::CoreError::timeout(format!(
+                    "the recording went quiet for {} s",
+                    STALL_TIMEOUT.as_secs()
                 )));
             }
         };

@@ -427,6 +427,22 @@ fn source_for(
     source
 }
 
+/// One of the streams no camera references: a feed on its own.
+///
+/// It is not a camera, so it is not given a camera's recordings either. The name
+/// it carries is go2rtc's, and Frigate would answer `404` to a camera of that
+/// name - which is a playback button that opens nothing.
+fn leftover_for(
+    config: &FrigateConfig,
+    port: u16,
+    name: &str,
+    credentials: &Option<(String, String)>,
+) -> CameraSource {
+    let mut source = source_for(config, port, name, name, credentials);
+    source.frigate = None;
+    source
+}
+
 /// The RTSP restream URL of one stream - the address the viewer prefers.
 pub fn rtsp_url(config: &FrigateConfig, restream_port: u16, stream: &str) -> String {
     restream_url(&config.host, restream_port, stream)
@@ -510,7 +526,7 @@ async fn build_sources(config: &FrigateConfig, parts: FrigateParts) -> FrigateIm
     let leftovers = parts
         .leftovers
         .iter()
-        .map(|name| source_for(config, port, name, name, &credentials))
+        .map(|name| leftover_for(config, port, name, &credentials))
         .collect();
 
     FrigateImport { cameras, leftovers }
@@ -796,6 +812,24 @@ mod tests {
         assert_eq!(extract_rtsp_port("rtsp://192.168.17.88:8554/cam_1"), Some(8554));
         assert_eq!(extract_rtsp_port("rtsp://192.168.17.88:9000/cam_1"), Some(9000));
         assert_eq!(extract_rtsp_port("wss://192.168.17.88:8971/live/mse/api/ws?src=cam_1"), None);
+    }
+
+    /// A stream that no camera references is not a camera, and must not claim
+    /// to be one: the name it carries is go2rtc's, and a recording asked for
+    /// under that name does not exist.
+    #[test]
+    fn a_stream_no_camera_references_is_not_a_camera() {
+        let leftover = leftover_for(&frigate_config(), 8554, "cam_garage_1", &None);
+        assert!(leftover.frigate.is_none());
+        // It is still an entry, with the address it was imported with.
+        assert_eq!(leftover.rtsp_main, "rtsp://192.168.17.88:8554/cam_garage_1");
+
+        // A camera of the same server is one.
+        let camera = source_for(&frigate_config(), 8554, "cam_living_room", "cam_living_room_1", &None);
+        assert_eq!(
+            camera.frigate.map(|origin| origin.camera),
+            Some("cam_living_room".to_string())
+        );
     }
 
     /// An imported camera remembers which camera of which server it is, and it
