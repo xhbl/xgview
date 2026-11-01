@@ -73,6 +73,50 @@ pub struct FrigateImport {
     pub leftovers: Vec<CameraSource>,
 }
 
+/// One stretch of a camera's recording, as the server lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Segment {
+    /// Where the stretch starts, in seconds since the epoch.
+    pub start: i64,
+    /// Where it ends.
+    pub end: i64,
+}
+
+/// How much of a gap two segments may leave and still be one stretch.
+///
+/// The recorder writes in segments of about ten seconds and consecutive ones
+/// leave a fraction of a second between them. Anything larger is a stretch the
+/// camera did not record, and a window must not cross one: a clip asked for
+/// across a hole comes back shorter with its timestamps running straight
+/// through it, so the picture's time and the wall's would part company.
+pub const JOIN: i64 = 2;
+
+/// The stretch of recording that begins at or before `from`, and runs to the
+/// first hole or to `longest` seconds, whichever comes first.
+///
+/// It starts at the beginning of the segment `from` falls in rather than at
+/// `from` itself: a clip cut mid-segment begins on whatever frame is there, and
+/// a decoder wants the keyframe that opens the segment.
+pub fn window_at(segments: &[Segment], from: i64, longest: i64) -> Option<(i64, i64)> {
+    let first = segments.iter().position(|segment| segment.end > from)?;
+    let start = segments[first].start;
+    let mut end = segments[first].end;
+    for next in &segments[first + 1..] {
+        if next.start - end > JOIN || next.end - start > longest {
+            break;
+        }
+        end = next.end;
+    }
+    Some((start, end.min(start + longest)))
+}
+
+/// The shape `/api/{camera}/recordings` answers with, as far as this needs it.
+#[derive(serde::Deserialize)]
+struct Listed {
+    start_time: f64,
+    end_time: f64,
+}
+
 /// Client for Frigate's API.
 #[derive(Debug, Clone)]
 pub struct FrigateClient {
@@ -152,6 +196,55 @@ impl FrigateClient {
         }
         serde_json::from_str(&text)
             .map_err(|err| CoreError::parse(format!("Frigate config is not JSON: {err}")))
+    }
+
+    /// The segments a camera recorded between two moments.
+    ///
+    /// Both bounds are seconds since the epoch, and the answer is in order. A
+    /// segment is what the recorder wrote in one go - about ten seconds of it -
+    /// and consecutive ones leave a fraction of a second between them; a gap
+    /// larger than [`JOIN`] is a stretch the camera did not record.
+    pub async fn segments(
+        &mut self,
+        camera: &str,
+        after: i64,
+        before: i64,
+    ) -> Result<Vec<Segment>> {
+        if self.config.needs_login() && self.token.is_none() {
+            self.login().await?;
+        }
+        let url = format!(
+            "{}/api/{camera}/recordings?after={after}&before={before}",
+            self.config.base_url()
+        );
+        let mut request = self.http.get(&url);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(CoreError::network("Frigate rejected the API token"));
+        }
+        if !status.is_success() {
+            return Err(CoreError::network(format!(
+                "Frigate /api/{camera}/recordings answered {status}"
+            )));
+        }
+        let listed: Vec<Listed> = response
+            .json()
+            .await
+            .map_err(|err| CoreError::parse(format!("the segment list is not JSON: {err}")))?;
+        Ok(listed
+            .into_iter()
+            .map(|entry| Segment {
+                // Truncated rather than rounded: a window that begins a moment
+                // early is answered from what exists, one that begins late
+                // loses its first frame.
+                start: entry.start_time as i64,
+                end: entry.end_time as i64,
+            })
+            .collect())
     }
 
     /// Fetches, groups, measures and builds the two groups of cameras.
@@ -812,6 +905,41 @@ mod tests {
         assert_eq!(extract_rtsp_port("rtsp://192.168.17.88:8554/cam_1"), Some(8554));
         assert_eq!(extract_rtsp_port("rtsp://192.168.17.88:9000/cam_1"), Some(9000));
         assert_eq!(extract_rtsp_port("wss://192.168.17.88:8971/live/mse/api/ws?src=cam_1"), None);
+    }
+
+    /// A window runs from the beginning of the segment `from` falls in, through
+    /// every segment that touches the one before it, and stops at the first
+    /// hole - a clip asked for across one comes back short with its timestamps
+    /// running straight through it.
+    #[test]
+    fn a_window_follows_the_segments_and_stops_at_a_hole() {
+        let segments = [
+            Segment { start: 100, end: 110 },
+            Segment { start: 110, end: 120 },
+            // A second's gap: the recorder changed file, the stretch did not.
+            Segment { start: 121, end: 130 },
+            // Ten seconds: the camera recorded nothing, and the window ends.
+            Segment { start: 140, end: 150 },
+        ];
+        assert_eq!(window_at(&segments, 105, 900), Some((100, 130)));
+    }
+
+    /// The window is capped, and the cap is measured from its own start rather
+    /// than from the moment asked for.
+    #[test]
+    fn a_window_is_capped() {
+        let segments: Vec<Segment> = (0..10)
+            .map(|i| Segment { start: 100 + i * 10, end: 110 + i * 10 })
+            .collect();
+        assert_eq!(window_at(&segments, 100, 35), Some((100, 130)));
+    }
+
+    /// A moment no segment covers has no window at all.
+    #[test]
+    fn a_moment_outside_the_recording_has_no_window() {
+        let segments = [Segment { start: 100, end: 110 }];
+        assert_eq!(window_at(&segments, 200, 900), None);
+        assert_eq!(window_at(&[], 100, 900), None);
     }
 
     /// A stream that no camera references is not a camera, and must not claim
