@@ -116,8 +116,8 @@ impl Supervisor {
                 ChannelCommand::Activate { index, source, stream, previous_stream } => {
                     self.activate(index, source, stream, previous_stream)
                 }
-                ChannelCommand::PlayClip { index, uri, camera_id, credentials } => {
-                    self.play_clip(index, uri, camera_id, credentials)
+                ChannelCommand::PlayClip { index, uri, camera_id, credentials, window } => {
+                    self.play_clip(index, uri, camera_id, credentials, window)
                 }
                 ChannelCommand::Suspend { index } => self.suspend(index),
                 ChannelCommand::Wake => self.wake(),
@@ -223,6 +223,7 @@ impl Supervisor {
         uri: String,
         camera_id: String,
         credentials: Option<(String, String)>,
+        window: (i64, i64),
     ) {
         if let Some(existing) = self.channels.remove(&index) {
             existing.task.abort();
@@ -234,7 +235,7 @@ impl Supervisor {
             camera = %camera_id,
             "playing a recording"
         );
-        let endpoint = Endpoint::clip(index, camera_id, uri, credentials, StreamKind::Main);
+        let endpoint = Endpoint::clip(index, camera_id, uri, credentials, StreamKind::Main, window);
         self.spawn_channel(endpoint, Arc::new(Notify::new()));
     }
 

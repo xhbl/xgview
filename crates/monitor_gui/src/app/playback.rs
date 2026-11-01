@@ -121,7 +121,7 @@ impl XgViewApp {
             origin.camera
         );
         tracing::debug!(target: "xgview::app", channel, index, %uri, "playing a recording");
-        self.manager.play_clip(index, uri, camera_id.clone(), credentials);
+        self.manager.play_clip(index, uri, camera_id.clone(), credentials, (from, to));
         self.playback = Some(Playback { slot: channel, index, camera: camera_id });
         // The speaker belongs to the channel whose picture is on screen, and
         // that has just become the recording's.

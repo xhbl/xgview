@@ -166,6 +166,8 @@ enum Bar {
 pub struct ChannelTexture {
     /// Sequence number of the frame currently uploaded.
     sequence: u64,
+    /// The moment that frame is of, when it came from a recording.
+    at: Option<f64>,
     surface: VideoSurface,
 }
 
@@ -1650,7 +1652,10 @@ impl XgViewApp {
             let Some(surface) = self.video.surface(index) else {
                 continue;
             };
-            self.textures.insert(index, ChannelTexture { sequence: frame.sequence, surface });
+            self.textures.insert(
+                index,
+                ChannelTexture { sequence: frame.sequence, at: frame.at, surface },
+            );
         }
         self.video.flush();
     }

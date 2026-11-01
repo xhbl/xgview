@@ -126,6 +126,9 @@ pub struct Tile<'a> {
     /// The four combined-info slots, each an ordered list of atomic items.
     pub combined: [&'a [OsdItem]; 4],
     pub time: f64,
+    /// The moment the picture is of, in seconds since the epoch, when it comes
+    /// from a recording. `None` for a live stream, whose picture is of now.
+    pub clock: Option<f64>,
     /// How the picture is fitted into the tile.
     pub aspect: TileAspect,
     /// Draw the picture rotated 90° clockwise. Used in portrait single-view
@@ -500,7 +503,14 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
         OsdItem::Format => vec![format()],
         OsdItem::Transport => vec![transport()],
         OsdItem::DateTime => {
-            let Some(now) = monitor_core::blackout::local_now() else {
+            // A recording is drawn in the hours it happened in, not in these:
+            // the corner says which moment the picture is, and for a live
+            // stream that is now.
+            let moment = match tile.clock {
+                Some(at) => monitor_core::blackout::local_at(at as i64),
+                None => monitor_core::blackout::local_now(),
+            };
+            let Some(now) = moment else {
                 return Vec::new();
             };
             vec![OsdLine {

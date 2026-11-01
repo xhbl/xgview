@@ -404,7 +404,7 @@ pub(super) async fn run_ws_session(
                 match dec.decode(&sample.data, sample.pts_us, sample.keyframe) {
                     Ok(decoded) => {
                         window.counters.decoded += decoded.len() as u64;
-                        if let Some((w, h)) = publish_frames(frames, index, &mut sequence, decoded) {
+                        if let Some((w, h)) = publish_frames(frames, index, &mut sequence, decoded, None) {
                             width = Some(w);
                             height = Some(h);
                         }

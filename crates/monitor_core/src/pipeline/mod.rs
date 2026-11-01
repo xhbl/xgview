@@ -194,10 +194,14 @@ impl StreamEvent {
 /// converted to colour first: uploading two planes costs a third of what RGBA
 /// costs, and the renderer turns them into colour on the GPU, once, for every
 /// tile at the same time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VideoFrame {
     /// Monotonic per channel; the renderer re-uploads only when it changes.
     pub sequence: u64,
+    /// The moment this picture is of, in seconds since the epoch, when the
+    /// channel is playing a recording. `None` for a live stream: its picture is
+    /// of now, and the wall clock is the answer.
+    pub at: Option<f64>,
     pub width: u32,
     pub height: u32,
     /// How the two planes are to be read back as colour.
@@ -403,6 +407,8 @@ enum ChannelCommand {
         /// emits. A playback channel has no camera of its own.
         camera_id: String,
         credentials: Option<(String, String)>,
+        /// The stretch the address asks for, in seconds since the epoch.
+        window: (i64, i64),
     },
     /// The viewer came back to the window. Every channel waiting out a backoff
     /// retries at once instead: the failures it counted happened while the
@@ -539,12 +545,14 @@ impl ChannelManager {
         uri: impl Into<String>,
         camera_id: impl Into<String>,
         credentials: Option<(String, String)>,
+        window: (i64, i64),
     ) {
         let _ = self.commands.send(ChannelCommand::PlayClip {
             index,
             uri: uri.into(),
             camera_id: camera_id.into(),
             credentials,
+            window,
         });
     }
 
@@ -668,6 +676,10 @@ struct Endpoint {
     credentials: Option<(String, String)>,
     stream: StreamKind,
     transport: RtspTransport,
+    /// The stretch of recording this channel plays, in seconds since the
+    /// epoch, for a playback channel and nothing else. It is what the session
+    /// needs to say which moment its pictures are of.
+    window: Option<(i64, i64)>,
     /// Whether this session also asks for the camera's talk-back media. Set for
     /// the magnified channel alone: a back channel is a camera resource, and
     /// sixteen tiles asking for one at once would fight over it.
@@ -781,6 +793,7 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endp
         credentials,
         stream,
         transport: source.transport,
+        window: None,
         talk: false,
         talk_mode: source.talk,
         fallback,
@@ -799,6 +812,7 @@ impl Endpoint {
         uri: String,
         credentials: Option<(String, String)>,
         stream: StreamKind,
+        window: (i64, i64),
     ) -> Self {
         Self {
             index,
@@ -808,6 +822,7 @@ impl Endpoint {
             credentials,
             stream,
             transport: RtspTransport::default(),
+            window: Some(window),
             talk: false,
             talk_mode: TalkMode::default(),
             fallback: None,

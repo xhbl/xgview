@@ -58,8 +58,14 @@ pub(super) async fn run_clip_session(
     audio: &AudioHub,
 ) -> Result<()> {
     let Sinks { events, frames, stats } = sinks;
-    let Endpoint { index, camera_id, uri, stream, credentials, .. } = endpoint;
+    let Endpoint { index, camera_id, uri, stream, credentials, window, .. } = endpoint;
     let camera_id_str = camera_id.as_str();
+    // A playback channel is always given the stretch it plays: it is what the
+    // pictures it publishes are dated from, and what says whether the answer was
+    // all of it.
+    let Some((from, to)) = window else {
+        return Err(crate::error::CoreError::config("a playback channel without a window"));
+    };
 
     let mut response = open_clip(&uri, credentials.as_ref()).await?;
 
@@ -184,7 +190,12 @@ pub(super) async fn run_clip_session(
 
         for (pts, step) in steps {
             let base = *first.get_or_insert(pts);
-            let due = Duration::from_micros(u64::try_from(pts - base).unwrap_or(0));
+            let elapsed = u64::try_from(pts - base).unwrap_or(0);
+            // Where this sample belongs on the wall clock. The window begins at
+            // its first sample, so the distance from that sample is the
+            // distance from the window's own start.
+            let at = from as f64 + elapsed as f64 / 1_000_000.0;
+            let due = Duration::from_micros(elapsed);
             let now = started.elapsed();
             if due > now {
                 tokio::time::sleep((due - now).min(LONGEST_WAIT)).await;
@@ -221,7 +232,9 @@ pub(super) async fn run_clip_session(
                         match dec.decode(&sample.data, sample.pts_us, sample.keyframe) {
                             Ok(decoded) => {
                                 window.counters.decoded += decoded.len() as u64;
-                                if let Some((w, h)) = publish_frames(frames, index, &mut sequence, decoded) {
+                                if let Some((w, h)) =
+                                    publish_frames(frames, index, &mut sequence, decoded, Some(at))
+                                {
                                     width = Some(w);
                                     height = Some(h);
                                 }
@@ -261,6 +274,20 @@ pub(super) async fn run_clip_session(
         }
     }
 
+    // The response ended. That is the recording's own end when the last picture
+    // reached the window's last second - and a server that stopped sending
+    // short of it looks the same from here. Said out loud rather than reported
+    // as a clean finish, so a truncated answer is not mistaken for a short one.
+    let reached = frames.latest(index).and_then(|frame| frame.at).unwrap_or(from as f64);
+    if reached + 3.0 < to as f64 {
+        tracing::warn!(
+            target: "xgview::pipeline",
+            index,
+            reached = %reached,
+            asked_for = to,
+            "the recording stopped before the end of the window it was asked for"
+        );
+    }
     tracing::debug!(
         target: "xgview::pipeline",
         index,

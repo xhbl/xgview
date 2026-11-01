@@ -103,7 +103,7 @@ pub(super) async fn run_mjpeg_session(
                 Ok(decoded) => {
                     window.counters.decoded += decoded.len() as u64;
                     if let Some((picture_width, picture_height)) =
-                        publish_frames(frames, index, &mut sequence, decoded)
+                        publish_frames(frames, index, &mut sequence, decoded, None)
                     {
                         width = Some(picture_width);
                         height = Some(picture_height);

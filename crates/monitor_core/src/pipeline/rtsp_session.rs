@@ -1368,6 +1368,7 @@ impl<'a> RtspSession<'a> {
                             self.index,
                             &mut self.sequence,
                             decoded,
+                            None,
                         )
                     {
                         self.width = Some(picture_width);

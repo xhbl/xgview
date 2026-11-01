@@ -46,6 +46,7 @@ pub(super) fn publish_frames(
     index: usize,
     sequence: &mut u64,
     decoded: Vec<DecodedFrame>,
+    at: Option<f64>,
 ) -> Option<(u32, u32)> {
     let mut size = None;
     for frame in decoded {
@@ -58,6 +59,7 @@ pub(super) fn publish_frames(
             index,
             Arc::new(VideoFrame {
                 sequence: *sequence,
+                at,
                 width: frame.width,
                 height: frame.height,
                 colorspace: frame.colorspace,

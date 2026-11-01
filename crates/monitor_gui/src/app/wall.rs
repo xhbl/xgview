@@ -168,6 +168,7 @@ impl XgViewApp {
                     &self.config.combined_info[3],
                 ],
                 time: self.time,
+                clock: index.and_then(|index| self.view_texture(index)).and_then(|entry| entry.at),
                 aspect: index
                     .and_then(|index| cameras.get(index))
                     .map(|camera| self.tile_aspect(camera))
