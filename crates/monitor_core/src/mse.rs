@@ -411,11 +411,19 @@ impl MseParser {
             let duration = trun.durations.get(i).copied().unwrap_or(run.default_sample_duration) as u64;
             let size = trun.sizes.get(i).copied().unwrap_or(run.default_sample_size) as usize;
             let comp_offset = trun.composition_offsets.get(i).copied().unwrap_or(0) as i64;
-            let flags = trun.sample_flags.get(i).copied().unwrap_or(run.default_sample_flags);
+            // The first sample of a run may carry its own flags: the IDR that
+            // opens a fragment does. `default_sample_flags` describes the rest
+            // of the run and would mark it as one more dependent frame.
+            let flags = trun
+                .sample_flags
+                .get(i)
+                .copied()
+                .or_else(|| trun.first_sample_flags.filter(|_| i == 0))
+                .unwrap_or(run.default_sample_flags);
 
             let pts = dts as i64 + comp_offset;
             let pts_us = pts * 1_000_000 / timescale as i64;
-            let keyframe = (flags >> 24) & 0x03 == 0;
+            let keyframe = is_sync_sample(flags);
 
             if offset + size <= mdat.len() && size > 0 {
                 let sample = &mdat[offset..offset + size];
@@ -624,6 +632,14 @@ struct TrackRun {
 struct TrunData {
     sample_count: u32,
     data_offset: Option<i32>,
+    /// Flags for the run's first sample alone, when the muxer gave them here
+    /// rather than in the per-sample table.
+    ///
+    /// This is where the IDR that opens a fragment is marked as one: ffmpeg
+    /// writes `default_sample_flags` saying "depends on others, not a sync
+    /// point" and then overrides the first sample with this. Ignoring it marks
+    /// every fragment's opening frame as one more dependent frame.
+    first_sample_flags: Option<u32>,
     durations: Vec<u32>,
     sizes: Vec<u32>,
     composition_offsets: Vec<i32>,
@@ -703,6 +719,29 @@ fn next_descriptor(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     Some((tag, body, &data[pos + len..]))
 }
 
+/// Whether a sample's flags mark it as a sync point - the frame a decoder can
+/// start on.
+///
+/// `sample_is_non_sync_sample` (bit 16) is the field that says it outright, and
+/// it is the one to read: a set bit means "not a sync point", whatever else the
+/// flags say. Where it is clear, `sample_depends_on` (bits 24-25) decides - an
+/// I-frame (`2`) is a sync point, a frame that depends on others (`1`) is not,
+/// and `0` means the muxer did not fill the field, which is read as a sync
+/// point because that is what it was read as before this existed.
+///
+/// Reading `depends_on` alone, as this did, gets an ffmpeg-written fragment
+/// wrong twice over: its `tfhd` default is `0x01010000` - depends on others,
+/// non-sync - which is right for every sample but the first, and the first is
+/// overridden in `trun`'s `first_sample_flags` with `0x02000000`, an I-frame.
+fn is_sync_sample(flags: u32) -> bool {
+    const NON_SYNC: u32 = 1 << 16;
+    const DEPENDS_ON: u32 = 0b11 << 24;
+    if flags & NON_SYNC != 0 {
+        return false;
+    }
+    matches!((flags & DEPENDS_ON) >> 24, 0 | 2)
+}
+
 fn parse_trun(data: &[u8]) -> Result<TrunData> {
     let (_, flags, body) = full_box_header(data)
         .ok_or_else(|| CoreError::network("trun too short"))?;
@@ -724,13 +763,16 @@ fn parse_trun(data: &[u8]) -> Result<TrunData> {
         None
     };
 
-    if flags & 0x000004 != 0 {
-        // first_sample_flags — skip (we use per-sample or default).
+    let first_sample_flags = if flags & 0x000004 != 0 {
         if pos + 4 > body.len() {
             return Err(CoreError::network("trun first_sample_flags truncated"));
         }
+        let value = u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap());
         pos += 4;
-    }
+        Some(value)
+    } else {
+        None
+    };
 
     let has_dur = flags & 0x000100 != 0;
     let has_size = flags & 0x000200 != 0;
@@ -750,6 +792,7 @@ fn parse_trun(data: &[u8]) -> Result<TrunData> {
         return Ok(TrunData {
             sample_count,
             data_offset,
+            first_sample_flags,
             durations: Vec::new(),
             sizes: Vec::new(),
             composition_offsets: Vec::new(),
@@ -800,6 +843,7 @@ fn parse_trun(data: &[u8]) -> Result<TrunData> {
     Ok(TrunData {
         sample_count,
         data_offset,
+        first_sample_flags,
         durations,
         sizes,
         composition_offsets,
@@ -1079,6 +1123,7 @@ mod tests {
             trun: TrunData {
                 sample_count: u32::MAX,
                 data_offset: None,
+                first_sample_flags: None,
                 durations: Vec::new(),
                 sizes: Vec::new(),
                 composition_offsets: Vec::new(),
@@ -1099,6 +1144,59 @@ mod tests {
         assert!(samples.is_empty());
         assert!(audio.is_empty());
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_sync_sample_is_one_the_flags_do_not_mark_as_dependent() {
+        // An ffmpeg `tfhd` default: depends on others, not a sync point.
+        assert!(!is_sync_sample(0x0101_0000));
+        // The same fragment's `trun` `first_sample_flags`: an I-frame.
+        assert!(is_sync_sample(0x0200_0000));
+        // The muxer left `depends_on` at "unknown" and the non-sync bit clear,
+        // which is what go2rtc's MSE sends and has always been read as a sync
+        // point.
+        assert!(is_sync_sample(0x0000_0000));
+        // Depends on others, non-sync bit clear: still not a sync point.
+        assert!(!is_sync_sample(0x0100_0000));
+        // The non-sync bit alone is enough to say no.
+        assert!(!is_sync_sample(0x0001_0000));
+    }
+
+    #[test]
+    fn the_first_sample_of_a_run_uses_its_own_flags() {
+        // A fragment as ffmpeg writes one for a clip: the run's default flags
+        // describe the frames that follow the keyframe, and the opening sample
+        // is overridden by `first_sample_flags`. Read without it, every
+        // fragment began on a frame the decoder was told not to trust - which
+        // is what a real `clip.mp4` did: 183 samples, none of them a keyframe.
+        let sample = [0u8, 0, 0, 2, 0x65, 0x88];
+        let mdat: Vec<u8> = sample.iter().copied().chain(sample.iter().copied()).collect();
+        let run = TrackRun {
+            track_id: 1,
+            base_dts: 0,
+            trun: TrunData {
+                sample_count: 2,
+                data_offset: Some(520),
+                first_sample_flags: Some(0x0200_0000),
+                durations: vec![1000, 1000],
+                sizes: vec![sample.len() as u32, sample.len() as u32],
+                composition_offsets: Vec::new(),
+                sample_flags: Vec::new(),
+            },
+            default_sample_duration: 1000,
+            default_sample_size: sample.len() as u32,
+            default_sample_flags: 0x0101_0000,
+            moof_size: 512,
+        };
+
+        let parser = MseParser::new();
+        let mut samples = Vec::new();
+        let mut audio = Vec::new();
+        parser.extract_samples(&run, &mdat, &mut samples, &mut audio).unwrap();
+
+        assert_eq!(samples.len(), 2);
+        assert!(samples[0].keyframe, "the first sample is the IDR the muxer named");
+        assert!(!samples[1].keyframe, "the rest of the run depends on it");
     }
 
     #[test]
