@@ -9,6 +9,9 @@ impl XgViewApp {
             return;
         }
         self.tile_bar.hide();
+        // The viewport is closing, and the recording it was showing goes with
+        // it: there is nowhere else for it to be drawn.
+        self.leave_playback();
         self.scheduler.zoom_out();
         self.scheduler.set_layout(layout);
         self.slide = Slide::default();
@@ -62,6 +65,7 @@ impl XgViewApp {
         self.tile_bar.hide();
         let view = self.config.group().clone();
         let layout = if wanted.is_portrait() { view.portrait_layout } else { view.layout };
+        self.leave_playback();
         self.scheduler.zoom_out();
         self.scheduler.set_layout(layout);
         self.slide = Slide::default();
@@ -184,6 +188,11 @@ impl XgViewApp {
             self.slide.drag = 0.0;
             return false;
         }
+        // The recording belonged to the camera being left, and it is shown
+        // nowhere else: it goes with the picture, and its channel stops. Left
+        // behind it would play on unseen - a request to the server and a
+        // decoder held for a camera nobody is looking at.
+        self.leave_playback();
         let outgoing = PageView { layout: GridLayout::G1x1, cells: vec![Some(current)] };
         self.slide.start(if forward { 1.0 } else { -1.0 }, Some(outgoing));
         // The channel that slides in comes up whole, the way a magnify does: the

@@ -77,6 +77,9 @@ impl XgViewApp {
     /// arriving on the wall arrives whole, on the page and focus it was left at.
     pub(super) fn load_group_view(&mut self) {
         self.tile_bar.hide();
+        // A recording belongs to a camera of the group being left; the group
+        // arriving has its own, and nothing of the old one is drawn here.
+        self.leave_playback();
         self.scheduler.zoom_out();
         let group = self.config.group().clone();
         let layout =
