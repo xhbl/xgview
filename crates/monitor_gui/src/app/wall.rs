@@ -147,11 +147,11 @@ impl XgViewApp {
                 // The picture, and the channel behind it, come from the
                 // slot's view: a camera showing a recording is still that
                 // camera for everything else - its name, its display, its
-                // settings, its place on the wall.
-                channel: index.and_then(|index| self.channels.get(&self.view_index(index))),
-                video: index
-                    .and_then(|index| self.textures.get(&self.view_index(index)))
-                    .map(|entry| entry.surface),
+                // settings, its place on the wall. Until the recording's first
+                // frame arrives the camera's own picture stays, so pressing the
+                // control does not blank the viewport.
+                channel: index.and_then(|index| self.view_channel(index)),
+                video: index.and_then(|index| self.view_texture(index)).map(|entry| entry.surface),
                 // The ring is a cursor, and a wall nobody is operating is just a
                 // picture: it is drawn from the last key or press on and goes
                 // once the wall has been left alone for the shorter of the ring's

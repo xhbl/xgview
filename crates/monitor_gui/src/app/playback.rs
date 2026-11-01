@@ -52,6 +52,23 @@ impl XgViewApp {
         }
     }
 
+    /// The channel a slot's picture is drawn from.
+    ///
+    /// The playback channel's once it exists - and the camera's own until then.
+    /// A recording's first frame is a request away, and a viewport that went
+    /// blank for the length of it would look like the picture had failed rather
+    /// than like something was being fetched.
+    pub(super) fn view_channel(&self, slot: usize) -> Option<&ChannelUi> {
+        let view = self.view_index(slot);
+        self.channels.get(&view).or_else(|| self.channels.get(&slot))
+    }
+
+    /// The texture a slot's picture is drawn from. See [`Self::view_channel`].
+    pub(super) fn view_texture(&self, slot: usize) -> Option<&ChannelTexture> {
+        let view = self.view_index(slot);
+        self.textures.get(&view).or_else(|| self.textures.get(&slot))
+    }
+
     /// Whether a recording is playing on this slot.
     pub(super) fn is_playing_back(&self, slot: usize) -> bool {
         matches!(&self.playback, Some(playback) if playback.slot == slot)
