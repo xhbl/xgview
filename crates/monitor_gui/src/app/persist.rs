@@ -31,10 +31,21 @@ impl XgViewApp {
         if let Some(index) = self.scheduler.zoom() {
             self.manager.probe_talk(index);
         }
-        self.channels.retain(|index, _| *index < count);
+        // The playback channel sits one past the last one a camera can take, so
+        // a wall that changed length leaves it on an index a camera now owns:
+        // it goes first, and the recording with it.
+        let playback_index = self.playback_index();
+        if self.playback.as_ref().is_some_and(|playback| playback.index != playback_index) {
+            self.leave_playback();
+        }
+        self.channels.retain(|index, _| *index < count || *index == playback_index);
         // A channel beyond the grid is gone for good, and its textures with it.
-        let dropped: Vec<usize> =
-            self.textures.keys().copied().filter(|index| *index >= count).collect();
+        let dropped: Vec<usize> = self
+            .textures
+            .keys()
+            .copied()
+            .filter(|index| *index >= count && *index != playback_index)
+            .collect();
         for index in dropped {
             self.video.release(index);
             self.textures.remove(&index);

@@ -108,7 +108,7 @@ impl XgViewApp {
         let cell = view.cells.iter().position(|slot| *slot == Some(index))?;
         let rect = grid::tile_rect(wall.translate(vec2(dx, 0.0)), view.layout, cell, grid::LINE);
         let camera = cameras.get(index)?;
-        let size = self.textures.get(&index)?.surface.size;
+        let size = self.textures.get(&self.view_index(index))?.surface.size;
         let aspect = self.tile_aspect(camera);
         // Upright, the magnified picture is the one that may be drawn sideways -
         // the same answer the tile is drawn with. See `paint_view`.
@@ -144,8 +144,14 @@ impl XgViewApp {
                 id: Id::new(("xgview-tile", tag, cell, index.unwrap_or(usize::MAX))),
                 index: *index,
                 camera: index.and_then(|index| cameras.get(index)),
-                channel: index.and_then(|index| self.channels.get(&index)),
-                video: index.and_then(|index| self.textures.get(&index)).map(|entry| entry.surface),
+                // The picture, and the channel behind it, come from the
+                // slot's view: a camera showing a recording is still that
+                // camera for everything else - its name, its display, its
+                // settings, its place on the wall.
+                channel: index.and_then(|index| self.channels.get(&self.view_index(index))),
+                video: index
+                    .and_then(|index| self.textures.get(&self.view_index(index)))
+                    .map(|entry| entry.surface),
                 // The ring is a cursor, and a wall nobody is operating is just a
                 // picture: it is drawn from the last key or press on and goes
                 // once the wall has been left alone for the shorter of the ring's
@@ -581,6 +587,16 @@ impl XgViewApp {
         if self.magnified_has_backchannel() {
             entries.push((tilebar::Control::Icon(Icon::Mic), TileBarAction::Mic));
         }
+        // The way into this camera's recordings, for a camera that came from a
+        // server which keeps them. It is the last control: the four before it
+        // are about watching this stream, and this one is about leaving it.
+        // Not while it is already playing: the way in is not also the way out,
+        // and pressing it again would ask for the same stretch from its first
+        // frame. Back leaves the viewport, and the recording with it.
+        let playing = self.scheduler.zoom().is_some_and(|channel| self.is_playing_back(channel));
+        if !playing && self.magnified_camera().is_some_and(|camera| camera.frigate.is_some()) {
+            entries.push((tilebar::Control::Icon(Icon::History), TileBarAction::Playback));
+        }
         entries
     }
 
@@ -613,6 +629,12 @@ impl XgViewApp {
             }
             TileBarAction::Mic => {
                 self.set_talking(!self.talking);
+            }
+            TileBarAction::Playback => {
+                // The control is only drawn for a camera that has recordings,
+                // and only while magnified - which is the one viewport a
+                // recording can be played in.
+                self.enter_playback();
             }
             TileBarAction::Fit => {
                 // The fit this writes is the magnified viewport's own: it is kept

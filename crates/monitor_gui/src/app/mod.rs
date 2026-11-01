@@ -420,6 +420,8 @@ enum TileBarAction {
     Mic,
     /// End the call the bar has taken over for.
     Hangup,
+    /// Play this camera's recordings in the viewport.
+    Playback,
 }
 
 /// Detects the frame a panel appears on.
@@ -1078,6 +1080,9 @@ pub struct XgViewApp {
     tile_bar: tilebar::Bar,
     /// The state the bar's sound control draws, and the switch the sink follows.
     sound_on: bool,
+    /// The recording playing in the magnified viewport, when one is. See
+    /// [`crate::app::playback`].
+    playback: Option<playback::Playback>,
     /// Whether the microphone is switched on, the bar's talk control driving it.
     ///
     /// The bar is a toggle rather than a push-to-talk button: a remote control
@@ -1229,6 +1234,7 @@ mod chrome;
 mod input;
 mod paging;
 mod persist;
+mod playback;
 mod pickers;
 mod settings;
 mod streams;
@@ -1496,6 +1502,7 @@ impl XgViewApp {
             picture_zoom: PictureZoom::FULL,
             tile_bar: tilebar::Bar::new(),
             sound_on,
+            playback: None,
             talking: false,
             talk_index: None,
             mic: None,

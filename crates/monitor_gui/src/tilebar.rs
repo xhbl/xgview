@@ -103,13 +103,14 @@ pub fn icon_width() -> f32 {
 }
 
 /// How many controls the bar can carry at once: the quarter turn, the picture
-/// fit, the sound switch and the microphone. A call takes all of them away and
-/// leaves the handset in the first place.
+/// fit, the sound switch, the microphone and the way into a camera's
+/// recordings. A call takes all of them away and leaves the handset in the
+/// first place.
 ///
 /// A focus on any of these ids is a focus the bar owns, whether or not that
 /// control is on screen this frame - the microphone a call has just turned into
 /// the handset is one, and the handset it becomes is another.
-pub const CONTROLS: usize = 4;
+pub const CONTROLS: usize = 5;
 
 /// Which edge of the picture the bar is docked to, in the picture's own frame.
 ///

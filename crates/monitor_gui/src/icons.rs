@@ -58,6 +58,9 @@ pub enum Icon {
     /// Turn the magnified picture a quarter turn: an arrow curving round a
     /// square, the shape a phone means by "rotate".
     Rotate,
+    /// Go back over what has already happened: a clock face, its hands at a
+    /// past hour.
+    History,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -411,6 +414,14 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
             painter.add(line(&[at(0.22, 0.44), at(0.22, 0.56), at(0.50, 0.74), at(0.78, 0.56), at(0.78, 0.44)]));
             painter.add(line(&[at(0.50, 0.74), at(0.50, 0.92)]));
             painter.add(line(&[at(0.34, 0.92), at(0.66, 0.92)]));
+        }
+        Icon::History => {
+            // A clock face, hands turned back. It is the one shape that reads
+            // as "already recorded" without a word beside it.
+            let centre = at(0.5, 0.5);
+            painter.circle_stroke(centre, rect.width() * 0.40, stroke);
+            painter.add(line(&[centre, at(0.5, 0.24)]));
+            painter.add(line(&[centre, at(0.70, 0.58)]));
         }
         Icon::Rotate => {
             // A circular arrow: an arc most of the way round, a head that says

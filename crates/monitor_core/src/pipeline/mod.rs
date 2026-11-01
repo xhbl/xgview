@@ -548,6 +548,15 @@ impl ChannelManager {
         });
     }
 
+    /// Stops whatever a playback channel is playing and leaves it idle.
+    ///
+    /// A recording that is not being watched is a request to the server and a
+    /// decoder held for nothing, so leaving playback stops it rather than
+    /// letting it run to its end unseen.
+    pub fn stop_clip(&self, index: usize) {
+        self.send(ChannelCommand::Suspend { index });
+    }
+
     /// The runtime used by the streaming tasks (the UI uses it to spawn the
     /// discovery and import jobs as well).
     /// Retries every channel that is waiting out a backoff, at once.

@@ -214,6 +214,10 @@ impl XgViewApp {
     }
 
     pub(super) fn zoom_out(&mut self) {
+        // Leaving the viewport is leaving the recording: playback has no
+        // picture of its own anywhere else, and a channel left running unseen
+        // is a request to the server for nothing.
+        self.leave_playback();
         if self.scheduler.zoom_out() {
             self.needs_sync = true;
             self.mark_dirty();
@@ -228,6 +232,8 @@ impl XgViewApp {
         if self.scheduler.zoom() == Some(index) {
             self.zoom_out();
         } else {
+            // Another camera's picture is a different camera's recordings.
+            self.leave_playback();
             self.scheduler.set_focus(Some(index));
             self.zoom_in();
         }
