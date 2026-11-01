@@ -39,6 +39,16 @@ pub fn local_now() -> Option<LocalTime> {
     imp::local_now()
 }
 
+/// The wall clock at a moment that is not now.
+///
+/// `unix` is seconds since 1970-01-01 UTC, and the answer is in the machine's
+/// own zone with daylight saving applied - the same clock [`local_now`] reads,
+/// which is what a recording's timeline is drawn in. `None` on a platform this
+/// build has no clock for, and for a moment no calendar can hold.
+pub fn local_at(unix: i64) -> Option<LocalTime> {
+    imp::at(unix)
+}
+
 /// Which moment of the week it is locally, as minutes from Monday 00:00.
 pub fn minute_of_week() -> Option<u32> {
     let now = local_now()?;
@@ -113,17 +123,27 @@ mod imp {
     // without `unsafe` on the block: this crate is edition 2021, and the
     // `unsafe extern` form would raise the effective minimum compiler past the
     // 1.80 the workspace declares.
-    extern "system" {
-        fn GetLocalTime(time: *mut SystemTime);
+    /// `FILETIME`: 100-nanosecond intervals since 1601-01-01, as two halves.
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
     }
 
-    pub(super) fn local_now() -> Option<LocalTime> {
-        let mut time = SystemTime::default();
-        // SAFETY: the call fills the structure it is given, which is laid out
-        // exactly as `SYSTEMTIME` is on every Windows target, and it has no
-        // failure mode.
-        unsafe { GetLocalTime(&mut time) };
-        Some(LocalTime {
+    extern "system" {
+        fn GetLocalTime(time: *mut SystemTime);
+        fn FileTimeToSystemTime(file_time: *const FileTime, system_time: *mut SystemTime) -> i32;
+        fn SystemTimeToTzSpecificLocalTime(
+            zone: *const core::ffi::c_void,
+            universal: *const SystemTime,
+            local: *mut SystemTime,
+        ) -> i32;
+    }
+
+    /// A `SYSTEMTIME` as the schedule wants it.
+    fn of(time: &SystemTime) -> LocalTime {
+        LocalTime {
             year: time.year,
             month: time.month as u8,
             day: time.day as u8,
@@ -132,7 +152,38 @@ mod imp {
             hour: time.hour as u8,
             minute: time.minute as u8,
             second: time.second as u8,
-        })
+        }
+    }
+
+    pub(super) fn local_now() -> Option<LocalTime> {
+        let mut time = SystemTime::default();
+        // SAFETY: the call fills the structure it is given, which is laid out
+        // exactly as `SYSTEMTIME` is on every Windows target, and it has no
+        // failure mode.
+        unsafe { GetLocalTime(&mut time) };
+        Some(of(&time))
+    }
+
+    pub(super) fn at(unix: i64) -> Option<LocalTime> {
+        // Seconds between 1601-01-01 and 1970-01-01; a `FILETIME` counts ticks
+        // of 100 nanoseconds from the former.
+        const EPOCH: i64 = 11_644_473_600;
+        let ticks = unix.checked_add(EPOCH)?.checked_mul(10_000_000)? as u64;
+        let file_time = FileTime { low: ticks as u32, high: (ticks >> 32) as u32 };
+        let mut universal = SystemTime::default();
+        let mut local = SystemTime::default();
+        // SAFETY: both calls fill the structure they are given and read the one
+        // passed in, and both answers are checked. The zone is `NULL`, which is
+        // the machine's own - the same one `GetLocalTime` reads.
+        unsafe {
+            if FileTimeToSystemTime(&file_time, &mut universal) == 0 {
+                return None;
+            }
+            if SystemTimeToTzSpecificLocalTime(std::ptr::null(), &universal, &mut local) == 0 {
+                return None;
+            }
+        }
+        Some(of(&local))
     }
 }
 
@@ -141,13 +192,22 @@ mod imp {
     use super::*;
 
     pub(super) fn local_now() -> Option<LocalTime> {
-        // SAFETY: `localtime_r` writes the `tm` it is handed and reads the
-        // `time_t` it is given, and both results are checked before use.
+        // SAFETY: `time` fills the value it is given, and the failure is
+        // checked.
         unsafe {
             let mut seconds: libc::time_t = 0;
             if libc::time(&mut seconds) == -1 {
                 return None;
             }
+            at(seconds as i64)
+        }
+    }
+
+    pub(super) fn at(unix: i64) -> Option<LocalTime> {
+        // SAFETY: `localtime_r` writes the `tm` it is handed and reads the
+        // `time_t` it is given, and both results are checked before use.
+        unsafe {
+            let seconds = unix as libc::time_t;
             let mut broken_down: libc::tm = std::mem::zeroed();
             if libc::localtime_r(&seconds, &mut broken_down).is_null() {
                 return None;
@@ -177,6 +237,10 @@ mod imp {
     pub(super) fn local_now() -> Option<LocalTime> {
         None
     }
+
+    pub(super) fn at(_unix: i64) -> Option<LocalTime> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +251,41 @@ mod tests {
     /// Minute of the week for a day counted from Monday, as the schedule does.
     fn at(day: u32, hour: u32, minute: u32) -> u32 {
         day * 24 * 60 + hour * 60 + minute
+    }
+
+    /// The wall clock at a moment that is not now. Now is the one moment both
+    /// can be asked about, and the two are read a moment apart.
+    #[test]
+    fn the_clock_reads_at_a_moment_that_is_not_now() {
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is past the epoch")
+            .as_secs() as i64;
+        let (Some(moment), Some(now)) = (local_at(unix), local_now()) else {
+            return; // a platform this build has no clock for
+        };
+        assert_eq!(
+            (moment.year, moment.month, moment.day),
+            (now.year, now.month, now.day),
+            "{moment:?} against {now:?}"
+        );
+        let seconds = |time: &LocalTime| {
+            i64::from(time.hour) * 3600 + i64::from(time.minute) * 60 + i64::from(time.second)
+        };
+        assert!(
+            (seconds(&moment) - seconds(&now)).abs() <= 2,
+            "{moment:?} against {now:?}"
+        );
+    }
+
+    /// A moment far from now still reads, and the epoch is the earliest one
+    /// worth asking about. A zone behind UTC has it in the year before.
+    #[test]
+    fn a_moment_in_the_past_reads() {
+        let Some(moment) = local_at(0) else {
+            return;
+        };
+        assert!(matches!(moment.year, 1969 | 1970), "{moment:?}");
     }
 
     fn night() -> BlackoutWindow {
