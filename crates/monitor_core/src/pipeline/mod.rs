@@ -757,7 +757,7 @@ pub struct ClipControl {
 
 /// A jump the viewer asked a recording to make.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Jump {
+struct Jump {
     /// The moment the picture is to begin at, in seconds since the epoch.
     pub at: i64,
     /// Which ask this was, so that the same moment asked for twice is two jumps.

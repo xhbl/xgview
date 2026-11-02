@@ -517,17 +517,17 @@ impl Recording {
     /// Moves the reading to the fragment a moment falls in, and says whether it
     /// could.
     ///
-    /// The init segment is not fetched again - the decoder is already reading
-    /// through it - and whatever response is open is dropped: its bytes are the
-    /// stretch the jump is leaving. A window cannot do this: it is one stream
-    /// from one start, and the way to play another moment of it is to ask for
-    /// another window.
+    /// What is open is dropped - its bytes are the stretch the jump is leaving -
+    /// and nothing else changes: the init segment has either been read already
+    /// or is still to be, the decoder is reading through it either way, and the
+    /// login is the one the playlist has been asked with. A window cannot do
+    /// this: it is one stream from one start, and the way to play another moment
+    /// of it is to ask for another window.
     fn jump_to(&mut self, at: i64) -> bool {
         match self {
             Self::Clip { .. } => false,
-            Self::Vod { playlist, init_read, next, response, .. } => {
+            Self::Vod { playlist, next, response, .. } => {
                 *next = fragment_at(playlist, at);
-                *init_read = true;
                 *response = None;
                 true
             }
@@ -621,9 +621,9 @@ fn take_jump(
     let Some(receiver) = jumps.as_mut() else {
         return false;
     };
-    if !receiver.has_changed().unwrap_or(false) {
-        return false;
-    }
+    // Read every time rather than asking whether it changed: a jump asked for
+    // before the session took its handle is not a change to that handle, and it
+    // is exactly the seek a viewer makes the instant playback opens.
     let Some(jump) = *receiver.borrow_and_update() else {
         return false;
     };
@@ -814,24 +814,31 @@ mod tests {
         assert_eq!(*next, 1, "the fragment that holds 125");
     }
 
-    /// A jump moves the reading to another fragment and does not fetch the init
-    /// segment again: the decoder is already reading through it.
+    /// A jump moves the reading to another fragment and never makes it skip the
+    /// init segment: one that has not been read yet still is, and one that has is
+    /// not fetched twice.
     #[test]
-    fn a_jump_moves_the_reading_and_keeps_the_init_segment() {
+    fn a_jump_moves_the_reading_and_never_skips_the_init_segment() {
         let mut source = Recording::vod(three_fragments(), None, None);
         assert!(source.jump_to(135), "a playlist can jump");
         let Recording::Vod { next, init_read, .. } = &source else {
             panic!("a playlist is a playlist");
         };
         assert_eq!(*next, 2, "the fragment that holds 135");
-        assert!(*init_read, "and the init segment is not fetched again");
+        assert!(!*init_read, "a jump before the first read still fetches it");
 
-        // Backwards is the same move: the fragment the moment falls in.
+        // And the reading the session has already done is not undone: the init
+        // segment stays read, and only the fragment moves.
+        let mut source = Recording::vod(three_fragments(), None, None);
+        if let Recording::Vod { init_read, .. } = &mut source {
+            *init_read = true;
+        }
         assert!(source.jump_to(101));
-        let Recording::Vod { next, .. } = &source else {
+        let Recording::Vod { next, init_read, .. } = &source else {
             panic!("a playlist is a playlist");
         };
-        assert_eq!(*next, 0);
+        assert_eq!(*next, 0, "backwards is the same move");
+        assert!(*init_read, "and the init segment is not fetched again");
     }
 
     /// A window's pictures are dated from the moment it was asked for; a
