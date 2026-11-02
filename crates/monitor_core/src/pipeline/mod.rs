@@ -25,6 +25,7 @@ use monitor_codec::{Codec, ColorSpace, DecodedFrame, DecoderConfig, VideoDecoder
 
 use crate::audio::{AacRtpParams, AudioHub};
 use crate::config::ReconnectPolicy;
+use crate::discovery::frigate::VodPlaylist;
 use crate::error::{FailureKind, Result};
 use crate::h264::{nal_unit_type, AccessUnit, H264Depacketizer, START_CODE};
 use crate::hevc::{nal_unit_type as hevc_nal_unit_type, HevcDepacketizer};
@@ -74,7 +75,7 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const RECEIVER_SSRC: u32 = 0x5847_5631;
 
 mod channel;
-mod clip_session;
+mod recording_session;
 mod mjpeg_session;
 mod rtsp_session;
 mod shared;
@@ -410,6 +411,15 @@ enum ChannelCommand {
         /// The stretch the address asks for, in seconds since the epoch.
         window: (i64, i64),
     },
+    /// Play a recording's fragments on this channel, replacing whatever it was
+    /// pulling. The playlist is the whole request: the range, the init segment
+    /// and the fragments it is cut into.
+    PlayVod {
+        index: usize,
+        camera_id: String,
+        playlist: VodPlaylist,
+        credentials: Option<(String, String)>,
+    },
     /// Hold a playback channel's picture still, or let it go on.
     HoldClip { index: usize, held: bool },
     /// The viewer came back to the window. Every channel waiting out a backoff
@@ -558,6 +568,31 @@ impl ChannelManager {
         });
     }
 
+    /// Plays a recording's fragments on a channel of its own.
+    ///
+    /// The playlist is what Frigate's own player reads: a range cut into
+    /// fragments, fetched one at a time, so that a seek is one small request
+    /// rather than a new stream. The fragments play in the order the playlist
+    /// lists them, and the channel stops at the last one exactly as it stops at
+    /// the end of a `clip.mp4`.
+    ///
+    /// The credentials are Frigate's own login, and the playlist is a command
+    /// rather than a state for the same reason [`Self::play_clip`] is.
+    pub fn play_vod(
+        &self,
+        index: usize,
+        camera_id: impl Into<String>,
+        playlist: VodPlaylist,
+        credentials: Option<(String, String)>,
+    ) {
+        let _ = self.commands.send(ChannelCommand::PlayVod {
+            index,
+            camera_id: camera_id.into(),
+            playlist,
+            credentials,
+        });
+    }
+
     /// Holds a playback channel's picture still, or lets it go on.
     ///
     /// A recording is paced by its own timestamps, so this is the only thing
@@ -662,15 +697,19 @@ impl ChannelManager {
 
 /// What a channel is pulling.
 ///
-/// The two are different sessions over different transports - a camera's own
-/// stream as it happens, or one stretch of its recording - and the scheme no
-/// longer tells them apart: both can be `http://` or `https://`.
+/// The three are different sessions over different transports - a camera's own
+/// stream as it happens, or one stretch of its recording in either of the two
+/// shapes Frigate serves it in - and the scheme no longer tells them apart: both
+/// can be `http://` or `https://`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EndpointKind {
     /// A camera's own stream, as it is happening.
     Live,
-    /// A stretch of a camera's recording, played back.
+    /// One window of a camera's recording: a single `clip.mp4`.
     Clip,
+    /// A camera's recording as a playlist of fragments, fetched one at a time.
+    /// See `docs/frigate-hls-playback.md`.
+    Vod,
 }
 
 /// Whether a playback channel is holding its picture still.
@@ -719,6 +758,9 @@ struct Endpoint {
     /// epoch, for a playback channel and nothing else. It is what the session
     /// needs to say which moment its pictures are of.
     window: Option<(i64, i64)>,
+    /// The fragments a recording is served in, when the channel plays a
+    /// playlist rather than one window. See [`EndpointKind::Vod`].
+    vod: Option<VodPlaylist>,
     /// How a playback channel is told to hold its picture still, and to go on.
     /// One per session: a channel opened on another window starts playing.
     control: Option<Arc<ClipControl>>,
@@ -836,6 +878,7 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endp
         stream,
         transport: source.transport,
         window: None,
+        vod: None,
         control: None,
         talk: false,
         talk_mode: source.talk,
@@ -847,8 +890,8 @@ impl Endpoint {
     /// The endpoint a playback channel pulls: one stretch of a recording.
     ///
     /// It carries no transport, no fallback and no back channel. A recording is
-    /// one HTTP request - there is nothing to fall back to when it fails, and
-    /// nothing to talk to.
+    /// HTTP requests and nothing else - there is nothing to fall back to when
+    /// one fails, and nothing to talk to.
     fn clip(
         index: usize,
         camera_id: String,
@@ -866,11 +909,48 @@ impl Endpoint {
             stream,
             transport: RtspTransport::default(),
             window: Some(window),
+            vod: None,
             control: Some(Arc::new(ClipControl::new())),
             talk: false,
             talk_mode: TalkMode::default(),
             fallback: None,
         }
+    }
+
+    /// The endpoint a playback channel pulls when the recording is a playlist.
+    ///
+    /// The address is the playlist's own, without a file name: it is what says
+    /// which range this channel is on, so that the same range revisited is not
+    /// opened twice. The stretch is the playlist's, from its start to the end of
+    /// its last fragment.
+    fn vod(
+        index: usize,
+        camera_id: String,
+        playlist: VodPlaylist,
+        credentials: Option<(String, String)>,
+        stream: StreamKind,
+    ) -> Self {
+        let window = (playlist.start, playlist.starts_at(playlist.fragments.len()));
+        Self {
+            index,
+            camera_id,
+            kind: EndpointKind::Vod,
+            uri: playlist.base.clone(),
+            credentials,
+            stream,
+            transport: RtspTransport::default(),
+            window: Some(window),
+            vod: Some(playlist),
+            control: Some(Arc::new(ClipControl::new())),
+            talk: false,
+            talk_mode: TalkMode::default(),
+            fallback: None,
+        }
+    }
+
+    /// Whether this endpoint is a recording rather than a camera.
+    fn is_recording(&self) -> bool {
+        matches!(self.kind, EndpointKind::Clip | EndpointKind::Vod)
     }
 }
 

@@ -1,14 +1,22 @@
-//! One stretch of a recording, played back at the speed it was recorded.
+//! A recording, played back at the speed it was recorded.
 //!
-//! Frigate answers `clip.mp4` with fragmented MP4 and no `-re`: ffmpeg pours the
+//! Two shapes of it, one session. A window is one request for one `clip.mp4`;
+//! a range is a playlist of fragments fetched one at a time. What differs is
+//! where the bytes come from, which is [`Recording`]; everything after them -
+//! the framing, the parser, the clock, the decoder, the speaker - is the same,
+//! and a recording that seeked by fetching another fragment would otherwise be
+//! a second copy of all of it.
+//!
+//! Frigate answers either with fragmented MP4 and no `-re`: ffmpeg pours the
 //! whole stretch out as fast as the network takes it, five to ten times faster
 //! than real time. So this session is the only one in the pipeline that has to
 //! time itself - everything else is paced by the camera.
 //!
-//! The clock is the presentation timestamp, and it is exact because a window
-//! never spans a gap: the request is built from adjacent segments, so `pts` 0 is
-//! the window's first wall-clock second and every sample after it is a known
-//! distance from it. See the playback plan's §4.4.
+//! The clock is the presentation timestamp. A clip is cut where it was asked
+//! for, so its first sample is that moment; a playlist's fragments count from
+//! the playlist's start, so a sample's own moment is already measured from
+//! there. Either way the session adds one offset and plays the distances
+//! between the samples as they are.
 //!
 //! What it shares with the MSE session is everything after the bytes arrive: the
 //! same [`MseParser`](crate::mse::MseParser), the same decoder, the same
@@ -24,12 +32,16 @@
 
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+
 use super::shared::{
     BaselineFix, Sinks, StatsWindow, announce_streaming, frigate_http, publish_frames, uses_hardware,
     video_decoder,
 };
 use super::ws_session::frigate_api_login;
 use super::*;
+
+use crate::discovery::frigate::VodPlaylist;
 
 /// How long the response may go quiet before the session is treated as broken.
 ///
@@ -46,19 +58,19 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// jump lasts, with nothing on screen to say why.
 const LONGEST_WAIT: Duration = Duration::from_secs(2);
 
-/// Plays one window of a recording on one channel.
+/// Plays a recording on one channel.
 ///
-/// Returns when the response ends, which is the recording reaching its last
-/// frame: the caller turns that into [`super::channel::SessionEnd::Finished`]
-/// rather than a reconnection.
-pub(super) async fn run_clip_session(
+/// Returns when the recording reaches its last frame - the response ends, or the
+/// playlist's last fragment does: the caller turns that into
+/// [`super::channel::SessionEnd::Finished`] rather than a reconnection.
+pub(super) async fn run_recording_session(
     endpoint: Endpoint,
     prefer_hardware: bool,
     sinks: Sinks<'_>,
     audio: &AudioHub,
 ) -> Result<()> {
     let Sinks { events, frames, stats } = sinks;
-    let Endpoint { index, camera_id, uri, stream, credentials, window, control, .. } = endpoint;
+    let Endpoint { index, camera_id, uri, stream, credentials, window, control, vod, .. } = endpoint;
     let camera_id_str = camera_id.as_str();
     // A playback channel is always given the stretch it plays: it is what the
     // pictures it publishes are dated from, and what says whether the answer was
@@ -67,7 +79,10 @@ pub(super) async fn run_clip_session(
         return Err(crate::error::CoreError::config("a playback channel without a window"));
     };
 
-    let mut response = open_clip(&uri, credentials.as_ref()).await?;
+    let mut source = match vod {
+        Some(playlist) => Recording::vod(playlist, credentials.clone()),
+        None => Recording::clip(&uri, &credentials).await?,
+    };
 
     let mut parser = crate::mse::MseParser::new();
     let mut decoder: Option<Box<dyn VideoDecoder>> = None;
@@ -87,9 +102,12 @@ pub(super) async fn run_clip_session(
     let mut pending: Vec<u8> = Vec::new();
 
     // The clock: `started` is the wall-clock instant `first` is due, and every
-    // sample after it waits its own distance from `first`.
+    // sample after it waits its own distance from `first`. `origin` is what
+    // `first` is of on the wall clock, which depends on where the bytes came
+    // from - see [`Recording::origin`].
     let started = Instant::now();
     let mut first: Option<i64> = None;
+    let mut origin: Option<f64> = None;
     // How much of the wait so far was spent held. Added to the origin rather
     // than to the wait, so letting go resumes the pace instead of racing to
     // catch up with the clock the picture was not keeping.
@@ -97,15 +115,12 @@ pub(super) async fn run_clip_session(
     let mut held = control.as_ref().map(|control| control.subscribe());
 
     loop {
-        let chunk = match tokio::time::timeout(STALL_TIMEOUT, response.chunk()).await {
+        let chunk = match tokio::time::timeout(STALL_TIMEOUT, source.next_chunk()).await {
             Ok(Ok(Some(chunk))) => chunk,
-            // The end of the response is the end of the recording.
+            // The end of the recording: the response ended, or the playlist had
+            // no fragment left to fetch.
             Ok(Ok(None)) => break,
-            Ok(Err(err)) => {
-                return Err(crate::error::CoreError::network(format!(
-                    "the recording stopped being sent: {err}"
-                )));
-            }
+            Ok(Err(err)) => return Err(err),
             Err(_) => {
                 return Err(crate::error::CoreError::timeout(format!(
                     "the recording went quiet for {} s",
@@ -195,11 +210,10 @@ pub(super) async fn run_clip_session(
 
         for (pts, step) in steps {
             let base = *first.get_or_insert(pts);
+            let origin = *origin.get_or_insert_with(|| source.origin(from, base));
             let elapsed = u64::try_from(pts - base).unwrap_or(0);
-            // Where this sample belongs on the wall clock. The window begins at
-            // its first sample, so the distance from that sample is the
-            // distance from the window's own start.
-            let at = from as f64 + elapsed as f64 / 1_000_000.0;
+            // Where this sample belongs on the wall clock.
+            let at = origin + elapsed as f64 / 1_000_000.0;
             // Held, the clock stops with the picture. The wait is the picture's
             // own pause, so nothing is decoded and nothing is published while
             // the viewer has a finger on the timeline.
@@ -363,7 +377,127 @@ fn complete_groups(buf: &[u8]) -> usize {
     end
 }
 
-/// Opens the request that carries one window of a recording.
+/// Where a recording's bytes come from.
+///
+/// A window is one request for one `clip.mp4`. A range is a playlist: an init
+/// segment and then a fragment at a time, each fetched when the one before has
+/// been read. Both hand the session a stream of bytes, and after that the
+/// session cannot tell them apart - which is the point.
+enum Recording {
+    /// One request for the whole window.
+    Clip { response: reqwest::Response },
+    /// A playlist's requests, in the order they are made: the init segment when
+    /// it names one, then its fragments.
+    Vod {
+        /// The moment the playlist's own timeline starts, in seconds since the
+        /// epoch. Its fragments count from zero, so a sample's moment is that
+        /// much past this.
+        start: i64,
+        uris: Vec<String>,
+        credentials: Option<(String, String)>,
+        /// The request being read, and which one that is.
+        next: usize,
+        response: Option<reqwest::Response>,
+        /// The login this playlist is being read with, once one has been asked
+        /// for. One box, one token: the fragments after the first are asked for
+        /// with it rather than logging in again.
+        token: Option<String>,
+    },
+}
+
+impl Recording {
+    /// Opens the one request a window is.
+    async fn clip(uri: &str, credentials: &Option<(String, String)>) -> Result<Self> {
+        let (response, _) = open_request(uri, credentials.as_ref(), None).await?;
+        Ok(Self::Clip { response })
+    }
+
+    /// A playlist, whose first request is made when its first bytes are asked
+    /// for.
+    fn vod(playlist: VodPlaylist, credentials: Option<(String, String)>) -> Self {
+        let mut uris = Vec::with_capacity(playlist.fragments.len() + 1);
+        if let Some(init) = playlist.init_uri() {
+            uris.push(init);
+        }
+        for fragment in &playlist.fragments {
+            uris.push(playlist.fragment_uri(fragment));
+        }
+        Self::Vod {
+            start: playlist.start,
+            uris,
+            credentials,
+            next: 0,
+            response: None,
+            token: None,
+        }
+    }
+
+    /// The next bytes of the recording, or `None` when it has all been read.
+    ///
+    /// The end of a fragment is not the end of the recording: the next one is
+    /// the recording going on, and it is fetched here so that the session above
+    /// sees one stream from first picture to last.
+    async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
+        match self {
+            Self::Clip { response } => read(response).await,
+            Self::Vod { uris, credentials, next, response, token, .. } => loop {
+                if response.is_none() {
+                    let Some(uri) = uris.get(*next).cloned() else {
+                        return Ok(None);
+                    };
+                    // The login is kept for the fragments after this one: a
+                    // playlist is a request every ten seconds, and a login for
+                    // each of them would be three round trips where one will do.
+                    let (body, fresh) = open_request(&uri, credentials.as_ref(), token.as_deref()).await?;
+                    *response = Some(body);
+                    *token = fresh;
+                }
+                let body = response.as_mut().expect("opened above");
+                match read(body).await? {
+                    Some(chunk) => return Ok(Some(chunk)),
+                    None => {
+                        *response = None;
+                        *next += 1;
+                    }
+                }
+            },
+        }
+    }
+
+    /// Where the recording's own clock starts. See [`origin_of`].
+    fn origin(&self, from: i64, first_pts_us: i64) -> f64 {
+        match self {
+            Self::Clip { .. } => origin_of(None, from, first_pts_us),
+            Self::Vod { start, .. } => origin_of(Some(*start), from, first_pts_us),
+        }
+    }
+}
+
+/// Where a recording's own clock starts, in seconds since the epoch.
+///
+/// A window is cut where it was asked for, so its first sample is that moment. A
+/// playlist's fragments count from the playlist's start, so the first sample's
+/// own moment is already measured from there - rebasing it to zero, the way a
+/// window's is, would add the offset twice.
+fn origin_of(start: Option<i64>, from: i64, first_pts_us: i64) -> f64 {
+    match start {
+        None => from as f64,
+        Some(start) => start as f64 + first_pts_us as f64 / 1_000_000.0,
+    }
+}
+
+/// One read from a response, with the one message a broken body deserves.
+async fn read(response: &mut reqwest::Response) -> Result<Option<Bytes>> {
+    match response.chunk().await {
+        Ok(chunk) => Ok(chunk),
+        Err(err) => Err(crate::error::CoreError::network(format!(
+            "the recording stopped being sent: {err}"
+        ))),
+    }
+}
+
+/// Opens one request for one piece of a recording, and answers the login it was
+/// read with.
 ///
 /// Frigate's own port serves a self-signed certificate, so the client accepts
 /// one - the same decision the MSE WebSocket makes, for the same reason, and the
@@ -374,19 +508,29 @@ fn complete_groups(buf: &[u8]) -> usize {
 /// internal port serves the same recordings without one, and a login it does
 /// not need - refused, because the box has authentication switched off - is a
 /// permanent failure, which would leave that box with no playback at all.
-async fn open_clip(uri: &str, credentials: Option<&(String, String)>) -> Result<reqwest::Response> {
+///
+/// `token` is the login an earlier request already made, and the one answered is
+/// the caller's to keep: a playlist is one request per fragment, and a login for
+/// each of them would be three round trips where one will do.
+async fn open_request(
+    uri: &str,
+    credentials: Option<&(String, String)>,
+    token: Option<&str>,
+) -> Result<(reqwest::Response, Option<String>)> {
     let http = frigate_http();
 
-    let response = http.get(uri).send().await?;
-    let response = match (response.status(), credentials) {
-        (reqwest::StatusCode::UNAUTHORIZED, Some((user, pass))) => {
-            let base = api_base(uri)
-                .ok_or_else(|| crate::error::CoreError::network("not an http address"))?;
-            let token = frigate_api_login(base, user, pass, Duration::from_secs(10)).await?;
-            http.get(uri).bearer_auth(token).send().await?
-        }
-        _ => response,
+    let mut response = match token {
+        Some(token) => http.get(uri).bearer_auth(token).send().await?,
+        None => http.get(uri).send().await?,
     };
+    let mut token = token.map(str::to_string);
+    if let (reqwest::StatusCode::UNAUTHORIZED, Some((user, pass))) = (response.status(), credentials) {
+        let base = api_base(uri)
+            .ok_or_else(|| crate::error::CoreError::network("not an http address"))?;
+        let fresh = frigate_api_login(base, user, pass, Duration::from_secs(10)).await?;
+        response = http.get(uri).bearer_auth(&fresh).send().await?;
+        token = Some(fresh);
+    }
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -417,7 +561,7 @@ async fn open_clip(uri: &str, credentials: Option<&(String, String)>) -> Result<
             "the recording answered {status}"
         )));
     }
-    Ok(response)
+    Ok((response, token))
 }
 
 /// The scheme, host and port of an `http`/`https` address.
@@ -433,6 +577,7 @@ fn api_base(uri: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::frigate::Fragment;
 
     /// A box, as the framing sees it.
     fn boxed(kind: &[u8; 4], body: usize) -> Vec<u8> {
@@ -441,6 +586,48 @@ mod tests {
         out.extend_from_slice(kind);
         out.extend(std::iter::repeat(0u8).take(body));
         out
+    }
+
+    /// A playlist becomes a queue of requests - the init segment first, then the
+    /// fragments in the order they play - and the clock it is dated from is the
+    /// playlist's own start plus a sample's own moment.
+    #[test]
+    fn a_playlist_is_a_queue_of_requests_with_its_own_clock() {
+        let playlist = VodPlaylist {
+            base: "https://box/vod/cam/start/100/end/200".to_string(),
+            start: 100,
+            init: Some("init.mp4".to_string()),
+            fragments: vec![
+                Fragment { name: "seg-1.m4s".into(), duration: 20.0 },
+                Fragment { name: "seg-3.m4s".into(), duration: 10.0 },
+            ],
+        };
+
+        let source = Recording::vod(playlist, None);
+        let Recording::Vod { uris, start, next, .. } = &source else {
+            panic!("a playlist is a playlist");
+        };
+        assert_eq!(*start, 100);
+        assert_eq!(*next, 0, "nothing fetched yet");
+        assert_eq!(
+            uris,
+            &[
+                "https://box/vod/cam/start/100/end/200/init.mp4".to_string(),
+                "https://box/vod/cam/start/100/end/200/seg-1.m4s".to_string(),
+                "https://box/vod/cam/start/100/end/200/seg-3.m4s".to_string(),
+            ]
+        );
+    }
+
+    /// A window's pictures are dated from the moment it was asked for; a
+    /// playlist's from its own start plus the moment the sample carries, because
+    /// its fragments count from there and rebasing would add the offset twice.
+    #[test]
+    fn a_recording_is_dated_from_where_its_bytes_count_from() {
+        assert_eq!(origin_of(None, 100, 30_000_000), 100.0);
+        assert_eq!(origin_of(Some(100), 100, 30_000_000), 130.0);
+        // A fragment that begins where the playlist does is dated from it.
+        assert_eq!(origin_of(Some(100), 100, 0), 100.0);
     }
 
     /// Only whole groups are handed over: a `moof` whose `mdat` has not arrived

@@ -2,7 +2,7 @@
 
 use super::*;
 
-use super::clip_session::run_clip_session;
+use super::recording_session::run_recording_session;
 use super::shared::{Sinks, describe, emit};
 use super::{mjpeg_session::run_mjpeg_session, rtsp_session::run_session, ws_session::run_ws_session};
 
@@ -35,8 +35,8 @@ async fn run_once(
     audio: &AudioHub,
     talk: &TalkHub,
 ) -> SessionEnd {
-    if endpoint.kind == EndpointKind::Clip {
-        return match run_clip_session(endpoint.clone(), prefer_hardware, sinks, audio).await {
+    if endpoint.is_recording() {
+        return match run_recording_session(endpoint.clone(), prefer_hardware, sinks, audio).await {
             Ok(()) => SessionEnd::Finished,
             Err(err) => SessionEnd::Failed(err),
         };

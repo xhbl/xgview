@@ -119,6 +119,9 @@ impl Supervisor {
                 ChannelCommand::PlayClip { index, uri, camera_id, credentials, window } => {
                     self.play_clip(index, uri, camera_id, credentials, window)
                 }
+                ChannelCommand::PlayVod { index, camera_id, playlist, credentials } => {
+                    self.play_vod(index, camera_id, playlist, credentials)
+                }
                 ChannelCommand::HoldClip { index, held } => self.hold_clip(index, held),
                 ChannelCommand::Suspend { index } => self.suspend(index),
                 ChannelCommand::Wake => self.wake(),
@@ -226,6 +229,26 @@ impl Supervisor {
         credentials: Option<(String, String)>,
         window: (i64, i64),
     ) {
+        let endpoint = Endpoint::clip(index, camera_id, uri, credentials, StreamKind::Main, window);
+        self.play(endpoint);
+    }
+
+    /// Plays a recording's fragments on `index`, replacing whatever that channel
+    /// was pulling. See [`Self::play_clip`] for why it is its own command.
+    fn play_vod(
+        &mut self,
+        index: usize,
+        camera_id: String,
+        playlist: VodPlaylist,
+        credentials: Option<(String, String)>,
+    ) {
+        let endpoint = Endpoint::vod(index, camera_id, playlist, credentials, StreamKind::Main);
+        self.play(endpoint);
+    }
+
+    /// Puts a recording on a channel, whatever shape it is served in.
+    fn play(&mut self, endpoint: Endpoint) {
+        let index = endpoint.index;
         if let Some(existing) = self.channels.remove(&index) {
             existing.task.abort();
             self.stats.clear(index);
@@ -233,10 +256,10 @@ impl Supervisor {
         tracing::debug!(
             target: "xgview::pipeline",
             index,
-            camera = %camera_id,
+            camera = %endpoint.camera_id,
+            kind = ?endpoint.kind,
             "playing a recording"
         );
-        let endpoint = Endpoint::clip(index, camera_id, uri, credentials, StreamKind::Main, window);
         self.spawn_channel(endpoint, Arc::new(Notify::new()));
     }
 
@@ -296,7 +319,7 @@ impl Supervisor {
             // a setting change would look like the recording jumping back to
             // the beginning. It picks the new preference up when the next
             // window is asked for, which is the next time a decoder is chosen.
-            if runtime.endpoint.kind == EndpointKind::Clip {
+            if runtime.endpoint.is_recording() {
                 self.channels.insert(index, runtime);
                 continue;
             }
