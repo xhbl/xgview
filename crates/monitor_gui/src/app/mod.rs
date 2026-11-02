@@ -1656,6 +1656,10 @@ impl XgViewApp {
                 index,
                 ChannelTexture { sequence: frame.sequence, at: frame.at, surface },
             );
+            // A frame is the only thing that says where the picture has got
+            // to, so it is what ends a seek's wait for the cursor to be let
+            // go of. See `Playback::pending`.
+            self.picture_arrived(index, frame.at);
         }
         self.video.flush();
     }
@@ -2458,7 +2462,11 @@ impl XgViewApp {
         // that ends it, so it stays up for as long as the microphone is open
         // rather than going down on the idle the viewer last touched it at.
         if let Some(left) = self.tile_bar.remaining(Instant::now()) {
-            if self.talking || self.tile_bar_pinned() {
+            // A recording holds the panel up: the timeline is the only thing
+            // that says where the picture is, and it is what a scrub is aimed
+            // at, so it cannot be something to ask for again every eight
+            // seconds. A tap still puts it away.
+            if self.talking || self.tile_bar_pinned() || self.playback.is_some() {
                 self.tile_bar.touch(Instant::now());
             } else if left.is_zero() {
                 self.tile_bar.hide();

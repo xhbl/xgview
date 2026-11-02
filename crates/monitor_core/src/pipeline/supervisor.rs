@@ -119,6 +119,7 @@ impl Supervisor {
                 ChannelCommand::PlayClip { index, uri, camera_id, credentials, window } => {
                     self.play_clip(index, uri, camera_id, credentials, window)
                 }
+                ChannelCommand::HoldClip { index, held } => self.hold_clip(index, held),
                 ChannelCommand::Suspend { index } => self.suspend(index),
                 ChannelCommand::Wake => self.wake(),
                 ChannelCommand::PreferHardware(prefer) => self.prefer_hardware(prefer),
@@ -237,6 +238,18 @@ impl Supervisor {
         );
         let endpoint = Endpoint::clip(index, camera_id, uri, credentials, StreamKind::Main, window);
         self.spawn_channel(endpoint, Arc::new(Notify::new()));
+    }
+
+    /// Holds a playback channel where it is, or lets it go on.
+    ///
+    /// Nothing is reopened and nothing is torn down: the session is the only
+    /// thing that can stop a recording that is paced by its own timestamps, so
+    /// it is told rather than replaced.
+    fn hold_clip(&mut self, index: usize, held: bool) {
+        if let Some(control) = self.channels.get(&index).and_then(|runtime| runtime.endpoint.control.as_ref()) {
+            control.set(held);
+            tracing::debug!(target: "xgview::pipeline", index, held, "playback held");
+        }
     }
 
     fn suspend(&mut self, index: usize) {

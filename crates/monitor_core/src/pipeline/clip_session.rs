@@ -58,7 +58,7 @@ pub(super) async fn run_clip_session(
     audio: &AudioHub,
 ) -> Result<()> {
     let Sinks { events, frames, stats } = sinks;
-    let Endpoint { index, camera_id, uri, stream, credentials, window, .. } = endpoint;
+    let Endpoint { index, camera_id, uri, stream, credentials, window, control, .. } = endpoint;
     let camera_id_str = camera_id.as_str();
     // A playback channel is always given the stretch it plays: it is what the
     // pictures it publishes are dated from, and what says whether the answer was
@@ -90,6 +90,11 @@ pub(super) async fn run_clip_session(
     // sample after it waits its own distance from `first`.
     let started = Instant::now();
     let mut first: Option<i64> = None;
+    // How much of the wait so far was spent held. Added to the origin rather
+    // than to the wait, so letting go resumes the pace instead of racing to
+    // catch up with the clock the picture was not keeping.
+    let mut shift = Duration::ZERO;
+    let mut held = control.as_ref().map(|control| control.subscribe());
 
     loop {
         let chunk = match tokio::time::timeout(STALL_TIMEOUT, response.chunk()).await {
@@ -195,7 +200,24 @@ pub(super) async fn run_clip_session(
             // its first sample, so the distance from that sample is the
             // distance from the window's own start.
             let at = from as f64 + elapsed as f64 / 1_000_000.0;
-            let due = Duration::from_micros(elapsed);
+            // Held, the clock stops with the picture. The wait is the picture's
+            // own pause, so nothing is decoded and nothing is published while
+            // the viewer has a finger on the timeline.
+            if let Some(paused) = held.as_mut() {
+                if *paused.borrow() {
+                    let since = Instant::now();
+                    loop {
+                        if !*paused.borrow() {
+                            break;
+                        }
+                        if paused.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                    shift += since.elapsed();
+                }
+            }
+            let due = Duration::from_micros(elapsed) + shift;
             let now = started.elapsed();
             if due > now {
                 tokio::time::sleep((due - now).min(LONGEST_WAIT)).await;

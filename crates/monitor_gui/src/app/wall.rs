@@ -342,7 +342,15 @@ impl XgViewApp {
         // the frame the second finger lands: the pointer follows the first one,
         // and letting this through would turn a page under the fingers. See
         // `step_zoom`.
-        if self.scheduler.is_zoomed() && (pinched.is_some() || self.picture_zoom.magnified()) {
+        // A finger on the timeline is not a finger on the page: what it is
+        // dragging is a recording, and the picture must not slide out from under
+        // it or the page turn over when it lets go. Read before the bar is
+        // answered, because this frame's release is the bar's to act on and not
+        // the wall's.
+        let scrubbing = self.playback.as_ref().is_some_and(|playback| playback.scrubbing);
+        if self.scheduler.is_zoomed()
+            && (pinched.is_some() || self.picture_zoom.magnified() || scrubbing)
+        {
             self.slide.dragging = false;
             self.slide.drag = 0.0;
             actions.drag_started = false;
@@ -570,6 +578,9 @@ impl XgViewApp {
             // drawn by the one thing that knows it, and the row it is drawn in
             // is the strip's own geometry.
             if let Some(row) = layout.timeline {
+                // Answered first, so a finger that moves this frame moves the
+                // cursor in it.
+                self.timeline_input(ui, row);
                 self.draw_timeline(ui, row);
             }
         }

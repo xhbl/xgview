@@ -410,6 +410,8 @@ enum ChannelCommand {
         /// The stretch the address asks for, in seconds since the epoch.
         window: (i64, i64),
     },
+    /// Hold a playback channel's picture still, or let it go on.
+    HoldClip { index: usize, held: bool },
     /// The viewer came back to the window. Every channel waiting out a backoff
     /// retries at once instead: the failures it counted happened while the
     /// process was in the background, and waiting them out now would only add
@@ -556,6 +558,14 @@ impl ChannelManager {
         });
     }
 
+    /// Holds a playback channel's picture still, or lets it go on.
+    ///
+    /// A recording is paced by its own timestamps, so this is the only thing
+    /// that can stop it: dropping frames would only make it skip ahead.
+    pub fn hold_clip(&self, index: usize, held: bool) {
+        self.send(ChannelCommand::HoldClip { index, held });
+    }
+
     /// Stops whatever a playback channel is playing and leaves it idle.
     ///
     /// A recording that is not being watched is a request to the server and a
@@ -663,6 +673,35 @@ enum EndpointKind {
     Clip,
 }
 
+/// Whether a playback channel is holding its picture still.
+///
+/// A recording is paced by its own timestamps, so pausing is not a matter of
+/// dropping frames: the session stops taking samples and stops its clock, and
+/// starts both again where they left off. The clock is shifted by however long
+/// it was held, so what follows a resume plays at the speed it was recorded
+/// rather than racing to catch up.
+#[derive(Debug)]
+pub struct ClipControl {
+    paused: tokio::sync::watch::Sender<bool>,
+}
+
+impl ClipControl {
+    fn new() -> Self {
+        let (paused, _) = tokio::sync::watch::channel(false);
+        Self { paused }
+    }
+
+    /// A handle the session waits on. Taken before the session starts, so a
+    /// pause set in between is not lost.
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.paused.subscribe()
+    }
+
+    fn set(&self, paused: bool) {
+        let _ = self.paused.send(paused);
+    }
+}
+
 /// The stream a channel pulls, and everything needed to open it again: after a
 /// failure, and after a change that only the supervisor knows about, such as the
 /// decoding preference.
@@ -680,6 +719,9 @@ struct Endpoint {
     /// epoch, for a playback channel and nothing else. It is what the session
     /// needs to say which moment its pictures are of.
     window: Option<(i64, i64)>,
+    /// How a playback channel is told to hold its picture still, and to go on.
+    /// One per session: a channel opened on another window starts playing.
+    control: Option<Arc<ClipControl>>,
     /// Whether this session also asks for the camera's talk-back media. Set for
     /// the magnified channel alone: a back channel is a camera resource, and
     /// sixteen tiles asking for one at once would fight over it.
@@ -794,6 +836,7 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endp
         stream,
         transport: source.transport,
         window: None,
+        control: None,
         talk: false,
         talk_mode: source.talk,
         fallback,
@@ -823,6 +866,7 @@ impl Endpoint {
             stream,
             transport: RtspTransport::default(),
             window: Some(window),
+            control: Some(Arc::new(ClipControl::new())),
             talk: false,
             talk_mode: TalkMode::default(),
             fallback: None,
