@@ -29,6 +29,12 @@
 //! as fast as the network allows. Reading one chunk and playing it out before
 //! reading the next bounds the lead to a chunk, and lets TCP's own window hold
 //! the server back from there.
+//!
+//! What a playlist costs is the seam between two fragments: the next one is
+//! fetched once the one before has been played out, so a read of a hundred-odd
+//! milliseconds sits between them. It is a fraction of a fragment and the clock
+//! swallows it - the pictures after it play without waiting until they are back
+//! on the pace they were recorded at.
 
 use std::time::{Duration, Instant};
 
@@ -81,7 +87,7 @@ pub(super) async fn run_recording_session(
 
     let mut source = match vod {
         Some(playlist) => Recording::vod(playlist, credentials.clone()),
-        None => Recording::clip(&uri, &credentials).await?,
+        None => Recording::clip(&uri, credentials.as_ref()).await?,
     };
 
     let mut parser = crate::mse::MseParser::new();
@@ -407,8 +413,8 @@ enum Recording {
 
 impl Recording {
     /// Opens the one request a window is.
-    async fn clip(uri: &str, credentials: &Option<(String, String)>) -> Result<Self> {
-        let (response, _) = open_request(uri, credentials.as_ref(), None).await?;
+    async fn clip(uri: &str, credentials: Option<&(String, String)>) -> Result<Self> {
+        let (response, _) = open_request(uri, credentials, None).await?;
         Ok(Self::Clip { response })
     }
 

@@ -23,10 +23,11 @@ enum SessionEnd {
 
 /// Runs one attempt on one endpoint, opening the session its kind calls for.
 ///
-/// A playback channel is one HTTP request for one stretch of a recording, and
-/// the recording's end is an answer rather than a failure. Everything else
-/// opens by scheme: an `http://` address is an MJPEG stream, a `ws://`/`wss://`
-/// one go2rtc's MSE, and anything else an RTSP session.
+/// A playback channel is HTTP requests for one stretch of a recording - one, or
+/// one per fragment of a playlist - and the recording's end is an answer rather
+/// than a failure. Everything else opens by scheme: an `http://` address is an
+/// MJPEG stream, a `ws://`/`wss://` one go2rtc's MSE, and anything else an RTSP
+/// session.
 async fn run_once(
     endpoint: &Endpoint,
     prefer_hardware: bool,
