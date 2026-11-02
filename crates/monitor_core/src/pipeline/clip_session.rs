@@ -398,9 +398,19 @@ async fn open_clip(uri: &str, credentials: Option<&(String, String)>) -> Result<
         // The range is real and Frigate read it; there is simply nothing
         // recorded in it. Worth its own words: it is the one answer the viewer
         // can act on, by picking another time.
-        return Err(crate::error::CoreError::network(
-            "no recording in that range",
-        ));
+        return Err(crate::error::CoreError::empty("no recording in that range"));
+    }
+    // Any other refusal of this address is one the address will give again: the
+    // window is what it is, and the same URL cannot start working. A `408` and a
+    // `429` are the exceptions - the first says try again, the second says try
+    // again later - and both are worth the backoff.
+    if status.is_client_error()
+        && status != reqwest::StatusCode::REQUEST_TIMEOUT
+        && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        return Err(crate::error::CoreError::empty(format!(
+            "the recording answered {status}"
+        )));
     }
     if !status.is_success() {
         return Err(crate::error::CoreError::network(format!(

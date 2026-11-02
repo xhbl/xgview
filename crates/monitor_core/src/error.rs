@@ -51,6 +51,21 @@ pub enum CoreError {
     #[error("{0}")]
     Auth(String),
 
+    /// The server has nothing at this address, and saying so is its whole
+    /// answer: a range with nothing recorded in it, a clip that is not there.
+    ///
+    /// Apart from [`CoreError::Network`], which is a connection that did not
+    /// come up, and apart from [`CoreError::Auth`], which is a door that will
+    /// not open. This is the third kind of answer time cannot change: the
+    /// address is what it is, and asking for it again draws the same nothing.
+    /// A channel that keeps asking would count down to a refusal it has already
+    /// been given.
+    ///
+    /// Carried without a prefix, like [`CoreError::Auth`]: it is read on the
+    /// tile.
+    #[error("{0}")]
+    Empty(String),
+
     #[error("xml error: {0}")]
     Xml(String),
 
@@ -79,6 +94,10 @@ impl CoreError {
 
     pub fn auth(message: impl Into<String>) -> Self {
         Self::Auth(message.into())
+    }
+
+    pub fn empty(message: impl Into<String>) -> Self {
+        Self::Empty(message.into())
     }
 
     pub fn parse(message: impl Into<String>) -> Self {
@@ -111,6 +130,7 @@ impl CoreError {
     pub fn kind(&self) -> FailureKind {
         match self {
             CoreError::Auth(_) => FailureKind::Auth,
+            CoreError::Empty(_) => FailureKind::Empty,
             CoreError::Transport(_) => FailureKind::Refused,
             CoreError::Timeout(_) => FailureKind::Timeout,
             // An `io` error that says `TimedOut` is one of ours: a socket read
@@ -138,6 +158,9 @@ impl CoreError {
 pub enum FailureKind {
     /// The camera rejected the credentials.
     Auth,
+    /// The address has nothing to give, and will have nothing the next time it
+    /// is asked either.
+    Empty,
     /// The server refused the shape of the request, and the caller has
     /// somewhere else to take it - see [`CoreError::Transport`].
     Refused,
@@ -155,11 +178,12 @@ pub enum FailureKind {
 impl FailureKind {
     /// Whether waiting can change the answer.
     ///
-    /// A rejected password stays rejected, and a configuration error stays an
-    /// error: both are answered by the viewer, not by time. Everything else is
-    /// worth another attempt after a backoff.
+    /// A rejected password stays rejected, a configuration error stays an
+    /// error, and an address with nothing behind it stays empty: all three are
+    /// answered by the viewer, not by time. Everything else is worth another
+    /// attempt after a backoff.
     pub fn is_permanent(self) -> bool {
-        matches!(self, FailureKind::Auth | FailureKind::Local)
+        matches!(self, FailureKind::Auth | FailureKind::Empty | FailureKind::Local)
     }
 }
 
@@ -278,7 +302,7 @@ mod tests {
     /// else is worth another attempt, which is what the backoff is for.
     #[test]
     fn only_an_answer_the_viewer_can_change_stops_the_retries() {
-        for kind in [FailureKind::Auth, FailureKind::Local] {
+        for kind in [FailureKind::Auth, FailureKind::Empty, FailureKind::Local] {
             assert!(kind.is_permanent(), "{kind:?} should stop the retries");
         }
         for kind in [
@@ -289,5 +313,18 @@ mod tests {
         ] {
             assert!(!kind.is_permanent(), "{kind:?} should be retried");
         }
+    }
+
+    /// An address with nothing behind it is one of those answers: the same
+    /// window asked for again is the same nothing, and a channel that counted
+    /// down to it would ask for ever.
+    #[test]
+    fn an_empty_answer_is_read_as_the_viewers_to_answer() {
+        let error = CoreError::empty("no recording in that range");
+        assert_eq!(error.kind(), FailureKind::Empty);
+        assert!(error.kind().is_permanent());
+        // Unprefixed, because the tile is forty-six characters wide and this is
+        // what a viewer reads there.
+        assert_eq!(error.to_string(), "no recording in that range");
     }
 }
