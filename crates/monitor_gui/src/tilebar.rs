@@ -267,6 +267,18 @@ pub fn owns(id: Id) -> bool {
     id == seat() || (0..CONTROLS).any(|index| id == control(index))
 }
 
+/// Whether a tile has room for the panel's two rows.
+///
+/// The panel's depth runs along the tile's height, or along its width once the
+/// picture is drawn turned. A panel deeper than the picture is no longer a strip
+/// of controls over it, and a recording is scrubbed along a timeline that cannot
+/// be anywhere else - so this is the one thing that keeps the row off a picture
+/// down to a postage stamp.
+pub fn fits_timeline(tile: Rect, rotated: bool) -> bool {
+    let across = if rotated { tile.width() } else { tile.height() };
+    across >= EDGE + FULL
+}
+
 /// The navigation scope the controls register under.
 ///
 /// A row when the bar lies across the wall, a column when the picture has been
@@ -636,6 +648,30 @@ mod tests {
         assert!(standing(now - IDLE + Duration::from_millis(100), now));
         assert!(!standing(now - IDLE, now), "the idle itself");
         assert!(!standing(now - IDLE - Duration::from_secs(1), now));
+    }
+
+    /// The row is given to any tile with room for both of them, wherever the
+    /// picture sits in it: a landscape camera fills a landscape tile, and a wall
+    /// with no timeline at all is a recording that cannot be scrubbed. Turned,
+    /// the depth runs along the width instead.
+    #[test]
+    fn a_timeline_is_given_to_a_tile_with_room_for_both_rows() {
+        assert!(fits_timeline(landscape(), false));
+        assert!(fits_timeline(portrait(), false));
+        assert!(fits_timeline(portrait(), true));
+        assert!(fits_timeline(landscape(), true));
+
+        // A strip of a tile has room for the controls and not for the row.
+        let shallow = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 100.0));
+        assert!(!fits_timeline(shallow, false));
+        assert!(fits_timeline(shallow, true), "its width is the depth when turned");
+        let narrow = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 1920.0));
+        assert!(!fits_timeline(narrow, true));
+        assert!(fits_timeline(narrow, false));
+        // And the edge it keeps clear of the picture edge is part of the room.
+        let exact = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, EDGE + FULL));
+        assert!(fits_timeline(exact, false));
+        assert!(!fits_timeline(exact.shrink2(vec2(0.0, 1.0)), false), "a point short");
     }
 
     /// The scope is a row across the wall and a column down a turned picture, so

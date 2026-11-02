@@ -451,16 +451,15 @@ impl XgViewApp {
         }
 
         let rotated = self.magnified_rotated();
-        // The panel carries a timeline only where there is black under the
-        // picture to hold it: over the picture it would be a strip of controls
-        // covering the very thing it is about. `Stretch` is the one fit with no
-        // black at all, and a phone held upright is the one screen where the
-        // band is thin.
+        // The panel carries a timeline whenever a recording is playing, and the
+        // row goes wherever the panel is: in the black a letterboxed picture
+        // leaves, or over the picture itself when it fills the tile - which is
+        // what a landscape wall does with a landscape camera, and a wall with no
+        // timeline at all is a recording that cannot be scrubbed. The row is
+        // given only to a tile with room for both of the panel's rows: a panel
+        // deeper than the picture is no longer a strip of controls.
         let playing = self.scheduler.zoom().is_some_and(|slot| self.is_playing_back(slot));
-        let band = self
-            .magnified_area(&self.config.active_cameras(), view, wall, dx)
-            .map_or(0.0, |picture| rect.bottom() - picture.bottom());
-        let timeline = playing && band >= tilebar::EDGE + tilebar::FULL;
+        let timeline = playing && tilebar::fits_timeline(rect, rotated);
         // The controls are read again below, after the press, so a press that
         // changes the picture fit also redraws the bar with the set it has in the
         // same frame it changes it. Every control is a square.
