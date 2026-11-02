@@ -864,8 +864,12 @@ fn parse_trun(data: &[u8]) -> Result<TrunData> {
 
     let has_dur = flags & 0x000100 != 0;
     let has_size = flags & 0x000200 != 0;
-    let has_comp = flags & 0x000400 != 0;
-    let has_flags = flags & 0x000800 != 0;
+    // 0x000400 asks for the per-sample flags and 0x000800 for the composition
+    // offsets, and the flags come first. Asked for and read the other way
+    // round, every sample's "composition offset" is its flags and its "flags"
+    // is its offset - see `a_run_reads_its_flags_before_its_composition_offsets`.
+    let has_flags = flags & 0x000400 != 0;
+    let has_comp = flags & 0x000800 != 0;
     // ISO 14496-12: composition_time_offset is always 32 bits. Version 1
     // makes it signed, not 64-bit - the old code read 8 bytes on v1 and
     // shifted every field after it.
@@ -913,17 +917,17 @@ fn parse_trun(data: &[u8]) -> Result<TrunData> {
             sizes.push(u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap()));
             pos += 4;
         }
+        if has_flags {
+            if pos + 4 > body.len() { break; }
+            sample_flags.push(u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap()));
+            pos += 4;
+        }
         if has_comp {
             if pos + 4 > body.len() { break; }
             // Always 32 bits: v0 is unsigned, v1 is signed, but the bit
             // pattern is the same and `u32 as i32` preserves it.
             let raw = u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap());
             composition_offsets.push(raw as i32);
-            pos += 4;
-        }
-        if has_flags {
-            if pos + 4 > body.len() { break; }
-            sample_flags.push(u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap()));
             pos += 4;
         }
     }
@@ -1399,6 +1403,36 @@ mod tests {
         assert_eq!(times.start(&run(1)), 12_000, "the run after it continues");
         // Another track keeps its own clock.
         assert_eq!(times.start(&run(2)), 9_000);
+    }
+
+    #[test]
+    fn a_run_reads_its_flags_before_its_composition_offsets() {
+        // flags 0x000f01: data offset, duration, size, flags and composition
+        // offset all present. The per-sample fields are in that order, and the
+        // bits that ask for the last two are 0x400 for the flags and 0x800 for
+        // the offsets. Read the other way round - which is what this did - every
+        // sample's "offset" is its flags: a Frigate HLS fragment came out as 550
+        // pictures spread over 187 seconds, every one of them a keyframe.
+        let mut data = vec![0u8, 0x00, 0x0f, 0x01];
+        data.extend_from_slice(&2u32.to_be_bytes());
+        data.extend_from_slice(&0i32.to_be_bytes());
+        for (duration, size, flags, cts) in [
+            (3000u32, 100u32, 0x0200_0000u32, 40i32),
+            (3000, 90, 0x0101_0000, -40),
+        ] {
+            data.extend_from_slice(&duration.to_be_bytes());
+            data.extend_from_slice(&size.to_be_bytes());
+            data.extend_from_slice(&flags.to_be_bytes());
+            data.extend_from_slice(&cts.to_be_bytes());
+        }
+
+        let trun = parse_trun(&data).unwrap();
+        assert_eq!(trun.durations, vec![3000, 3000]);
+        assert_eq!(trun.sizes, vec![100, 90]);
+        assert_eq!(trun.sample_flags, vec![0x0200_0000, 0x0101_0000], "the flags, not the offsets");
+        assert_eq!(trun.composition_offsets, vec![40, -40], "and the offsets, signed");
+        assert!(is_sync_sample(trun.sample_flags[0]));
+        assert!(!is_sync_sample(trun.sample_flags[1]));
     }
 
     #[test]
