@@ -100,6 +100,12 @@ pub(super) async fn frigate_api_login(
     pass: &str,
     timeout: Duration,
 ) -> Result<String> {
+    // A login this process already made is the same login, and the token lasts a
+    // day while minting one costs the box most of a second. See
+    // [`crate::discovery::frigate::LOGINS`].
+    if let Some(token) = crate::discovery::frigate::cached_login(base_url, user) {
+        return Ok(token);
+    }
     // The deadline is the request's, not the client's: the client is the one the
     // whole process asks Frigate through, and a recording is read for as long as
     // the viewer watches it. See [`frigate_http`].
@@ -122,7 +128,7 @@ pub(super) async fn frigate_api_login(
         )));
     }
 
-    response
+    let token = response
         .headers()
         .get_all(reqwest::header::SET_COOKIE)
         .iter()
@@ -132,7 +138,9 @@ pub(super) async fn frigate_api_login(
             (name.trim() == "frigate_token")
                 .then(|| rest.split(';').next().unwrap_or_default().to_string())
         })
-        .ok_or_else(|| crate::error::CoreError::network("Frigate login did not return a token"))
+        .ok_or_else(|| crate::error::CoreError::network("Frigate login did not return a token"))?;
+    crate::discovery::frigate::remember_login(base_url, user, &token);
+    Ok(token)
 }
 
 /// A connected MSE WebSocket, with the handshake sent but no message read yet.

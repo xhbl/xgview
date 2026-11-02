@@ -227,7 +227,11 @@ impl DiscoveryService {
     /// Imports the cameras of a Frigate NVR, in the two groups the tab shows -
     /// see [`frigate::FrigateImport`].
     pub async fn import_frigate(&self, config: FrigateConfig) -> Result<FrigateImport> {
-        FrigateClient::new(config)?.import_cameras().await
+        let mut client = FrigateClient::new(config)?;
+        // The import is where a password is checked: a login this process already
+        // holds would answer for a password that has since been changed.
+        client.forget_login();
+        client.import_cameras().await
     }
 
     /// Imports the streams of a standalone go2rtc, one camera per stream.

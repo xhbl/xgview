@@ -47,7 +47,7 @@ use super::shared::{
 use super::ws_session::frigate_api_login;
 use super::*;
 
-use crate::discovery::frigate::VodPlaylist;
+use crate::discovery::frigate::{VodPlaylist, cached_login, forget_login};
 
 /// How long the response may go quiet before the session is treated as broken.
 ///
@@ -726,6 +726,12 @@ async fn read(response: &mut reqwest::Response) -> Result<Option<Bytes>> {
 /// `token` is the login an earlier request already made, and the one answered is
 /// the caller's to keep: a playlist is one request per fragment, and a login for
 /// each of them would be three round trips where one will do.
+///
+/// A login this process already holds is used when neither of those has one. It
+/// costs the box most of a second to mint, and every session that started
+/// without it minted another - 952 ms of the 1.05 s entering a recording took.
+/// A box with authentication switched off has never made one, so nothing is sent
+/// that it did not ask for.
 async fn open_request(
     uri: &str,
     credentials: Option<&(String, String)>,
@@ -733,14 +739,20 @@ async fn open_request(
 ) -> Result<(reqwest::Response, Option<String>)> {
     let http = frigate_http();
 
-    let mut response = match token {
+    let base = api_base(uri);
+    let known = match (base, credentials) {
+        (Some(base), Some((user, _))) => cached_login(base, user),
+        _ => None,
+    };
+    let mut token = token.map(str::to_string).or(known);
+    let mut response = match &token {
         Some(token) => http.get(uri).bearer_auth(token).send().await?,
         None => http.get(uri).send().await?,
     };
-    let mut token = token.map(str::to_string);
     if let (reqwest::StatusCode::UNAUTHORIZED, Some((user, pass))) = (response.status(), credentials) {
-        let base = api_base(uri)
-            .ok_or_else(|| crate::error::CoreError::network("not an http address"))?;
+        let base = base.ok_or_else(|| crate::error::CoreError::network("not an http address"))?;
+        // The box has withdrawn the login this process was holding.
+        forget_login(base, user);
         let fresh = frigate_api_login(base, user, pass, Duration::from_secs(10)).await?;
         response = http.get(uri).bearer_auth(&fresh).send().await?;
         token = Some(fresh);

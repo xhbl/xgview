@@ -19,7 +19,8 @@
 //! where neither answers does a camera with more than one stream fall back to
 //! input order to name its sub (see [`select_pair`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
@@ -250,6 +251,43 @@ struct Listed {
     end_time: f64,
 }
 
+/// The logins this process has made, one per box and account.
+///
+/// A login is the most expensive request in playback: the box hashes the
+/// password on the way in, measured at **0.7-1.0 s** against the box of
+/// 2026-11-02, and Frigate's answer to it lasts a day. Without this, every
+/// session that starts without a token mints another one - entering a
+/// recording, and every drag that leaves the range - while the token from the
+/// request just before it is thrown away. Measured: entering a recording spent
+/// 952 ms of its 1.05 s here.
+///
+/// Keyed by account as well as address, because two accounts on one box are two
+/// tokens with different rights.
+static LOGINS: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+
+fn logins() -> &'static Mutex<HashMap<(String, String), String>> {
+    LOGINS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The login this process already made for a box and account, if any.
+pub(crate) fn cached_login(base: &str, user: &str) -> Option<String> {
+    logins().lock().ok()?.get(&(base.to_string(), user.to_string())).cloned()
+}
+
+/// Keeps a login for the requests that follow it. See [`LOGINS`].
+pub(crate) fn remember_login(base: &str, user: &str, token: &str) {
+    if let Ok(mut logins) = logins().lock() {
+        logins.insert((base.to_string(), user.to_string()), token.to_string());
+    }
+}
+
+/// Drops a login the box has stopped accepting.
+pub(crate) fn forget_login(base: &str, user: &str) {
+    if let Ok(mut logins) = logins().lock() {
+        logins.remove(&(base.to_string(), user.to_string()));
+    }
+}
+
 /// Client for Frigate's API.
 #[derive(Debug, Clone)]
 pub struct FrigateClient {
@@ -278,7 +316,14 @@ impl FrigateClient {
     /// `POST /api/login`. The JWT comes back as the `frigate_token` cookie and
     /// nowhere else, so the header is what is read.
     pub async fn login(&mut self) -> Result<()> {
-        let url = format!("{}/api/login", self.config.base_url());
+        let base = self.config.base_url();
+        // A login this process already made is the same login: the token lasts a
+        // day, and minting one costs the box most of a second. See [`LOGINS`].
+        if let Some(token) = cached_login(&base, &self.config.username) {
+            self.token = Some(token);
+            return Ok(());
+        }
+        let url = format!("{}/api/login", base);
         let response = self
             .http
             .post(&url)
@@ -305,24 +350,63 @@ impl FrigateClient {
                 (name.trim() == "frigate_token")
                     .then(|| rest.split(';').next().unwrap_or_default().to_string())
             });
+        if let Some(token) = self.token.as_deref() {
+            remember_login(&base, &self.config.username, token);
+        }
         Ok(())
+    }
+
+    /// Forgets the login this process holds for this box, so that the next
+    /// request asks the box again.
+    ///
+    /// The import is where a viewer's password is checked, and a token this
+    /// process already holds would answer "fine" to a password that is not: it
+    /// was minted with the old one, and the box honours it until it expires. See
+    /// [`LOGINS`].
+    pub fn forget_login(&mut self) {
+        forget_login(&self.config.base_url(), &self.config.username);
+        self.token = None;
+    }
+
+    /// One `GET` from the box, logged in when an account is configured.
+    ///
+    /// A token this process already holds is tried first, and a `401` with it
+    /// means the box has withdrawn the login rather than that the account is
+    /// wrong: the token is dropped, one more login is made, and the request goes
+    /// out once more. That is the only way a day-long token goes bad, and
+    /// without it a stale one would refuse every request until the process
+    /// restarted.
+    async fn get(&mut self, url: &str) -> Result<reqwest::Response> {
+        let response = self.send_get(url).await?;
+        if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+        forget_login(&self.config.base_url(), &self.config.username);
+        self.token = None;
+        let response = self.send_get(url).await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(CoreError::network("Frigate rejected the API token"));
+        }
+        Ok(response)
+    }
+
+    /// The `GET` itself: log in when there is no token, then send it as a bearer.
+    async fn send_get(&mut self, url: &str) -> Result<reqwest::Response> {
+        if self.config.needs_login() && self.token.is_none() {
+            self.login().await?;
+        }
+        let mut request = self.http.get(url);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        Ok(request.send().await?)
     }
 
     /// `GET /api/config`, logging in first when an account is configured.
     pub async fn config_json(&mut self) -> Result<Value> {
-        if self.config.needs_login() && self.token.is_none() {
-            self.login().await?;
-        }
         let url = format!("{}/api/config", self.config.base_url());
-        let mut request = self.http.get(&url);
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
-        }
-        let response = request.send().await?;
+        let response = self.get(&url).await?;
         let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(CoreError::network("Frigate rejected the API token"));
-        }
         let text = response.text().await.unwrap_or_default();
         if !status.is_success() {
             return Err(CoreError::network(format!("Frigate /api/config answered {status}")));
@@ -343,22 +427,12 @@ impl FrigateClient {
         after: i64,
         before: i64,
     ) -> Result<Vec<Segment>> {
-        if self.config.needs_login() && self.token.is_none() {
-            self.login().await?;
-        }
         let url = format!(
             "{}/api/{camera}/recordings?after={after}&before={before}",
             self.config.base_url()
         );
-        let mut request = self.http.get(&url);
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
-        }
-        let response = request.send().await?;
+        let response = self.get(&url).await?;
         let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(CoreError::network("Frigate rejected the API token"));
-        }
         if !status.is_success() {
             return Err(CoreError::network(format!(
                 "Frigate /api/{camera}/recordings answered {status}"
@@ -386,20 +460,10 @@ impl FrigateClient {
     /// segment list; one that begins inside a segment is cut first. Measured
     /// against the box of 2026-11-01: 82-90 ms against 270-380 ms.
     pub async fn vod_playlist(&mut self, camera: &str, from: i64, to: i64) -> Result<VodPlaylist> {
-        if self.config.needs_login() && self.token.is_none() {
-            self.login().await?;
-        }
         let base = format!("{}/vod/{camera}/start/{from}/end/{to}", self.config.base_url());
         let url = format!("{base}/index.m3u8");
-        let mut request = self.http.get(&url);
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
-        }
-        let response = request.send().await?;
+        let response = self.get(&url).await?;
         let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(CoreError::network("Frigate rejected the API token"));
-        }
         if !status.is_success() {
             return Err(CoreError::network(format!("Frigate /vod/{camera} answered {status}")));
         }
@@ -798,6 +862,20 @@ mod tests {
     use super::*;
     use crate::config::StreamProtocol;
     use crate::model::ConnectionMode;
+
+    /// A login is kept for the requests that follow it, and dropped when the box
+    /// stops accepting it. Two accounts on one box are two logins.
+    #[test]
+    fn a_login_is_kept_until_it_is_forgotten() {
+        let base = "https://cached.invalid:8971";
+        assert_eq!(cached_login(base, "someone"), None, "nothing is kept before a login");
+        remember_login(base, "someone", "first");
+        assert_eq!(cached_login(base, "someone").as_deref(), Some("first"));
+        assert_eq!(cached_login(base, "another"), None, "an account is not another's token");
+        assert_eq!(cached_login("https://elsewhere.invalid:8971", "someone"), None);
+        forget_login(base, "someone");
+        assert_eq!(cached_login(base, "someone"), None, "a withdrawn login is gone");
+    }
 
     fn frigate_config() -> FrigateConfig {
         FrigateConfig { host: "192.168.17.88".into(), ..Default::default() }
