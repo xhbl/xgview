@@ -3778,3 +3778,293 @@ on to the next frame; whoever **gives the focus back** takes it. Taking it at th
 top of a window that then decides to stay loses the button for the next frame,
 and the focus never returns - which compiles, and looks like the window closing
 correctly.
+
+## 50. A seek was 750 ms because the range began in the wrong second
+
+*Landed 2026-11-02, in 2.1.45, 2.1.46 and 2.1.47.*
+
+**The notes said a seek inside a playlist cost 486 ms.** The viewer said the
+drag felt slow. Both were right, and the difference was where the range began.
+
+Frigate's `/vod` has two shapes of answer. A range that begins on a recording
+segment's own boundary is served straight out of the file the recorder wrote. A
+range that begins anywhere else has to be cut, and it is cut **whole**: every
+fragment in it, not only the first. Measured on the box of 2026-11-02,
+`cam_living_room`, ten-second segments, same minute, one `curl` per line:
+
+| range begins | playlist | a fragment's first byte |
+| --- | --- | --- |
+| on a segment boundary | 159 ms | 115-164 ms |
+| 5 s into a segment | 1034 ms | 467-591 ms |
+| in the middle, 10 s range | 671 ms | 883-967 ms |
+
+**The interface never asked for a boundary.** `range_for` took the timeline's own
+span - `last.end - SPAN` - which is whatever moment the recording happened to
+stop at. So the 486 ms in the design document was measured on a range that
+happened to be aligned, and what shipped was the other row: 750 ms.
+
+`range_from` moves a range's start back to the segment it falls in, and no
+further back than the start of the stretch the moment is in - a range ends at the
+first hole, so one that began on the far side of a hole would end before the
+moment it was asked for. It is used by both ways a range is asked for: the
+timeline's span, and the ten minutes around a moment outside it.
+
+Measured through `vod_play`, ask to first picture, software decode:
+
+| range start | before | after |
+| --- | --- | --- |
+| on a boundary | 486 ms | 486 ms |
+| 5 s into a segment | 762 ms | 486 ms |
+
+**That left about 400 ms, and it was the fragment.** Not the request - the whole
+read: the seek's horizon is four seconds back from the moment, so the session
+reads roughly a quarter of a fragment before it can decode anything.
+
+So the timeline now says where the finger is while it is still there. A press
+sends the moment, each move that changes it sends the moment, and the session -
+which is holding the picture still and has nothing else to do - fetches the
+fragment under the finger into memory on a task of its own. When the finger is
+let go of, the seek finds the bytes in hand.
+
+It is the fragment under the finger, not the one next to the one playing. A
+neighbour is right only for a nudge of one fragment's worth; a viewer sweeping a
+ten-minute strip names a dozen fragments on the way, and the one that matters is
+the one it stops on.
+
+| | no hint | with hint |
+| --- | --- | --- |
+| range on a boundary | 507-510 ms | 407-431 ms |
+| range 5 s into a segment | 652-744 ms | 373-374 ms |
+
+**The gain is smaller than the download it removes, and steadier.** With a
+hardware decoder the same runs came out 388-451 ms and 308-314 ms: the hint's
+numbers barely move between runs, because nothing in them depends on the box or
+the LAN any more.
+
+**And then the horizon turned out to be the wrong shape.** `SEEK_HORIZON` was
+four seconds of guesswork - "keyframes are about two seconds apart, so four is
+safe" - and what it bought was four seconds of pictures decoded and thrown away.
+The fragment already says which samples are keyframes: `trun`'s per-sample flags
+carry it, and `MseSample::keyframe` has it. So a seek now starts at the **last
+keyframe at or before the moment asked for**, which is the least work that still
+decodes, and there is no constant left to be wrong.
+
+That was worth more than either of the other two changes:
+
+| ask to first picture | |
+| --- | --- |
+| range began mid-segment, no hint | 750 ms |
+| range on a boundary, no hint | 486 ms |
+| and the finger's hint | 407-435 ms |
+| and starting at the keyframe | **185-192 ms** |
+
+A jump without a hint came out 231-358 ms - the same keyframe start, with the
+fragment still to fetch. The landing is exact (asked for `1793642208`, first
+picture `1793642208.0129`), a jump backwards lands on its moment too, and the
+pace after it is still 1:1.
+
+**What is left is not the decode any more.** A seek that crosses into another
+range is 1.7-1.8 s, and nearly all of it is starting a session: a playlist
+request, then a 1.2 KB init segment the box spends 60-350 ms generating, then
+the first fragment. Nothing decodes until the whole fragment has arrived -
+`complete_groups` wants a `moof` and its `mdat` together - so the first picture
+waits out the whole download. Parsing the `moof` and emitting samples as their
+bytes arrive is the next thing that would move, and it is a change to the
+parser rather than to the clock.
+
+**The trap worth keeping.** `watch::Receiver::changed` marks the value as seen,
+so `has_changed` straight after it is false. The first version asked
+`has_changed` inside `take_hint`, which meant the hint that had just woken the
+session was the one hint thrown away - and the measurement came out 100 ms
+better instead of 300, which is what sent me looking. `take_hint` now remembers
+the moment it acted on, and the hold starts that memory empty: the last drag's
+last word is not where this finger is.
+
+Two smaller things. A prefetch task is abandoned rather than left to finish when
+the finger moves on, so a sweep across the strip is one request at a time. And
+`ahead` is boxed: `Recording`'s playlist variant was already near the size at
+which clippy starts asking, and an empty field should not decide how large the
+whole enum is.
+
+## 51. A login cost a second, and every session paid for it again
+
+*Landed 2026-11-02, in 2.1.43.*
+
+**A session that starts a recording took 1.05 s to its first picture, and 952 ms
+of it was a login.** The box hashes the password on the way in, which is most of
+a second on a NAS that is also recording eight cameras - and Frigate's answer to
+it is a token that lasts a day.
+
+It was being paid twice. `FrigateClient` logs in to read the playlist, keeps the
+token for its own requests, and then hands the session a playlist and nothing
+else. The session started with no token, asked for the init segment, was told
+`401`, logged in again - and did the same on every range change, because a new
+range is a new session. Entering a recording and every drag that left the range
+each paid it.
+
+**The measurement lied first.** Three logins in a row, one `curl` per line, came
+out 700-960 ms; then two on one connection came out 46 ms and 14 ms. Frigate
+evidently keeps the credential check warm for a moment, and the cheap pair was
+the one that stuck in my head - the note "the login is 14 ms, not the problem"
+was written and nearly believed. What settled it was instrumenting the session:
+`401` at 43.97 ms, login done at 996.34 ms, first byte of the init at 1.09 s.
+The 952 ms is real, and it is the first login after a gap that costs it.
+
+`LOGINS` is now a map from (address, account) to token, filled by every login
+this process makes - the client's, the WebSocket's, and the one a `401` forces -
+and consulted before any of them asks again. Keyed by account as well as address,
+because two accounts on one box are two tokens with different rights.
+
+Three rules keep it honest:
+
+* **A `401` with a cached token means the box withdrew it**, not that the account
+  is wrong: the entry is dropped, one login is made, and the request goes out
+  once more. Without that, a token that expired after a day would refuse every
+  request until the process restarted.
+* **The import forgets it first.** The import is where a viewer's password is
+  checked, and a token minted with the old password would answer "fine" to a new
+  and wrong one.
+* **A box with authentication switched off never makes one**, so nothing is sent
+  that it did not ask for - which is why the session still asks without a token
+  in the first place.
+
+| | before | after |
+| --- | --- | --- |
+| a session's start, to first picture | 1.05 s | 0.11-0.15 s |
+| the whole way in, first of the process | ~1.9 s | 1.01-1.34 s |
+| the whole way in, after that | ~1.9 s | ~0.3 s |
+| a drag that leaves the range | 1.7-1.8 s | 1.0-1.15 s |
+
+**What is left in a range change is the init segment**, and the obvious fix for
+it does not work: asking for the init and the first fragment **at the same time**
+is three times slower. Measured over eight fresh ranges, alternating, wall clock
+until both were in hand: **210 ms serial against 615 ms concurrent**. The box
+appears to generate the range once per request, so two requests generate it
+twice. Recorded here so it is not tried again.
+
+## 52. The range is read while the finger is still on the timeline
+
+*Landed 2026-11-02, in 2.1.47.*
+
+A drag that leaves the range the channel holds needs another playlist - one
+request, about **283 ms** on the box of 2026-11-02. It was asked for when the
+finger was let go of, so it sat between the viewer and the picture: the drag
+cost the request *and* the session that followed it.
+
+The finger says where it is going long before it stops. So the timeline now
+reads that range as soon as the finger leaves the one playing, and keeps the
+answer. Nothing moves while it waits: what is on screen is still the stretch
+being left, and the viewer may still be holding. On release the answer is
+already there and the session starts at once.
+
+| a drag that leaves the range | |
+| --- | --- |
+| before | 283 ms of playlist, then 511-565 ms of session |
+| after | 511-565 ms of session |
+
+Three details make it work:
+
+* **One range at a time.** A finger sweeping the strip asks again only once it
+  has left the range it already asked for, which on a ten-minute timeline is a
+  request per ten minutes of travel rather than one per frame. The window is
+  also what a request is keyed by, so a finger moving inside it asks for
+  nothing.
+* **A seek waiting for it is not sent again.** If the finger is lifted while the
+  answer is still on its way, the seek records the moment it wants and the
+  answer makes the seek - one request, not two. That is `Playback::awaiting`.
+* **The range the session already holds is checked first.** A drag that leaves
+  and comes back must jump inside the session it has, not start the range it
+  read on the way out: the check for "the playlist covers this moment" comes
+  before the check for "a range was read ahead of it".
+
+What is left of a far drag is the session itself - init segment, first fragment,
+decode - and that is the same 511-565 ms whether the drag crossed one range or
+five.
+
+## 53. A hiccup cost ten minutes, because the channel reopened what it was asked for
+
+*Landed 2026-11-02, in 2.1.44.*
+
+A recording that broke part-way through was reopened from the endpoint it was
+opened with: for a playlist, that is its **first fragment**. The range is ten
+minutes wide, so a dropped connection put the viewer back at the start of it and
+made them watch the same stretch again. It was also the reason the range was ten
+minutes and not an hour - the width of the range was the size of the rewind.
+
+**What the channel had, and did not use, was the picture.** The frame store
+holds the newest frame of every channel, and a recording's frame carries the
+moment it is of. That is where the viewer had got to, and it is what the next
+attempt is told to play from.
+
+It is told as a **jump** rather than as the endpoint's `begin`. A session takes
+its `begin` from the endpoint and then reads the control for a jump, and the
+jump wins - deliberately, so that a seek asked for the instant playback opens is
+not lost. A resume set as `begin` would therefore be overridden by any seek the
+viewer had made before the failure, which is the very thing being fixed: after
+watching on from a drag, the leftover jump *is* the start of the stretch they
+watched. A jump counts, so the channel's is newer than theirs. A window has no
+fragments to move between, so it is told where to begin instead - the session
+re-reads the window and skips to that moment.
+
+**The guard is that the attempt published something.** One that failed before its
+first frame leaves the frame of the recording *before* this one on the channel,
+and resuming from it would be resuming from another recording. That is the same
+condition the RTSP→MSE fallback already uses, for the same reason.
+
+What this does not do: it does not make a *seek* survive a failure. The resume
+point is the last picture, not the last place asked for - and if a drag was in
+flight when the session died, the drag is lost and the picture comes back where
+it was. That window is a few milliseconds wide, and the alternative is a
+guaranteed ten-minute rewind.
+
+**What it does not unlock, now that it has been measured.** The obvious next
+move is a wider range - a failure no longer costs one - and the box turns out to
+be willing: a **one-hour** playlist came back in 65-84 ms, 10.8 KB, 324
+fragments, with no process started and the box's CPU unchanged at 46.9%; a
+fragment from the middle of that hour is served in 38-76 ms, the same as one
+from a ten-minute range.
+
+It would buy nothing. The range is not set by `WINDOW` - it is set by the
+timeline (`range_for` asks for the stretch the timeline shows, `SPAN` = 600),
+and the timeline is ten minutes wide because an hour across that strip is three
+seconds to a pixel, too coarse to aim a scrub with. A viewer cannot point at
+anything outside the ten minutes on screen, so a range that reaches further is a
+range nobody asks for. A wider range waits for the timeline to learn zoom
+levels, and that is a different piece of work.
+
+## 54. The timeline learns to be wider than ten minutes
+
+*Landed 2026-11-02, in 2.1.47.*
+
+The strip was ten minutes wide and could not be changed. Two things had put it
+there: an hour across it is three seconds to a pixel, too coarse to aim a scrub
+with - and, until §53, the width of the strip was also the width of a range, and
+a range was what a dropped connection cost.
+
+The second reason is gone. The first one is what the levels are for: **ten
+minutes, half an hour, an hour**, cycled by a right press on the strip. Ten is
+still where it starts, because that is what a scrub can be aimed at; the wider
+ones are for finding something older.
+
+A wider strip asks for a wider range - `range_for` and `range_start` take the
+width the timeline is showing rather than a constant, so the range and the strip
+are the same stretch at every level. That is only sensible because the box
+serves it: a one-hour playlist measured 65-84 ms with no process started (§53).
+
+**The zoom exposed a bug the fixed width had been hiding.** The strip was drawn
+from `last.end - span` to `last.end` and set once, when playback opened - so a
+scrub into the recording's history left the cursor pinned against the left edge
+with the picture somewhere off the strip. The strip now ends a quarter of a
+width past the moment being watched, and is re-drawn on every seek: at the
+newest part of a recording that is still its end, and back in the history the
+cursor sits three quarters across, with somewhere to scrub to on either side.
+
+**A press is the left button's, and that had to be said twice.** `track_tap` read
+`pointer.any_pressed()` and the timeline read `pointer.any_down()`, so a right
+press would have widened the strip *and* started a hold, and its release would
+have counted as a tap and taken the strip away. Both now ask for
+`PointerButton::Primary` - which a touch also is, so nothing else changes.
+
+Not watched on screen: the levels, the anchoring and the right press are
+unit-tested where they are arithmetic (`extent`, `next_zoom`), and the rest is
+plumbing.

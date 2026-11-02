@@ -1799,8 +1799,12 @@ impl XgViewApp {
                         ),
                     }
                 }
-                BackgroundEvent::PlaylistReady { index, camera_id, window, at, playlist } => {
-                    self.start_seek(*index, camera_id.clone(), *window, *at, playlist.clone());
+                BackgroundEvent::PlaylistReady { index, camera_id, window, at, playlist, ahead } => {
+                    if *ahead {
+                        self.range_arrived(*index, camera_id.clone(), *window, playlist.clone());
+                    } else {
+                        self.start_seek(*index, camera_id.clone(), *window, *at, playlist.clone());
+                    }
                 }
                 BackgroundEvent::Go2rtcFailed(error) => {
                     toast = Some((

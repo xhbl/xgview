@@ -13,7 +13,10 @@ impl XgViewApp {
     /// gone by the release.
     pub(super) fn track_tap(&mut self, ctx: &egui::Context) {
         ctx.input(|input| {
-            if input.pointer.any_pressed() {
+            // A tap is the left button's, and a touch's: the right one is the
+            // timeline's to widen itself with, and reading it here as well would
+            // have that press also take the strip away.
+            if input.pointer.button_pressed(egui::PointerButton::Primary) {
                 if let Some(origin) = input.pointer.press_origin() {
                     self.tap_press = Some((origin, input.time));
                     self.tap_multi = false;

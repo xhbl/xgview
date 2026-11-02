@@ -146,6 +146,10 @@ pub enum BackgroundEvent {
         /// The moment asked for, which the stretch is played from.
         at: i64,
         playlist: Option<VodPlaylist>,
+        /// Whether it was read before it was asked for, while a finger was
+        /// still on the timeline. Such an answer moves nothing by itself: it is
+        /// kept until the seek that wants it.
+        ahead: bool,
     },
 }
 

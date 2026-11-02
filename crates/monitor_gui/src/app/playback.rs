@@ -44,6 +44,8 @@ pub(super) struct Playback {
     /// no playlist and the stretch is one `clip.mp4`, where every seek is
     /// another window.
     pub(super) vod: Option<(i64, i64)>,
+    /// How many seconds the timeline is drawn across. One of [`ZOOMS`].
+    pub(super) zoom: i64,
     /// The moment under the viewer's finger, while there is one. The cursor
     /// follows it and the picture stays where it was, because nothing has been
     /// asked for yet.
@@ -63,6 +65,27 @@ pub(super) struct Playback {
     /// the row - not about whether a widget was the one egui decided to hand the
     /// gesture to.
     pub(super) scrubbing: bool,
+    /// A range read while the finger was still on the timeline.
+    ///
+    /// A drag that leaves the range the session holds needs another playlist,
+    /// and asking for it once the finger is lifted puts the request between the
+    /// viewer and the picture. The finger says where it is going seconds before
+    /// it stops, so the range is read while it is still there and the answer is
+    /// waiting when it lifts. See [`XgViewApp::read_ahead`].
+    pub(super) ahead: Option<Ahead>,
+    /// The moment a seek is waiting to play, while the range it needs is still
+    /// being read.
+    pub(super) awaiting: Option<i64>,
+}
+
+/// A range read before it was needed, and the answer to it.
+pub(super) struct Ahead {
+    /// The range asked for.
+    pub(super) window: (i64, i64),
+    /// The fragments it was cut into, once the box has answered - `None` while
+    /// the answer is still on its way, and `Some(None)` for a box that serves no
+    /// playlist for that range.
+    pub(super) answer: Option<Option<VodPlaylist>>,
 }
 
 /// Whose recording is playing, and where it is served from.
@@ -209,12 +232,13 @@ impl XgViewApp {
         let (from, to) = window;
         let begin = begin.map(|at| begin_in(window, at));
         let vod = self.play_recording(index, &source, window, playlist, begin);
-        let span = extent(&segments).unwrap_or((from, to));
+        let span = extent(&segments, SPAN, begin.unwrap_or(from)).unwrap_or((from, to));
         self.playback = Some(Playback {
             slot: channel,
             index,
             source,
             span,
+            zoom: SPAN,
             segments,
             vod,
             scrub: None,
@@ -225,6 +249,8 @@ impl XgViewApp {
             // starts - not the range's - that the cursor waits for.
             pending: Some(begin.unwrap_or(from)),
             scrubbing: false,
+            ahead: None,
+            awaiting: None,
         });
         // The speaker belongs to the channel whose picture is on screen, and
         // that has just become the recording's.
@@ -269,11 +295,61 @@ impl XgViewApp {
             playback.scrub = None;
             playback.scrubbing = false;
             playback.vod = vod;
+            // The seek this drag was going to make has been made.
+            playback.ahead = None;
+            playback.awaiting = None;
+            // The strip follows the picture: a drag into the recording's history
+            // would otherwise leave the cursor pressed against its left edge,
+            // with the stretch being watched somewhere off it.
+            if let Some(span) = extent(&playback.segments, playback.zoom, begin.unwrap_or(window.0)) {
+                playback.span = span;
+            }
             // The moment the picture begins at, held to the stretch that will
             // play: a scrub taken to the edge of the nearest recording does not
             // wait for a moment this playlist never reaches.
             playback.pending = Some(begin.unwrap_or(window.0));
         }
+    }
+
+    /// Takes the answer to a range read while the finger was down.
+    ///
+    /// Nothing moves by itself: what is on screen is still the stretch being
+    /// left, and the viewer may still have a finger on the timeline. The answer
+    /// is kept, and a seek already waiting for it is made now - which is what
+    /// makes the wait disappear rather than merely shorter.
+    pub(super) fn range_arrived(
+        &mut self,
+        index: usize,
+        camera_id: String,
+        window: (i64, i64),
+        playlist: Option<VodPlaylist>,
+    ) {
+        let wanted = {
+            let Some(playback) = self.playback.as_mut() else {
+                return;
+            };
+            // An answer for a recording that is no longer on screen, or for a
+            // range the finger has since left, has nowhere to go.
+            if playback.index != index || playback.source.camera != camera_id {
+                return;
+            }
+            let Some(ahead) = playback.ahead.as_mut() else {
+                return;
+            };
+            if ahead.window != window {
+                return;
+            }
+            ahead.answer = Some(playlist.clone());
+            playback.awaiting.filter(|wanted| covered(Some(window), *wanted))
+        };
+        let Some(wanted) = wanted else {
+            return;
+        };
+        if let Some(playback) = self.playback.as_mut() {
+            playback.ahead = None;
+            playback.awaiting = None;
+        }
+        self.start_seek(index, camera_id, window, wanted, playlist);
     }
 
     /// Asks a channel to play a stretch of a recording, and says which stretch
@@ -466,9 +542,22 @@ impl XgViewApp {
         // What the viewer is doing is read from the pointer rather than from
         // this answer: whether egui hands the gesture to this widget or to the
         // picture under it is not something a timeline should depend on.
-        let _ = ui.interact(row, Id::new(("xgview-timeline", index)), Sense::click_and_drag());
-        let (down, pos) = ui.ctx().input(|input| (input.pointer.any_down(), input.pointer.interact_pos()));
+        let response = ui.interact(row, Id::new(("xgview-timeline", index)), Sense::click_and_drag());
+        // A scrub is the left button's and a touch's. The right one widens the
+        // strip below, and reading it here as a press would have it start a hold
+        // on the way.
+        let down = ui.ctx().input(|input| input.pointer.button_down(egui::PointerButton::Primary));
+        let pos = ui.ctx().input(|input| input.pointer.interact_pos());
         let scrubbing = self.playback.as_ref().is_some_and(|playback| playback.scrubbing);
+        // A right press widens the strip a level: ten minutes, half an hour, an
+        // hour, and back to ten minutes. Aiming a scrub is a left press, so the
+        // gesture that changes what the timeline shows cannot be mistaken for
+        // the one that moves the picture - and nothing else on the wall uses
+        // that button.
+        if response.secondary_clicked() && !scrubbing {
+            self.zoom_timeline();
+            return;
+        }
 
         if !scrubbing {
             // A press that starts on the strip holds the picture where it is and
@@ -477,9 +566,24 @@ impl XgViewApp {
             if let (true, Some(pos)) = (down, pos) {
                 if row.contains(pos) {
                     self.manager.hold_clip(index, true);
+                    let at = moment(pos);
+                    let inside = self.playback.as_ref().is_some_and(|playback| covered(playback.vod, at));
+                    if inside {
+                        // A press can land far from the picture, and the fragment
+                        // under it is fetched while the finger is still there.
+                        self.manager.prefetch_fragment(index, at);
+                    } else {
+                        // A press outside the range the session holds has no
+                        // fragment of it to fetch: what that seek will need is
+                        // another playlist, and a tap is enough time to read it.
+                        self.read_ahead(index, at);
+                    }
                     if let Some(playback) = self.playback.as_mut() {
                         playback.scrubbing = true;
-                        playback.scrub = Some(moment(pos));
+                        playback.scrub = Some(at);
+                        // The range the last drag read is not this drag's.
+                        playback.ahead = None;
+                        playback.awaiting = None;
                     }
                 }
             }
@@ -490,8 +594,25 @@ impl XgViewApp {
             // The finger may leave the strip; the cursor follows it to the end
             // rather than stopping where the strip does.
             (true, Some(pos)) => {
+                let at = moment(pos);
+                let moved = self.playback.as_ref().is_some_and(|playback| playback.scrub != Some(at));
+                if moved {
+                    let inside = self.playback.as_ref().is_some_and(|playback| covered(playback.vod, at));
+                    if inside {
+                        // Where the seek will land, said while there is still
+                        // time to fetch it: the session holds one fragment and
+                        // fetches the one under the finger, so a drag across the
+                        // strip costs no more than the fragment it stops on.
+                        self.manager.prefetch_fragment(index, at);
+                    } else {
+                        // The finger has left the range the session holds, so
+                        // that seek will need another playlist. Read it now,
+                        // while there is a finger to hide the wait under.
+                        self.read_ahead(index, at);
+                    }
+                }
                 if let Some(playback) = self.playback.as_mut() {
-                    playback.scrub = Some(moment(pos));
+                    playback.scrub = Some(at);
                 }
             }
             _ => self.end_scrub(),
@@ -516,6 +637,65 @@ impl XgViewApp {
             // Nothing under the finger: the recording goes on where it was
             // held.
             None => self.manager.hold_clip(index, false),
+        }
+    }
+
+    /// Widens the timeline a level, or takes it back to the narrowest.
+    ///
+    /// What is on screen does not move: the strip still ends where it ended, so
+    /// a wider one reaches further back and a narrower one reaches less far. The
+    /// range follows the next time one is asked for - a drag to a moment the
+    /// session does not hold asks for the stretch the timeline shows.
+    fn zoom_timeline(&mut self) {
+        let Some(playback) = self.playback.as_mut() else {
+            return;
+        };
+        let zoom = next_zoom(playback.zoom);
+        playback.zoom = zoom;
+        let anchor = playback.span.1;
+        if let Some(span) = extent(&playback.segments, zoom, anchor) {
+            playback.span = span;
+        }
+        tracing::debug!(target: "xgview::app", zoom, "the timeline changed width");
+    }
+
+    /// Reads the range a finger is over while it is still on the timeline.
+    ///
+    /// A drag that leaves the range the session holds will need another
+    /// playlist. Asked for once the finger is lifted, that request sits between
+    /// the viewer and the picture; asked for now, it is answered by then.
+    /// Nothing moves: the answer waits for a seek to want it.
+    ///
+    /// One range at a time. A finger that keeps moving asks again only once it
+    /// has left the range it already asked for, which on a ten-minute timeline
+    /// is a request per ten minutes of travel rather than one per frame.
+    fn read_ahead(&mut self, index: usize, at: i64) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        if playback.ahead.as_ref().is_some_and(|ahead| covered(Some(ahead.window), at)) {
+            return;
+        }
+        let width = playback.zoom;
+        let Some(window) = window_at(
+            &playback.segments,
+            range_start(&playback.segments, at, width / 2),
+            width,
+        ) else {
+            return;
+        };
+        let source = playback.source.clone();
+        tracing::debug!(
+            target: "xgview::app",
+            index,
+            at,
+            from = window.0,
+            to = window.1,
+            "reading a range under the finger"
+        );
+        start_playlist(&self.handle, &self.events_tx, index, source, window, at, true);
+        if let Some(playback) = self.playback.as_mut() {
+            playback.ahead = Some(Ahead { window, answer: None });
         }
     }
 
@@ -561,12 +741,47 @@ impl XgViewApp {
             return;
         }
 
+        // A range read while the finger was down is this seek's own request:
+        // the answer is used rather than asked for again, and one still being
+        // read is waited for - which is the whole point of having asked early.
+        let ahead = playback
+            .ahead
+            .as_ref()
+            .filter(|ahead| covered(Some(ahead.window), target))
+            .map(|ahead| (ahead.window, ahead.answer.clone()));
+        if let Some((window, answer)) = ahead {
+            match answer {
+                Some(playlist) => {
+                    let camera_id = playback.source.camera.clone();
+                    self.start_seek(index, camera_id, window, target, playlist);
+                }
+                // Still on its way: the seek waits for it rather than asking
+                // again, and the cursor stays where the finger left it.
+                None => {
+                    if let Some(playback) = self.playback.as_mut() {
+                        playback.awaiting = Some(target);
+                        playback.scrub = None;
+                        playback.scrubbing = false;
+                        playback.pending = Some(target);
+                    }
+                }
+            }
+            return;
+        }
+
         // Somewhere else: another range, which is another playlist. The hold is
         // kept while it is read - the picture stays where it is rather than
         // running on to the end of the stretch being left - and the session that
         // replaces this one starts unpaused.
-        let Some(window) = window_at(&playback.segments, range_start(&playback.segments, target), WINDOW)
-        else {
+        // The range is the stretch the timeline shows, at whatever width it is
+        // showing it: a wider timeline reaches further back, and the range
+        // reaches with it.
+        let width = playback.zoom;
+        let Some(window) = window_at(
+            &playback.segments,
+            range_start(&playback.segments, target, width / 2),
+            width,
+        ) else {
             self.manager.hold_clip(index, false);
             self.flash(monitor_i18n::tr("toast-no-recording"), ToastKind::Error);
             return;
@@ -582,7 +797,7 @@ impl XgViewApp {
             playback.pending = Some(target);
         }
         tracing::debug!(target: "xgview::app", index, at = target, "another stretch for a scrub");
-        start_playlist(&self.handle, &self.events_tx, index, source, window, target);
+        start_playlist(&self.handle, &self.events_tx, index, source, window, target, false);
     }
 
     /// Lets the cursor follow the picture again, once the picture has reached
@@ -601,21 +816,39 @@ impl XgViewApp {
     }
 }
 
-/// How much of a recording the timeline shows at once.
+/// The widths the timeline can be shown at, narrowest first.
 ///
-/// Ten minutes. An hour across a strip this wide is three seconds to a pixel,
-/// which is too coarse to aim a scrub with; the levels that let it be changed
-/// are the next thing the timeline learns.
-const SPAN: i64 = 600;
+/// Ten minutes is what a scrub can be aimed at across a strip this wide - an
+/// hour across it is three seconds to a pixel. But ten minutes is also all a
+/// viewer can *see*, and a recording goes back an hour, so the wider levels are
+/// for finding something older rather than for aiming: the strip always ends at
+/// the newest moment recorded, so a wider one reaches further back and a
+/// narrower one reaches less far.
+const ZOOMS: [i64; 3] = [600, 1800, 3600];
 
-/// What the timeline is drawn across: the last few minutes that were read.
-fn extent(segments: &[Segment]) -> Option<(i64, i64)> {
+/// How much of a recording the timeline shows when a recording is opened.
+const SPAN: i64 = ZOOMS[0];
+
+/// The next width up, wrapping back to the narrowest.
+fn next_zoom(zoom: i64) -> i64 {
+    ZOOMS.iter().copied().find(|width| *width > zoom).unwrap_or(ZOOMS[0])
+}
+
+/// What the timeline is drawn across: `zoom` seconds of what was read, ending
+/// where the viewer is looking.
+///
+/// The end is the newest moment recorded, unless that would leave the moment
+/// being watched too far behind it - which a scrub into the recording's history
+/// does. Then it ends a quarter of a width past that moment, so the cursor sits
+/// where there is still somewhere to scrub to on either side of it.
+fn extent(segments: &[Segment], zoom: i64, anchor: i64) -> Option<(i64, i64)> {
     let first = segments.first()?;
     let last = segments.last()?;
     if last.end <= first.start {
         return None;
     }
-    Some((last.end.saturating_sub(SPAN).max(first.start), last.end))
+    let end = last.end.min(anchor + zoom / 4).max(first.start + 1);
+    Some((end.saturating_sub(zoom).max(first.start), end))
 }
 
 /// Whether the playlist a channel is playing can reach a moment.
@@ -628,23 +861,48 @@ fn covered(vod: Option<(i64, i64)>, at: i64) -> bool {
     vod.is_some_and(|(start, end)| start <= at && at < end)
 }
 
-/// How far before a moment a playlist's range begins, when the range cannot be
-/// the stretch the timeline shows.
-///
-/// Half a window, so that the range runs as far ahead of the moment as it does
-/// behind it and a scrub either way stays inside it: a jump within a playlist is
-/// half a second, and one out of it is a request and a session.
-const LEAD: i64 = WINDOW / 2;
-
 /// The range a playlist is asked for: what the timeline shows.
 ///
 /// A range the width of the timeline and placed anywhere else would leave most
-/// scrubs outside it - the timeline is ten minutes wide, so half of what the
-/// viewer can see would be another range and another session. Widened only when
-/// the moment is outside the span, which a scrub taken to the edge of a
-/// recording can produce.
-fn range_for(span: (i64, i64), at: i64) -> (i64, i64) {
-    (span.0.min(at), span.1.max(at + 1))
+/// scrubs outside it - half of what the viewer can see would be another range
+/// and another session. Widened only when the moment is outside the span, which
+/// a scrub taken to the edge of a recording can produce.
+fn range_for(segments: &[Segment], span: (i64, i64), at: i64) -> (i64, i64) {
+    (range_from(segments, span.0.min(at), at), span.1.max(at + 1))
+}
+
+/// Where a range begins, moved back to the start of the segment it falls in.
+///
+/// Frigate serves a fragment straight out of the recorded file when the range
+/// begins on a segment's own boundary, and cuts the whole range when it does
+/// not. Measured against the box of 2026-11-02, `cam_living_room`, the same
+/// ten-second fragments:
+///
+/// | range begins | playlist | a fragment's first byte |
+/// | --- | --- | --- |
+/// | on a boundary | 159 ms | 115-164 ms |
+/// | in the middle of a segment | 671-1034 ms | 467-967 ms |
+///
+/// Every fragment of the range is cut, not only the first - so where the range
+/// begins is most of what a seek costs. It was never on a boundary: the range
+/// was the timeline's own span, `last.end - SPAN`, which is whatever moment the
+/// recording happened to stop at.
+///
+/// Moved back rather than forward, so the range still holds the moment asked
+/// for, and no further back than the start of the stretch that moment is in: a
+/// range ends at the first hole, so one that began on the far side of a hole
+/// would end before the moment it was asked for.
+fn range_from(segments: &[Segment], from: i64, at: i64) -> i64 {
+    let floor = stretches(segments)
+        .into_iter()
+        .find(|stretch| stretch.start <= at && at <= stretch.end)
+        .map_or(from, |stretch| stretch.start);
+    let from = from.max(floor);
+    segments
+        .iter()
+        .rev()
+        .find(|segment| segment.start <= from && segment.start >= floor)
+        .map_or(from, |segment| segment.start)
 }
 
 /// Where a range asked for around a moment has to begin.
@@ -655,12 +913,17 @@ fn range_for(span: (i64, i64), at: i64) -> (i64, i64) {
 /// stretch's own start when it is not. Starting earlier and trusting the range to
 /// reach the moment is what a hole between the two would break - the range would
 /// end before the moment, and the session would find nothing at it.
-fn range_start(segments: &[Segment], at: i64) -> i64 {
-    let lead = at - LEAD;
-    stretches(segments)
-        .into_iter()
-        .find(|stretch| stretch.start <= at && at <= stretch.end)
-        .map_or(lead, |stretch| lead.max(stretch.start))
+///
+/// The stretch's start is a segment's start, and so is the moment `lead` back
+/// lands on after [`range_from`] moves it to one - which is what keeps the box
+/// from cutting the whole range. See [`range_from`].
+///
+/// `lead` is half the width the timeline is showing, so that the range runs as
+/// far ahead of the moment as it does behind it and a scrub either way stays
+/// inside it: a jump within a playlist is half a second, and one out of it is a
+/// request and a session.
+fn range_start(segments: &[Segment], at: i64, lead: i64) -> i64 {
+    range_from(segments, at - lead, at)
 }
 
 /// Where playback begins inside a range.
@@ -714,10 +977,12 @@ const LOOKBACK: i64 = 3600;
 ///
 /// Ten minutes, whether it arrives as one `clip.mp4` or as a playlist cut from a
 /// range that wide. Long enough that the seam a new range makes comes once in
-/// ten minutes rather than once a minute - and short enough that a connection
-/// that drops part-way through costs ten minutes of rewind rather than an hour.
-/// What is asked for and where playback begins are two different questions: the
-/// range runs from the moment asked for, and only what was recorded fills it.
+/// ten minutes rather than once a minute. A connection that drops part-way
+/// through used to cost this whole range of rewind, which was the other reason
+/// for the width; it is resumed where it broke now, so the width is the seam's
+/// alone. What is asked for and where playback begins are two different
+/// questions: the range runs from the moment asked for, and only what was
+/// recorded fills it.
 const WINDOW: i64 = 600;
 
 /// How far back opening a recording begins, when nothing else says.
@@ -764,14 +1029,19 @@ fn start_window(
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        let span = extent(&segments);
-        let at = entry_moment(span, now - ENTRY_BACK);
+        // Where entering begins, and the strip drawn across it. The moment is
+        // the unclamped one: `entry_moment` is what holds it to the recording,
+        // and holding it before the strip is chosen would draw the strip around
+        // a moment it had already moved.
+        let entry = now - ENTRY_BACK;
+        let span = extent(&segments, SPAN, entry);
+        let at = entry_moment(span, entry);
         // The playlist is asked for the stretch the timeline shows, so that a
         // scrub anywhere within it is a fragment of the session already running
         // rather than another range and another session. A box with no playlist
         // gets a window from the moment itself, which is where a `clip.mp4` is
         // cut.
-        let range = span.map(|span| range_for(span, at));
+        let range = span.map(|span| range_for(&segments, span, at));
         let playlist = match (range, client.as_mut()) {
             (Some(range), Some(client)) => {
                 read_playlist(client, &source.origin.camera, range).await
@@ -807,6 +1077,7 @@ fn start_playlist(
     source: Source,
     window: (i64, i64),
     at: i64,
+    ahead: bool,
 ) {
     let sender = events.clone();
     handle.spawn(async move {
@@ -822,6 +1093,7 @@ fn start_playlist(
             window,
             at,
             playlist,
+            ahead,
         });
     });
 }
@@ -866,34 +1138,64 @@ fn epoch_now() -> i64 {
 mod tests {
     use super::*;
 
-    /// The timeline is drawn across everything that was read, which is wider
+    /// The timeline is drawn across the stretch being watched, which is wider
     /// than the window: drawn across the window alone it would put the cursor at
     /// its left edge after every seek, and the picture would have moved while
     /// the cursor looked as though it had gone back.
     #[test]
     fn the_timeline_spans_what_was_read() {
         let segments = [Segment { start: 100, end: 110 }, Segment { start: 110, end: 120 }];
-        assert_eq!(extent(&segments), Some((100, 120)));
-        assert_eq!(extent(&[]), None);
+        assert_eq!(extent(&segments, 600, 120), Some((100, 120)));
+        assert_eq!(extent(&[], 600, 120), None);
         // A list that ends before it starts has no span to draw.
-        assert_eq!(extent(&[Segment { start: 120, end: 100 }]), None);
+        assert_eq!(extent(&[Segment { start: 120, end: 100 }], 600, 120), None);
         // An hour of recording is shown ten minutes at a time, from its end.
-        assert_eq!(extent(&[Segment { start: 0, end: 3600 }]), Some((3000, 3600)));
+        assert_eq!(extent(&[Segment { start: 0, end: 3600 }], 600, 3600), Some((3000, 3600)));
         // And a recording shorter than that is shown whole.
-        assert_eq!(extent(&[Segment { start: 3500, end: 3600 }]), Some((3500, 3600)));
+        assert_eq!(extent(&[Segment { start: 3500, end: 3600 }], 600, 3600), Some((3500, 3600)));
+    }
+
+    /// The strip ends at the newest moment recorded, unless the moment being
+    /// watched is further back than that would reach - and the wider levels
+    /// reach further back, which is what they are for.
+    #[test]
+    fn the_timeline_follows_what_is_being_watched() {
+        let segments = run(0, 3600);
+        // At the newest part of the recording the strip ends with it.
+        assert_eq!(extent(&segments, 600, 3540), Some((3000, 3600)));
+        // A scrub an hour back brings the strip with it, a quarter of a width
+        // past the moment, so there is somewhere to scrub to on either side.
+        assert_eq!(extent(&segments, 600, 1000), Some((550, 1150)));
+        // The same moment on a wider strip: it reaches further back.
+        assert_eq!(extent(&segments, 1800, 1000), Some((0, 1450)));
+        // And the widths go ten minutes, half an hour, an hour, back to ten.
+        assert_eq!(next_zoom(600), 1800);
+        assert_eq!(next_zoom(1800), 3600);
+        assert_eq!(next_zoom(3600), 600);
     }
 
     /// The range a playlist is asked for is the stretch the timeline shows, so
     /// that a scrub anywhere inside it is another fragment of the same session.
     #[test]
     fn the_playlist_range_is_what_the_timeline_shows() {
+        let segments = run(900, 1800);
         let span = (1000, 1600);
-        assert_eq!(range_for(span, 1100), span, "a moment inside it does not move it");
-        assert_eq!(range_for(span, 1600), (1000, 1601), "the end itself is inside");
+        assert_eq!(range_for(&segments, span, 1100), span, "a moment inside it does not move it");
+        assert_eq!(range_for(&segments, span, 1600), (1000, 1601), "the end itself is inside");
         // A moment the span does not reach - a scrub taken to the edge of the
         // recording - widens it rather than leaving the moment outside.
-        assert_eq!(range_for(span, 900), (900, 1600));
-        assert_eq!(range_for(span, 1700), (1000, 1701));
+        assert_eq!(range_for(&segments, span, 900), (900, 1600));
+        assert_eq!(range_for(&segments, span, 1700), (1000, 1701));
+        // And a span that begins in the middle of a segment begins at the
+        // segment's own boundary instead: that is what the box serves without
+        // cutting. See [`range_from`].
+        assert_eq!(range_for(&segments, (1003, 1600), 1100), (1000, 1600));
+        assert_eq!(range_for(&segments, (1003, 1600), 1600), (1000, 1601));
+    }
+
+    /// A run of ten-second segments, the way the recorder writes them.
+    fn run(from: i64, to: i64) -> Vec<Segment> {
+        (from..to).step_by(10).map(|start| Segment { start, end: start + 10 }).collect()
     }
 
     /// A range asked for around a moment has to hold it, whatever the recording
@@ -902,24 +1204,29 @@ mod tests {
     #[test]
     fn a_range_begins_inside_the_stretch_the_moment_is_in() {
         // Continuous: half a window back, which is as far behind as it runs ahead.
-        let continuous = [Segment { start: 0, end: 3600 }];
-        assert_eq!(range_start(&continuous, 2000), 2000 - LEAD);
+        let continuous = run(0, 3600);
+        let lead = SPAN / 2;
+        assert_eq!(range_start(&continuous, 2000, lead), 2000 - lead);
         // A recording that does not go back that far begins at its first moment.
-        assert_eq!(range_start(&continuous, 100), 0);
+        assert_eq!(range_start(&continuous, 100, lead), 0);
+        // A moment in the middle of a segment begins at that segment's boundary,
+        // so the box serves the range rather than cutting it.
+        assert_eq!(range_start(&continuous, 2007, lead), 2000 - lead);
+        assert_eq!(range_start(&continuous, 2009, lead), 1700, "the lead lands on 1709");
 
         // A hole between the lead and the moment: the range begins where the
         // stretch the moment is in begins, which is on the moment's side of it.
         let gapped = [Segment { start: 0, end: 100 }, Segment { start: 200, end: 400 }];
-        assert_eq!(range_start(&gapped, 300), 200, "the stretch's own start");
-        assert_eq!(range_start(&gapped, 90), 0);
+        assert_eq!(range_start(&gapped, 300, lead), 200, "the stretch's own start");
+        assert_eq!(range_start(&gapped, 90, lead), 0);
         // And a moment in the hole itself falls back to the lead, which
         // `window_at` lifts to the next stretch.
-        assert_eq!(range_start(&gapped, 150), 150 - LEAD);
+        assert_eq!(range_start(&gapped, 150, lead), 150 - lead);
 
         // What the two are for: for every moment a scrub can land on - which is
         // one a stretch covers - the range holds it.
         for at in [90, 300] {
-            let (from, to) = window_at(&gapped, range_start(&gapped, at), WINDOW).unwrap();
+            let (from, to) = window_at(&gapped, range_start(&gapped, at, lead), WINDOW).unwrap();
             assert!(from <= at && at < to, "{at} is not in {from}..{to}");
         }
     }
