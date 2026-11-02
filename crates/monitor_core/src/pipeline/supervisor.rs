@@ -124,6 +124,7 @@ impl Supervisor {
                 }
                 ChannelCommand::HoldClip { index, held } => self.hold_clip(index, held),
                 ChannelCommand::SeekFragment { index, at } => self.seek_fragment(index, at),
+                ChannelCommand::PrefetchFragment { index, at } => self.prefetch_fragment(index, at),
                 ChannelCommand::Suspend { index } => self.suspend(index),
                 ChannelCommand::Wake => self.wake(),
                 ChannelCommand::PreferHardware(prefer) => self.prefer_hardware(prefer),
@@ -286,6 +287,18 @@ impl Supervisor {
         if let Some(control) = self.channels.get(&index).and_then(|runtime| runtime.endpoint.control.as_ref()) {
             control.jump(at);
             tracing::debug!(target: "xgview::pipeline", index, at, "playback jumped");
+        }
+    }
+
+    /// Says where a finger dragging the timeline is, so the session can fetch
+    /// the fragment under it before the seek is asked for.
+    ///
+    /// Told rather than replaced, like a hold and a jump: what is playing is
+    /// still what the viewer is watching, and the hint is about a fragment that
+    /// is not playing yet.
+    fn prefetch_fragment(&mut self, index: usize, at: i64) {
+        if let Some(control) = self.channels.get(&index).and_then(|runtime| runtime.endpoint.control.as_ref()) {
+            control.hint(at);
         }
     }
 

@@ -428,6 +428,10 @@ enum ChannelCommand {
     /// in between are not read, and the decoder reading the one on screen keeps
     /// going. See [`ClipControl`].
     SeekFragment { index: usize, at: i64 },
+    /// Where a finger dragging the timeline is now. Nothing plays: the fragment
+    /// under it is fetched into memory, so that the seek the finger is about to
+    /// make finds its bytes already there. See [`ClipControl::hint`].
+    PrefetchFragment { index: usize, at: i64 },
     /// The viewer came back to the window. Every channel waiting out a backoff
     /// retries at once instead: the failures it counted happened while the
     /// process was in the background, and waiting them out now would only add
@@ -628,6 +632,20 @@ impl ChannelManager {
         self.send(ChannelCommand::SeekFragment { index, at });
     }
 
+    /// Says where a finger dragging a recording's timeline is.
+    ///
+    /// Nothing is played and nothing is shown: the fragment under the moment is
+    /// fetched into memory while the finger is still moving, so that the seek
+    /// it is about to make begins with its bytes already in hand. A drag says
+    /// this as often as it moves - the session keeps one fragment and ignores
+    /// the hints that fall in the one it already holds.
+    ///
+    /// Only a playlist can do this; a `clip.mp4` is one stream and a moment of
+    /// it cannot be fetched on its own.
+    pub fn prefetch_fragment(&self, index: usize, at: i64) {
+        self.send(ChannelCommand::PrefetchFragment { index, at });
+    }
+
     /// Stops whatever a playback channel is playing and leaves it idle.
     ///
     /// A recording that is not being watched is a request to the server and a
@@ -754,6 +772,10 @@ enum EndpointKind {
 pub struct ClipControl {
     paused: tokio::sync::watch::Sender<bool>,
     jump: tokio::sync::watch::Sender<Option<Jump>>,
+    /// Where a finger dragging the timeline is, for a session to fetch ahead of.
+    /// The moment alone: a hint is a place, and the session works out which
+    /// fragment that is from the playlist it holds.
+    hint: tokio::sync::watch::Sender<Option<i64>>,
     /// How many jumps have been asked for. A count rather than the moment alone,
     /// because a viewer who drags back to where they already were means it.
     asked: std::sync::atomic::AtomicU64,
@@ -772,7 +794,8 @@ impl ClipControl {
     fn new() -> Self {
         let (paused, _) = tokio::sync::watch::channel(false);
         let (jump, _) = tokio::sync::watch::channel(None);
-        Self { paused, jump, asked: std::sync::atomic::AtomicU64::new(0) }
+        let (hint, _) = tokio::sync::watch::channel(None);
+        Self { paused, jump, hint, asked: std::sync::atomic::AtomicU64::new(0) }
     }
 
     /// A handle the session waits on. Taken before the session starts, so a
@@ -794,6 +817,12 @@ impl ClipControl {
     fn jump(&self, at: i64) {
         let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let _ = self.jump.send(Some(Jump { at, asked }));
+    }
+
+    /// Says where a finger on the timeline is. No count is kept: a hint names a
+    /// fragment, and saying the same one again asks for nothing new.
+    fn hint(&self, at: i64) {
+        let _ = self.hint.send(Some(at));
     }
 }
 
