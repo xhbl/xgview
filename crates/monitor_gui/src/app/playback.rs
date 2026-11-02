@@ -10,7 +10,7 @@ use super::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use monitor_core::config::FrigateConfig;
-use monitor_core::discovery::frigate::{FrigateClient, window_at};
+use monitor_core::discovery::frigate::{FrigateClient, Segment, window_at};
 use monitor_core::model::FrigateOrigin;
 
 /// One camera's recordings, playing in the magnified viewport.
@@ -24,6 +24,15 @@ pub(super) struct Playback {
     /// without changing how many there are - another group - so the slot alone
     /// does not say whose recording this is.
     pub(super) camera: String,
+    /// The stretch the channel was asked for, in seconds since the epoch. The
+    /// timeline is drawn across it, so the cursor's place is its distance from
+    /// the start.
+    pub(super) from: i64,
+    pub(super) to: i64,
+    /// What the camera recorded around it. Read once when playback opens, and
+    /// kept: the timeline draws the stretches that exist, and asking again for
+    /// every repaint would be a request a frame.
+    pub(super) segments: Vec<Segment>,
 }
 
 impl XgViewApp {
@@ -139,6 +148,7 @@ impl XgViewApp {
         origin: FrigateOrigin,
         credentials: Option<(String, String)>,
         window: (i64, i64),
+        segments: Vec<Segment>,
     ) {
         let index = self.playback_index();
         let (from, to) = window;
@@ -149,7 +159,8 @@ impl XgViewApp {
         );
         tracing::debug!(target: "xgview::app", channel, index, %uri, "playing a recording");
         self.manager.play_clip(index, uri, camera_id.clone(), credentials, window);
-        self.playback = Some(Playback { slot: channel, index, camera: camera_id });
+        self.playback =
+            Some(Playback { slot: channel, index, camera: camera_id, from, to, segments });
         // The speaker belongs to the channel whose picture is on screen, and
         // that has just become the recording's.
         self.apply_audio();
@@ -174,6 +185,65 @@ impl XgViewApp {
             index = playback.index,
             "the recording is put away"
         );
+    }
+}
+
+impl XgViewApp {
+    /// Draws what the recording holds across the timeline's row.
+    ///
+    /// The row is in the picture's own frame, so it is read as one axis: a
+    /// moment is its distance along the window, and a stretch is the band
+    /// between two of them. Which of the row's sides that axis runs along is
+    /// the row's own shape - across a picture as it arrives, down one drawn
+    /// turned.
+    pub(super) fn draw_timeline(&self, ui: &egui::Ui, row: Rect) {
+        let Some(playback) = &self.playback else {
+            return;
+        };
+        let span = (playback.to - playback.from).max(1) as f32;
+        let horizontal = row.width() > row.height();
+        let middle = row.center();
+        let along = |at: i64| {
+            let t = ((at - playback.from) as f32 / span).clamp(0.0, 1.0);
+            if horizontal {
+                row.left() + row.width() * t
+            } else {
+                row.top() + row.height() * t
+            }
+        };
+        let band = |from: f32, to: f32, thick: f32| {
+            let to = to.max(from + 1.0);
+            if horizontal {
+                Rect::from_min_max(
+                    egui::pos2(from, middle.y - thick / 2.0),
+                    egui::pos2(to, middle.y + thick / 2.0),
+                )
+            } else {
+                Rect::from_min_max(
+                    egui::pos2(middle.x - thick / 2.0, from),
+                    egui::pos2(middle.x + thick / 2.0, to),
+                )
+            }
+        };
+
+        let painter = ui.painter();
+        // The stretches that were recorded, in the accent the wall uses for a
+        // picture that is arriving.
+        for segment in &playback.segments {
+            if segment.end <= playback.from || segment.start >= playback.to {
+                continue;
+            }
+            let from = along(segment.start.max(playback.from));
+            let to = along(segment.end.min(playback.to));
+            painter.rect_filled(band(from, to, 6.0), CornerRadius::same(2), theme::ACCENT.gamma_multiply(0.55));
+        }
+        // Where the picture has got to. Its moment comes from the frame itself,
+        // so a stalled stream leaves the cursor where the picture is rather
+        // than where a clock thinks it should be.
+        if let Some(at) = self.view_texture(playback.slot).and_then(|entry| entry.at) {
+            let x = along(at.round() as i64);
+            painter.rect_filled(band(x - 1.5, x + 1.5, 18.0), CornerRadius::same(1), theme::FOCUS);
+        }
     }
 }
 
@@ -203,20 +273,21 @@ fn start_window(
     handle.spawn(async move {
         let (user, pass) = credentials.clone().unwrap_or_default();
         let config = FrigateConfig::at(&origin.base_url, &user, &pass);
-        let window = match FrigateClient::new(config) {
+        let segments = match FrigateClient::new(config) {
             Ok(mut client) => client
                 .segments(&origin.camera, now - LOOKBACK, now)
                 .await
-                .ok()
-                .and_then(|segments| window_at(&segments, now - WINDOW, WINDOW)),
-            Err(_) => None,
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
         };
+        let window = window_at(&segments, now - WINDOW, WINDOW);
         let _ = sender.send(BackgroundEvent::PlaybackReady {
             channel,
             camera_id,
             origin,
             credentials,
             window,
+            segments,
         });
     });
 }

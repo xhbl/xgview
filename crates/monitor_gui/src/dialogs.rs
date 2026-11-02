@@ -18,6 +18,7 @@ use monitor_core::discovery::{
     PortHit, ProgressCallback,
 };
 use monitor_core::discovery::frigate::{
+    Segment,
     extract_rtsp_port, extract_stream, mse_url as frigate_mse_url, rtsp_url as frigate_rtsp_url,
 };
 use monitor_core::discovery::go2rtc::{mse_url as go2rtc_mse_url, restream_url as go2rtc_rtsp_url};
@@ -116,6 +117,9 @@ pub enum BackgroundEvent {
         origin: FrigateOrigin,
         credentials: Option<(String, String)>,
         window: Option<(i64, i64)>,
+        /// What the camera recorded around the window, for the timeline. Empty
+        /// when there is nothing to play.
+        segments: Vec<Segment>,
     },
 }
 
