@@ -64,6 +64,16 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// jump lasts, with nothing on screen to say why.
 const LONGEST_WAIT: Duration = Duration::from_secs(2);
 
+/// How far behind its clock a picture may be before the stretch in between is
+/// dropped instead of played through.
+///
+/// The clock is the wall clock, so a read that took its time - a fragment the
+/// box was still cutting, a link that stalled - leaves it ahead of the pictures.
+/// Playing the backlog at full speed is a stretch of fast-forward nobody asked
+/// for; past this much, the missed stretch is skipped and the picture joins the
+/// clock where it is.
+const MAX_LAG: Duration = Duration::from_millis(250);
+
 /// How far before the moment asked for a decoder may start.
 ///
 /// A recording asked for part-way in begins at the start of the fragment the
@@ -131,7 +141,7 @@ pub(super) async fn run_recording_session(
     // `origin` is what `first` is of on the wall clock, which depends on where
     // the bytes came from - see [`Recording::origin`].
     let mut began = Instant::now();
-    let mut base_elapsed = Duration::ZERO;
+    let mut base_elapsed: i64 = 0;
     let mut first: Option<i64> = None;
     let mut origin: Option<f64> = None;
     let mut held = control.as_ref().map(|control| control.subscribe());
@@ -248,7 +258,14 @@ pub(super) async fn run_recording_session(
             }
             let base = *first.get_or_insert(pts);
             let origin = *origin.get_or_insert_with(|| source.origin(from, base));
-            let elapsed = u64::try_from(pts - base).unwrap_or(0);
+            // Signed, because a jump backwards moves the reading to a fragment
+            // whose moments are behind the one the session opened on. Read as
+            // unsigned, that distance became zero for every sample: the picture
+            // kept the moment it had when the drag began, and the clock had
+            // nothing left to wait for - so the session played the stretch
+            // between the two at whatever speed the network allowed, and the
+            // recording appeared to race back to where it had been.
+            let elapsed = pts - base;
             // Where this sample belongs on the wall clock.
             let at = origin + elapsed as f64 / 1_000_000.0;
             // Too far before the moment asked for to be worth decoding: a
@@ -271,10 +288,16 @@ pub(super) async fn run_recording_session(
                             break;
                         }
                     }
-                    // Held, the clock stops with the picture. The wait is the
-                    // picture's own pause, so nothing is decoded and nothing is
-                    // published while the viewer has a finger on the timeline.
+                    // The clock stopped with the picture, so the wait is not
+                    // time the recording owes.
                     began += since.elapsed();
+                    // A finger lifted into a seek: taken here rather than at the
+                    // top of the next sample, which would publish the frame the
+                    // picture was stopped on first - the moment the drag began
+                    // from, arriving after the place the viewer pointed at.
+                    if take_jump(&mut jumps, &mut jumped, &mut source, &mut begin, &mut pending) {
+                        break;
+                    }
                 }
             }
             // The moment asked for is where the picture and its clock begin, so
@@ -282,13 +305,19 @@ pub(super) async fn run_recording_session(
             if begin.is_some_and(|target| at >= target) {
                 begin = None;
                 began = Instant::now();
-                base_elapsed = Duration::from_micros(elapsed);
+                base_elapsed = elapsed;
             }
             if begin.is_none() {
-                let played = Duration::from_micros(elapsed).saturating_sub(base_elapsed);
+                let played = played_since(elapsed, base_elapsed);
                 let due = began + played;
                 let now = Instant::now();
-                if due > now {
+                if now > due + MAX_LAG {
+                    // Behind by more than a hiccup: the pictures in between are
+                    // dropped rather than played at speed. Moving the clock on
+                    // is what keeps a slow read from being repaid as a stretch
+                    // of fast-forward.
+                    began = now.checked_sub(played).unwrap_or(now);
+                } else if due > now {
                     tokio::time::sleep((due - now).min(LONGEST_WAIT)).await;
                 }
             }
@@ -661,6 +690,16 @@ fn origin_of(start: Option<i64>, from: i64, first_pts_us: i64) -> f64 {
     }
 }
 
+/// How far into the picture a sample is, measured from where playback began.
+///
+/// Both moments are distances from the session's first sample, and both are
+/// signed: a jump backwards moves the reading to a fragment whose moments are
+/// behind that first one, so the distance is negative. What is played is never
+/// behind the moment playback began at, and the answer is floored at zero.
+fn played_since(elapsed: i64, base_elapsed: i64) -> Duration {
+    Duration::from_micros(u64::try_from(elapsed - base_elapsed).unwrap_or(0))
+}
+
 /// One read from a response, with the one message a broken body deserves.
 async fn read(response: &mut reqwest::Response) -> Result<Option<Bytes>> {
     match response.chunk().await {
@@ -794,6 +833,27 @@ mod tests {
         );
         assert!(!init_read);
         assert_eq!(*next, 0, "the first fragment");
+    }
+
+    /// A jump backwards lands on a fragment whose moments are behind the one
+    /// the session opened on. Everything that is played after it is measured
+    /// from the moment it landed on, not from the session's first sample - and
+    /// the stretch before that moment owes nothing, or it would be played at
+    /// whatever speed the network allowed.
+    #[test]
+    fn a_jump_backwards_is_played_from_the_moment_it_landed_on() {
+        // The session opened 535 s into the playlist and the jump took it back
+        // to a fragment at 100 s.
+        let base = 535_000_000i64;
+        let landed = 100_000_000i64;
+        assert_eq!(played_since(landed, landed), Duration::ZERO, "the moment it landed on");
+        assert_eq!(played_since(landed + 40_000, landed), Duration::from_millis(40));
+        assert_eq!(played_since(landed + 1_000_000, landed), Duration::from_secs(1));
+        // And a sample still behind where playback began owes nothing.
+        assert_eq!(played_since(landed - 5_000_000, landed), Duration::ZERO);
+        // What the distance from the session's first sample is, for comparison:
+        // negative, which is what the clock used to read as zero.
+        assert!(landed - base < 0);
     }
 
     /// A moment part-way into a range begins at the fragment it falls in, and

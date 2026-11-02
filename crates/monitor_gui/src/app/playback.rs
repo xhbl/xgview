@@ -10,7 +10,7 @@ use super::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use monitor_core::config::FrigateConfig;
-use monitor_core::discovery::frigate::{FrigateClient, Segment, stretches, window_at};
+use monitor_core::discovery::frigate::{FrigateClient, Segment, VodPlaylist, stretches, window_at};
 use monitor_core::model::FrigateOrigin;
 
 /// One camera's recordings, playing in the magnified viewport.
@@ -20,10 +20,10 @@ pub(super) struct Playback {
     slot: usize,
     /// The channel the recording plays on. See [`XgViewApp::playback_index`].
     pub(super) index: usize,
-    /// The camera it belongs to. The wall can change the camera behind a slot
-    /// without changing how many there are - another group - so the slot alone
-    /// does not say whose recording this is.
-    pub(super) camera: String,
+    /// Whose recording it is and where it is served from. The wall can change
+    /// the camera behind a slot without changing how many there are - another
+    /// group - so the slot alone does not say whose recording this is.
+    pub(super) source: Source,
     /// The stretch the timeline is drawn across - the last few minutes that
     /// were read, which is not the window.
     ///
@@ -36,12 +36,14 @@ pub(super) struct Playback {
     /// kept: the timeline draws the stretches that exist, and asking again for
     /// every repaint would be a request a frame.
     pub(super) segments: Vec<Segment>,
-    /// The address the window is a suffix of - `…/api/<camera>` - kept so a
-    /// scrub can ask for another stretch without the camera being looked up
-    /// again, or having moved on the wall in between.
-    pub(super) uri_base: String,
-    /// The login that address takes. Frigate's own, not the restream's.
-    pub(super) credentials: Option<(String, String)>,
+    /// The stretch the playlist on this channel covers, when it plays one.
+    ///
+    /// A moment inside it is another fragment of the session already running -
+    /// one request, no decoder to build. A moment outside it is another range,
+    /// which is another playlist and another session. `None` when the box serves
+    /// no playlist and the stretch is one `clip.mp4`, where every seek is
+    /// another window.
+    pub(super) vod: Option<(i64, i64)>,
     /// The moment under the viewer's finger, while there is one. The cursor
     /// follows it and the picture stays where it was, because nothing has been
     /// asked for yet.
@@ -61,6 +63,33 @@ pub(super) struct Playback {
     /// the row - not about whether a widget was the one egui decided to hand the
     /// gesture to.
     pub(super) scrubbing: bool,
+}
+
+/// Whose recording is playing, and where it is served from.
+///
+/// The three travel together because nothing about a recording can be asked for
+/// without all of them, and none can be looked up again when it is needed: a
+/// seek happens long after the recording opened, and the wall may have moved
+/// another camera into that slot by then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Source {
+    /// The camera's own name, for the events the channel emits.
+    pub(super) camera: String,
+    /// Where its server answers, and what it calls that camera.
+    pub(super) origin: FrigateOrigin,
+    /// The login that server takes. Frigate's own, not the restream's.
+    pub(super) credentials: Option<(String, String)>,
+}
+
+impl Source {
+    /// The address a recording of this camera is a suffix of - `…/api/<camera>`.
+    fn api_base(&self) -> String {
+        format!(
+            "{}/api/{}",
+            self.origin.base_url.trim_end_matches('/'),
+            self.origin.camera
+        )
+    }
 }
 
 impl XgViewApp {
@@ -125,7 +154,8 @@ impl XgViewApp {
             return true;
         }
         let cameras = self.config.active_cameras();
-        cameras.get(playback.slot).map(|camera| camera.id.as_str()) != Some(playback.camera.as_str())
+        cameras.get(playback.slot).map(|camera| camera.id.as_str())
+            != Some(playback.source.camera.as_str())
     }
 
     /// Whether a recording is playing on this slot.
@@ -157,9 +187,7 @@ impl XgViewApp {
             &self.handle,
             &self.events_tx,
             channel,
-            camera_id,
-            origin,
-            credentials,
+            Source { camera: camera_id, origin, credentials },
             epoch_now(),
         );
     }
@@ -171,41 +199,154 @@ impl XgViewApp {
     pub(super) fn start_playback(
         &mut self,
         channel: usize,
-        camera_id: String,
-        origin: FrigateOrigin,
-        credentials: Option<(String, String)>,
+        source: Source,
         window: (i64, i64),
+        begin: Option<i64>,
+        playlist: Option<VodPlaylist>,
         segments: Vec<Segment>,
     ) {
         let index = self.playback_index();
         let (from, to) = window;
-        let uri_base = format!(
-            "{}/api/{}",
-            origin.base_url.trim_end_matches('/'),
-            origin.camera
-        );
-        let uri = format!("{uri_base}/start/{from}/end/{to}/clip.mp4");
-        tracing::debug!(target: "xgview::app", channel, index, %uri, "playing a recording");
-        self.manager.play_clip(index, uri, camera_id.clone(), credentials.clone(), window);
+        let begin = begin.map(|at| begin_in(window, at));
+        let vod = self.play_recording(index, &source, window, playlist, begin);
         let span = extent(&segments).unwrap_or((from, to));
         self.playback = Some(Playback {
             slot: channel,
             index,
-            camera: camera_id,
+            source,
             span,
             segments,
-            uri_base,
-            credentials,
+            vod,
             scrub: None,
-            // The window's first frame is the moment the cursor starts from,
-            // and it is a request away; until then the slot still shows the
-            // camera's own picture, which has no moment at all.
-            pending: Some(from),
+            // The first frame is the moment the cursor starts from, and it is a
+            // request away; until then the slot still shows the camera's own
+            // picture, which has no moment at all. A playlist's range reaches
+            // back before where playback begins, so it is where the picture
+            // starts - not the range's - that the cursor waits for.
+            pending: Some(begin.unwrap_or(from)),
             scrubbing: false,
         });
         // The speaker belongs to the channel whose picture is on screen, and
         // that has just become the recording's.
         self.apply_audio();
+    }
+
+    /// Plays another stretch of the recording on the channel already playing it.
+    ///
+    /// A seek is not another viewport: the slot, the timeline and the camera are
+    /// the ones already there, and what changes is what the channel is pulling.
+    /// The stretch is played from the moment asked for, which the playlist
+    /// reaches by skipping the fragments before it.
+    pub(super) fn start_seek(
+        &mut self,
+        index: usize,
+        camera_id: String,
+        window: (i64, i64),
+        at: i64,
+        playlist: Option<VodPlaylist>,
+    ) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        // A seek that was on its way when the viewer left - or left and came
+        // back to another camera - has nowhere to land.
+        if playback.index != index || playback.source.camera != camera_id {
+            return;
+        }
+        // The range a playlist was asked for reaches back before the moment, so
+        // the picture begins inside it. A box that serves no playlist gets a
+        // `clip.mp4`, which begins where it is asked for and no earlier.
+        let (window, begin) = match &playlist {
+            Some(_) => (window, Some(begin_in(window, at))),
+            None => match window_at(&playback.segments, at, WINDOW) {
+                Some(window) => (window, None),
+                None => return,
+            },
+        };
+        let source = playback.source.clone();
+        let vod = self.play_recording(index, &source, window, playlist, begin);
+        if let Some(playback) = self.playback.as_mut() {
+            playback.scrub = None;
+            playback.scrubbing = false;
+            playback.vod = vod;
+            // The moment the picture begins at, held to the stretch that will
+            // play: a scrub taken to the edge of the nearest recording does not
+            // wait for a moment this playlist never reaches.
+            playback.pending = Some(begin.unwrap_or(window.0));
+        }
+    }
+
+    /// Asks a channel to play a stretch of a recording, and says which stretch
+    /// of it is a playlist.
+    ///
+    /// A playlist is the shape a seek wants: a fragment is a request, so another
+    /// moment is another request rather than another stream. It is taken
+    /// whenever the box serves one, and the old way - one `clip.mp4` for the
+    /// whole stretch - is what a box without `/vod` falls back to.
+    fn play_recording(
+        &self,
+        index: usize,
+        source: &Source,
+        window: (i64, i64),
+        playlist: Option<VodPlaylist>,
+        begin: Option<i64>,
+    ) -> Option<(i64, i64)> {
+        let (from, to) = window;
+        match playlist {
+            Some(playlist) => {
+                let covered = (playlist.start, playlist.starts_at(playlist.fragments.len()));
+                tracing::debug!(
+                    target: "xgview::app",
+                    index,
+                    from,
+                    to,
+                    fragments = playlist.fragments.len(),
+                    begin,
+                    "playing a playlist"
+                );
+                self.manager.play_vod(
+                    index,
+                    source.camera.clone(),
+                    playlist,
+                    source.credentials.clone(),
+                    begin,
+                );
+                Some(covered)
+            }
+            None => {
+                let uri = format!("{}/start/{from}/end/{to}/clip.mp4", source.api_base());
+                tracing::debug!(target: "xgview::app", index, %uri, "playing a recording");
+                self.manager.play_clip(
+                    index,
+                    uri,
+                    source.camera.clone(),
+                    source.credentials.clone(),
+                    window,
+                );
+                None
+            }
+        }
+    }
+
+    /// Whether the channel on this index still has a session to be told anything.
+    ///
+    /// A recording that played to the end of its range, and one that gave up,
+    /// leave nothing behind: the channel is a picture and a state, and asking it
+    /// to jump would set a value nothing reads. Such a seek has to be another
+    /// range. A channel that has not reported a state yet is the opposite case -
+    /// its session was just asked for, and reads the jump before its first
+    /// sample.
+    fn has_session(&self, index: usize) -> bool {
+        match self.channels.get(&index) {
+            None => true,
+            Some(channel) => !matches!(
+                channel.state,
+                ConnectionState::Idle
+                    | ConnectionState::Suspended
+                    | ConnectionState::Failed
+                    | ConnectionState::Finished
+            ),
+        }
     }
 
     /// Puts the recording away and goes back to the camera's own stream.
@@ -367,8 +508,10 @@ impl XgViewApp {
         match at {
             // The hold is not let go of first: a session resumed for a moment
             // publishes a frame of the window that is being left, and that
-            // frame is the one that would put the cursor back. The window the
-            // seek asks for replaces the session, so the hold ends with it.
+            // frame is the one that would put the cursor back. A seek either
+            // jumps inside the session - and lets go of the hold itself, with
+            // the jump already in the session's hand - or replaces it, and a
+            // replaced session ends the hold with it.
             Some(at) => self.seek(at),
             // Nothing under the finger: the recording goes on where it was
             // held.
@@ -386,37 +529,60 @@ impl XgViewApp {
         let Some(playback) = &self.playback else {
             return;
         };
-        let index = playback.index;
+        let (index, vod) = (playback.index, playback.vod);
         // Neither of these can happen while the list is the one the window was
         // built from - and if it does, saying so is better than a picture that
         // silently carries on where it was, which reads as a drag that was
         // refused.
-        let Some(window) = nearest(&stretches(&playback.segments), at)
-            .and_then(|target| window_at(&playback.segments, target, WINDOW))
+        let Some(target) = nearest(&stretches(&playback.segments), at) else {
+            self.manager.hold_clip(index, false);
+            self.flash(monitor_i18n::tr("toast-no-recording"), ToastKind::Error);
+            return;
+        };
+
+        // A moment the playlist covers is another fragment of the session that
+        // is already running: the decoder, the parser and the login carry on,
+        // and the fragments in between are never asked for. A session that
+        // reached the end of its range has nothing left to jump in - its task is
+        // gone - so that seek is another range too.
+        if covered(vod, target) && self.has_session(index) {
+            tracing::debug!(target: "xgview::app", index, at = target, "playing another fragment");
+            // Asked for before the hold is let go of, so that the session wakes
+            // to the jump rather than to the frame it was stopped on: a resumed
+            // session publishes the sample it was waiting for, and that sample
+            // is the moment the drag began from.
+            self.manager.seek_fragment(index, target);
+            self.manager.hold_clip(index, false);
+            if let Some(playback) = self.playback.as_mut() {
+                playback.scrub = None;
+                playback.scrubbing = false;
+                playback.pending = Some(target);
+            }
+            return;
+        }
+
+        // Somewhere else: another range, which is another playlist. The hold is
+        // kept while it is read - the picture stays where it is rather than
+        // running on to the end of the stretch being left - and the session that
+        // replaces this one starts unpaused.
+        let Some(window) = window_at(&playback.segments, range_start(&playback.segments, target), WINDOW)
         else {
             self.manager.hold_clip(index, false);
             self.flash(monitor_i18n::tr("toast-no-recording"), ToastKind::Error);
             return;
         };
-        let (camera, uri_base) = (playback.camera.clone(), playback.uri_base.clone());
-        let credentials = playback.credentials.clone();
-        let (from, to) = window;
-        let uri = format!("{uri_base}/start/{from}/end/{to}/clip.mp4");
-        tracing::debug!(target: "xgview::app", index, %uri, "playing from a scrub");
-        // A new channel on the same index: the old one is replaced, which is
-        // what "play from here" means. It starts unpaused, so the hold the
-        // press began ends with it.
-        self.manager.play_clip(index, uri, camera, credentials, window);
-        // The cursor stays where the finger left it until the picture gets
-        // there. The moment asked for is held inside the window that will
-        // play, so a scrub past the end of a stretch - taken to that stretch's
-        // edge, and played from the start of the next one - does not wait for a
-        // moment the new window never reaches.
+        let source = playback.source.clone();
+        // The cursor stays where the finger left it while the range is read.
+        // Left to the picture it would go back to the moment the drag began from
+        // - the frame on screen is still the stretch being left - and only
+        // return a request later, which reads as a drag that bounced off.
         if let Some(playback) = self.playback.as_mut() {
             playback.scrub = None;
             playback.scrubbing = false;
-            playback.pending = Some(at.clamp(from, to));
+            playback.pending = Some(target);
         }
+        tracing::debug!(target: "xgview::app", index, at = target, "another stretch for a scrub");
+        start_playlist(&self.handle, &self.events_tx, index, source, window, target);
     }
 
     /// Lets the cursor follow the picture again, once the picture has reached
@@ -450,6 +616,62 @@ fn extent(segments: &[Segment]) -> Option<(i64, i64)> {
         return None;
     }
     Some((last.end.saturating_sub(SPAN).max(first.start), last.end))
+}
+
+/// Whether the playlist a channel is playing can reach a moment.
+///
+/// The stretch it covers runs from its start to the end of its last fragment,
+/// and the last moment it can play is the one before that end. A seek to the end
+/// itself would be a wait for a sample the playlist does not hold, which ends
+/// the session instead of moving to it - so the end belongs to the next range.
+fn covered(vod: Option<(i64, i64)>, at: i64) -> bool {
+    vod.is_some_and(|(start, end)| start <= at && at < end)
+}
+
+/// How far before a moment a playlist's range begins, when the range cannot be
+/// the stretch the timeline shows.
+///
+/// Half a window, so that the range runs as far ahead of the moment as it does
+/// behind it and a scrub either way stays inside it: a jump within a playlist is
+/// half a second, and one out of it is a request and a session.
+const LEAD: i64 = WINDOW / 2;
+
+/// The range a playlist is asked for: what the timeline shows.
+///
+/// A range the width of the timeline and placed anywhere else would leave most
+/// scrubs outside it - the timeline is ten minutes wide, so half of what the
+/// viewer can see would be another range and another session. Widened only when
+/// the moment is outside the span, which a scrub taken to the edge of a
+/// recording can produce.
+fn range_for(span: (i64, i64), at: i64) -> (i64, i64) {
+    (span.0.min(at), span.1.max(at + 1))
+}
+
+/// Where a range asked for around a moment has to begin.
+///
+/// A range runs from where it starts to the first hole, so the only way to be
+/// sure it holds the moment asked for is to start inside the same stretch of
+/// recording: [`LEAD`] back when the recording is continuous there, and at the
+/// stretch's own start when it is not. Starting earlier and trusting the range to
+/// reach the moment is what a hole between the two would break - the range would
+/// end before the moment, and the session would find nothing at it.
+fn range_start(segments: &[Segment], at: i64) -> i64 {
+    let lead = at - LEAD;
+    stretches(segments)
+        .into_iter()
+        .find(|stretch| stretch.start <= at && at <= stretch.end)
+        .map_or(lead, |stretch| lead.max(stretch.start))
+}
+
+/// Where playback begins inside a range.
+///
+/// The moment asked for, held to a moment the range holds. A scrub can land on
+/// the very last second of a stretch - [`nearest`] takes it to that edge - and a
+/// range asked for around it ends where the stretch does, so the moment can be
+/// one past the range's end. Beginning at the range's own end would be a wait for
+/// a picture it never reaches.
+fn begin_in(window: (i64, i64), at: i64) -> i64 {
+    at.clamp(window.0, window.1 - 1)
 }
 
 /// The moment closest to `at` that a stretch covers.
@@ -490,53 +712,146 @@ const LOOKBACK: i64 = 3600;
 
 /// How much of a recording a channel is given at once.
 ///
-/// Ten minutes, so the seam that a new window makes - a request, a decoder
-/// reopening - comes once in ten minutes rather than once a minute. What is
-/// asked for and where playback begins are two different questions: the window
-/// runs from the moment asked for, and only what was recorded fills it.
+/// Ten minutes, whether it arrives as one `clip.mp4` or as a playlist cut from a
+/// range that wide. Long enough that the seam a new range makes comes once in
+/// ten minutes rather than once a minute - and short enough that a connection
+/// that drops part-way through costs ten minutes of rewind rather than an hour.
+/// What is asked for and where playback begins are two different questions: the
+/// range runs from the moment asked for, and only what was recorded fills it.
 const WINDOW: i64 = 600;
 
 /// How far back opening a recording begins, when nothing else says.
 ///
-/// A minute, which is what a viewer means by "what just happened". The window
-/// asked for is longer, but a recording ends at the present, so a minute back is
-/// all there is to play.
+/// A minute, which is what a viewer means by "what just happened". A recording
+/// ends at the present, so a minute back is usually all there is to play - and
+/// when it does not, [`entry_moment`] takes it to the last moment there is.
 const ENTRY_BACK: i64 = 60;
+
+/// The moment entering a recording begins at.
+///
+/// A minute back, or the last moment the recording holds when nothing was
+/// recorded that recently. A camera that stopped recording an hour ago would
+/// otherwise be opened at a moment no fragment reaches, and the channel would
+/// report nothing at it rather than the last thing the camera saw.
+fn entry_moment(span: Option<(i64, i64)>, at: i64) -> i64 {
+    span.map_or(at, |(start, end)| at.clamp(start, end - 1))
+}
 
 /// Reads what a camera has recorded and sends back the stretch to play.
 ///
 /// The address is the camera's own rather than the import's configuration: the
 /// server may have been edited since, and the camera carries where it answers.
+///
+/// The playlist is read here too, in the same request's shadow: it is what the
+/// channel will actually pull, and asking for it before the channel exists is
+/// what keeps the first picture from being a `clip.mp4` that is then replaced.
 fn start_window(
     handle: &Handle,
     events: &Sender<BackgroundEvent>,
     channel: usize,
-    camera_id: String,
-    origin: FrigateOrigin,
-    credentials: Option<(String, String)>,
+    source: Source,
     now: i64,
 ) {
     let sender = events.clone();
     handle.spawn(async move {
-        let (user, pass) = credentials.clone().unwrap_or_default();
-        let config = FrigateConfig::at(&origin.base_url, &user, &pass);
-        let segments = match FrigateClient::new(config) {
-            Ok(mut client) => client
-                .segments(&origin.camera, now - LOOKBACK, now)
+        let (user, pass) = source.credentials.clone().unwrap_or_default();
+        let config = FrigateConfig::at(&source.origin.base_url, &user, &pass);
+        let mut client = FrigateClient::new(config).ok();
+        let segments = match client.as_mut() {
+            Some(client) => client
+                .segments(&source.origin.camera, now - LOOKBACK, now)
                 .await
                 .unwrap_or_default(),
-            Err(_) => Vec::new(),
+            None => Vec::new(),
         };
-        let window = window_at(&segments, now - ENTRY_BACK, WINDOW);
+        let span = extent(&segments);
+        let at = entry_moment(span, now - ENTRY_BACK);
+        // The playlist is asked for the stretch the timeline shows, so that a
+        // scrub anywhere within it is a fragment of the session already running
+        // rather than another range and another session. A box with no playlist
+        // gets a window from the moment itself, which is where a `clip.mp4` is
+        // cut.
+        let range = span.map(|span| range_for(span, at));
+        let playlist = match (range, client.as_mut()) {
+            (Some(range), Some(client)) => {
+                read_playlist(client, &source.origin.camera, range).await
+            }
+            _ => None,
+        };
+        let (window, begin) = match (&playlist, range) {
+            (Some(_), Some(range)) => (Some(range), Some(begin_in(range, at))),
+            _ => (window_at(&segments, at, WINDOW), None),
+        };
         let _ = sender.send(BackgroundEvent::PlaybackReady {
             channel,
-            camera_id,
-            origin,
-            credentials,
+            camera_id: source.camera,
+            origin: source.origin,
+            credentials: source.credentials,
             window,
+            begin,
+            playlist,
             segments,
         });
     });
+}
+
+/// Reads the playlist for a stretch a seek asked for, and sends it back.
+///
+/// The seek is not held up by it: what is on screen while the range is read is
+/// still the stretch being left, which is what the viewer was looking at anyway.
+/// Until the answer arrives the cursor waits where the finger left it.
+fn start_playlist(
+    handle: &Handle,
+    events: &Sender<BackgroundEvent>,
+    index: usize,
+    source: Source,
+    window: (i64, i64),
+    at: i64,
+) {
+    let sender = events.clone();
+    handle.spawn(async move {
+        let (user, pass) = source.credentials.clone().unwrap_or_default();
+        let config = FrigateConfig::at(&source.origin.base_url, &user, &pass);
+        let playlist = match FrigateClient::new(config) {
+            Ok(mut client) => read_playlist(&mut client, &source.origin.camera, window).await,
+            Err(_) => None,
+        };
+        let _ = sender.send(BackgroundEvent::PlaylistReady {
+            index,
+            camera_id: source.camera,
+            window,
+            at,
+            playlist,
+        });
+    });
+}
+
+/// The playlist a stretch was cut into, or `None` when the box serves none.
+///
+/// A box older than `/vod` answers `404`, and its recordings are played the way
+/// they always were: one `clip.mp4` for the whole stretch, which a seek replaces
+/// outright. That is worth a debug line rather than a toast - the recording
+/// plays either way, and the only thing that changed is how a seek costs.
+async fn read_playlist(
+    client: &mut FrigateClient,
+    camera: &str,
+    window: (i64, i64),
+) -> Option<VodPlaylist> {
+    let (from, to) = window;
+    match client.vod_playlist(camera, from, to).await {
+        Ok(playlist) => Some(playlist),
+        Err(err) => {
+            tracing::debug!(
+                target: "xgview::app",
+                %camera,
+                from,
+                to,
+                %err,
+                "no playlist for this stretch, playing it whole"
+            );
+            None
+        }
+    }
 }
 
 /// Seconds since the epoch.
@@ -566,6 +881,76 @@ mod tests {
         assert_eq!(extent(&[Segment { start: 0, end: 3600 }]), Some((3000, 3600)));
         // And a recording shorter than that is shown whole.
         assert_eq!(extent(&[Segment { start: 3500, end: 3600 }]), Some((3500, 3600)));
+    }
+
+    /// The range a playlist is asked for is the stretch the timeline shows, so
+    /// that a scrub anywhere inside it is another fragment of the same session.
+    #[test]
+    fn the_playlist_range_is_what_the_timeline_shows() {
+        let span = (1000, 1600);
+        assert_eq!(range_for(span, 1100), span, "a moment inside it does not move it");
+        assert_eq!(range_for(span, 1600), (1000, 1601), "the end itself is inside");
+        // A moment the span does not reach - a scrub taken to the edge of the
+        // recording - widens it rather than leaving the moment outside.
+        assert_eq!(range_for(span, 900), (900, 1600));
+        assert_eq!(range_for(span, 1700), (1000, 1701));
+    }
+
+    /// A range asked for around a moment has to hold it, whatever the recording
+    /// looks like between the two: a hole is where a range ends, so a range that
+    /// starts before one never reaches the moment on its far side.
+    #[test]
+    fn a_range_begins_inside_the_stretch_the_moment_is_in() {
+        // Continuous: half a window back, which is as far behind as it runs ahead.
+        let continuous = [Segment { start: 0, end: 3600 }];
+        assert_eq!(range_start(&continuous, 2000), 2000 - LEAD);
+        // A recording that does not go back that far begins at its first moment.
+        assert_eq!(range_start(&continuous, 100), 0);
+
+        // A hole between the lead and the moment: the range begins where the
+        // stretch the moment is in begins, which is on the moment's side of it.
+        let gapped = [Segment { start: 0, end: 100 }, Segment { start: 200, end: 400 }];
+        assert_eq!(range_start(&gapped, 300), 200, "the stretch's own start");
+        assert_eq!(range_start(&gapped, 90), 0);
+        // And a moment in the hole itself falls back to the lead, which
+        // `window_at` lifts to the next stretch.
+        assert_eq!(range_start(&gapped, 150), 150 - LEAD);
+
+        // What the two are for: for every moment a scrub can land on - which is
+        // one a stretch covers - the range holds it.
+        for at in [90, 300] {
+            let (from, to) = window_at(&gapped, range_start(&gapped, at), WINDOW).unwrap();
+            assert!(from <= at && at < to, "{at} is not in {from}..{to}");
+        }
+    }
+
+    /// Entering a recording begins a minute back, or at the last moment it holds
+    /// when nothing was recorded that recently: a camera that stopped an hour ago
+    /// would otherwise be opened at a moment no fragment reaches.
+    #[test]
+    fn entering_begins_at_the_last_moment_when_nothing_was_recorded_just_now() {
+        let span = Some((1000, 1600));
+        assert_eq!(entry_moment(span, 1540), 1540, "a minute back, inside the span");
+        assert_eq!(entry_moment(span, 1700), 1599, "past its end: the last moment it holds");
+        assert_eq!(entry_moment(span, 900), 1000, "before it: its first");
+        // Nothing recorded at all: there is no stretch to be held to.
+        assert_eq!(entry_moment(None, 1700), 1700);
+    }
+
+    /// A seek inside the playlist already playing is another fragment of it; a
+    /// seek outside is another range, and another session.
+    #[test]
+    fn a_seek_inside_the_playlist_stays_in_the_session() {
+        let vod = Some((100, 700));
+        assert!(covered(vod, 100), "its first moment is inside it");
+        assert!(covered(vod, 400));
+        assert!(covered(vod, 699), "the last moment it can play");
+        // The end itself is a moment the last fragment does not hold, and
+        // asking for it would end the session rather than move within it.
+        assert!(!covered(vod, 700));
+        assert!(!covered(vod, 99), "nothing before the range was fetched");
+        // A box with no playlist has no stretch to stay inside.
+        assert!(!covered(None, 400));
     }
 
     /// A scrub that lands between two stretches goes to the nearer edge rather

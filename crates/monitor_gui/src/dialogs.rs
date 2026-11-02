@@ -18,7 +18,7 @@ use monitor_core::discovery::{
     PortHit, ProgressCallback,
 };
 use monitor_core::discovery::frigate::{
-    Segment,
+    Segment, VodPlaylist,
     extract_rtsp_port, extract_stream, mse_url as frigate_mse_url, rtsp_url as frigate_rtsp_url,
 };
 use monitor_core::discovery::go2rtc::{mse_url as go2rtc_mse_url, restream_url as go2rtc_rtsp_url};
@@ -117,9 +117,35 @@ pub enum BackgroundEvent {
         origin: FrigateOrigin,
         credentials: Option<(String, String)>,
         window: Option<(i64, i64)>,
+        /// Where playback begins inside that stretch, when it is not its start.
+        /// A playlist's range reaches back before the moment the viewer is
+        /// opening the recording at, so the picture begins inside it.
+        begin: Option<i64>,
+        /// The fragments the window was cut into, when the box serves them.
+        /// `None` means it does not, and the stretch has to be played as one
+        /// `clip.mp4`.
+        playlist: Option<VodPlaylist>,
         /// What the camera recorded around the window, for the timeline. Empty
         /// when there is nothing to play.
         segments: Vec<Segment>,
+    },
+    /// A seek that left the playlist it was playing has been read: the stretch
+    /// it asked for, and the fragments it is cut into - or `None` for a box
+    /// that serves no playlist, which is played as one `clip.mp4` instead.
+    ///
+    /// The camera and its login are not carried: they are the ones the playback
+    /// channel already has, and a copy here could only disagree with them.
+    PlaylistReady {
+        /// The playback channel the stretch is for. It is the same channel it
+        /// already was: a seek does not open another one.
+        index: usize,
+        /// The camera whose recording it is, which is what says whether this
+        /// answer still belongs to the recording on screen.
+        camera_id: String,
+        window: (i64, i64),
+        /// The moment asked for, which the stretch is played from.
+        at: i64,
+        playlist: Option<VodPlaylist>,
     },
 }
 
@@ -427,6 +453,7 @@ impl DiscoveryUi {
             // Answered by the window, not by the device list: nothing about a
             // camera's recordings belongs in these panels.
             BackgroundEvent::PlaybackReady { .. } => {}
+            BackgroundEvent::PlaylistReady { .. } => {}
             BackgroundEvent::Discovery(event) => match event {
                 DiscoveryEvent::Phase(phase) => self.phase = phase,
                 DiscoveryEvent::DeviceFound(device) => self.push_device(&device),

@@ -1237,6 +1237,7 @@ mod input;
 mod paging;
 mod persist;
 mod playback;
+use playback::Source;
 mod pickers;
 mod settings;
 mod streams;
@@ -1775,14 +1776,18 @@ impl XgViewApp {
                         ToastKind::Info,
                     ));
                 }
-                BackgroundEvent::PlaybackReady { channel, camera_id, origin, credentials, window, segments } => {
+                BackgroundEvent::PlaybackReady { channel, camera_id, origin, credentials, window, begin, playlist, segments } => {
                     match window {
                         Some(window) => self.start_playback(
                             *channel,
-                            camera_id.clone(),
-                            origin.clone(),
-                            credentials.clone(),
+                            Source {
+                                camera: camera_id.clone(),
+                                origin: origin.clone(),
+                                credentials: credentials.clone(),
+                            },
                             *window,
+                            *begin,
+                            playlist.clone(),
                             segments.clone(),
                         ),
                         // The camera is there and its server answered; there is
@@ -1793,6 +1798,9 @@ impl XgViewApp {
                             ToastKind::Error,
                         ),
                     }
+                }
+                BackgroundEvent::PlaylistReady { index, camera_id, window, at, playlist } => {
+                    self.start_seek(*index, camera_id.clone(), *window, *at, playlist.clone());
                 }
                 BackgroundEvent::Go2rtcFailed(error) => {
                     toast = Some((
