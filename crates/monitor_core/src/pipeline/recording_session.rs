@@ -611,6 +611,10 @@ fn fragment_at(playlist: &VodPlaylist, at: i64) -> usize {
 /// The reading moves to the fragment the moment falls in and the picture begins
 /// there; the caller drops whatever is left of the chunk it was playing, because
 /// those samples are the stretch being left.
+///
+/// A jump asked for before this session was listening is taken too, and so is
+/// one left over from a session the channel has reopened: both are the viewer
+/// saying where they want to be, which is the same thing a fresh jump says.
 fn take_jump(
     jumps: &mut Option<tokio::sync::watch::Receiver<Option<Jump>>>,
     jumped: &mut u64,

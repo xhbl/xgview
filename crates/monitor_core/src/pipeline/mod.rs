@@ -620,6 +620,10 @@ impl ChannelManager {
     /// moving to another moment is one more request and the session - decoder,
     /// parser, login - carries on. A window is one stream from one start and
     /// ignores this; [`Self::play_vod`] is what to call for that.
+    ///
+    /// A moment the recording does not hold - past its last fragment - ends it
+    /// there and reports nothing recorded at that moment, which is the caller's
+    /// answer to ask for another range.
     pub fn seek_fragment(&self, index: usize, at: i64) {
         self.send(ChannelCommand::SeekFragment { index, at });
     }
