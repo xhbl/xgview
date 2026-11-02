@@ -809,6 +809,11 @@ impl ClipControl {
         self.jump.subscribe()
     }
 
+    /// A handle the session takes its hints from, for the same reason.
+    fn subscribe_hints(&self) -> tokio::sync::watch::Receiver<Option<i64>> {
+        self.hint.subscribe()
+    }
+
     fn set(&self, paused: bool) {
         let _ = self.paused.send(paused);
     }

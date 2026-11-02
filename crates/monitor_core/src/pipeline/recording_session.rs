@@ -74,16 +74,6 @@ const LONGEST_WAIT: Duration = Duration::from_secs(2);
 /// clock where it is.
 const MAX_LAG: Duration = Duration::from_millis(250);
 
-/// How far before the moment asked for a decoder may start.
-///
-/// A recording asked for part-way in begins at the start of the fragment the
-/// moment falls in, which can be twenty seconds early, and a decoder can only
-/// start on a keyframe. Decoding from this far before the moment keeps the
-/// stretch that is decoded and not shown down to the distance between two
-/// keyframes rather than to a whole fragment. The keyframes measured on the box
-/// of 2026-11-01 are two seconds apart.
-const SEEK_HORIZON: i64 = 4;
-
 /// Plays a recording on one channel.
 ///
 /// Returns when the recording reaches its last frame - the response ends, or the
@@ -146,6 +136,10 @@ pub(super) async fn run_recording_session(
     let mut origin: Option<f64> = None;
     let mut held = control.as_ref().map(|control| control.subscribe());
     let mut jumps = control.as_ref().map(|control| control.subscribe_jumps());
+    // Where a finger dragging the timeline is. A hint is not a jump: nothing
+    // moves until the finger is let go of, and what it does is put the fragment
+    // under the finger in memory before the seek asks for it.
+    let mut hints = control.as_ref().map(|control| control.subscribe_hints());
     // The last jump acted on. A jump is taken as it is seen, and the count is
     // what tells one from the next.
     let mut jumped: u64 = 0;
@@ -248,7 +242,34 @@ pub(super) async fn run_recording_session(
         );
         steps.sort_by_key(|(pts, _)| *pts);
 
-        for (pts, step) in steps {
+        // Where decoding may begin. A decoder can only start on a keyframe, so
+        // a seek decodes from the last one at or before the moment asked for:
+        // the least work that still decodes, and a fact the fragment carries
+        // rather than a guess about how far apart keyframes are. The clock is
+        // read here rather than inside the loop because the answer is about the
+        // whole chunk.
+        //
+        // `first` is set from the earliest sample either way, so that where the
+        // session's clock starts does not depend on whether a chunk opens with
+        // sound or with a picture.
+        if first.is_none() {
+            if let Some((pts, _)) = steps.first() {
+                let base = *first.insert(*pts);
+                origin.get_or_insert_with(|| source.origin(from, base));
+            }
+        }
+        let skip = match (begin, first, origin) {
+            (Some(target), Some(base), Some(origin)) => steps
+                .iter()
+                .rposition(|(pts, step)| {
+                    matches!(step, Step::Video(sample) if sample.keyframe)
+                        && origin + (*pts - base) as f64 / 1_000_000.0 <= target
+                })
+                .unwrap_or(0),
+            _ => 0,
+        };
+
+        for (pts, step) in steps.into_iter().skip(skip) {
             // A jump is taken between two samples rather than between two
             // reads: a read holds seconds of pictures, and the viewer's finger
             // is not going to wait for them. What is left of the chunk belongs
@@ -268,24 +289,42 @@ pub(super) async fn run_recording_session(
             let elapsed = pts - base;
             // Where this sample belongs on the wall clock.
             let at = origin + elapsed as f64 / 1_000_000.0;
-            // Too far before the moment asked for to be worth decoding: a
-            // decoder that starts mid-run has nothing to predict from, so it
-            // starts at the keyframe inside the horizon.
-            if begin.is_some_and(|target| at + SEEK_HORIZON as f64 <= target) {
-                continue;
-            }
             // Held, the clock stops with the picture. The wait is the picture's
             // own pause, so nothing is decoded and nothing is published while
             // the viewer has a finger on the timeline.
             if let Some(paused) = held.as_mut() {
                 if *paused.borrow() {
                     let since = Instant::now();
+                    // The pause is let go of, or the finger says where it is -
+                    // whichever comes first. A hold is the one moment there is
+                    // nothing else to do, so it is where the fragment the seek
+                    // will land on is fetched.
+                    //
+                    // The receiver is cloned before the loop rather than in it:
+                    // a clone starts from the moment it was made, and one made
+                    // after the finger was lifted would wait for a change that
+                    // has already happened.
+                    let mut lifted = paused.clone();
+                    // What this hold has acted on. Started empty rather than
+                    // carried over: the last drag's last word is not where this
+                    // finger is, even when it is the same moment.
+                    let mut hinted: Option<i64> = None;
                     loop {
+                        take_hint(&mut hints, &mut hinted, &mut source);
                         if !*paused.borrow() {
                             break;
                         }
-                        if paused.changed().await.is_err() {
-                            break;
+                        tokio::select! {
+                            result = lifted.changed() => {
+                                if result.is_err() {
+                                    break;
+                                }
+                            }
+                            result = wait_for_hint(hints.as_mut()) => {
+                                if result.is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                     // The clock stopped with the picture, so the wait is not
@@ -506,6 +545,10 @@ enum Recording {
         /// The fragment being read. It is the one the session began at, and the
         /// one a jump moves.
         next: usize,
+        /// A fragment fetched ahead of the seek a finger is about to make. See
+        /// [`Recording::prefetch`]. Boxed because it is empty most of the time,
+        /// and a variant is as large as its largest field.
+        ahead: Option<Box<Ahead>>,
         credentials: Option<(String, String)>,
         response: Option<reqwest::Response>,
         /// The login this playlist is being read with, once one has been asked
@@ -513,6 +556,22 @@ enum Recording {
         /// with it rather than logging in again.
         token: Option<String>,
     },
+}
+
+/// A fragment being fetched into memory while the viewer's finger is still on
+/// the timeline.
+///
+/// A seek is measured from the moment it is asked for, and most of that is the
+/// fragment: on the box of 2026-11-02 its first byte took 115-164 ms and the
+/// stretch up to the seek's horizon had to be read after that. The finger says
+/// where the seek will land seconds before it does, so the fragment under it is
+/// fetched then and the seek finds the bytes in hand.
+struct Ahead {
+    /// Which fragment these bytes are.
+    index: usize,
+    /// The fetch itself. Awaited when the reading reaches this fragment, and
+    /// abandoned when the finger moves to another one.
+    task: tokio::task::JoinHandle<Result<Bytes>>,
 }
 
 impl Recording {
@@ -537,6 +596,7 @@ impl Recording {
             init,
             init_read: false,
             next,
+            ahead: None,
             credentials,
             response: None,
             token: None,
@@ -563,6 +623,42 @@ impl Recording {
         }
     }
 
+    /// Fetches the fragment under `at` while the viewer is still dragging.
+    ///
+    /// One fragment is kept: a finger sweeping the timeline names a new one
+    /// every ten seconds, and what it left behind is a stretch the seek is not
+    /// going to land on. The fetch runs on its own task, because the session is
+    /// busy playing the fragment the finger has not left yet.
+    ///
+    /// A hint for the fragment being read, or for the one already in hand, is
+    /// nothing new and costs nothing.
+    fn prefetch(&mut self, at: i64) {
+        let Self::Vod { playlist, next, response, ahead, credentials, token, .. } = self else {
+            return;
+        };
+        let index = fragment_at(playlist, at);
+        // The fragment whose body is open is the one before the cursor: `next`
+        // moves when the request is made, not when the body ends. The init
+        // segment is open before any fragment is, which is why the cursor has to
+        // have moved at all.
+        let reading = (*next > 0 && response.is_some()).then(|| *next - 1);
+        if reading == Some(index) || ahead.as_ref().is_some_and(|ahead| ahead.index == index) {
+            return;
+        }
+        let Some(fragment) = playlist.fragments.get(index) else {
+            return;
+        };
+        let uri = playlist.fragment_uri(fragment);
+        let credentials = credentials.clone();
+        let token = token.clone();
+        // The fragment the finger has left is not going to be played: the
+        // request is abandoned rather than left to finish into nothing.
+        if let Some(old) = ahead.take() {
+            old.task.abort();
+        }
+        *ahead = Some(Box::new(Ahead { index, task: tokio::spawn(fetch_fragment(uri, credentials, token)) }));
+    }
+
     /// The next bytes of the recording, or `None` when it has all been read.
     ///
     /// The end of a fragment is not the end of the recording: the next one is
@@ -571,31 +667,67 @@ impl Recording {
     async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
         match self {
             Self::Clip { response } => read(response).await,
-            Self::Vod { playlist, init, init_read, next, credentials, response, token } => loop {
+            Self::Vod {
+                playlist,
+                init,
+                init_read,
+                next,
+                ahead,
+                credentials,
+                response,
+                token,
+            } => loop {
                 if response.is_none() {
-                    // The init segment first, then the fragment being read. The
-                    // cursor moves as the request is made: what has been asked
-                    // for is not asked for again.
-                    let uri = match init {
-                        Some(uri) if !*init_read => {
-                            *init_read = true;
-                            uri.clone()
+                    // The init segment comes first, always: a fragment is no
+                    // use to a decoder that has not been given the parameters
+                    // it was encoded with, and a fragment fetched for a seek is
+                    // no different.
+                    if let Some(uri) = init.as_ref().filter(|_| !*init_read) {
+                        let uri = uri.clone();
+                        *init_read = true;
+                        let (body, fresh) =
+                            open_request(&uri, credentials.as_ref(), token.as_deref()).await?;
+                        *response = Some(body);
+                        *token = fresh;
+                        continue;
+                    }
+                    // A fragment fetched while the finger was on the timeline is
+                    // the one this reading wants: it is taken rather than asked
+                    // for again, and that is the whole of what a seek saves.
+                    if let Some(fetched) = ahead.take() {
+                        if fetched.index == *next {
+                            match fetched.task.await {
+                                Ok(Ok(bytes)) => {
+                                    *next += 1;
+                                    return Ok(Some(bytes));
+                                }
+                                // A fetch that did not arrive is only a fetch
+                                // that has to be made now: the reading goes on
+                                // as though it had never been tried.
+                                Ok(Err(err)) => tracing::debug!(
+                                    target: "xgview::pipeline",
+                                    error = %err,
+                                    "a fragment fetched ahead was not read, asking for it again"
+                                ),
+                                Err(_) => {}
+                            }
+                        } else {
+                            *ahead = Some(fetched);
                         }
-                        _ => {
-                            let Some(fragment) = playlist.fragments.get(*next) else {
-                                return Ok(None);
-                            };
-                            let uri = playlist.fragment_uri(fragment);
-                            *next += 1;
-                            uri
-                        }
+                    }
+                    let Some(fragment) = playlist.fragments.get(*next) else {
+                        return Ok(None);
                     };
+                    let uri = playlist.fragment_uri(fragment);
+                    *next += 1;
                     // The login is kept for the fragments after this one: a
                     // playlist is a request every ten seconds, and a login for
                     // each of them would be three round trips where one will do.
-                    let (body, fresh) = open_request(&uri, credentials.as_ref(), token.as_deref()).await?;
+                    let (body, fresh) =
+                        open_request(&uri, credentials.as_ref(), token.as_deref()).await?;
                     *response = Some(body);
                     *token = fresh;
+                    continue;
                 }
                 let body = response.as_mut().expect("opened above");
                 match read(body).await? {
@@ -677,6 +809,47 @@ fn take_jump(
     true
 }
 
+/// Takes the fragment a finger dragging the timeline is over, and fetches it.
+///
+/// The moment is remembered rather than the watch's own idea of what has been
+/// seen: `changed` marks a value as seen, so a hint that woke the session would
+/// be one the session had already counted as read. A moment said twice is one
+/// fragment, and nothing is fetched for it a second time.
+///
+/// A session without a hint channel is a session nothing is dragging.
+fn take_hint(
+    hints: &mut Option<tokio::sync::watch::Receiver<Option<i64>>>,
+    hinted: &mut Option<i64>,
+    source: &mut Recording,
+) {
+    let Some(receiver) = hints.as_mut() else {
+        return;
+    };
+    let at = *receiver.borrow_and_update();
+    if at == *hinted {
+        return;
+    }
+    *hinted = at;
+    if let Some(at) = at {
+        source.prefetch(at);
+    }
+}
+
+/// Waits for a finger on the timeline to say where it is, for a session whose
+/// picture is being held.
+///
+/// The hold is exactly when there is time to fetch: the session is stopped
+/// waiting for the pause to be let go of, and the fragment the seek will land
+/// on can be read in the meantime. A session with no hints waits for nothing.
+async fn wait_for_hint(
+    hints: Option<&mut tokio::sync::watch::Receiver<Option<i64>>>,
+) -> Result<(), ()> {
+    match hints {
+        Some(receiver) => receiver.changed().await.map_err(|_| ()),
+        None => std::future::pending().await,
+    }
+}
+
 /// Where a recording's own clock starts, in seconds since the epoch.
 ///
 /// A window is cut where it was asked for, so its first sample is that moment. A
@@ -708,6 +881,28 @@ async fn read(response: &mut reqwest::Response) -> Result<Option<Bytes>> {
             "the recording stopped being sent: {err}"
         ))),
     }
+}
+
+/// Fetches one fragment whole, for a seek the viewer has not made yet.
+///
+/// Whole rather than in reads, because the point is for the seek to find the
+/// bytes in hand: what is handed over is one chunk, and the session plays it as
+/// it plays any other - see [`Recording::prefetch`].
+///
+/// The login a fresh one makes is not kept: the session reading the playlist
+/// holds the token it reads with, and a task that does not is only a task that
+/// may have to log in once more.
+async fn fetch_fragment(
+    uri: String,
+    credentials: Option<(String, String)>,
+    token: Option<String>,
+) -> Result<Bytes> {
+    let (mut response, _) = open_request(&uri, credentials.as_ref(), token.as_deref()).await?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = read(&mut response).await? {
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes.into())
 }
 
 /// Opens one request for one piece of a recording, and answers the login it was
