@@ -55,9 +55,26 @@ async fn run_once(
     }
 }
 
+/// Where a broken recording is picked up from, if it is picked up at all.
+///
+/// A recording resumes where its last picture was, which is what stops a hiccup
+/// costing the whole range: ten minutes of fragments, replayed from the first.
+/// A live stream is never resumed - its picture is of now, and there is no
+/// stretch to replay.
+///
+/// `published` is whether the attempt that just ended put anything on screen.
+/// One that did not leaves the frame of the recording before this one, which
+/// says nothing about where this one had got to.
+fn resume_at(recording: bool, published: bool, frame: Option<f64>) -> Option<i64> {
+    if !recording || !published {
+        return None;
+    }
+    frame.map(|at| at as i64)
+}
+
 /// Reconnection state machine of one channel.
 pub(super) async fn run_channel(
-    endpoint: Endpoint,
+    mut endpoint: Endpoint,
     prefer_hardware: bool,
     settings: Arc<Mutex<SessionSettings>>,
     events: Sender<StreamEvent>,
@@ -141,6 +158,44 @@ pub(super) async fn run_channel(
             );
             let mse = Endpoint { uri: fallback.uri, credentials: fallback.credentials, fallback: None, ..endpoint.clone() };
             outcome = run_once(&mse, prefer_hardware, settings.handshake_timeout, sinks, &audio, &talk).await;
+        }
+
+        // A recording that broke part-way through is picked up where the picture
+        // had got to. Its range is ten minutes of fragments, and reopening the
+        // endpoint as it was asked for would replay them from the first - so a
+        // hiccup cost ten minutes of rewind, and the viewer watched the same
+        // stretch again.
+        //
+        // Only when this attempt put something on screen: one that failed before
+        // its first frame leaves the frame of the recording before this one,
+        // which says nothing about where this one had got to.
+        // Only a broken attempt is picked up: one that reached the end of the
+        // recording is the recording's own end, and the channel stops there.
+        let resumed = if matches!(outcome, SessionEnd::Failed(_)) {
+            resume_at(
+                endpoint.is_recording(),
+                frames.published(index) > published,
+                frames.latest(index).and_then(|frame| frame.at),
+            )
+        } else {
+            None
+        };
+        if let Some(at) = resumed {
+            // A playlist is told by a jump: that is the session's own way of
+            // being told where to play from, and it counts, so this one is newer
+            // than any jump the viewer asked for before the failure.
+            if let Some(control) = endpoint.control.as_ref() {
+                control.jump(at);
+            }
+            // A window has no fragments to move between, so it is told where to
+            // begin instead: the session reads the window and skips to it.
+            endpoint.begin = Some(at);
+            tracing::debug!(
+                target: "xgview::pipeline",
+                index,
+                at,
+                "a recording broke; picking it up where the picture had got to"
+            );
         }
 
         // The attempt is over, so its measurements are too: whatever the next
@@ -272,5 +327,23 @@ pub(super) async fn run_channel(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A recording is picked up where its last picture was, and a live stream is
+    /// not picked up at all: its picture is of now, and there is no stretch to
+    /// replay. An attempt that put nothing on screen has no frame of its own to
+    /// read - the one it would find belongs to the recording before it.
+    #[test]
+    fn a_broken_recording_is_picked_up_where_it_stopped() {
+        let at = Some(1_793_642_208.4);
+        assert_eq!(resume_at(true, true, at), Some(1_793_642_208));
+        assert_eq!(resume_at(true, true, None), None, "a frame with no moment");
+        assert_eq!(resume_at(true, false, at), None, "the frame is the last recording's");
+        assert_eq!(resume_at(false, true, at), None, "a live stream has no stretch");
     }
 }
