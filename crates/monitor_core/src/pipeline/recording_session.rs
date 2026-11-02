@@ -64,6 +64,16 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// jump lasts, with nothing on screen to say why.
 const LONGEST_WAIT: Duration = Duration::from_secs(2);
 
+/// How far before the moment asked for a decoder may start.
+///
+/// A recording asked for part-way in begins at the start of the fragment the
+/// moment falls in, which can be twenty seconds early, and a decoder can only
+/// start on a keyframe. Decoding from this far before the moment keeps the
+/// stretch that is decoded and not shown down to the distance between two
+/// keyframes rather than to a whole fragment. The keyframes measured on the box
+/// of 2026-11-01 are two seconds apart.
+const SEEK_HORIZON: i64 = 4;
+
 /// Plays a recording on one channel.
 ///
 /// Returns when the recording reaches its last frame - the response ends, or the
@@ -76,7 +86,8 @@ pub(super) async fn run_recording_session(
     audio: &AudioHub,
 ) -> Result<()> {
     let Sinks { events, frames, stats } = sinks;
-    let Endpoint { index, camera_id, uri, stream, credentials, window, control, vod, .. } = endpoint;
+    let Endpoint { index, camera_id, uri, stream, credentials, window, control, vod, begin, .. } =
+        endpoint;
     let camera_id_str = camera_id.as_str();
     // A playback channel is always given the stretch it plays: it is what the
     // pictures it publishes are dated from, and what says whether the answer was
@@ -86,9 +97,15 @@ pub(super) async fn run_recording_session(
     };
 
     let mut source = match vod {
-        Some(playlist) => Recording::vod(playlist, credentials.clone()),
+        Some(playlist) => Recording::vod(playlist, credentials.clone(), begin),
         None => Recording::clip(&uri, credentials.as_ref()).await?,
     };
+
+    // The moment the picture is to begin at, when the recording was asked for
+    // part-way in. Everything before it is read and not played: a recording
+    // begins at a keyframe, and a seek into the middle of one would otherwise
+    // show up to a fragment of the wrong moment before reaching the right one.
+    let mut begin = begin.map(|at| at as f64);
 
     let mut parser = crate::mse::MseParser::new();
     let mut decoder: Option<Box<dyn VideoDecoder>> = None;
@@ -107,17 +124,16 @@ pub(super) async fn run_recording_session(
     // the middle of a box, or between a `moof` and the `mdat` it describes.
     let mut pending: Vec<u8> = Vec::new();
 
-    // The clock: `started` is the wall-clock instant `first` is due, and every
-    // sample after it waits its own distance from `first`. `origin` is what
-    // `first` is of on the wall clock, which depends on where the bytes came
-    // from - see [`Recording::origin`].
-    let started = Instant::now();
+    // The clock: a sample is due at `began` plus its distance from the moment the
+    // picture started (`base_elapsed`). A pause moves `began` on by however long
+    // it lasted, and a seek sets both to where the picture really began - so a
+    // stretch that was read and not played is not time the recording owes.
+    // `origin` is what `first` is of on the wall clock, which depends on where
+    // the bytes came from - see [`Recording::origin`].
+    let mut began = Instant::now();
+    let mut base_elapsed = Duration::ZERO;
     let mut first: Option<i64> = None;
     let mut origin: Option<f64> = None;
-    // How much of the wait so far was spent held. Added to the origin rather
-    // than to the wait, so letting go resumes the pace instead of racing to
-    // catch up with the clock the picture was not keeping.
-    let mut shift = Duration::ZERO;
     let mut held = control.as_ref().map(|control| control.subscribe());
 
     loop {
@@ -220,6 +236,12 @@ pub(super) async fn run_recording_session(
             let elapsed = u64::try_from(pts - base).unwrap_or(0);
             // Where this sample belongs on the wall clock.
             let at = origin + elapsed as f64 / 1_000_000.0;
+            // Too far before the moment asked for to be worth decoding: a
+            // decoder that starts mid-run has nothing to predict from, so it
+            // starts at the keyframe inside the horizon.
+            if begin.is_some_and(|target| at + SEEK_HORIZON as f64 <= target) {
+                continue;
+            }
             // Held, the clock stops with the picture. The wait is the picture's
             // own pause, so nothing is decoded and nothing is published while
             // the viewer has a finger on the timeline.
@@ -234,18 +256,33 @@ pub(super) async fn run_recording_session(
                             break;
                         }
                     }
-                    shift += since.elapsed();
+                    // Held, the clock stops with the picture. The wait is the
+                    // picture's own pause, so nothing is decoded and nothing is
+                    // published while the viewer has a finger on the timeline.
+                    began += since.elapsed();
                 }
             }
-            let due = Duration::from_micros(elapsed) + shift;
-            let now = started.elapsed();
-            if due > now {
-                tokio::time::sleep((due - now).min(LONGEST_WAIT)).await;
+            // The moment asked for is where the picture and its clock begin, so
+            // the stretch read on the way is not time the recording owes.
+            if begin.is_some_and(|target| at >= target) {
+                begin = None;
+                began = Instant::now();
+                base_elapsed = Duration::from_micros(elapsed);
+            }
+            if begin.is_none() {
+                let played = Duration::from_micros(elapsed).saturating_sub(base_elapsed);
+                let due = began + played;
+                let now = Instant::now();
+                if due > now {
+                    tokio::time::sleep((due - now).min(LONGEST_WAIT)).await;
+                }
             }
 
             match step {
                 Step::Audio(sample) => {
-                    if audio.wants(index) {
+                    // Sound heard before the picture begins is the seek's own
+                    // pre-roll being listened to.
+                    if begin.is_none() && audio.wants(index) {
                         if let Some(output) = audio.output().filter(|output| output.is_active()) {
                             if let Some((decoder, info)) = audio_decoder.as_mut() {
                                 let mut pcm: Vec<i16> = Vec::new();
@@ -274,11 +311,16 @@ pub(super) async fn run_recording_session(
                         match dec.decode(&sample.data, sample.pts_us, sample.keyframe) {
                             Ok(decoded) => {
                                 window.counters.decoded += decoded.len() as u64;
-                                if let Some((w, h)) =
-                                    publish_frames(frames, index, &mut sequence, decoded, Some(at))
-                                {
-                                    width = Some(w);
-                                    height = Some(h);
+                                // Decoded on the way to the moment asked for and
+                                // not shown: it is there for the pictures after
+                                // it to be predicted from.
+                                if begin.is_none() {
+                                    if let Some((w, h)) =
+                                        publish_frames(frames, index, &mut sequence, decoded, Some(at))
+                                    {
+                                        width = Some(w);
+                                        height = Some(h);
+                                    }
                                 }
                             }
                             Err(err) => {
@@ -419,13 +461,19 @@ impl Recording {
     }
 
     /// A playlist, whose first request is made when its first bytes are asked
-    /// for.
-    fn vod(playlist: VodPlaylist, credentials: Option<(String, String)>) -> Self {
-        let mut uris = Vec::with_capacity(playlist.fragments.len() + 1);
+    /// for. A moment asked for part-way in begins at the fragment it falls in:
+    /// the ones before it are a stretch nothing is going to play.
+    fn vod(
+        playlist: VodPlaylist,
+        credentials: Option<(String, String)>,
+        begin: Option<i64>,
+    ) -> Self {
+        let first = begin.map_or(0, |at| fragment_at(&playlist, at));
+        let mut uris = Vec::with_capacity(playlist.fragments.len() - first + 1);
         if let Some(init) = playlist.init_uri() {
             uris.push(init);
         }
-        for fragment in &playlist.fragments {
+        for fragment in &playlist.fragments[first..] {
             uris.push(playlist.fragment_uri(fragment));
         }
         Self::Vod {
@@ -477,6 +525,24 @@ impl Recording {
             Self::Vod { start, .. } => origin_of(Some(*start), from, first_pts_us),
         }
     }
+}
+
+/// The fragment a moment falls in: the last one that begins at or before it.
+///
+/// The fragments are listed in the order they play and their lengths are what
+/// says where each begins, which is the same arithmetic [`VodPlaylist::starts_at`]
+/// does - walked once, because a range can be an hour and a seek is a drag.
+fn fragment_at(playlist: &VodPlaylist, at: i64) -> usize {
+    let mut start = playlist.start as f64;
+    let mut chosen = 0;
+    for (index, fragment) in playlist.fragments.iter().enumerate() {
+        if start > at as f64 {
+            break;
+        }
+        chosen = index;
+        start += fragment.duration;
+    }
+    chosen
 }
 
 /// Where a recording's own clock starts, in seconds since the epoch.
@@ -609,7 +675,7 @@ mod tests {
             ],
         };
 
-        let source = Recording::vod(playlist, None);
+        let source = Recording::vod(playlist, None, None);
         let Recording::Vod { uris, start, next, .. } = &source else {
             panic!("a playlist is a playlist");
         };
@@ -623,6 +689,37 @@ mod tests {
                 "https://box/vod/cam/start/100/end/200/seg-3.m4s".to_string(),
             ]
         );
+    }
+
+    /// A moment part-way into a range begins at the fragment it falls in, and
+    /// the ones before it are not even asked for.
+    #[test]
+    fn a_moment_part_way_in_skips_the_fragments_before_it() {
+        let playlist = VodPlaylist {
+            base: "https://box/vod/cam/start/100/end/200".to_string(),
+            start: 100,
+            init: Some("init.mp4".to_string()),
+            fragments: vec![
+                Fragment { name: "seg-1.m4s".into(), duration: 20.0 },
+                Fragment { name: "seg-2.m4s".into(), duration: 10.0 },
+                Fragment { name: "seg-3.m4s".into(), duration: 20.0 },
+            ],
+        };
+        // The fragments run 100..120, 120..130 and 130..150.
+        assert_eq!(fragment_at(&playlist, 100), 0, "the first moment it holds");
+        assert_eq!(fragment_at(&playlist, 119), 0);
+        assert_eq!(fragment_at(&playlist, 120), 1, "a fragment's own start");
+        assert_eq!(fragment_at(&playlist, 129), 1);
+        assert_eq!(fragment_at(&playlist, 130), 2);
+        assert_eq!(fragment_at(&playlist, 900), 2, "past the end is the last one");
+        assert_eq!(fragment_at(&playlist, 50), 0, "before the range is the first");
+
+        let Recording::Vod { uris, .. } = Recording::vod(playlist, None, Some(125)) else {
+            panic!("a playlist is a playlist");
+        };
+        assert_eq!(uris.len(), 3, "the init segment and the two fragments left");
+        assert!(uris[1].ends_with("seg-2.m4s"), "{uris:?}");
+        assert!(uris[2].ends_with("seg-3.m4s"), "{uris:?}");
     }
 
     /// A window's pictures are dated from the moment it was asked for; a

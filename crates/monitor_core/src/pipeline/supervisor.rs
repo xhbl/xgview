@@ -119,8 +119,8 @@ impl Supervisor {
                 ChannelCommand::PlayClip { index, uri, camera_id, credentials, window } => {
                     self.play_clip(index, uri, camera_id, credentials, window)
                 }
-                ChannelCommand::PlayVod { index, camera_id, playlist, credentials } => {
-                    self.play_vod(index, camera_id, playlist, credentials)
+                ChannelCommand::PlayVod { index, camera_id, playlist, credentials, begin } => {
+                    self.play_vod(index, camera_id, playlist, credentials, begin)
                 }
                 ChannelCommand::HoldClip { index, held } => self.hold_clip(index, held),
                 ChannelCommand::Suspend { index } => self.suspend(index),
@@ -241,8 +241,9 @@ impl Supervisor {
         camera_id: String,
         playlist: VodPlaylist,
         credentials: Option<(String, String)>,
+        begin: Option<i64>,
     ) {
-        let endpoint = Endpoint::vod(index, camera_id, playlist, credentials, StreamKind::Main);
+        let endpoint = Endpoint::vod(index, camera_id, playlist, credentials, StreamKind::Main, begin);
         self.play(endpoint);
     }
 

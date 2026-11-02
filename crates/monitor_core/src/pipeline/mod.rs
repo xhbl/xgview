@@ -413,12 +413,14 @@ enum ChannelCommand {
     },
     /// Play a recording's fragments on this channel, replacing whatever it was
     /// pulling. The playlist is the whole request: the range, the init segment
-    /// and the fragments it is cut into.
+    /// and the fragments it is cut into. `begin` is the moment the picture is to
+    /// start at, when the range was asked for part-way in.
     PlayVod {
         index: usize,
         camera_id: String,
         playlist: VodPlaylist,
         credentials: Option<(String, String)>,
+        begin: Option<i64>,
     },
     /// Hold a playback channel's picture still, or let it go on.
     HoldClip { index: usize, held: bool },
@@ -576,6 +578,11 @@ impl ChannelManager {
     /// lists them, and the channel stops at the last one exactly as it stops at
     /// the end of a `clip.mp4`.
     ///
+    /// `begin` is the moment the picture is to start at. A seek into the middle
+    /// of the range passes it, and the fragments before it are not fetched: the
+    /// picture begins where the viewer pointed rather than at the start of the
+    /// fragment that holds it.
+    ///
     /// The credentials are Frigate's own login, and the playlist is a command
     /// rather than a state for the same reason [`Self::play_clip`] is.
     pub fn play_vod(
@@ -584,12 +591,14 @@ impl ChannelManager {
         camera_id: impl Into<String>,
         playlist: VodPlaylist,
         credentials: Option<(String, String)>,
+        begin: Option<i64>,
     ) {
         let _ = self.commands.send(ChannelCommand::PlayVod {
             index,
             camera_id: camera_id.into(),
             playlist,
             credentials,
+            begin,
         });
     }
 
@@ -761,6 +770,9 @@ struct Endpoint {
     /// The fragments a recording is served in, when the channel plays a
     /// playlist rather than one window. See [`EndpointKind::Vod`].
     vod: Option<VodPlaylist>,
+    /// The moment a recording's picture is to begin at, when it was asked for
+    /// part-way into what it holds. `None` plays it from the start.
+    begin: Option<i64>,
     /// How a playback channel is told to hold its picture still, and to go on.
     /// One per session: a channel opened on another window starts playing.
     control: Option<Arc<ClipControl>>,
@@ -879,6 +891,7 @@ fn endpoint_for(source: &CameraSource, stream: StreamKind, index: usize) -> Endp
         transport: source.transport,
         window: None,
         vod: None,
+        begin: None,
         control: None,
         talk: false,
         talk_mode: source.talk,
@@ -910,6 +923,7 @@ impl Endpoint {
             transport: RtspTransport::default(),
             window: Some(window),
             vod: None,
+            begin: None,
             control: Some(Arc::new(ClipControl::new())),
             talk: false,
             talk_mode: TalkMode::default(),
@@ -923,12 +937,17 @@ impl Endpoint {
     /// which range this channel is on, so that the same range revisited is not
     /// opened twice. The stretch is the playlist's, from its start to the end of
     /// its last fragment.
+    ///
+    /// `begin` is the moment the picture is to start at, for a seek into the
+    /// middle of that range; the fragments before the one it falls in are not
+    /// fetched at all.
     fn vod(
         index: usize,
         camera_id: String,
         playlist: VodPlaylist,
         credentials: Option<(String, String)>,
         stream: StreamKind,
+        begin: Option<i64>,
     ) -> Self {
         let window = (playlist.start, playlist.starts_at(playlist.fragments.len()));
         Self {
@@ -941,6 +960,7 @@ impl Endpoint {
             transport: RtspTransport::default(),
             window: Some(window),
             vod: Some(playlist),
+            begin,
             control: Some(Arc::new(ClipControl::new())),
             talk: false,
             talk_mode: TalkMode::default(),
