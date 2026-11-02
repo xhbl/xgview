@@ -10,7 +10,7 @@ use super::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use monitor_core::config::FrigateConfig;
-use monitor_core::discovery::frigate::{FrigateClient, Segment, window_at};
+use monitor_core::discovery::frigate::{FrigateClient, Segment, stretches, window_at};
 use monitor_core::model::FrigateOrigin;
 
 /// One camera's recordings, playing in the magnified viewport.
@@ -228,8 +228,10 @@ impl XgViewApp {
 
         let painter = ui.painter();
         // The stretches that were recorded, in the accent the wall uses for a
-        // picture that is arriving.
-        for segment in &playback.segments {
+        // picture that is arriving. Merged first: the recorder's own file
+        // boundaries are fractions of a second apart, and drawing them would put
+        // a notch every ten seconds along a recording that is continuous.
+        for segment in &stretches(&playback.segments) {
             if segment.end <= playback.from || segment.start >= playback.to {
                 continue;
             }

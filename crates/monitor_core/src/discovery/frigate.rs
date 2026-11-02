@@ -91,6 +91,25 @@ pub struct Segment {
 /// through it, so the picture's time and the wall's would part company.
 pub const JOIN: i64 = 2;
 
+/// The stretches a list of segments makes, with the recorder's own seams closed.
+///
+/// A gap larger than [`JOIN`] is a stretch the camera did not record, and it
+/// ends one stretch and begins another. Everything else is one continuous run,
+/// which is what a timeline draws: one band with two rounded ends rather than a
+/// row of dashes with a notch between each.
+pub fn stretches(segments: &[Segment]) -> Vec<Segment> {
+    let mut out: Vec<Segment> = Vec::new();
+    for segment in segments {
+        match out.last_mut() {
+            Some(last) if segment.start - last.end <= JOIN => {
+                last.end = last.end.max(segment.end);
+            }
+            _ => out.push(*segment),
+        }
+    }
+    out
+}
+
 /// The stretch of recording that begins at or before `from`, and runs to the
 /// first hole or to `longest` seconds, whichever comes first.
 ///
@@ -108,6 +127,18 @@ pub fn window_at(segments: &[Segment], from: i64, longest: i64) -> Option<(i64, 
         end = next.end;
     }
     Some((start, end.min(start + longest)))
+}
+
+/// One listed segment, as whole seconds.
+///
+/// Frigate truncates a segment's start to the second and leaves its end exact,
+/// so two consecutive files either leave a fraction of a second between them or
+/// overlap by one. Both ends are rounded outwards - the start down, the end up -
+/// which makes them touch. That fraction is the recorder changing file, not a
+/// stretch the camera did not record, and drawing it would put a seam every ten
+/// seconds along a timeline with nothing wrong with it.
+fn rounded(start: f64, end: f64) -> Segment {
+    Segment { start: start.floor() as i64, end: end.ceil() as i64 }
 }
 
 /// The shape `/api/{camera}/recordings` answers with, as far as this needs it.
@@ -237,13 +268,7 @@ impl FrigateClient {
             .map_err(|err| CoreError::parse(format!("the segment list is not JSON: {err}")))?;
         Ok(listed
             .into_iter()
-            .map(|entry| Segment {
-                // Truncated rather than rounded: a window that begins a moment
-                // early is answered from what exists, one that begins late
-                // loses its first frame.
-                start: entry.start_time as i64,
-                end: entry.end_time as i64,
-            })
+            .map(|entry| rounded(entry.start_time, entry.end_time))
             .collect())
     }
 
@@ -905,6 +930,44 @@ mod tests {
         assert_eq!(extract_rtsp_port("rtsp://192.168.17.88:8554/cam_1"), Some(8554));
         assert_eq!(extract_rtsp_port("rtsp://192.168.17.88:9000/cam_1"), Some(9000));
         assert_eq!(extract_rtsp_port("wss://192.168.17.88:8971/live/mse/api/ws?src=cam_1"), None);
+    }
+
+    /// The recorder's own file boundaries are fractions of a second - it
+    /// truncates a start to the second and leaves the end exact - and rounded
+    /// outwards they close, so a continuous recording is one band and not a row
+    /// of dashes.
+    #[test]
+    fn a_segment_is_rounded_outwards_so_the_recorder_s_own_seams_close() {
+        // The three pairs the box actually answers with, to the millisecond.
+        let a = rounded(1793580453.000, 1793580462.704);
+        let b = rounded(1793580462.000, 1793580471.682);
+        let c = rounded(1793580472.000, 1793580481.702);
+        assert_eq!(a, Segment { start: 1793580453, end: 1793580463 });
+        assert_eq!(b, Segment { start: 1793580462, end: 1793580472 });
+        assert_eq!(c, Segment { start: 1793580472, end: 1793580482 });
+        // Touching or overlapping, never a gap.
+        assert!(b.start <= a.end);
+        assert!(c.start <= b.end);
+    }
+
+    /// Segments that touch are one stretch; a hole larger than the recorder's
+    /// own seam ends it and begins another.
+    #[test]
+    fn stretches_close_the_seams_and_stop_at_a_hole() {
+        let segments = [
+            Segment { start: 100, end: 110 },
+            // Overlapping by one, which the box does as often as it leaves a gap.
+            Segment { start: 109, end: 120 },
+            // A second between files: still one stretch.
+            Segment { start: 121, end: 130 },
+            // Ten: the camera recorded nothing, and a new stretch begins.
+            Segment { start: 140, end: 150 },
+        ];
+        assert_eq!(
+            stretches(&segments),
+            vec![Segment { start: 100, end: 130 }, Segment { start: 140, end: 150 }]
+        );
+        assert!(stretches(&[]).is_empty());
     }
 
     /// A window runs from the beginning of the segment `from` falls in, through
