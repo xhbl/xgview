@@ -25,7 +25,7 @@
 use std::time::{Duration, Instant};
 
 use super::shared::{
-    BaselineFix, Sinks, StatsWindow, announce_streaming, publish_frames, uses_hardware,
+    BaselineFix, Sinks, StatsWindow, announce_streaming, frigate_http, publish_frames, uses_hardware,
     video_decoder,
 };
 use super::ws_session::frigate_api_login;
@@ -366,7 +366,8 @@ fn complete_groups(buf: &[u8]) -> usize {
 /// Opens the request that carries one window of a recording.
 ///
 /// Frigate's own port serves a self-signed certificate, so the client accepts
-/// one - the same decision the MSE WebSocket makes, for the same reason.
+/// one - the same decision the MSE WebSocket makes, for the same reason, and the
+/// same client: see [`frigate_http`].
 ///
 /// The request goes out without a token first, and a `401` is what asks for a
 /// login. Asking first would tie every recording to an account: Frigate's
@@ -374,12 +375,7 @@ fn complete_groups(buf: &[u8]) -> usize {
 /// not need - refused, because the box has authentication switched off - is a
 /// permanent failure, which would leave that box with no playback at all.
 async fn open_clip(uri: &str, credentials: Option<&(String, String)>) -> Result<reqwest::Response> {
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        // No overall timeout: a long window is meant to take minutes to play
-        // out, and the response is read for as long as the viewer watches it.
-        .connect_timeout(Duration::from_secs(10))
-        .build()?;
+    let http = frigate_http();
 
     let response = http.get(uri).send().await?;
     let response = match (response.status(), credentials) {

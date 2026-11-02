@@ -4,6 +4,31 @@
 
 use super::*;
 
+use std::sync::OnceLock;
+
+/// The client every request to Frigate's own port goes out on.
+///
+/// One for the process rather than one per request. A recording is asked for
+/// again on every seek, and a client built per request starts from nothing: no
+/// pooled connection and no TLS session to resume, so each scrub paid a
+/// handshake before it could even ask. The certificate is Frigate's own - its
+/// port serves a self-signed one - and that is the same answer for every
+/// request, which is why it can be decided once, here.
+///
+/// No overall timeout: a window of a recording is meant to take minutes to play
+/// out, and the response is read for as long as the viewer watches it. What
+/// does need a deadline - a login, a handshake - sets one on its own request.
+pub(super) fn frigate_http() -> &'static reqwest::Client {
+    static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+    HTTP.get_or_init(|| {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("a client built from constants")
+    })
+}
+
 /// Where a session puts what it produces: the events that mark a change, and
 /// the two stores that keep the newest of what has no history worth keeping.
 ///

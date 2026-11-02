@@ -4,7 +4,7 @@
 use super::*;
 
 use super::shared::{
-    BaselineFix, Sinks, StatsWindow, announce_streaming, publish_frames, uses_hardware,
+    BaselineFix, Sinks, StatsWindow, announce_streaming, frigate_http, publish_frames, uses_hardware,
     video_decoder,
 };
 
@@ -100,13 +100,12 @@ pub(super) async fn frigate_api_login(
     pass: &str,
     timeout: Duration,
 ) -> Result<String> {
-    let http = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(timeout)
-        .build()?;
-
-    let response = http
+    // The deadline is the request's, not the client's: the client is the one the
+    // whole process asks Frigate through, and a recording is read for as long as
+    // the viewer watches it. See [`frigate_http`].
+    let response = frigate_http()
         .post(format!("{base_url}/api/login"))
+        .timeout(timeout)
         .json(&serde_json::json!({"user": user, "password": pass}))
         .send()
         .await?;
