@@ -135,11 +135,10 @@ impl XgViewApp {
 
     /// Asks a camera's server what there is to play, and plays it.
     ///
-    /// The window is read from the segment list rather than guessed: a window
-    /// is only playable where a segment covers it, and it has to begin where a
-    /// segment begins - a clip cut mid-segment opens on whatever frame is there,
-    /// and the moment each picture is of is counted from the window's start. So
-    /// this is a request, and what it answers arrives as an event.
+    /// The window is read from the segment list rather than guessed: a window is
+    /// only playable where a segment covers it, and where it begins is what the
+    /// moment each picture is of is counted from. So this is a request, and what
+    /// it answers arrives as an event.
     pub(super) fn enter_playback(&mut self) {
         let Some(channel) = self.scheduler.zoom() else {
             return;

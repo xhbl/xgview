@@ -110,23 +110,35 @@ pub fn stretches(segments: &[Segment]) -> Vec<Segment> {
     out
 }
 
-/// The stretch of recording that begins at or before `from`, and runs to the
-/// first hole or to `longest` seconds, whichever comes first.
+/// The stretch of recording that begins at `from` and runs to the first hole or
+/// to `longest` seconds, whichever comes first.
 ///
-/// It starts at the beginning of the segment `from` falls in rather than at
-/// `from` itself: a clip cut mid-segment begins on whatever frame is there, and
-/// a decoder wants the keyframe that opens the segment.
+/// A moment in a hole is taken to the beginning of the next stretch instead:
+/// nothing comes back for a range with no recording in it.
+///
+/// It used to begin at the beginning of the segment `from` falls in, so that the
+/// clip would open on the keyframe that opens the segment. A clip cannot be cut
+/// between two keyframes anyway - the cut lands on the one before it - and the
+/// segments are ten seconds long, so that rule made every seek begin up to ten
+/// seconds early and play its way to the moment asked for. Measured against the
+/// box of 2026-11-01, a cut in the middle of a segment begins 0.8-0.9 s before
+/// it, which is the distance to the keyframe and no more.
+///
+/// What that costs is exactness: the moments the frames are given are counted
+/// from `from`, and the picture is really a keyframe or so behind it. On a
+/// timeline ten minutes wide that is a pixel or two; on the recording's own
+/// clock it is the interval between two keyframes.
 pub fn window_at(segments: &[Segment], from: i64, longest: i64) -> Option<(i64, i64)> {
     let first = segments.iter().position(|segment| segment.end > from)?;
-    let start = segments[first].start;
+    let from = from.max(segments[first].start);
     let mut end = segments[first].end;
     for next in &segments[first + 1..] {
-        if next.start - end > JOIN || next.end - start > longest {
+        if next.start - end > JOIN || next.end - from > longest {
             break;
         }
         end = next.end;
     }
-    Some((start, end.min(start + longest)))
+    Some((from, end.min(from + longest)))
 }
 
 /// One listed segment, as whole seconds.
@@ -970,12 +982,12 @@ mod tests {
         assert!(stretches(&[]).is_empty());
     }
 
-    /// A window runs from the beginning of the segment `from` falls in, through
-    /// every segment that touches the one before it, and stops at the first
-    /// hole - a clip asked for across one comes back short with its timestamps
-    /// running straight through it.
+    /// A window runs from the moment asked for, through every segment that
+    /// touches the one before it, and stops at the first hole - a clip asked for
+    /// across one comes back short with its timestamps running straight through
+    /// it.
     #[test]
-    fn a_window_follows_the_segments_and_stops_at_a_hole() {
+    fn a_window_begins_where_it_was_asked_for_and_stops_at_a_hole() {
         let segments = [
             Segment { start: 100, end: 110 },
             Segment { start: 110, end: 120 },
@@ -984,17 +996,23 @@ mod tests {
             // Ten seconds: the camera recorded nothing, and the window ends.
             Segment { start: 140, end: 150 },
         ];
-        assert_eq!(window_at(&segments, 105, 900), Some((100, 130)));
+        assert_eq!(window_at(&segments, 105, 900), Some((105, 130)));
+        assert_eq!(window_at(&segments, 100, 900), Some((100, 130)), "a segment's own beginning is itself");
+
+        // A moment in a hole is taken to the beginning of the next stretch: a
+        // window asked for there would come back with nothing in it.
+        assert_eq!(window_at(&segments, 135, 900), Some((140, 150)));
+        assert_eq!(window_at(&segments, 90, 900), Some((100, 130)), "before the recording");
     }
 
-    /// The window is capped, and the cap is measured from its own start rather
-    /// than from the moment asked for.
+    /// The window is capped, and the cap is measured from its own start.
     #[test]
     fn a_window_is_capped() {
         let segments: Vec<Segment> = (0..10)
             .map(|i| Segment { start: 100 + i * 10, end: 110 + i * 10 })
             .collect();
         assert_eq!(window_at(&segments, 100, 35), Some((100, 130)));
+        assert_eq!(window_at(&segments, 105, 35), Some((105, 140)));
     }
 
     /// A moment no segment covers has no window at all.
