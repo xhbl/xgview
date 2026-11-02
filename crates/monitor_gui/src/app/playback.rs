@@ -76,6 +76,12 @@ pub(super) struct Playback {
     /// The moment a seek is waiting to play, while the range it needs is still
     /// being read.
     pub(super) awaiting: Option<i64>,
+    /// The stretch of segment list being read for a strip wider than what was
+    /// held. See [`XgViewApp::read_older`].
+    pub(super) reading_older: Option<(i64, i64)>,
+    /// The earliest moment the camera answered "nothing recorded" for, once a
+    /// strip has been drawn that far back. The strip stops there.
+    pub(super) oldest: Option<i64>,
 }
 
 /// A range read before it was needed, and the answer to it.
@@ -251,6 +257,8 @@ impl XgViewApp {
             scrubbing: false,
             ahead: None,
             awaiting: None,
+            reading_older: None,
+            oldest: None,
         });
         // The speaker belongs to the channel whose picture is on screen, and
         // that has just become the recording's.
@@ -549,8 +557,9 @@ impl XgViewApp {
         let down = ui.ctx().input(|input| input.pointer.button_down(egui::PointerButton::Primary));
         let pos = ui.ctx().input(|input| input.pointer.interact_pos());
         let scrubbing = self.playback.as_ref().is_some_and(|playback| playback.scrubbing);
-        // A right press widens the strip a level: ten minutes, half an hour, an
-        // hour, and back to ten minutes. Aiming a scrub is a left press, so the
+        // A right press widens the strip a level - two minutes, ten, an hour,
+        // six hours, a day, and back - and the list is read as it widens.
+        // Aiming a scrub is a left press, so the
         // gesture that changes what the timeline shows cannot be mistaken for
         // the one that moves the picture - and nothing else on the wall uses
         // that button.
@@ -652,11 +661,83 @@ impl XgViewApp {
         };
         let zoom = next_zoom(playback.zoom);
         playback.zoom = zoom;
-        let anchor = playback.span.1;
+        let (index, anchor) = (playback.index, playback.span.1);
         if let Some(span) = extent(&playback.segments, zoom, anchor) {
             playback.span = span;
         }
         tracing::debug!(target: "xgview::app", zoom, "the timeline changed width");
+        // A strip wider than what has been read needs the rest of the list.
+        self.read_older(index);
+    }
+
+    /// Reads the stretch of segment list a wider strip needs. See
+    /// [`older_window`].
+    ///
+    /// One request for the whole missing stretch rather than one per level: a
+    /// day of segments is 1.7 MB and 744 ms, and asking for it a level at a time
+    /// would be the same bytes in five requests.
+    fn read_older(&mut self, index: usize) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        // One at a time: the answer widens the strip, which may then want more.
+        if playback.reading_older.is_some() {
+            return;
+        }
+        let Some((from, to)) =
+            older_window(&playback.segments, playback.zoom, playback.span.1, playback.oldest)
+        else {
+            return;
+        };
+        let source = playback.source.clone();
+        tracing::debug!(target: "xgview::app", index, from, to, "reading older segments");
+        // Marked before the task is spawned: an answer that arrives before the
+        // mark would clear a field that had not been set yet.
+        if let Some(playback) = self.playback.as_mut() {
+            playback.reading_older = Some((from, to));
+        }
+        start_segments(&self.handle, &self.events_tx, index, source, from, to);
+    }
+
+    /// Takes the segment list read for a wider strip.
+    ///
+    /// Nothing moves by itself: the strip widens to what the list now reaches,
+    /// and a level still wider asks for the rest. An answer that could not be
+    /// read is not an answer that there is nothing there: nothing is marked, and
+    /// the next width the viewer chooses asks again.
+    pub(super) fn segments_arrived(
+        &mut self,
+        index: usize,
+        camera_id: String,
+        segments: Option<Vec<Segment>>,
+    ) {
+        let Some(playback) = self.playback.as_mut() else {
+            return;
+        };
+        if playback.index != index || playback.source.camera != camera_id {
+            return;
+        }
+        playback.reading_older = None;
+        let Some(segments) = segments else {
+            // The camera could not be asked. Nothing is marked, so the next
+            // width the viewer chooses asks again - and a failed read is not
+            // read as a stretch with nothing in it.
+            return;
+        };
+        if segments.is_empty() {
+            // Nothing was recorded that far back: the strip stops here.
+            playback.oldest = playback.segments.first().map(|segment| segment.start);
+            return;
+        }
+        playback.segments.extend(segments);
+        playback.segments.sort_by_key(|segment| segment.start);
+        playback.segments.dedup_by_key(|segment| segment.start);
+        let anchor = playback.span.1;
+        if let Some(span) = extent(&playback.segments, playback.zoom, anchor) {
+            playback.span = span;
+        }
+        // A wider strip may want more than this one answered.
+        self.read_older(index);
     }
 
     /// Reads the range a finger is over while it is still on the timeline.
@@ -667,8 +748,8 @@ impl XgViewApp {
     /// Nothing moves: the answer waits for a seek to want it.
     ///
     /// One range at a time. A finger that keeps moving asks again only once it
-    /// has left the range it already asked for, which on a ten-minute timeline
-    /// is a request per ten minutes of travel rather than one per frame.
+    /// has left the range it already asked for, so a sweep costs one request per
+    /// window of travel rather than one per frame.
     fn read_ahead(&mut self, index: usize, at: i64) {
         let Some(playback) = self.playback.as_ref() else {
             return;
@@ -676,7 +757,7 @@ impl XgViewApp {
         if playback.ahead.as_ref().is_some_and(|ahead| covered(Some(ahead.window), at)) {
             return;
         }
-        let width = playback.zoom;
+        let width = range_width(playback.zoom);
         let Some(window) = window_at(
             &playback.segments,
             range_start(&playback.segments, at, width / 2),
@@ -774,9 +855,9 @@ impl XgViewApp {
         // running on to the end of the stretch being left - and the session that
         // replaces this one starts unpaused.
         // The range is the stretch the timeline shows, at whatever width it is
-        // showing it: a wider timeline reaches further back, and the range
-        // reaches with it.
-        let width = playback.zoom;
+        // showing it - up to what the box will serve. A strip wider than that
+        // asks for its own width, and a drag past the range is another session.
+        let width = range_width(playback.zoom);
         let Some(window) = window_at(
             &playback.segments,
             range_start(&playback.segments, target, width / 2),
@@ -818,16 +899,31 @@ impl XgViewApp {
 
 /// The widths the timeline can be shown at, narrowest first.
 ///
-/// Ten minutes is what a scrub can be aimed at across a strip this wide - an
-/// hour across it is three seconds to a pixel. But ten minutes is also all a
-/// viewer can *see*, and a recording goes back an hour, so the wider levels are
-/// for finding something older rather than for aiming: the strip always ends at
-/// the newest moment recorded, so a wider one reaches further back and a
-/// narrower one reaches less far.
-const ZOOMS: [i64; 3] = [600, 1800, 3600];
+/// Five of the plan's six levels: two minutes, ten, an hour, six hours, a day.
+/// Ten is what a recording opens at - what a scrub can be aimed at across a
+/// strip this wide - and the wider ones are for finding something older: the
+/// strip ends at the moment being watched, so a wider one reaches further back.
+/// The sixth, a day per row, is the plan's calendar: a different picture rather
+/// than a wider strip.
+const ZOOMS: [i64; 5] = [120, 600, 3600, 21600, 86400];
 
 /// How much of a recording the timeline shows when a recording is opened.
-const SPAN: i64 = ZOOMS[0];
+const SPAN: i64 = 600;
+
+/// The widest range a playlist is asked for, however wide the strip is drawn.
+///
+/// The strip and the range are two different questions - what can be pointed at,
+/// and what one session holds - and they were the same until the strip grew past
+/// an hour. Past this the box stops answering: measured on the box of
+/// 2026-11-02, a range of 2.5 hours is served and one of 3 hours is `503`. So a
+/// wider strip asks for this much around the moment pointed at, and a drag
+/// beyond it is another range, which is a session rather than a fragment.
+const RANGE_CAP: i64 = 7200;
+
+/// The width of the range a playlist is asked for, given the width on screen.
+fn range_width(zoom: i64) -> i64 {
+    zoom.min(RANGE_CAP)
+}
 
 /// The next width up, wrapping back to the narrowest.
 fn next_zoom(zoom: i64) -> i64 {
@@ -849,6 +945,35 @@ fn extent(segments: &[Segment], zoom: i64, anchor: i64) -> Option<(i64, i64)> {
     }
     let end = last.end.min(anchor + zoom / 4).max(first.start + 1);
     Some((end.saturating_sub(zoom).max(first.start), end))
+}
+
+/// The stretch of segment list to read so the strip can be as wide as it is
+/// drawn.
+///
+/// The strip is drawn inside what has been read, so a wider level does not show
+/// more of the recording - it shows the same hour stretched, and stops at the
+/// oldest segment held. What is missing is the list: this is the stretch before
+/// that segment, back as far as the width asks for. `None` when the strip
+/// already fits, which is the usual case.
+///
+/// `oldest` is the earliest moment the camera was asked about and answered
+/// nothing for: a strip reaching past it is not asked for again.
+fn older_window(
+    segments: &[Segment],
+    zoom: i64,
+    anchor: i64,
+    oldest: Option<i64>,
+) -> Option<(i64, i64)> {
+    let first = segments.first()?;
+    let last = segments.last()?;
+    // Where the strip would begin if the list reached as far back as it is wide,
+    // and no further back than the camera has already said it recorded nothing.
+    let want = last.end.min(anchor + zoom / 4).saturating_sub(zoom);
+    let want = oldest.map_or(want, |oldest| want.max(oldest));
+    if want >= first.start {
+        return None;
+    }
+    Some((want, first.start))
 }
 
 /// Whether the playlist a channel is playing can reach a moment.
@@ -971,18 +1096,18 @@ fn caught_up(picture: Option<f64>, pending: i64) -> bool {
 ///
 /// The window itself is a minute; the list is read over an hour so that a
 /// camera whose recording is not continuous still has a segment to align to.
+///
+/// An hour is where the list starts, not where it stops: a timeline wider than
+/// that reads the stretch before it as it widens. See [`XgViewApp::read_older`].
 const LOOKBACK: i64 = 3600;
 
-/// How much of a recording a channel is given at once.
+/// How much of a recording a channel is given at once, where nothing else says.
 ///
-/// Ten minutes, whether it arrives as one `clip.mp4` or as a playlist cut from a
-/// range that wide. Long enough that the seam a new range makes comes once in
-/// ten minutes rather than once a minute. A connection that drops part-way
-/// through used to cost this whole range of rewind, which was the other reason
-/// for the width; it is resumed where it broke now, so the width is the seam's
-/// alone. What is asked for and where playback begins are two different
-/// questions: the range runs from the moment asked for, and only what was
-/// recorded fills it.
+/// Ten minutes: the window a `clip.mp4` is cut from, and the range a recording
+/// opens with. A playlist's range is the width the timeline is showing, up to
+/// [`RANGE_CAP`] - this is the floor of that, not the rule. What is asked for
+/// and where playback begins are two different questions: the range runs from
+/// the moment asked for, and only what was recorded fills it.
 const WINDOW: i64 = 600;
 
 /// How far back opening a recording begins, when nothing else says.
@@ -1098,6 +1223,38 @@ fn start_playlist(
     });
 }
 
+/// Reads the stretch of segment list a wider timeline needs.
+///
+/// Answered with `None` when the camera could not be asked at all, which is not
+/// the same as "nothing was recorded": the strip has to be able to tell a failed
+/// request from an empty stretch, or one bad read stops it widening for good.
+fn start_segments(
+    handle: &Handle,
+    events: &Sender<BackgroundEvent>,
+    index: usize,
+    source: Source,
+    from: i64,
+    to: i64,
+) {
+    let sender = events.clone();
+    handle.spawn(async move {
+        let (user, pass) = source.credentials.clone().unwrap_or_default();
+        let config = FrigateConfig::at(&source.origin.base_url, &user, &pass);
+        let segments = match FrigateClient::new(config) {
+            Ok(mut client) => client
+                .segments(&source.origin.camera, from, to)
+                .await
+                .ok(),
+            Err(_) => None,
+        };
+        let _ = sender.send(BackgroundEvent::SegmentsReady {
+            index,
+            camera_id: source.camera,
+            segments,
+        });
+    });
+}
+
 /// The playlist a stretch was cut into, or `None` when the box serves none.
 ///
 /// A box older than `/vod` answers `404`, and its recordings are played the way
@@ -1168,10 +1325,39 @@ mod tests {
         assert_eq!(extent(&segments, 600, 1000), Some((550, 1150)));
         // The same moment on a wider strip: it reaches further back.
         assert_eq!(extent(&segments, 1800, 1000), Some((0, 1450)));
-        // And the widths go ten minutes, half an hour, an hour, back to ten.
-        assert_eq!(next_zoom(600), 1800);
-        assert_eq!(next_zoom(1800), 3600);
-        assert_eq!(next_zoom(3600), 600);
+        // The widths go two minutes, ten, an hour, six hours, a day, and back.
+        assert_eq!(next_zoom(120), 600);
+        assert_eq!(next_zoom(600), 3600);
+        assert_eq!(next_zoom(3600), 21600);
+        assert_eq!(next_zoom(21600), 86400);
+        assert_eq!(next_zoom(86400), 120);
+    }
+
+    /// A strip wider than the cap asks for the cap and no more: past about two
+    /// hours the box stops answering. Measured on the box of 2026-11-02 - 2.5
+    /// hours is served, 3 hours is `503`.
+    #[test]
+    fn a_wide_strip_does_not_ask_for_a_wide_range() {
+        assert_eq!(range_width(600), 600, "under the cap the strip is the range");
+        assert_eq!(range_width(3600), 3600);
+        assert_eq!(range_width(21600), RANGE_CAP);
+        assert_eq!(range_width(86400), RANGE_CAP);
+    }
+
+    /// A strip wider than what has been read asks for the rest of the list, once
+    /// - and stops asking once the camera has said there is nothing older.
+    #[test]
+    fn a_wider_strip_reads_the_list_it_needs() {
+        let segments = run(0, 3600);
+        // Ten minutes of a list that holds an hour: nothing to read.
+        assert_eq!(older_window(&segments, 600, 3600, None), None);
+        // Six hours: the strip would begin five hours before the list does.
+        assert_eq!(older_window(&segments, 21600, 3600, None), Some((-18000, 0)));
+        // Once the camera has answered that nothing was recorded before it, the
+        // same width asks for nothing.
+        assert_eq!(older_window(&segments, 21600, 3600, Some(0)), None);
+        // And a list that already reaches back far enough asks for nothing.
+        assert_eq!(older_window(&run(-21600, 3600), 21600, 3600, None), None);
     }
 
     /// The range a playlist is asked for is the stretch the timeline shows, so

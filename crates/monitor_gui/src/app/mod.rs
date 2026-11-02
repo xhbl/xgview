@@ -1806,6 +1806,9 @@ impl XgViewApp {
                         self.start_seek(*index, camera_id.clone(), *window, *at, playlist.clone());
                     }
                 }
+                BackgroundEvent::SegmentsReady { index, camera_id, segments } => {
+                    self.segments_arrived(*index, camera_id.clone(), segments.clone());
+                }
                 BackgroundEvent::Go2rtcFailed(error) => {
                     toast = Some((
                         monitor_i18n::tr_args("toast-go2rtc-failed", &[("error", error.to_string().into())]),

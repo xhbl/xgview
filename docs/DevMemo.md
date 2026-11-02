@@ -4068,3 +4068,39 @@ have counted as a tap and taken the strip away. Both now ask for
 Not watched on screen: the levels, the anchoring and the right press are
 unit-tested where they are arithmetic (`extent`, `next_zoom`), and the rest is
 plumbing.
+
+## 55. The timeline reaches further back than an hour
+
+*Landed 2026-11-02, in 2.1.48.*
+
+The plan has six widths for the strip - two minutes, ten, an hour, six hours, a
+day, and a day per row - and the code had three. The sixth is the plan's
+calendar: a row per day, fed by `/api/recordings/summary`, which is a different
+picture rather than a wider strip. The other five are the same strip at
+different widths, and they are what this adds.
+
+**The discovery that shaped it: the box will not answer a wide range.** A
+playlist for two hours is served, one for two and a half is served, and one for
+**three hours is `503`** - twice, with nginx's own error page. Yesterday's note
+that "the server does not mind how wide a range is" was measured on an hour and
+generalised too far; it is corrected.
+
+So the strip and the range stop being the same number. `RANGE_CAP` is two hours:
+a strip six hours wide still asks for at most two hours around the moment pointed
+at. What that costs is honest and unavoidable - a wider strip means more drags
+land outside the range, and one of those is a session (511-565 ms) rather than a
+fragment (185 ms). That is the price of the wide levels, and the reason they are
+for finding something rather than for watching.
+
+**And the segment list is read on demand.** The strip is drawn inside what has
+been read, so a wider level does not show more - it shows the same hour
+stretched. `older_window` says what is missing: where the strip would begin if
+the list reached that far back, up to the oldest segment held. One request for
+the whole stretch, because a day of segments is 1.7 MB and 744 ms and asking for
+it a level at a time would be the same bytes in five requests.
+
+**A failed read is not an empty stretch.** The camera answering "nothing was
+recorded there" and the camera not answering at all look the same if both are an
+empty vector - and the first should stop the strip from widening, while the
+second must not. So the answer is an `Option`, and only `Some(empty)` sets the
+floor the strip stops at.

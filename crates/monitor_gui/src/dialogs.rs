@@ -151,6 +151,15 @@ pub enum BackgroundEvent {
         /// kept until the seek that wants it.
         ahead: bool,
     },
+    /// The segment list before what was held: what a timeline wider than an
+    /// hour needs in order to be drawn that wide. `None` when the camera could
+    /// not be asked at all, which is not the same as a stretch with nothing
+    /// recorded in it.
+    SegmentsReady {
+        index: usize,
+        camera_id: String,
+        segments: Option<Vec<Segment>>,
+    },
 }
 
 /// Tab of the "Add devices" window.
@@ -458,6 +467,7 @@ impl DiscoveryUi {
             // camera's recordings belongs in these panels.
             BackgroundEvent::PlaybackReady { .. } => {}
             BackgroundEvent::PlaylistReady { .. } => {}
+            BackgroundEvent::SegmentsReady { .. } => {}
             BackgroundEvent::Discovery(event) => match event {
                 DiscoveryEvent::Phase(phase) => self.phase = phase,
                 DiscoveryEvent::DeviceFound(device) => self.push_device(&device),
