@@ -802,8 +802,13 @@ impl Endpoint {
     /// URI it contributes is, and so is the transport it is pulled with - and
     /// the fallback, so that switching `Auto` off (which drops it) reopens the
     /// channel rather than leaving the old attempt in place.
+    ///
+    /// What kind of session it opens is compared too, although the two addresses
+    /// a camera has are already different: a recording on the same index is not
+    /// the same stream as the camera, and one day an address will be shared.
     fn is_same_stream(&self, other: &Endpoint) -> bool {
-        self.stream == other.stream
+        self.kind == other.kind
+            && self.stream == other.stream
             && self.uri == other.uri
             && self.credentials == other.credentials
             && self.transport == other.transport
