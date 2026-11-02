@@ -141,6 +141,96 @@ pub fn window_at(segments: &[Segment], from: i64, longest: i64) -> Option<(i64, 
     Some((from, end.min(from + longest)))
 }
 
+/// One fragment of a recording, as a VOD playlist lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fragment {
+    /// Its name, which is what the playlist's own address takes as a suffix.
+    pub name: String,
+    /// How long it lasts, in seconds.
+    pub duration: f64,
+}
+
+/// What Frigate's `/vod` endpoint answers with: a recording cut into fragments
+/// that can be fetched one at a time.
+///
+/// This is the shape Frigate's own web player reads, and the reason a seek
+/// there is one small request rather than a new stream. See
+/// `docs/frigate-hls-playback.md`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VodPlaylist {
+    /// The address the fragments are named relative to, without a trailing
+    /// slash. Set by the client; empty in a parsed body, which knows no address.
+    pub base: String,
+    /// The moment the playlist's own timeline starts, in seconds since the
+    /// epoch. Its fragments count from zero, so a picture's wall clock is this
+    /// plus its moment in the fragment.
+    pub start: i64,
+    /// The init segment every fragment is read through - the codec and its
+    /// parameter sets - when the playlist names one.
+    pub init: Option<String>,
+    /// The fragments, in the order they play.
+    pub fragments: Vec<Fragment>,
+}
+
+impl VodPlaylist {
+    /// Where a fragment is.
+    pub fn fragment_uri(&self, fragment: &Fragment) -> String {
+        format!("{}/{}", self.base.trim_end_matches('/'), fragment.name)
+    }
+
+    /// Where the init segment is, when the playlist names one.
+    pub fn init_uri(&self) -> Option<String> {
+        self.init
+            .as_ref()
+            .map(|name| format!("{}/{}", self.base.trim_end_matches('/'), name))
+    }
+
+    /// The moment a fragment begins, in seconds since the epoch.
+    pub fn starts_at(&self, index: usize) -> i64 {
+        self.start + self.fragments.iter().take(index).map(|f| f.duration).sum::<f64>() as i64
+    }
+}
+
+/// Reads a VOD playlist.
+///
+/// Only what a session needs: the init segment's name and the fragments with
+/// their lengths. The rest of the file - the target duration, the media
+/// sequence, the end marker - is either a live stream's bookkeeping or said by
+/// the list itself.
+fn parse_playlist(text: &str) -> VodPlaylist {
+    let mut playlist = VodPlaylist::default();
+    let mut duration: Option<f64> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("#EXT-X-MAP:") {
+            playlist.init = attribute(rest, "URI").map(str::to_string);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            duration = rest.split(',').next().unwrap_or_default().trim().parse().ok();
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        // A name with no length before it is not a fragment a session can place
+        // on its timeline; it is still played, from wherever the last one ended.
+        playlist.fragments.push(Fragment { name: line.to_string(), duration: duration.take().unwrap_or(0.0) });
+    }
+    playlist
+}
+
+/// One attribute of a `#EXT-X-…` line, which is `NAME="value"` between commas.
+fn attribute<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    line.split(',').find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        (key.trim() == name).then(|| value.trim().trim_matches('"'))
+    })
+}
+
 /// One listed segment, as whole seconds.
 ///
 /// Frigate truncates a segment's start to the second and leaves its end exact,
@@ -282,6 +372,47 @@ impl FrigateClient {
             .into_iter()
             .map(|entry| rounded(entry.start_time, entry.end_time))
             .collect())
+    }
+
+    /// The fragments a camera's recording is served in between two moments.
+    ///
+    /// Frigate's VOD endpoint answers with an HLS playlist: one init segment and
+    /// the fragments the range is cut into, ten to twenty seconds each. It is
+    /// what its own web player reads, and it is cheaper than `clip.mp4` because
+    /// a fragment can be fetched on its own - a seek is one request for one
+    /// fragment rather than a new stream and a new decoder.
+    ///
+    /// A range that begins at a segment's beginning is answered from the
+    /// segment list; one that begins inside a segment is cut first. Measured
+    /// against the box of 2026-11-01: 82-90 ms against 270-380 ms.
+    pub async fn vod_playlist(&mut self, camera: &str, from: i64, to: i64) -> Result<VodPlaylist> {
+        if self.config.needs_login() && self.token.is_none() {
+            self.login().await?;
+        }
+        let base = format!("{}/vod/{camera}/start/{from}/end/{to}", self.config.base_url());
+        let url = format!("{base}/index.m3u8");
+        let mut request = self.http.get(&url);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(CoreError::network("Frigate rejected the API token"));
+        }
+        if !status.is_success() {
+            return Err(CoreError::network(format!("Frigate /vod/{camera} answered {status}")));
+        }
+        let text = response.text().await.unwrap_or_default();
+        let mut playlist = parse_playlist(&text);
+        if playlist.fragments.is_empty() {
+            // The range was read and holds nothing: the same answer a `400` from
+            // `clip.mp4` gives, and no more worth asking again.
+            return Err(CoreError::empty("no recording in that range"));
+        }
+        playlist.base = base;
+        playlist.start = from;
+        Ok(playlist)
     }
 
     /// Fetches, groups, measures and builds the two groups of cameras.
@@ -980,6 +1111,70 @@ mod tests {
             vec![Segment { start: 100, end: 130 }, Segment { start: 140, end: 150 }]
         );
         assert!(stretches(&[]).is_empty());
+    }
+
+    /// A playlist is the init segment and the fragments, in order, with their
+    /// lengths - and the box of 2026-11-01 answered with exactly this one, CRLF
+    /// and all.
+    #[test]
+    fn a_playlist_lists_its_init_segment_and_fragments() {
+        let text = "#EXTM3U\r\n\
+#EXT-X-TARGETDURATION:20\r\n\
+#EXT-X-ALLOW-CACHE:YES\r\n\
+#EXT-X-PLAYLIST-TYPE:VOD\r\n\
+#EXT-X-VERSION:6\r\n\
+#EXT-X-MEDIA-SEQUENCE:1\r\n\
+#EXT-X-MAP:URI=\"init-v1-a1.mp4\"\r\n\
+#EXTINF:20.304,\r\n\
+seg-1-v1-a1.m4s\r\n\
+#EXTINF:9.713,\r\n\
+seg-3-v1-a1.m4s\r\n\
+#EXTINF:19.410,\r\n\
+seg-4-v1-a1.m4s\r\n\
+#EXT-X-ENDLIST\r\n";
+
+        let playlist = parse_playlist(text);
+        assert_eq!(playlist.init.as_deref(), Some("init-v1-a1.mp4"));
+        let names: Vec<&str> = playlist.fragments.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["seg-1-v1-a1.m4s", "seg-3-v1-a1.m4s", "seg-4-v1-a1.m4s"]);
+        assert!((playlist.fragments[0].duration - 20.304).abs() < 1e-9);
+        assert!((playlist.fragments[2].duration - 19.410).abs() < 1e-9);
+    }
+
+    /// A playlist that names no init segment, and one that is nothing but
+    /// comments: a session reads what is there and asks the same of both.
+    #[test]
+    fn a_playlist_without_an_init_segment_says_so() {
+        let playlist = parse_playlist("#EXTM3U\n#EXT-X-ENDLIST\n");
+        assert_eq!(playlist.init, None);
+        assert!(playlist.fragments.is_empty());
+        assert_eq!(parse_playlist(""), VodPlaylist::default());
+    }
+
+    /// Each fragment begins where the ones before it ended, counted from the
+    /// playlist's own start, and its address is the playlist's own.
+    #[test]
+    fn fragments_are_placed_and_addressed_from_the_playlist() {
+        let text = "#EXTM3U\n\
+#EXT-X-MAP:URI=\"init.mp4\"\n\
+#EXTINF:20.304,\n\
+seg-1.m4s\n\
+#EXTINF:9.713,\n\
+seg-3.m4s\n";
+        let mut playlist = parse_playlist(text);
+        playlist.base = "https://box:8971/vod/cam/start/100/end/200".to_string();
+        playlist.start = 100;
+
+        assert_eq!(
+            playlist.fragment_uri(&playlist.fragments[1]),
+            "https://box:8971/vod/cam/start/100/end/200/seg-3.m4s"
+        );
+        assert_eq!(
+            playlist.init_uri().as_deref(),
+            Some("https://box:8971/vod/cam/start/100/end/200/init.mp4")
+        );
+        assert_eq!(playlist.starts_at(0), 100);
+        assert_eq!(playlist.starts_at(1), 120, "twenty seconds and a fraction later");
     }
 
     /// A window runs from the moment asked for, through every segment that
