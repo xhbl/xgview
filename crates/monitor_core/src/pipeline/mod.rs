@@ -424,6 +424,10 @@ enum ChannelCommand {
     },
     /// Hold a playback channel's picture still, or let it go on.
     HoldClip { index: usize, held: bool },
+    /// Play a recording from another moment without reopening it: the fragments
+    /// in between are not read, and the decoder reading the one on screen keeps
+    /// going. See [`ClipControl`].
+    SeekFragment { index: usize, at: i64 },
     /// The viewer came back to the window. Every channel waiting out a backoff
     /// retries at once instead: the failures it counted happened while the
     /// process was in the background, and waiting them out now would only add
@@ -610,6 +614,16 @@ impl ChannelManager {
         self.send(ChannelCommand::HoldClip { index, held });
     }
 
+    /// Plays a recording from another moment, without reopening it.
+    ///
+    /// Only a playlist can do this: the fragments are separate requests, so
+    /// moving to another moment is one more request and the session - decoder,
+    /// parser, login - carries on. A window is one stream from one start and
+    /// ignores this; [`Self::play_vod`] is what to call for that.
+    pub fn seek_fragment(&self, index: usize, at: i64) {
+        self.send(ChannelCommand::SeekFragment { index, at });
+    }
+
     /// Stops whatever a playback channel is playing and leaves it idle.
     ///
     /// A recording that is not being watched is a request to the server and a
@@ -728,15 +742,33 @@ enum EndpointKind {
 /// starts both again where they left off. The clock is shifted by however long
 /// it was held, so what follows a resume plays at the speed it was recorded
 /// rather than racing to catch up.
+///
+/// The same handle carries the jumps a seek asks for. A jump is taken by the
+/// session rather than by reopening the channel: the decoder, the parser and the
+/// login are all still good, and what changes is which fragment is being read.
 #[derive(Debug)]
 pub struct ClipControl {
     paused: tokio::sync::watch::Sender<bool>,
+    jump: tokio::sync::watch::Sender<Option<Jump>>,
+    /// How many jumps have been asked for. A count rather than the moment alone,
+    /// because a viewer who drags back to where they already were means it.
+    asked: std::sync::atomic::AtomicU64,
+}
+
+/// A jump the viewer asked a recording to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Jump {
+    /// The moment the picture is to begin at, in seconds since the epoch.
+    pub at: i64,
+    /// Which ask this was, so that the same moment asked for twice is two jumps.
+    pub asked: u64,
 }
 
 impl ClipControl {
     fn new() -> Self {
         let (paused, _) = tokio::sync::watch::channel(false);
-        Self { paused }
+        let (jump, _) = tokio::sync::watch::channel(None);
+        Self { paused, jump, asked: std::sync::atomic::AtomicU64::new(0) }
     }
 
     /// A handle the session waits on. Taken before the session starts, so a
@@ -745,8 +777,19 @@ impl ClipControl {
         self.paused.subscribe()
     }
 
+    /// A handle the session takes its jumps from, for the same reason.
+    fn subscribe_jumps(&self) -> tokio::sync::watch::Receiver<Option<Jump>> {
+        self.jump.subscribe()
+    }
+
     fn set(&self, paused: bool) {
         let _ = self.paused.send(paused);
+    }
+
+    /// Asks the session to play from `at`.
+    fn jump(&self, at: i64) {
+        let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let _ = self.jump.send(Some(Jump { at, asked }));
     }
 }
 

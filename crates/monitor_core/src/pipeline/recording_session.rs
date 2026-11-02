@@ -135,8 +135,16 @@ pub(super) async fn run_recording_session(
     let mut first: Option<i64> = None;
     let mut origin: Option<f64> = None;
     let mut held = control.as_ref().map(|control| control.subscribe());
+    let mut jumps = control.as_ref().map(|control| control.subscribe_jumps());
+    // The last jump acted on. A jump is taken as it is seen, and the count is
+    // what tells one from the next.
+    let mut jumped: u64 = 0;
 
     loop {
+        // A jump the viewer asked for is taken before the next read: what is
+        // open is the fragment being left, and its bytes are the stretch being
+        // left with it. The decoder, the parser and the login are untouched.
+        take_jump(&mut jumps, &mut jumped, &mut source, &mut begin, &mut pending);
         let chunk = match tokio::time::timeout(STALL_TIMEOUT, source.next_chunk()).await {
             Ok(Ok(Some(chunk))) => chunk,
             // The end of the recording: the response ended, or the playlist had
@@ -231,6 +239,13 @@ pub(super) async fn run_recording_session(
         steps.sort_by_key(|(pts, _)| *pts);
 
         for (pts, step) in steps {
+            // A jump is taken between two samples rather than between two
+            // reads: a read holds seconds of pictures, and the viewer's finger
+            // is not going to wait for them. What is left of the chunk belongs
+            // to the stretch being left.
+            if take_jump(&mut jumps, &mut jumped, &mut source, &mut begin, &mut pending) {
+                break;
+            }
             let base = *first.get_or_insert(pts);
             let origin = *origin.get_or_insert_with(|| source.origin(from, base));
             let elapsed = u64::try_from(pts - base).unwrap_or(0);
@@ -447,17 +462,22 @@ fn complete_groups(buf: &[u8]) -> usize {
 enum Recording {
     /// One request for the whole window.
     Clip { response: reqwest::Response },
-    /// A playlist's requests, in the order they are made: the init segment when
-    /// it names one, then its fragments.
+    /// A playlist, read a fragment at a time.
+    ///
+    /// The playlist is kept whole rather than turned into a list of addresses
+    /// when the reading starts: a jump moves to another fragment, and the one it
+    /// moves to is worked out from the playlist every time.
     Vod {
-        /// The moment the playlist's own timeline starts, in seconds since the
-        /// epoch. Its fragments count from zero, so a sample's moment is that
-        /// much past this.
-        start: i64,
-        uris: Vec<String>,
-        credentials: Option<(String, String)>,
-        /// The request being read, and which one that is.
+        playlist: VodPlaylist,
+        /// Where the init segment is, resolved once. Every fragment is read
+        /// through it, and it is fetched once per session.
+        init: Option<String>,
+        /// Whether the init segment has been read, or there was none.
+        init_read: bool,
+        /// The fragment being read. It is the one the session began at, and the
+        /// one a jump moves.
         next: usize,
+        credentials: Option<(String, String)>,
         response: Option<reqwest::Response>,
         /// The login this playlist is being read with, once one has been asked
         /// for. One box, one token: the fragments after the first are asked for
@@ -481,21 +501,36 @@ impl Recording {
         credentials: Option<(String, String)>,
         begin: Option<i64>,
     ) -> Self {
-        let first = begin.map_or(0, |at| fragment_at(&playlist, at));
-        let mut uris = Vec::with_capacity(playlist.fragments.len() - first + 1);
-        if let Some(init) = playlist.init_uri() {
-            uris.push(init);
-        }
-        for fragment in &playlist.fragments[first..] {
-            uris.push(playlist.fragment_uri(fragment));
-        }
+        let next = begin.map_or(0, |at| fragment_at(&playlist, at));
+        let init = playlist.init_uri();
         Self::Vod {
-            start: playlist.start,
-            uris,
+            playlist,
+            init,
+            init_read: false,
+            next,
             credentials,
-            next: 0,
             response: None,
             token: None,
+        }
+    }
+
+    /// Moves the reading to the fragment a moment falls in, and says whether it
+    /// could.
+    ///
+    /// The init segment is not fetched again - the decoder is already reading
+    /// through it - and whatever response is open is dropped: its bytes are the
+    /// stretch the jump is leaving. A window cannot do this: it is one stream
+    /// from one start, and the way to play another moment of it is to ask for
+    /// another window.
+    fn jump_to(&mut self, at: i64) -> bool {
+        match self {
+            Self::Clip { .. } => false,
+            Self::Vod { playlist, init_read, next, response, .. } => {
+                *next = fragment_at(playlist, at);
+                *init_read = true;
+                *response = None;
+                true
+            }
         }
     }
 
@@ -507,10 +542,24 @@ impl Recording {
     async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
         match self {
             Self::Clip { response } => read(response).await,
-            Self::Vod { uris, credentials, next, response, token, .. } => loop {
+            Self::Vod { playlist, init, init_read, next, credentials, response, token } => loop {
                 if response.is_none() {
-                    let Some(uri) = uris.get(*next).cloned() else {
-                        return Ok(None);
+                    // The init segment first, then the fragment being read. The
+                    // cursor moves as the request is made: what has been asked
+                    // for is not asked for again.
+                    let uri = match init {
+                        Some(uri) if !*init_read => {
+                            *init_read = true;
+                            uri.clone()
+                        }
+                        _ => {
+                            let Some(fragment) = playlist.fragments.get(*next) else {
+                                return Ok(None);
+                            };
+                            let uri = playlist.fragment_uri(fragment);
+                            *next += 1;
+                            uri
+                        }
                     };
                     // The login is kept for the fragments after this one: a
                     // playlist is a request every ten seconds, and a login for
@@ -522,10 +571,9 @@ impl Recording {
                 let body = response.as_mut().expect("opened above");
                 match read(body).await? {
                     Some(chunk) => return Ok(Some(chunk)),
-                    None => {
-                        *response = None;
-                        *next += 1;
-                    }
+                    // This request is read; the next one is the recording going
+                    // on.
+                    None => *response = None,
                 }
             },
         }
@@ -535,7 +583,7 @@ impl Recording {
     fn origin(&self, from: i64, first_pts_us: i64) -> f64 {
         match self {
             Self::Clip { .. } => origin_of(None, from, first_pts_us),
-            Self::Vod { start, .. } => origin_of(Some(*start), from, first_pts_us),
+            Self::Vod { playlist, .. } => origin_of(Some(playlist.start), from, first_pts_us),
         }
     }
 }
@@ -556,6 +604,44 @@ fn fragment_at(playlist: &VodPlaylist, at: i64) -> usize {
         start += fragment.duration;
     }
     chosen
+}
+
+/// Takes a jump the viewer asked for, and says whether there was one.
+///
+/// The reading moves to the fragment the moment falls in and the picture begins
+/// there; the caller drops whatever is left of the chunk it was playing, because
+/// those samples are the stretch being left.
+fn take_jump(
+    jumps: &mut Option<tokio::sync::watch::Receiver<Option<Jump>>>,
+    jumped: &mut u64,
+    source: &mut Recording,
+    begin: &mut Option<f64>,
+    pending: &mut Vec<u8>,
+) -> bool {
+    let Some(receiver) = jumps.as_mut() else {
+        return false;
+    };
+    if !receiver.has_changed().unwrap_or(false) {
+        return false;
+    }
+    let Some(jump) = *receiver.borrow_and_update() else {
+        return false;
+    };
+    if jump.asked == *jumped {
+        return false;
+    }
+    *jumped = jump.asked;
+    if !source.jump_to(jump.at) {
+        return false;
+    }
+    pending.clear();
+    *begin = Some(jump.at as f64);
+    tracing::debug!(
+        target: "xgview::pipeline",
+        at = jump.at,
+        "the recording jumped"
+    );
+    true
 }
 
 /// Where a recording's own clock starts, in seconds since the epoch.
@@ -673,42 +759,9 @@ mod tests {
         out
     }
 
-    /// A playlist becomes a queue of requests - the init segment first, then the
-    /// fragments in the order they play - and the clock it is dated from is the
-    /// playlist's own start plus a sample's own moment.
-    #[test]
-    fn a_playlist_is_a_queue_of_requests_with_its_own_clock() {
-        let playlist = VodPlaylist {
-            base: "https://box/vod/cam/start/100/end/200".to_string(),
-            start: 100,
-            init: Some("init.mp4".to_string()),
-            fragments: vec![
-                Fragment { name: "seg-1.m4s".into(), duration: 20.0 },
-                Fragment { name: "seg-3.m4s".into(), duration: 10.0 },
-            ],
-        };
-
-        let source = Recording::vod(playlist, None, None);
-        let Recording::Vod { uris, start, next, .. } = &source else {
-            panic!("a playlist is a playlist");
-        };
-        assert_eq!(*start, 100);
-        assert_eq!(*next, 0, "nothing fetched yet");
-        assert_eq!(
-            uris,
-            &[
-                "https://box/vod/cam/start/100/end/200/init.mp4".to_string(),
-                "https://box/vod/cam/start/100/end/200/seg-1.m4s".to_string(),
-                "https://box/vod/cam/start/100/end/200/seg-3.m4s".to_string(),
-            ]
-        );
-    }
-
-    /// A moment part-way into a range begins at the fragment it falls in, and
-    /// the ones before it are not even asked for.
-    #[test]
-    fn a_moment_part_way_in_skips_the_fragments_before_it() {
-        let playlist = VodPlaylist {
+    /// A playlist over 100..150 in three fragments, with an init segment.
+    fn three_fragments() -> VodPlaylist {
+        VodPlaylist {
             base: "https://box/vod/cam/start/100/end/200".to_string(),
             start: 100,
             init: Some("init.mp4".to_string()),
@@ -717,7 +770,33 @@ mod tests {
                 Fragment { name: "seg-2.m4s".into(), duration: 10.0 },
                 Fragment { name: "seg-3.m4s".into(), duration: 20.0 },
             ],
+        }
+    }
+
+    /// A playlist is read from its init segment and its first fragment, and the
+    /// clock it is dated from is the playlist's own start plus a sample's own
+    /// moment.
+    #[test]
+    fn a_playlist_begins_at_its_init_segment_and_its_first_fragment() {
+        let source = Recording::vod(three_fragments(), None, None);
+        let Recording::Vod { playlist, init, init_read, next, .. } = &source else {
+            panic!("a playlist is a playlist");
         };
+        assert_eq!(playlist.start, 100);
+        assert_eq!(
+            init.as_deref(),
+            Some("https://box/vod/cam/start/100/end/200/init.mp4"),
+            "resolved once, and fetched before anything else"
+        );
+        assert!(!init_read);
+        assert_eq!(*next, 0, "the first fragment");
+    }
+
+    /// A moment part-way into a range begins at the fragment it falls in, and
+    /// the ones before it are not even asked for.
+    #[test]
+    fn a_moment_part_way_in_skips_the_fragments_before_it() {
+        let playlist = three_fragments();
         // The fragments run 100..120, 120..130 and 130..150.
         assert_eq!(fragment_at(&playlist, 100), 0, "the first moment it holds");
         assert_eq!(fragment_at(&playlist, 119), 0);
@@ -727,13 +806,32 @@ mod tests {
         assert_eq!(fragment_at(&playlist, 900), 2, "past the end is the last one");
         assert_eq!(fragment_at(&playlist, 50), 0, "before the range is the first");
 
-        let Recording::Vod { uris, start, .. } = Recording::vod(playlist, None, Some(125)) else {
+        let source = Recording::vod(playlist, None, Some(125));
+        let Recording::Vod { playlist, next, .. } = &source else {
             panic!("a playlist is a playlist");
         };
-        assert_eq!(start, 100, "the range's own start, not the fragment's");
-        assert_eq!(uris.len(), 3, "the init segment and the two fragments left");
-        assert!(uris[1].ends_with("seg-2.m4s"), "{uris:?}");
-        assert!(uris[2].ends_with("seg-3.m4s"), "{uris:?}");
+        assert_eq!(playlist.start, 100, "the range's own start, not the fragment's");
+        assert_eq!(*next, 1, "the fragment that holds 125");
+    }
+
+    /// A jump moves the reading to another fragment and does not fetch the init
+    /// segment again: the decoder is already reading through it.
+    #[test]
+    fn a_jump_moves_the_reading_and_keeps_the_init_segment() {
+        let mut source = Recording::vod(three_fragments(), None, None);
+        assert!(source.jump_to(135), "a playlist can jump");
+        let Recording::Vod { next, init_read, .. } = &source else {
+            panic!("a playlist is a playlist");
+        };
+        assert_eq!(*next, 2, "the fragment that holds 135");
+        assert!(*init_read, "and the init segment is not fetched again");
+
+        // Backwards is the same move: the fragment the moment falls in.
+        assert!(source.jump_to(101));
+        let Recording::Vod { next, .. } = &source else {
+            panic!("a playlist is a playlist");
+        };
+        assert_eq!(*next, 0);
     }
 
     /// A window's pictures are dated from the moment it was asked for; a
