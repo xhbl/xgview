@@ -296,8 +296,13 @@ pub(super) async fn run_recording_session(
                     }
                 }
                 Step::Video(mut sample) => {
-                    window.counters.frames += 1;
-                    total_frames += 1;
+                    // The stretch decoded on the way to the moment asked for is
+                    // not part of what this session played, and counting it
+                    // would show a rate for a second that nobody saw.
+                    if begin.is_none() {
+                        window.counters.frames += 1;
+                        total_frames += 1;
+                    }
                     announce_streaming(events, index, camera_id_str, stream, &mut announced);
 
                     if let Some(codec) = codec {
@@ -356,6 +361,14 @@ pub(super) async fn run_recording_session(
             });
             window.close();
         }
+    }
+
+    // A moment asked for that nothing was ever played from is past everything
+    // the recording held - a playlist whose last fragment ends before it. Said
+    // as the empty answer it is, rather than reported as a recording played to
+    // its end that nobody saw a frame of.
+    if begin.is_some() {
+        return Err(crate::error::CoreError::empty("nothing recorded at that moment"));
     }
 
     // The response ended. That is the recording's own end when the last picture
@@ -714,9 +727,10 @@ mod tests {
         assert_eq!(fragment_at(&playlist, 900), 2, "past the end is the last one");
         assert_eq!(fragment_at(&playlist, 50), 0, "before the range is the first");
 
-        let Recording::Vod { uris, .. } = Recording::vod(playlist, None, Some(125)) else {
+        let Recording::Vod { uris, start, .. } = Recording::vod(playlist, None, Some(125)) else {
             panic!("a playlist is a playlist");
         };
+        assert_eq!(start, 100, "the range's own start, not the fragment's");
         assert_eq!(uris.len(), 3, "the init segment and the two fragments left");
         assert!(uris[1].ends_with("seg-2.m4s"), "{uris:?}");
         assert!(uris[2].ends_with("seg-3.m4s"), "{uris:?}");
