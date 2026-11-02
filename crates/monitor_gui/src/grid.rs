@@ -138,6 +138,12 @@ pub struct Tile<'a> {
     ///
     /// Every other tile shows all of it. See [`PictureZoom`].
     pub picture_zoom: Option<PictureZoom>,
+    /// Whether this tile is showing a recording.
+    ///
+    /// A recording that is being seeked reports a state a live stream reports
+    /// when it has nothing to show, and it has something: the window being left
+    /// is still on screen. See [`holds_last_picture`].
+    pub recording: bool,
 }
 
 /// What the tile shows of its picture, where it is the magnified one.
@@ -300,17 +306,23 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
             painter.text(body.center(), Align2::CENTER_CENTER, monitor_i18n::tr("grid-suspended"), FontId::proportional(13.0), dim(theme::TEXT_DIM));
         }
         ConnectionState::Idle | ConnectionState::Connecting | ConnectionState::Reconnecting => {
-            painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS_PENDING));
-            spinner(&painter, body.center() - vec2(0.0, 16.0), 12.0, tile.time, theme::ACCENT);
-            painter.text(body.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, monitor_i18n::tr(state.label()), FontId::proportional(14.0), theme::TEXT);
-            if tier != Tier::Minimal && !detail.is_empty() {
-                painter.text(
-                    body.center() + vec2(0.0, 34.0),
-                    Align2::CENTER_CENTER,
-                    theme::truncate(detail, 52),
-                    FontId::proportional(11.0),
-                    theme::TEXT_DIM,
-                );
+            if holds_last_picture(state, tile.recording, tile.video.is_some()) {
+                // A recording being seeked: the picture is the window being
+                // left, and the next one is a request away.
+                live_canvas(&painter, body, tile, tier);
+            } else {
+                painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS_PENDING));
+                spinner(&painter, body.center() - vec2(0.0, 16.0), 12.0, tile.time, theme::ACCENT);
+                painter.text(body.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, monitor_i18n::tr(state.label()), FontId::proportional(14.0), theme::TEXT);
+                if tier != Tier::Minimal && !detail.is_empty() {
+                    painter.text(
+                        body.center() + vec2(0.0, 34.0),
+                        Align2::CENTER_CENTER,
+                        theme::truncate(detail, 52),
+                        FontId::proportional(11.0),
+                        theme::TEXT_DIM,
+                    );
+                }
             }
         }
     }
@@ -718,6 +730,22 @@ fn osd_corner_rotated(
     }
 }
 
+/// Whether a channel that is not streaming keeps the picture it already has.
+///
+/// The one case this is for is a recording being seeked. A seek replaces the
+/// channel, so the new one reports what a live stream reports when it has
+/// nothing to show - and it has something: the window being left is still on
+/// screen, and the next one is a request away. Covering it with the pending
+/// canvas turns every drag into a black frame with a spinner on it.
+///
+/// A channel that has never drawn anything has nothing to keep, and a live
+/// stream that dropped is reporting something the viewer should see.
+fn holds_last_picture(state: ConnectionState, recording: bool, has_picture: bool) -> bool {
+    recording
+        && has_picture
+        && matches!(state, ConnectionState::Connecting | ConnectionState::Reconnecting)
+}
+
 /// Paints the newest decoded pictures of a live channel, or a placeholder while
 /// the first one is on its way.
 fn live_canvas(painter: &egui::Painter, rect: Rect, tile: &Tile<'_>, tier: Tier) {
@@ -1025,5 +1053,25 @@ mod tests {
                 egui::pos2(1.0, 1.0),
             ]
         );
+    }
+
+    /// A recording being seeked keeps the picture it has: the window it is
+    /// leaving is what is on screen, and blanking it would make every drag look
+    /// like a stream that stopped. Nothing else does.
+    #[test]
+    fn only_a_recording_holds_its_picture_through_a_reconnect() {
+        for state in [ConnectionState::Connecting, ConnectionState::Reconnecting] {
+            assert!(holds_last_picture(state, true, true), "{state:?}");
+            // A recording with nothing on screen has nothing to hold.
+            assert!(!holds_last_picture(state, true, false), "{state:?}, no picture");
+            // And a live stream that dropped is saying something the viewer
+            // should see.
+            assert!(!holds_last_picture(state, false, true), "{state:?}, live");
+        }
+        // A channel that is streaming draws its picture anyway, and one that is
+        // idle has been stopped rather than asked for.
+        for state in [ConnectionState::Streaming, ConnectionState::Idle, ConnectionState::Failed] {
+            assert!(!holds_last_picture(state, true, true), "{state:?}");
+        }
     }
 }

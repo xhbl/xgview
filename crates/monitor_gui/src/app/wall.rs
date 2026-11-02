@@ -180,6 +180,9 @@ impl XgViewApp {
                 // nothing else is given one.
                 picture_zoom: (index.is_some() && *index == self.scheduler.zoom())
                     .then_some(self.picture_zoom),
+                // A recording keeps its picture through a seek, which reports
+                // the state a live stream reports when it has nothing to show.
+                recording: index.is_some_and(|slot| self.is_playing_back(slot)),
             };
             let response = grid::paint(ui, rect, &tile);
             if interactive {
