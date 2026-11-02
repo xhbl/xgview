@@ -9,6 +9,8 @@
 //! units). The parser converts them to Annex-B format (start-code-prefixed) so
 //! the existing decoders can consume them unchanged.
 
+use std::collections::HashMap;
+
 use crate::error::{CoreError, Result};
 use monitor_codec::audio::AudioCodec;
 use monitor_codec::Codec;
@@ -112,6 +114,7 @@ impl MseParser {
         let mut samples = Vec::new();
         let mut audio_samples = Vec::new();
         let mut pending_runs: Vec<TrackRun> = Vec::new();
+        let mut decode_times = DecodeTimes::default();
 
         for (box_type, content) in iter_boxes(data) {
             match box_type {
@@ -120,10 +123,16 @@ impl MseParser {
                     init = moov.video;
                     audio = moov.audio;
                 }
-                b"moof" => pending_runs = self.parse_moof(content, content.len() + 8)?,
+                b"moof" => {
+                    pending_runs = self.parse_moof(content, content.len() + 8)?;
+                    decode_times = DecodeTimes::default();
+                }
                 b"mdat" => {
                     for run in pending_runs.drain(..) {
-                        self.extract_samples(&run, content, &mut samples, &mut audio_samples)?;
+                        let from = decode_times.start(&run);
+                        let ended =
+                            self.extract_samples(&run, content, &mut samples, &mut audio_samples, from)?;
+                        decode_times.ended(&run, ended);
                     }
                 }
                 _ => {}
@@ -320,7 +329,8 @@ impl MseParser {
         Ok(None)
     }
 
-    /// Every track a `moof` describes, in the order the fragment lists them.
+    /// Every track a `moof` describes, in the order the fragment lists them, and
+    /// every run within a track in the order it lists those.
     ///
     /// A fragment may carry one `traf` per track - a recorded clip from Frigate
     /// carries two, video then audio - and each `trun` points into the same
@@ -331,7 +341,7 @@ impl MseParser {
         let mut runs = Vec::new();
         for (box_type, content) in iter_boxes(data) {
             if box_type == b"traf" {
-                if let Some(mut run) = self.parse_traf(content)? {
+                for mut run in self.parse_traf(content)? {
                     run.moof_size = moof_size;
                     runs.push(run);
                 }
@@ -343,13 +353,28 @@ impl MseParser {
         Ok(runs)
     }
 
-    fn parse_traf(&self, data: &[u8]) -> Result<Option<TrackRun>> {
+    /// Every run a `traf` describes, in the order it lists them.
+    ///
+    /// One `traf` usually carries one `trun`, and everything this program read
+    /// until now did: a go2rtc fragment, a `clip.mp4` fragment. Frigate's HLS
+    /// fragments do not - a twenty-second one carries 116 runs in a single
+    /// `traf` - and keeping only the last read two pictures out of five hundred.
+    /// See `docs/frigate-hls-playback.md`.
+    ///
+    /// The runs are one timeline: `tfdt` gives the moment the first begins, the
+    /// runs after it continue from where the one before ended (which
+    /// [`DecodeTimes`] threads), and a run that does not say where its data is
+    /// begins where the one before finished.
+    fn parse_traf(&self, data: &[u8]) -> Result<Vec<TrackRun>> {
         let mut track_id: u32 = 0;
         let mut base_dts: u64 = 0;
-        let mut trun: Option<TrunData> = None;
         let mut default_sample_duration: u32 = 0;
         let mut default_sample_size: u32 = 0;
         let mut default_sample_flags: u32 = 0;
+        let mut runs: Vec<TrackRun> = Vec::new();
+        // Where the next run's data begins, counted from the start of the `moof`
+        // like the `trun`'s own offset: the end of the run before it.
+        let mut next_offset: Option<i64> = None;
 
         for (box_type, content) in iter_boxes(data) {
             match box_type {
@@ -361,21 +386,32 @@ impl MseParser {
                     default_sample_flags = flags;
                 }
                 b"tfdt" => base_dts = parse_tfdt(content),
-                b"trun" => trun = Some(parse_trun(content)?),
+                b"trun" => {
+                    let mut trun = parse_trun(content)?;
+                    if trun.data_offset.is_none() {
+                        trun.data_offset = next_offset.and_then(|offset| i32::try_from(offset).ok());
+                    }
+                    next_offset = trun
+                        .data_offset
+                        .map(|offset| offset as i64 + run_bytes(&trun, default_sample_size) as i64);
+                    runs.push(TrackRun {
+                        track_id,
+                        base_dts,
+                        trun,
+                        default_sample_duration,
+                        default_sample_size,
+                        default_sample_flags,
+                        moof_size: 0,
+                    });
+                }
                 _ => {}
             }
         }
 
-        let trun = trun.ok_or_else(|| CoreError::network("traf had no trun"))?;
-        Ok(Some(TrackRun {
-            track_id,
-            base_dts,
-            trun,
-            default_sample_duration,
-            default_sample_size,
-            default_sample_flags,
-            moof_size: 0,
-        }))
+        if runs.is_empty() {
+            return Err(CoreError::network("traf had no trun"));
+        }
+        Ok(runs)
     }
 
     fn extract_samples(
@@ -384,7 +420,8 @@ impl MseParser {
         mdat: &[u8],
         out: &mut Vec<MseSample>,
         audio_out: &mut Vec<MseAudioSample>,
-    ) -> Result<()> {
+        from: u64,
+    ) -> Result<u64> {
         let trun = &run.trun;
         // Audio samples are raw access units; video ones need the Annex-B
         // conversion. The track the `tfhd` named decides which, and each track
@@ -400,7 +437,7 @@ impl MseParser {
             None => 0,
         };
 
-        let mut dts = run.base_dts;
+        let mut dts = from;
         let mut offset = base_offset;
 
         // The run can name more samples than the segment carries, and the
@@ -449,7 +486,47 @@ impl MseParser {
             dts += duration;
         }
 
-        Ok(())
+        Ok(dts)
+    }
+}
+
+/// Where each track's decode time has got to within the fragment being read.
+///
+/// A `moof` gives its first run the moment it begins - the `tfdt` - and every
+/// run after it continues from where the one before ended. There is one of
+/// these per fragment rather than one per `traf` because the runs of a track are
+/// listed together: a Frigate HLS fragment has 116 of them in one `traf`, and
+/// starting each at the `tfdt` would give a fifth of a second of pictures all
+/// the same timestamp.
+#[derive(Default)]
+struct DecodeTimes {
+    tracks: HashMap<u32, u64>,
+}
+
+impl DecodeTimes {
+    /// The moment a run begins: its own `tfdt` the first time its track is seen
+    /// in this fragment, and the end of the run before it after that.
+    fn start(&self, run: &TrackRun) -> u64 {
+        self.tracks.get(&run.track_id).copied().unwrap_or(run.base_dts)
+    }
+
+    /// Remembers where a run left its track.
+    fn ended(&mut self, run: &TrackRun, dts: u64) {
+        self.tracks.insert(run.track_id, dts);
+    }
+}
+
+/// How many bytes a run's samples take.
+///
+/// It is where the run after it begins, when that one does not say so itself.
+fn run_bytes(trun: &TrunData, default_size: u32) -> u64 {
+    let declared = trun.sample_count as usize;
+    if trun.sizes.len() >= declared {
+        trun.sizes.iter().take(declared).map(|size| u64::from(*size)).sum()
+    } else if !trun.sizes.is_empty() {
+        trun.sizes.iter().map(|size| u64::from(*size)).sum()
+    } else {
+        declared as u64 * u64::from(default_size)
     }
 }
 
@@ -1150,7 +1227,7 @@ mod tests {
         let mut audio = Vec::new();
         let start = std::time::Instant::now();
         parser
-            .extract_samples(&run, &[], &mut samples, &mut audio)
+            .extract_samples(&run, &[], &mut samples, &mut audio, 0)
             .unwrap();
         assert!(samples.is_empty());
         assert!(audio.is_empty());
@@ -1203,7 +1280,7 @@ mod tests {
         let parser = MseParser::new();
         let mut samples = Vec::new();
         let mut audio = Vec::new();
-        parser.extract_samples(&run, &mdat, &mut samples, &mut audio).unwrap();
+        parser.extract_samples(&run, &mdat, &mut samples, &mut audio, run.base_dts).unwrap();
 
         assert_eq!(samples.len(), 2);
         assert!(samples[0].keyframe, "the first sample is the IDR the muxer named");
@@ -1243,6 +1320,85 @@ mod tests {
         assert_eq!(runs.len(), 2, "both trafs, not just the first");
         assert_eq!(runs[0].track_id, 1);
         assert_eq!(runs[1].track_id, 2);
+    }
+
+    /// A `traf` may carry several runs, and Frigate's HLS fragments do: one of
+    /// theirs holds 116 of them in a single `traf`, and keeping only the last
+    /// read two pictures out of five hundred.
+    #[test]
+    fn a_traf_with_several_runs_yields_every_one() {
+        fn wrap(name: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut out = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(name);
+            out.extend_from_slice(body);
+            out
+        }
+
+        let mut tfhd = vec![0, 0, 0, 0];
+        tfhd.extend_from_slice(&1u32.to_be_bytes());
+        let mut traf = wrap(b"tfhd", &tfhd);
+        for run in 0..3u32 {
+            // Only the first run says where its data is; the rest continue
+            // where it ended, which is what the flag difference encodes.
+            let mut flags = vec![0, 0, 0x03, 0x00];
+            let mut body = 2u32.to_be_bytes().to_vec();
+            if run == 0 {
+                flags = vec![0, 0, 0x03, 0x01];
+                body.extend_from_slice(&100u32.to_be_bytes());
+            }
+            let mut trun = flags;
+            trun.extend_from_slice(&body);
+            for _ in 0..2 {
+                trun.extend_from_slice(&1000u32.to_be_bytes());
+                trun.extend_from_slice(&10u32.to_be_bytes());
+            }
+            traf.extend_from_slice(&wrap(b"trun", &trun));
+        }
+        let moof = wrap(b"traf", &traf);
+
+        let parser = MseParser::new();
+        let runs = parser.parse_moof(&moof, moof.len() + 8).unwrap();
+        assert_eq!(runs.len(), 3, "every run, not just the last");
+        for run in &runs {
+            assert_eq!(run.track_id, 1);
+            assert_eq!(run.trun.sample_count, 2);
+        }
+        // Two samples of ten bytes each, so the next run's data begins twenty
+        // bytes after this one's.
+        assert_eq!(runs[0].trun.data_offset, Some(100));
+        assert_eq!(runs[1].trun.data_offset, Some(120));
+        assert_eq!(runs[2].trun.data_offset, Some(140));
+    }
+
+    /// The runs of one track are one timeline: the first begins where the
+    /// `tfdt` says, and each one after it where the one before ended.
+    #[test]
+    fn runs_of_one_track_continue_each_others_decode_time() {
+        let run = |track_id: u32| TrackRun {
+            track_id,
+            base_dts: 9_000,
+            trun: TrunData {
+                sample_count: 0,
+                data_offset: None,
+                first_sample_flags: None,
+                durations: Vec::new(),
+                sizes: Vec::new(),
+                composition_offsets: Vec::new(),
+                sample_flags: Vec::new(),
+            },
+            default_sample_duration: 0,
+            default_sample_size: 0,
+            default_sample_flags: 0,
+            moof_size: 0,
+        };
+
+        let mut times = DecodeTimes::default();
+        let first = run(1);
+        assert_eq!(times.start(&first), 9_000, "the first run's own tfdt");
+        times.ended(&first, 12_000);
+        assert_eq!(times.start(&run(1)), 12_000, "the run after it continues");
+        // Another track keeps its own clock.
+        assert_eq!(times.start(&run(2)), 9_000);
     }
 
     #[test]
