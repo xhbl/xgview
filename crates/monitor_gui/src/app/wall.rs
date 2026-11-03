@@ -467,10 +467,21 @@ impl XgViewApp {
         // same frame it changes it. Every control is a square.
         let controls = self.tile_bar_controls();
         let widths = vec![tilebar::icon_width(); controls.len()];
+        let break_after = self.tile_bar_break();
         // How deep the panel is depends on how many lines the controls need, so
         // the timeline is only promised to a tile that has room for both.
-        let timeline = playing && tilebar::fits_timeline(rect, rotated, &widths);
-        let layout = tilebar::layout(rect, rotated, self.tile_bar.dock(), &widths, timeline);
+        let margin = self.tile_bar_margin();
+        let timeline =
+            playing && tilebar::fits_timeline(rect, rotated, margin, &widths, break_after);
+        let layout = tilebar::layout(
+            rect,
+            rotated,
+            self.tile_bar.dock(),
+            margin,
+            &widths,
+            break_after,
+            timeline,
+        );
         let now = Instant::now();
         let mut consumed = false;
 
@@ -532,9 +543,18 @@ impl XgViewApp {
         // again with the dock and the widths it has now, so this frame paints it
         // there rather than at the old edge and then jumping over on the next
         // one.
-        let entries = self.tile_bar_entries();
+        let entries = self.tile_bar_entries().0;
         let widths = vec![tilebar::icon_width(); entries.len()];
-        let layout = tilebar::layout(rect, rotated, self.tile_bar.dock(), &widths, timeline);
+        let break_after = self.tile_bar_break();
+        let layout = tilebar::layout(
+            rect,
+            rotated,
+            self.tile_bar.dock(),
+            margin,
+            &widths,
+            break_after,
+            timeline,
+        );
 
         // A double press in the band is the bar being asked for, not the
         // viewport being put back: its first press has already opened the bar,
@@ -603,38 +623,75 @@ impl XgViewApp {
     /// new fit named in a toast as it changes - is always there; the sound switch
     /// for a camera that has sound, the microphone for one that offers a back
     /// channel.
-    pub(super) fn tile_bar_entries(&self) -> Vec<(tilebar::Control, TileBarAction)> {
+    /// The controls the bar carries, and where its second line begins.
+    ///
+    /// The break is the bar's own rather than a width's: a recording has twelve
+    /// controls and wants them as the transport and the timeline's own, which is
+    /// a grouping a greedy fill would not find on a wide picture. `None` is one
+    /// line, which is what a live camera has.
+    pub(super) fn tile_bar_entries(&self) -> (Vec<(tilebar::Control, TileBarAction)>, Option<usize>) {
         if self.talking {
-            return vec![(tilebar::Control::Hangup, TileBarAction::Hangup)];
+            return (vec![(tilebar::Control::Hangup, TileBarAction::Hangup)], None);
         }
         let mut entries = Vec::new();
         let playing = self.scheduler.zoom().is_some_and(|channel| self.is_playing_back(channel));
-        if self.is_portrait() {
+        // The quarter turn belongs to the live picture, and to the live picture
+        // only: a recording is not something to turn - the strip under it is the
+        // same length whichever way up the picture is, and the button would sit
+        // beside play and pause where a mis-press costs the picture.
+        if !playing && self.is_portrait() {
             entries.push((tilebar::Control::Icon(Icon::Rotate), TileBarAction::Rotate));
         }
         // A recording has its own controls, and they are not the live ones: what
         // a viewer watching the past wants is the picture held and moved, not
-        // the microphone and the way in. The way *out* is the last control, as
-        // it is on the live bar.
+        // the microphone and the way in.
         if playing {
-            entries.push((tilebar::Control::Icon(Icon::StepBack), TileBarAction::StepBack));
             let play = if self.playback_paused() { Icon::Play } else { Icon::Pause };
-            entries.push((tilebar::Control::Icon(play), TileBarAction::PlayPause));
-            entries.push((tilebar::Control::Icon(Icon::StepForward), TileBarAction::StepForward));
-            entries.push((tilebar::Control::Icon(Icon::EventBack), TileBarAction::PrevEvent));
-            entries.push((tilebar::Control::Icon(Icon::EventForward), TileBarAction::NextEvent));
-            // How much of the recording the strip shows. It is here rather than
-            // on the strip because a control on the bar is a control the remote
-            // can reach, and the timeline has to be usable without a drag.
-            if let Some(width) = self.width_control() {
-                entries.push((width, TileBarAction::Width));
+            let speed = tilebar::Control::Label(self.playback_speed_label());
+            let sound = tilebar::SOUND && self.magnified_has_audio();
+            let sound_icon = if self.sound_on { Icon::Sound } else { Icon::Mute };
+            let mut break_after = None;
+            // Two lines on a phone held upright, and one line everywhere else.
+            // Turned, the strip runs down the screen - the long side of it - and
+            // twelve controls fit in that: a second line there would be a second
+            // column beside the picture, which is a panel nobody asked for.
+            if self.is_portrait() && !self.magnified_rotated() {
+                // What is done to the picture, then what is done to the
+                // timeline.
+                entries.push((tilebar::Control::Icon(play), TileBarAction::PlayPause));
+                entries.push((speed, TileBarAction::Speed));
+                entries.push((tilebar::Control::Icon(Icon::Calendar), TileBarAction::Date));
+                entries.push((tilebar::Control::Icon(Icon::AspectRatio), TileBarAction::Fit));
+                if sound {
+                    entries.push((tilebar::Control::Icon(sound_icon), TileBarAction::Sound));
+                }
+                entries.push((tilebar::Control::Icon(Icon::Live), TileBarAction::Live));
+                break_after = Some(entries.len());
+                entries.push((tilebar::Control::Icon(Icon::EventBack), TileBarAction::PrevEvent));
+                entries.push((tilebar::Control::Icon(Icon::EventForward), TileBarAction::NextEvent));
+                entries.push((tilebar::Control::Icon(Icon::StepBack), TileBarAction::StepBack));
+                entries.push((tilebar::Control::Icon(Icon::StepForward), TileBarAction::StepForward));
+                entries.push((tilebar::Control::Icon(Icon::TimelineZoomIn), TileBarAction::ZoomIn));
+                entries.push((tilebar::Control::Icon(Icon::TimelineZoomOut), TileBarAction::ZoomOut));
+            } else {
+                // One line on a wide picture, the transport first and the way
+                // out last.
+                entries.push((tilebar::Control::Icon(play), TileBarAction::PlayPause));
+                entries.push((speed, TileBarAction::Speed));
+                entries.push((tilebar::Control::Icon(Icon::EventBack), TileBarAction::PrevEvent));
+                entries.push((tilebar::Control::Icon(Icon::EventForward), TileBarAction::NextEvent));
+                entries.push((tilebar::Control::Icon(Icon::StepBack), TileBarAction::StepBack));
+                entries.push((tilebar::Control::Icon(Icon::StepForward), TileBarAction::StepForward));
+                entries.push((tilebar::Control::Icon(Icon::TimelineZoomIn), TileBarAction::ZoomIn));
+                entries.push((tilebar::Control::Icon(Icon::TimelineZoomOut), TileBarAction::ZoomOut));
+                entries.push((tilebar::Control::Icon(Icon::Calendar), TileBarAction::Date));
+                entries.push((tilebar::Control::Icon(Icon::AspectRatio), TileBarAction::Fit));
+                if sound {
+                    entries.push((tilebar::Control::Icon(sound_icon), TileBarAction::Sound));
+                }
+                entries.push((tilebar::Control::Icon(Icon::Live), TileBarAction::Live));
             }
-            if tilebar::SOUND && self.magnified_has_audio() {
-                let icon = if self.sound_on { Icon::Sound } else { Icon::Mute };
-                entries.push((tilebar::Control::Icon(icon), TileBarAction::Sound));
-            }
-            entries.push((tilebar::Control::Icon(Icon::Live), TileBarAction::Live));
-            return entries;
+            return (entries, break_after);
         }
         entries.push((tilebar::Control::Icon(Icon::AspectRatio), TileBarAction::Fit));
         if tilebar::SOUND && self.magnified_has_audio() {
@@ -655,12 +712,32 @@ impl XgViewApp {
         if self.magnified_camera().is_some_and(|camera| camera.frigate.is_some()) {
             entries.push((tilebar::Control::Icon(Icon::History), TileBarAction::Playback));
         }
-        entries
+        (entries, None)
+    }
+
+    /// How far in from the docked edge the panel sits.
+    ///
+    /// Twelve on a wide picture and on a turned one, where the panel is over the
+    /// picture and every point of it is picture given away; twenty-four on a
+    /// phone held upright, where it sits in the black under the picture and
+    /// there is nothing to give away. The margin along the strip does not change
+    /// - that one keeps the bar clear of the screen's own gesture band.
+    pub(super) fn tile_bar_margin(&self) -> f32 {
+        if self.is_portrait() && !self.magnified_rotated() {
+            tilebar::EDGE
+        } else {
+            tilebar::EDGE * 0.5
+        }
+    }
+
+    /// Where a recording's second line of controls begins, or `None`.
+    pub(super) fn tile_bar_break(&self) -> Option<usize> {
+        self.tile_bar_entries().1
     }
 
     /// The controls alone, which is what the layout and the paint need.
     pub(super) fn tile_bar_controls(&self) -> Vec<tilebar::Control> {
-        self.tile_bar_entries().into_iter().map(|(control, _)| control).collect()
+        self.tile_bar_entries().0.into_iter().map(|(control, _)| control).collect()
     }
 
     /// Answers a control of the magnified bar: the handset that ends a call, the
@@ -699,7 +776,10 @@ impl XgViewApp {
             TileBarAction::PlayPause => self.toggle_play(),
             TileBarAction::PrevEvent => self.jump_event(false),
             TileBarAction::NextEvent => self.jump_event(true),
-            TileBarAction::Width => self.zoom_timeline(),
+            TileBarAction::ZoomIn => self.zoom_timeline(true),
+            TileBarAction::ZoomOut => self.zoom_timeline(false),
+            TileBarAction::Speed => self.cycle_speed(),
+            TileBarAction::Date => self.toggle_calendar(),
             TileBarAction::Live => self.leave_playback(),
             TileBarAction::Fit => {
                 // The fit this writes is the magnified viewport's own: it is kept

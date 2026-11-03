@@ -140,6 +140,9 @@ pub(super) async fn run_recording_session(
     // moves until the finger is let go of, and what it does is put the fragment
     // under the finger in memory before the seek asks for it.
     let mut hints = control.as_ref().map(|control| control.subscribe_hints());
+    // How fast the picture plays. Read every sample rather than watched: it is
+    // one branch on a float, and a change is felt on the next picture.
+    let rates = control.as_ref().map(|control| control.subscribe_rate());
     // The last jump acted on. A jump is taken as it is seen, and the count is
     // what tells one from the next.
     let mut jumped: u64 = 0;
@@ -366,7 +369,8 @@ pub(super) async fn run_recording_session(
                 base_elapsed = elapsed;
             }
             if begin.is_none() {
-                let played = played_since(elapsed, base_elapsed);
+                let rate = rate_of(rates.as_ref());
+                let played = played_since(elapsed, base_elapsed, rate);
                 let due = began + played;
                 let now = Instant::now();
                 if now > due + MAX_LAG {
@@ -384,7 +388,12 @@ pub(super) async fn run_recording_session(
                 Step::Audio(sample) => {
                     // Sound heard before the picture begins is the seek's own
                     // pre-roll being listened to.
-                    if begin.is_none() && audio.wants(index) {
+                    // Sound is left out of anything but normal speed: the
+                    // recording's audio is decoded as it arrives, and there is
+                    // nothing here that could resample it - so at two times the
+                    // picture runs ahead of the sound and the two never meet
+                    // again. A silent fast-forward is the honest half of it.
+                    if begin.is_none() && audio.wants(index) && rate_of(rates.as_ref()) == 1.0 {
                         if let Some(output) = audio.output().filter(|output| output.is_active()) {
                             if let Some((decoder, info)) = audio_decoder.as_mut() {
                                 let mut pcm: Vec<i16> = Vec::new();
@@ -899,8 +908,19 @@ fn origin_of(start: Option<i64>, from: i64, first_pts_us: i64) -> f64 {
 /// signed: a jump backwards moves the reading to a fragment whose moments are
 /// behind that first one, so the distance is negative. What is played is never
 /// behind the moment playback began at, and the answer is floored at zero.
-fn played_since(elapsed: i64, base_elapsed: i64) -> Duration {
-    Duration::from_micros(u64::try_from(elapsed - base_elapsed).unwrap_or(0))
+fn played_since(elapsed: i64, base_elapsed: i64, rate: f32) -> Duration {
+    let played = Duration::from_micros(u64::try_from(elapsed - base_elapsed).unwrap_or(0));
+    if rate == 1.0 {
+        played
+    } else {
+        Duration::from_secs_f64(played.as_secs_f64() / rate as f64)
+    }
+}
+
+/// How fast the picture plays, floored at a quarter so that a rate of zero - a
+/// sender that has been dropped - is not a division by nothing.
+fn rate_of(rates: Option<&tokio::sync::watch::Receiver<f32>>) -> f32 {
+    rates.map(|rates| *rates.borrow()).unwrap_or(1.0).max(0.25)
 }
 
 /// One read from a response, with the one message a broken body deserves.
@@ -1083,11 +1103,15 @@ mod tests {
         // to a fragment at 100 s.
         let base = 535_000_000i64;
         let landed = 100_000_000i64;
-        assert_eq!(played_since(landed, landed), Duration::ZERO, "the moment it landed on");
-        assert_eq!(played_since(landed + 40_000, landed), Duration::from_millis(40));
-        assert_eq!(played_since(landed + 1_000_000, landed), Duration::from_secs(1));
+        assert_eq!(played_since(landed, landed, 1.0), Duration::ZERO, "the moment it landed on");
+        assert_eq!(played_since(landed + 40_000, landed, 1.0), Duration::from_millis(40));
+        assert_eq!(played_since(landed + 1_000_000, landed, 1.0), Duration::from_secs(1));
         // And a sample still behind where playback began owes nothing.
-        assert_eq!(played_since(landed - 5_000_000, landed), Duration::ZERO);
+        assert_eq!(played_since(landed - 5_000_000, landed, 1.0), Duration::ZERO);
+        // At twice the speed a second of recording is due half a second in, and
+        // at four times, a quarter.
+        assert_eq!(played_since(landed + 1_000_000, landed, 2.0), Duration::from_millis(500));
+        assert_eq!(played_since(landed + 1_000_000, landed, 4.0), Duration::from_millis(250));
         // What the distance from the session's first sample is, for comparison:
         // negative, which is what the clock used to read as zero.
         assert!(landed - base < 0);

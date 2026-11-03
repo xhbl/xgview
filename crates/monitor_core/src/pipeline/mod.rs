@@ -432,6 +432,8 @@ enum ChannelCommand {
     /// under it is fetched into memory, so that the seek the finger is about to
     /// make finds its bytes already there. See [`ClipControl::hint`].
     PrefetchFragment { index: usize, at: i64 },
+    /// Play this recording faster, or back to normal.
+    SetRate { index: usize, rate: f32 },
     /// The viewer came back to the window. Every channel waiting out a backoff
     /// retries at once instead: the failures it counted happened while the
     /// process was in the background, and waiting them out now would only add
@@ -642,6 +644,11 @@ impl ChannelManager {
     ///
     /// Only a playlist can do this; a `clip.mp4` is one stream and a moment of
     /// it cannot be fetched on its own.
+    /// Plays a recording faster, or back to normal.
+    pub fn set_rate(&self, index: usize, rate: f32) {
+        self.send(ChannelCommand::SetRate { index, rate });
+    }
+
     pub fn prefetch_fragment(&self, index: usize, at: i64) {
         self.send(ChannelCommand::PrefetchFragment { index, at });
     }
@@ -779,6 +786,10 @@ pub struct ClipControl {
     /// How many jumps have been asked for. A count rather than the moment alone,
     /// because a viewer who drags back to where they already were means it.
     asked: std::sync::atomic::AtomicU64,
+    /// How fast the picture plays: one, two or four times. The sound is left out
+    /// of anything but one - a recording's audio is decoded as it arrives, and
+    /// there is nothing here that could resample it.
+    rate: tokio::sync::watch::Sender<f32>,
 }
 
 /// A jump the viewer asked a recording to make.
@@ -795,7 +806,8 @@ impl ClipControl {
         let (paused, _) = tokio::sync::watch::channel(false);
         let (jump, _) = tokio::sync::watch::channel(None);
         let (hint, _) = tokio::sync::watch::channel(None);
-        Self { paused, jump, hint, asked: std::sync::atomic::AtomicU64::new(0) }
+        let (rate, _) = tokio::sync::watch::channel(1.0_f32);
+        Self { paused, jump, hint, asked: std::sync::atomic::AtomicU64::new(0), rate }
     }
 
     /// A handle the session waits on. Taken before the session starts, so a
@@ -816,6 +828,16 @@ impl ClipControl {
 
     fn set(&self, paused: bool) {
         let _ = self.paused.send(paused);
+    }
+
+    /// A handle the session takes its rate from, taken before it starts so that
+    /// a rate set in between is not lost.
+    fn subscribe_rate(&self) -> tokio::sync::watch::Receiver<f32> {
+        self.rate.subscribe()
+    }
+
+    fn set_rate(&self, rate: f32) {
+        let _ = self.rate.send(rate);
     }
 
     /// Asks the session to play from `at`.

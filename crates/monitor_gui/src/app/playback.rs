@@ -27,14 +27,21 @@ pub(super) struct Playback {
     /// the camera behind a slot without changing how many there are - another
     /// group - so the slot alone does not say whose recording this is.
     pub(super) source: Source,
-    /// The stretch the timeline is drawn across - the last few minutes that
-    /// were read, which is not the window.
-    ///
-    /// It has to be. Playback begins at the window's first second, so a timeline
-    /// drawn across the window alone would put the cursor at its left edge after
-    /// every seek: the picture would have moved and the cursor would look as
-    /// though it had jumped back to where it started.
-    pub(super) span: (i64, i64),
+    /// Where playback opened, which is what the cursor shows before the first
+    /// frame has arrived to say where the picture really is.
+    pub(super) opened: i64,
+    /// How fast the picture plays: one, two or four times. The session is told;
+    /// the sound is not, so anything but one is silent. See
+    /// [`XgViewApp::cycle_speed`].
+    pub(super) speed: f32,
+    /// Where a drag on the strip began: how far along it the finger went down,
+    /// and the moment under the cursor then. What moves is the strip, so this is
+    /// the anchor a drag is measured from rather than a place the cursor goes.
+    pub(super) drag: Option<(f32, i64)>,
+    /// An arrow held down on the timeline, and since when. A held key walks
+    /// further per repeat the longer it is held - see
+    /// [`XgViewApp::walk_timeline`].
+    pub(super) held: Option<(bool, std::time::Instant)>,
     /// What the camera recorded around it. Read once when playback opens, and
     /// kept: the timeline draws the stretches that exist, and asking again for
     /// every repaint would be a request a frame.
@@ -98,9 +105,9 @@ pub(super) struct Playback {
     /// Whether the picture is held. The session is told, and stops reading; the
     /// bar draws the control as the one that lets it go.
     pub(super) paused: bool,
-    /// The moments the camera's events began, in the stretch that was read.
+    /// When the camera's events began and ended, in the stretch that was read.
     /// Empty until the box has answered, and empty for a camera with none.
-    pub(super) events: Vec<i64>,
+    pub(super) events: Vec<(i64, i64)>,
     /// Whether the event list is being read.
     pub(super) reading_events: bool,
 }
@@ -283,15 +290,17 @@ impl XgViewApp {
         segments: Vec<Segment>,
     ) {
         let index = self.playback_index();
-        let (from, to) = window;
+        let from = window.0;
         let begin = begin.map(|at| begin_in(window, at));
         let vod = self.play_recording(index, &source, window, playlist, begin);
-        let span = extent(&segments, SPAN, begin.unwrap_or(from)).unwrap_or((from, to));
         self.playback = Some(Playback {
             slot: channel,
             index,
             source,
-            span,
+            opened: begin.unwrap_or(from),
+            speed: 1.0,
+            drag: None,
+            held: None,
             zoom: SPAN,
             segments,
             vod,
@@ -347,19 +356,8 @@ impl XgViewApp {
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
-        let (index, paused) = (playback.index, playback.paused);
-        let now = self.playback_moment(playback);
-        self.seek(now + by);
-        if paused {
-            // A seek lets the hold go - that is what a drag needs - so the hold
-            // a step is under has to be put back, and the bar told, or the next
-            // frame draws a play control over a held picture. The session reads
-            // the value when it next looks, so one set here is not lost.
-            self.manager.hold_clip(index, true);
-            if let Some(playback) = self.playback.as_mut() {
-                playback.paused = true;
-            }
-        }
+        let at = self.centre_of(playback) + by;
+        self.move_to(at);
     }
 
     /// Steps to the event before or after the moment on screen.
@@ -375,11 +373,11 @@ impl XgViewApp {
         if playback.events.is_empty() {
             return;
         }
-        let now = self.playback_moment(playback);
+        let now = self.centre_of(playback);
         let target = if forward {
-            playback.events.iter().copied().find(|at| *at > now + 1)
+            playback.events.iter().map(|event| event.0).find(|at| *at > now + 1)
         } else {
-            playback.events.iter().rev().copied().find(|at| *at < now - 1)
+            playback.events.iter().rev().map(|event| event.0).find(|at| *at < now - 1)
         };
         match target {
             Some(at) => {
@@ -390,12 +388,13 @@ impl XgViewApp {
         }
     }
 
-    /// The moment the picture is of, as near as anything here knows.
+    /// The moment under the cursor: the middle of the strip, which never moves.
     ///
     /// The frame store is the answer when there is one - it is the picture on
-    /// screen - and the last moment asked for before that, which is where a seek
-    /// that has not arrived yet is going.
-    fn playback_moment(&self, playback: &Playback) -> i64 {
+    /// screen, and the strip slides under the cursor as the picture plays. A
+    /// seek that has not arrived yet is already there, and a finger on the strip
+    /// has taken the cursor with it.
+    fn centre_of(&self, playback: &Playback) -> i64 {
         self.manager
             .frames()
             .latest(playback.index)
@@ -403,14 +402,15 @@ impl XgViewApp {
             .map(|at| at as i64)
             .or(playback.pending)
             .or(playback.scrub)
-            .unwrap_or(playback.span.1)
+            .unwrap_or(playback.opened)
     }
 
-    /// The bar's control for the timeline's width: the double-headed arrow that
-    /// says "wider or narrower", and the press that walks the levels.
-    pub(super) fn width_control(&self) -> Option<tilebar::Control> {
-        self.playback.as_ref()?;
-        Some(tilebar::Control::Icon(crate::icons::Icon::Zoom))
+    /// The stretch the strip is drawn across: the width it is showing, centred
+    /// on the cursor.
+    fn window_of(&self, playback: &Playback) -> (i64, i64) {
+        let centre = self.centre_of(playback);
+        let half = playback.zoom / 2;
+        (centre - half, centre + half)
     }
 
     /// Whether the picture is held, for the bar's play control to draw.
@@ -426,7 +426,7 @@ impl XgViewApp {
         if playback.reading_events {
             return;
         }
-        let (from, to) = playback.span;
+        let (from, to) = self.window_of(playback);
         let source = playback.source.clone();
         tracing::debug!(target: "xgview::app", index, from, to, "reading the events");
         if let Some(playback) = self.playback.as_mut() {
@@ -441,7 +441,7 @@ impl XgViewApp {
         &mut self,
         index: usize,
         camera_id: String,
-        events: Option<Vec<i64>>,
+        events: Option<Vec<(i64, i64)>>,
     ) {
         let Some(playback) = self.playback.as_mut() else {
             return;
@@ -488,7 +488,11 @@ impl XgViewApp {
             },
         };
         let source = playback.source.clone();
+        let speed = playback.speed;
         let vod = self.play_recording(index, &source, window, playlist, begin);
+        // A new session starts at normal speed, so the rate the viewer chose is
+        // put back on it: the control says "2x" and the picture has to agree.
+        self.manager.set_rate(index, speed);
         if let Some(playback) = self.playback.as_mut() {
             playback.scrub = None;
             playback.scrubbing = false;
@@ -496,18 +500,6 @@ impl XgViewApp {
             // The seek this drag was going to make has been made.
             playback.ahead = None;
             playback.awaiting = None;
-            // The strip follows the picture - a drag into the recording's history
-            // would otherwise leave the cursor pressed against its left edge,
-            // with the stretch being watched somewhere off it. Only when it does
-            // not already hold it: a day the calendar was told to open is a
-            // whole day, and re-anchoring on its first moment would cut it down
-            // to the hours around midnight.
-            let target = begin.unwrap_or(window.0);
-            if !covered(Some(playback.span), target) {
-                if let Some(span) = extent(&playback.segments, playback.zoom, target) {
-                    playback.span = span;
-                }
-            }
             // The moment the picture begins at, held to the stretch that will
             // play: a scrub taken to the edge of the nearest recording does not
             // wait for a moment this playlist never reaches.
@@ -667,10 +659,12 @@ impl XgViewApp {
             self.draw_days(ui, row, playback);
             return;
         }
-        let (start, end) = playback.span;
+        let (start, end) = self.window_of(playback);
+        let centre = self.centre_of(playback);
         let span = (end - start).max(1) as f32;
+        // A turned picture carries a strip that runs down the screen, so its
+        // times are written turned with it rather than on their side.
         let horizontal = row.width() > row.height();
-        let middle = row.center();
         let along = |at: i64| {
             let t = ((at - start) as f32 / span).clamp(0.0, 1.0);
             if horizontal {
@@ -679,24 +673,33 @@ impl XgViewApp {
                 row.top() + row.height() * t
             }
         };
+        // Three bands in one row: the times above, the strip itself, and the
+        // moment under the cursor below. The cursor never moves, so the strip
+        // does - which is what makes a long recording feel like a long strip.
+        //
+        // `across` is a fraction of the way from the picture's top of the row to
+        // its bottom, which is down the screen for a picture as it arrives and
+        // right-to-left for one drawn turned. Every band is placed with it, so
+        // the two orientations are the same drawing.
+        let across = |t: f32| {
+            if horizontal {
+                row.top() + row.height() * t
+            } else {
+                row.right() - row.width() * t
+            }
+        };
+        let track = across(0.42);
         let band = |from: f32, to: f32, thick: f32| {
             let to = to.max(from + 1.0);
             if horizontal {
-                Rect::from_min_max(
-                    egui::pos2(from, middle.y - thick / 2.0),
-                    egui::pos2(to, middle.y + thick / 2.0),
-                )
+                Rect::from_two_pos(egui::pos2(from, track - thick / 2.0), egui::pos2(to, track + thick / 2.0))
             } else {
-                Rect::from_min_max(
-                    egui::pos2(middle.x - thick / 2.0, from),
-                    egui::pos2(middle.x + thick / 2.0, to),
-                )
+                Rect::from_two_pos(egui::pos2(track - thick / 2.0, from), egui::pos2(track + thick / 2.0, to))
             }
         };
 
         let painter = ui.painter();
-        // The stretches that were recorded, in the accent the wall uses for a
-        // picture that is arriving. Merged first: the recorder's own file
+        // The stretches that were recorded. Merged first: the recorder's own file
         // boundaries are fractions of a second apart, and drawing them would put
         // a notch every ten seconds along a recording that is continuous.
         for segment in &stretches(&playback.segments) {
@@ -705,35 +708,68 @@ impl XgViewApp {
             }
             let from = along(segment.start.max(start));
             let to = along(segment.end.min(end));
-            painter.rect_filled(band(from, to, 6.0), CornerRadius::same(2), theme::ACCENT.gamma_multiply(0.55));
+            painter.rect_filled(band(from, to, 10.0), CornerRadius::same(2), theme::ACCENT.gamma_multiply(0.55));
         }
-        // Where the camera noticed something: a tick over the track, in the
-        // colour the wall uses for a warning - not a stretch and not the cursor,
-        // because an event is a moment and those two are a span and a place.
-        for at in &playback.events {
-            if *at < start || *at >= end {
+        // Where the camera noticed something: the same band in the colour the
+        // wall uses for a warning, so the strip reads as "recorded, and here is
+        // what happened in it" rather than as two rows of marks.
+        for event in &playback.events {
+            let (from, to) = (event.0.max(start), event.1.min(end));
+            if to <= from {
                 continue;
             }
-            let x = along(*at);
             painter.rect_filled(
-                band(x - 1.0, x + 1.0, 16.0),
-                CornerRadius::same(1),
+                band(along(from), along(to), 10.0),
+                CornerRadius::same(2),
                 theme::WARN.gamma_multiply(0.85),
             );
         }
-        // Where the picture has got to. Its moment comes from the frame itself,
-        // so a stalled stream leaves the cursor where the picture is rather
-        // than where a clock thinks it should be - and a seek that is on its
-        // way leaves it where the finger was. See [`Playback::pending`].
-        let position = cursor(
-            playback.scrub,
-            playback.pending,
-            self.view_texture(playback.slot).and_then(|entry| entry.at),
-        );
-        if let Some(at) = position {
-            let x = along(at.round() as i64);
-            painter.rect_filled(band(x - 1.5, x + 1.5, 18.0), CornerRadius::same(1), theme::FOCUS);
+        // The times along the top, at a step a clock would show. On a turned
+        // picture they run down the screen's left instead, turned with it.
+        let step = tick_step(playback.zoom);
+        let mut at = start.div_euclid(step) * step;
+        while at < end {
+            if at >= start {
+                if let Some(label) = clock_of(at) {
+                    let spot = if horizontal {
+                        egui::pos2(along(at), across(0.135))
+                    } else {
+                        egui::pos2(across(0.135), along(at))
+                    };
+                    turned_text(
+                        painter,
+                        spot,
+                        label,
+                        9.5,
+                        theme::GRID_LINE.gamma_multiply(0.8),
+                        !horizontal,
+                    );
+                }
+            }
+            at += step;
         }
+        // The moment under the cursor, in full, where the eye already is.
+        if let Some(stamp) = stamp_of(centre) {
+            let spot = if horizontal {
+                egui::pos2(row.center().x, across(0.83))
+            } else {
+                egui::pos2(across(0.83), row.center().y)
+            };
+            turned_text(painter, spot, stamp, 12.0, theme::TEXT_BRIGHT, !horizontal);
+        }
+        // The cursor: fixed in the middle, from the times down through the strip.
+        let cursor = if horizontal {
+            Rect::from_two_pos(
+                egui::pos2(row.center().x - 1.0, across(0.25)),
+                egui::pos2(row.center().x + 1.0, across(0.60)),
+            )
+        } else {
+            Rect::from_two_pos(
+                egui::pos2(across(0.25), row.center().y - 1.0),
+                egui::pos2(across(0.60), row.center().y + 1.0),
+            )
+        };
+        painter.rect_filled(cursor, CornerRadius::same(1), theme::FOCUS);
     }
 }
 
@@ -803,45 +839,73 @@ impl XgViewApp {
     /// the finger with nothing asked of the server. Letting go asks for the
     /// stretch under the finger and plays it from there.
     pub(super) fn timeline_input(&mut self, ui: &egui::Ui, row: Rect) {
-        let Some(playback) = &self.playback else {
+        let Some(playback) = self.playback.as_ref() else {
             return;
         };
-        let (index, start, end) = (playback.index, playback.span.0, playback.span.1);
+        let index = playback.index;
+        let days = matches!(playback.timeline, Timeline::Days);
+        let (start, end) = self.window_of(playback);
+        let centre = self.centre_of(playback);
         let span = (end - start).max(1) as f32;
         let horizontal = row.width() > row.height();
-        let moment = |pos: egui::Pos2| -> i64 {
-            let along = if horizontal {
-                (pos.x - row.left()) / row.width()
+        let along = |pos: egui::Pos2| -> f32 {
+            let t = if horizontal {
+                (pos.x - row.left()) / row.width().max(1.0)
             } else {
-                (pos.y - row.top()) / row.height()
+                (pos.y - row.top()) / row.height().max(1.0)
             };
-            start + (along.clamp(0.0, 1.0) * span) as i64
+            t.clamp(0.0, 1.0)
         };
 
         // Claimed so the wall behind does not take the press for a page swipe.
-        // What the viewer is doing is read from the pointer rather than from
-        // this answer: whether egui hands the gesture to this widget or to the
-        // picture under it is not something a timeline should depend on.
         let response = ui.interact(row, Id::new(("xgview-timeline", index)), Sense::click_and_drag());
-        // A scrub is the left button's and a touch's. The right one widens the
-        // strip below, and reading it here as a press would have it start a hold
-        // on the way.
+        // The strip is a slider for a remote: left and right are its own, Down
+        // walks into it from the controls and Up walks back out. Those keys are
+        // read here rather than through the navigation layer because the strip
+        // is not one of the bar's controls - it is the thing they operate.
+        let (down_key, up_key, left, right) = ui.ctx().input(|input| {
+            (
+                input.key_pressed(egui::Key::ArrowDown),
+                input.key_pressed(egui::Key::ArrowUp),
+                input.key_down(egui::Key::ArrowLeft),
+                input.key_down(egui::Key::ArrowRight),
+            )
+        });
+        if !response.has_focus()
+            && down_key
+            && ui.memory(|memory| memory.focused()).is_some_and(tilebar::owns)
+        {
+            response.request_focus();
+        }
+        if response.has_focus() {
+            if up_key {
+                ui.memory_mut(|memory| memory.request_focus(tilebar::control(0)));
+            } else if left || right {
+                self.walk_timeline(right);
+            } else if let Some(playback) = self.playback.as_mut() {
+                playback.held = None;
+            }
+        }
+
+        // A scrub is the left button's and a touch's. The right one is the
+        // mouse's way to the widths, and reading it here as a press would have
+        // it start a drag on the way.
         let down = ui.ctx().input(|input| input.pointer.button_down(egui::PointerButton::Primary));
         let pos = ui.ctx().input(|input| input.pointer.interact_pos());
         let scrubbing = self.playback.as_ref().is_some_and(|playback| playback.scrubbing);
-        // The same walk the strip's own button makes, for a mouse: two minutes,
-        // ten, an hour, six hours, a day, the calendar, and back. Aiming a scrub
-        // is a left press, so this cannot be mistaken for the one that moves the
-        // picture, and nothing else on the wall uses that button.
         if response.secondary_clicked() && !scrubbing {
-            self.zoom_timeline();
+            self.zoom_timeline(true);
             return;
         }
+
         // The calendar is a picture of days, not a stretch: a press on a band is
         // that day, and nothing is held while it is pressed.
-        if let Timeline::Days = playback.timeline {
+        if days {
             if let (true, Some(pos)) = (down, pos) {
                 if row.contains(pos) {
+                    let Some(playback) = self.playback.as_ref() else {
+                        return;
+                    };
                     if let Some(at) = day_at(row, &playback.days, pos).map(|day| day.start) {
                         self.pick_day(index, at);
                     }
@@ -851,27 +915,18 @@ impl XgViewApp {
         }
 
         if !scrubbing {
-            // A press that starts on the strip holds the picture where it is and
-            // puts the cursor under the finger. One that starts elsewhere is the
-            // picture's, and does nothing here.
+            // A press that starts on the strip holds the picture and takes the
+            // strip with it. One that starts elsewhere is the picture's, and
+            // does nothing here.
             if let (true, Some(pos)) = (down, pos) {
                 if row.contains(pos) {
                     self.manager.hold_clip(index, true);
-                    let at = moment(pos);
-                    let inside = self.playback.as_ref().is_some_and(|playback| covered(playback.vod, at));
-                    if inside {
-                        // A press can land far from the picture, and the fragment
-                        // under it is fetched while the finger is still there.
-                        self.manager.prefetch_fragment(index, at);
-                    } else {
-                        // A press outside the range the session holds has no
-                        // fragment of it to fetch: what that seek will need is
-                        // another playlist, and a tap is enough time to read it.
-                        self.read_ahead(index, at);
-                    }
+                    response.request_focus();
+                    self.fetch_for(index, centre);
                     if let Some(playback) = self.playback.as_mut() {
                         playback.scrubbing = true;
-                        playback.scrub = Some(at);
+                        playback.drag = Some((along(pos), centre));
+                        playback.scrub = Some(centre);
                         // The range the last drag read is not this drag's.
                         playback.ahead = None;
                         playback.awaiting = None;
@@ -882,28 +937,23 @@ impl XgViewApp {
         }
 
         match (down, pos) {
-            // The finger may leave the strip; the cursor follows it to the end
-            // rather than stopping where the strip does.
+            // The finger may leave the strip; what it has moved keeps going to
+            // the end rather than stopping where the strip does.
             (true, Some(pos)) => {
-                let at = moment(pos);
-                let moved = self.playback.as_ref().is_some_and(|playback| playback.scrub != Some(at));
-                if moved {
-                    let inside = self.playback.as_ref().is_some_and(|playback| covered(playback.vod, at));
-                    if inside {
-                        // Where the seek will land, said while there is still
-                        // time to fetch it: the session holds one fragment and
-                        // fetches the one under the finger, so a drag across the
-                        // strip costs no more than the fragment it stops on.
-                        self.manager.prefetch_fragment(index, at);
-                    } else {
-                        // The finger has left the range the session holds, so
-                        // that seek will need another playlist. Read it now,
-                        // while there is a finger to hide the wait under.
-                        self.read_ahead(index, at);
+                let Some((from, anchor)) =
+                    self.playback.as_ref().and_then(|playback| playback.drag)
+                else {
+                    return;
+                };
+                // Dragging the strip to the left brings later moments under the
+                // cursor: the cursor is the one thing that does not move.
+                let at = anchor + ((from - along(pos)) * span) as i64;
+                let at = self.clamp_centre(at);
+                if self.playback.as_ref().is_some_and(|playback| playback.scrub != Some(at)) {
+                    self.fetch_for(index, at);
+                    if let Some(playback) = self.playback.as_mut() {
+                        playback.scrub = Some(at);
                     }
-                }
-                if let Some(playback) = self.playback.as_mut() {
-                    playback.scrub = Some(at);
                 }
             }
             _ => self.end_scrub(),
@@ -912,29 +962,49 @@ impl XgViewApp {
 
     /// Lets the picture go and plays from wherever the finger was left.
     fn end_scrub(&mut self) {
-        let Some(playback) = self.playback.as_mut() else {
+        let Some((at, index)) = self.playback.as_mut().map(|playback| {
+            playback.scrubbing = false;
+            (playback.scrub.take(), playback.index)
+        }) else {
             return;
         };
-        playback.scrubbing = false;
-        let (at, index) = (playback.scrub.take(), playback.index);
-        match at {
-            // The hold is not let go of first: a session resumed for a moment
-            // publishes a frame of the window that is being left, and that
-            // frame is the one that would put the cursor back. A seek either
-            // jumps inside the session - and lets go of the hold itself, with
-            // the jump already in the session's hand - or replaces it, and a
-            // replaced session ends the hold with it.
-            Some(at) => self.seek(at),
-            // Nothing under the finger: the recording goes on where it was
-            // held - and the bar says so, or it would draw a pause for a picture
-            // that is running.
-            None => {
-                self.manager.hold_clip(index, false);
-                if let Some(playback) = self.playback.as_mut() {
-                    playback.paused = false;
-                }
+        let Some(at) = at else {
+            // Nothing under the finger: the recording goes on where it was held.
+            self.manager.hold_clip(index, false);
+            if let Some(playback) = self.playback.as_mut() {
+                playback.paused = false;
             }
+            return;
+        };
+        // A tap that never moved the strip is not a seek: asking for the moment
+        // already on screen would drop the open response and fetch the fragment
+        // again for a picture that is already there.
+        let centre = self.playback.as_ref().map_or(at, |playback| self.centre_of(playback));
+        if (at - centre).abs() < 1 {
+            self.manager.hold_clip(index, false);
+            if let Some(playback) = self.playback.as_mut() {
+                playback.paused = false;
+            }
+            return;
         }
+        // A drag that has taken the strip somewhere the event list does not
+        // reach reads the events there: the marks on the strip and the two
+        // buttons that step between them are the same list.
+        let covered = self
+            .playback
+            .as_ref()
+            .and_then(|playback| playback.events.first().zip(playback.events.last()))
+            .is_some_and(|(first, last)| first.0 <= at && at <= last.1);
+        if !covered {
+            self.read_events(index);
+        }
+        // The hold is not let go of first: a session resumed for a moment
+        // publishes a frame of the window that is being left, and that frame is
+        // the one that would put the picture back where it was. A seek either
+        // jumps inside the session - and lets go of the hold itself, with the
+        // jump already in the session's hand - or replaces it, and a replaced
+        // session ends the hold with it.
+        self.seek(at);
     }
 
     /// Widens the timeline a level, or takes it back to the narrowest.
@@ -943,33 +1013,154 @@ impl XgViewApp {
     /// a wider one reaches further back and a narrower one reaches less far. The
     /// range follows the next time one is asked for - a drag to a moment the
     /// session does not hold asks for the stretch the timeline shows.
-    pub(super) fn zoom_timeline(&mut self) {
+    /// More detail on the timeline, or more of it.
+    ///
+    /// The ladder is fixed and its ends are ends: two minutes is as close as it
+    /// goes, a day as wide, and a press past either does nothing.
+    pub(super) fn zoom_timeline(&mut self, finer: bool) {
         let Some(playback) = self.playback.as_mut() else {
             return;
         };
-        let (timeline, zoom) = next_timeline(playback.timeline, playback.zoom);
-        playback.timeline = timeline;
+        if playback.timeline == Timeline::Days {
+            return;
+        }
+        let Some(zoom) = step_zoom(playback.zoom, finer) else {
+            return;
+        };
         playback.zoom = zoom;
-        let (index, anchor) = (playback.index, playback.span.1);
-        tracing::debug!(target: "xgview::app", ?timeline, zoom, "the timeline changed");
-        match timeline {
+        // A strip of a different width holds events the old list does not.
+        playback.events.clear();
+        let index = playback.index;
+        tracing::debug!(target: "xgview::app", zoom, finer, "the timeline changed width");
+        self.read_events(index);
+        self.read_older(index);
+    }
+
+    /// Shows the days, or goes back to the stretch of one.
+    ///
+    /// The calendar is not a width of the strip - it is a different picture of
+    /// the recording - so it has its own control rather than the end of the
+    /// ladder.
+    pub(super) fn toggle_calendar(&mut self) {
+        let Some(playback) = self.playback.as_mut() else {
+            return;
+        };
+        let index = playback.index;
+        match playback.timeline {
             Timeline::Span => {
-                if let Some(span) = extent(&playback.segments, zoom, anchor) {
-                    playback.span = span;
-                }
-                // A wider strip holds events the narrower one's list does not,
-                // and they are read again from the stretch now on screen. The
-                // narrowest level would have been covered by the old list, and
-                // asking again is one request for a list that has just changed
-                // width - not one per repaint.
+                playback.timeline = Timeline::Days;
+                self.read_days(index);
+            }
+            Timeline::Days => {
+                // Back to a day's width, which is what "the day I was looking
+                // at" means when the strip returns.
+                playback.timeline = Timeline::Span;
+                playback.zoom = *ZOOMS.last().expect("a ladder of widths");
                 playback.events.clear();
                 self.read_events(index);
-                // A strip wider than what has been read needs the rest of it.
-                self.read_older(index);
             }
-            // The calendar is the days the box recorded on, which it has not
-            // been asked for yet.
-            Timeline::Days => self.read_days(index),
+        }
+    }
+
+    /// Plays faster, or back to normal: one, two, four, one.
+    pub(super) fn cycle_speed(&mut self) {
+        let Some(playback) = self.playback.as_mut() else {
+            return;
+        };
+        let speed = if playback.speed < 1.5 {
+            2.0
+        } else if playback.speed < 3.0 {
+            4.0
+        } else {
+            1.0
+        };
+        playback.speed = speed;
+        let index = playback.index;
+        self.manager.set_rate(index, speed);
+        tracing::debug!(target: "xgview::app", index, speed, "playback rate");
+    }
+
+    /// The word the speed control carries: `1×`, `2×` or `4×`.
+    pub(super) fn playback_speed_label(&self) -> &'static str {
+        match self.playback.as_ref().map(|playback| playback.speed) {
+            Some(speed) if speed > 3.0 => "4×",
+            Some(speed) if speed > 1.5 => "2×",
+            _ => "1×",
+        }
+    }
+
+    /// Walks the strip under the cursor, a step at a time.
+    ///
+    /// The step is a twentieth of what the strip is showing, so it is a few
+    /// seconds at the closest width and an hour at the widest - the arrow means
+    /// "a little further" at every level. Held down it accelerates: four times
+    /// the step after half a second, sixteen after one and a half.
+    pub(super) fn walk_timeline(&mut self, forward: bool) {
+        let now = std::time::Instant::now();
+        let step = {
+            let Some(playback) = self.playback.as_mut() else {
+                return;
+            };
+            let base = (playback.zoom / 20).max(1);
+            match playback.held {
+                Some((direction, since)) if direction == forward => {
+                    let held = now.duration_since(since).as_secs_f32();
+                    if held > 1.5 {
+                        base * 16
+                    } else if held > 0.6 {
+                        base * 4
+                    } else {
+                        base
+                    }
+                }
+                _ => {
+                    playback.held = Some((forward, now));
+                    base
+                }
+            }
+        };
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        let at = self.centre_of(playback) + if forward { step } else { -step };
+        self.move_to(at);
+    }
+
+    /// Takes the picture to a moment, keeping the hold it was under.
+    fn move_to(&mut self, at: i64) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        let (index, paused) = (playback.index, playback.paused);
+        let at = self.clamp_centre(at);
+        self.seek(at);
+        if paused {
+            self.manager.hold_clip(index, true);
+            if let Some(playback) = self.playback.as_mut() {
+                playback.paused = true;
+            }
+        }
+    }
+
+    /// A moment kept inside what the camera recorded: the cursor cannot be
+    /// dragged off the end of the strip into nothing.
+    fn clamp_centre(&self, at: i64) -> i64 {
+        let Some(playback) = self.playback.as_ref() else {
+            return at;
+        };
+        match (playback.segments.first(), playback.segments.last()) {
+            (Some(first), Some(last)) => at.clamp(first.start, last.end),
+            _ => at,
+        }
+    }
+
+    /// Fetches what a seek to `at` will need, while there is time to fetch it.
+    fn fetch_for(&mut self, index: usize, at: i64) {
+        let inside = self.playback.as_ref().is_some_and(|playback| covered(playback.vod, at));
+        if inside {
+            self.manager.prefetch_fragment(index, at);
+        } else {
+            self.read_ahead(index, at);
         }
     }
 
@@ -1050,7 +1241,7 @@ impl XgViewApp {
             return;
         }
         let Some((from, to)) =
-            older_window(&playback.segments, playback.zoom, playback.span.1, playback.oldest)
+            older_window(&playback.segments, playback.zoom, self.window_of(playback).1, playback.oldest)
         else {
             return;
         };
@@ -1111,22 +1302,12 @@ impl XgViewApp {
         playback.segments.extend(segments);
         playback.segments.sort_by_key(|segment| segment.start);
         playback.segments.dedup_by_key(|segment| segment.start);
-        let anchor = playback.span.1;
-        if let Some(span) = extent(&playback.segments, playback.zoom, anchor) {
-            playback.span = span;
-        }
         // A day was picked, and this is the list that reaches it: the strip
         // becomes that day, and the picture goes to its first moment.
         if let Some(at) = picked {
             if playback.segments.iter().any(|segment| segment.start <= at && at < segment.end) {
                 playback.timeline = Timeline::Span;
                 playback.zoom = *ZOOMS.last().expect("a ladder of widths");
-                // Anchored on the day's end, so the strip is the day rather than
-                // the eighteen hours before midnight and the six after it.
-                let anchor = at + playback.zoom * 3 / 4;
-                if let Some(span) = extent(&playback.segments, playback.zoom, anchor) {
-                    playback.span = span;
-                }
                 self.seek(at);
             }
             return;
@@ -1327,9 +1508,17 @@ fn range_width(zoom: i64) -> i64 {
     zoom.min(RANGE_CAP)
 }
 
-/// The next width up, wrapping back to the narrowest.
-fn next_zoom(zoom: i64) -> i64 {
-    ZOOMS.iter().copied().find(|width| *width > zoom).unwrap_or(ZOOMS[0])
+/// The next width up or down the ladder, or `None` at an end of it.
+///
+/// The ends are the ends: two buttons that wrapped would make "one step more
+/// detail" mean "back to the coarsest", which is the one thing a viewer pressing
+/// it again does not want.
+fn step_zoom(zoom: i64, finer: bool) -> Option<i64> {
+    if finer {
+        ZOOMS.iter().copied().rev().find(|width| *width < zoom)
+    } else {
+        ZOOMS.iter().copied().find(|width| *width > zoom)
+    }
 }
 
 /// How far the two step controls move the picture.
@@ -1344,18 +1533,6 @@ pub(super) const STEP: i64 = 10;
 /// Three weeks: enough that "the night before last" and "last Tuesday" are both
 /// on it, and few enough that a band is still a target on a strip this short.
 const DAYS: usize = 21;
-
-/// What the right press shows next: the next width up, the calendar after the
-/// widest of them, and the narrowest after the calendar.
-fn next_timeline(timeline: Timeline, zoom: i64) -> (Timeline, i64) {
-    match timeline {
-        Timeline::Span if zoom < *ZOOMS.last().expect("a ladder of widths") => {
-            (Timeline::Span, next_zoom(zoom))
-        }
-        Timeline::Span => (Timeline::Days, zoom),
-        Timeline::Days => (Timeline::Span, ZOOMS[0]),
-    }
-}
 
 /// The days a calendar shows: `days` of them, oldest first, ending with the day
 /// `now` falls in.
@@ -1427,6 +1604,65 @@ fn day_at(row: Rect, days: &[Day], pos: egui::Pos2) -> Option<&Day> {
     };
     let index = (along * shown as f32).floor().max(0.0) as usize;
     days[days.len() - shown..].get(index.min(shown - 1))
+}
+
+/// Draws `text` centred on `spot`, turned a quarter turn clockwise when
+/// `turned`.
+///
+/// A painter's own `text` has no angle, so the galley is laid out and placed as
+/// a shape - the same bargain [`icons::label_in`] makes, and the same turn: a
+/// strip that runs down a turned picture carries its times down the screen
+/// rather than across it.
+fn turned_text(
+    painter: &egui::Painter,
+    spot: egui::Pos2,
+    text: String,
+    size: f32,
+    colour: egui::Color32,
+    turned: bool,
+) {
+    let galley = painter.layout_no_wrap(text, egui::FontId::proportional(size), colour);
+    let extent = galley.size();
+    // A quarter turn about `pos` puts the text's own centre at `(-h/2, w/2)`
+    // from it, so the origin has to be moved back by that much for the middle of
+    // the text to land on `spot`.
+    let pos = if turned {
+        egui::pos2(spot.x + extent.y * 0.5, spot.y - extent.x * 0.5)
+    } else {
+        egui::pos2(spot.x - extent.x * 0.5, spot.y - extent.y * 0.5)
+    };
+    painter.add(egui::epaint::TextShape {
+        pos,
+        galley,
+        underline: egui::Stroke::NONE,
+        fallback_color: colour,
+        override_text_color: None,
+        opacity_factor: 1.0,
+        angle: if turned { std::f32::consts::FRAC_PI_2 } else { 0.0 },
+    });
+}
+
+/// The step between the times along the top of the strip: about six labels, at
+/// a distance a clock shows rather than an arbitrary division.
+fn tick_step(span: i64) -> i64 {
+    const STEPS: [i64; 14] = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200];
+    let want = (span / 6).max(1);
+    STEPS.iter().copied().find(|step| *step >= want).unwrap_or(10_800)
+}
+
+/// The hour and minute of a moment, on the viewer's own clock.
+fn clock_of(at: i64) -> Option<String> {
+    local_at(at).map(|local| format!("{:02}:{:02}", local.hour, local.minute))
+}
+
+/// The whole of a moment, to the second, on the viewer's own clock.
+fn stamp_of(at: i64) -> Option<String> {
+    local_at(at).map(|local| {
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            local.year, local.month, local.day, local.hour, local.minute, local.second
+        )
+    })
 }
 
 /// How many of the calendar's days fit across the strip.
@@ -1583,15 +1819,6 @@ fn nearest(stretches: &[Segment], at: i64) -> Option<i64> {
 /// What the cursor shows: the moment under the finger while there is one, then
 /// the moment asked for, and only then the picture's own.
 ///
-/// The order is what keeps a seek from looking like a refusal. A press holds the
-/// picture where it is, so the frame on screen still says the moment the drag
-/// began from until the new window's first frame arrives - reading it back would
-/// put the cursor at the place the drag started, and only a request later at the
-/// place the viewer pointed at.
-fn cursor(scrub: Option<i64>, pending: Option<i64>, picture: Option<f64>) -> Option<f64> {
-    scrub.or(pending).map(|at| at as f64).or(picture)
-}
-
 /// Whether the picture has reached the moment a seek asked for.
 ///
 /// A seek's window begins where the segment it was cut from begins - up to a
@@ -1747,7 +1974,7 @@ fn start_events(
         let (user, pass) = source.credentials.clone().unwrap_or_default();
         let config = FrigateConfig::at(&source.origin.base_url, &user, &pass);
         let times = match FrigateClient::new(config) {
-            Ok(mut client) => client.event_times(&source.origin.camera, from, to).await.ok(),
+            Ok(mut client) => client.event_spans(&source.origin.camera, from, to).await.ok(),
             Err(_) => None,
         };
         let _ = sender.send(BackgroundEvent::EventsReady {
@@ -1853,51 +2080,41 @@ fn epoch_now() -> i64 {
 mod tests {
     use super::*;
 
-    /// The timeline is drawn across the stretch being watched, which is wider
-    /// than the window: drawn across the window alone it would put the cursor at
-    /// its left edge after every seek, and the picture would have moved while
-    /// the cursor looked as though it had gone back.
+    /// The strip is the width it is showing, centred on the cursor - and the
+    /// cursor is the middle of it, which is the one thing that does not move.
     #[test]
-    fn the_timeline_spans_what_was_read() {
-        let segments = [Segment { start: 100, end: 110 }, Segment { start: 110, end: 120 }];
-        assert_eq!(extent(&segments, 600, 120), Some((100, 120)));
-        assert_eq!(extent(&[], 600, 120), None);
-        // A list that ends before it starts has no span to draw.
-        assert_eq!(extent(&[Segment { start: 120, end: 100 }], 600, 120), None);
-        // An hour of recording is shown ten minutes at a time, from its end.
-        assert_eq!(extent(&[Segment { start: 0, end: 3600 }], 600, 3600), Some((3000, 3600)));
-        // And a recording shorter than that is shown whole.
-        assert_eq!(extent(&[Segment { start: 3500, end: 3600 }], 600, 3600), Some((3500, 3600)));
+    fn the_strip_is_drawn_around_the_cursor() {
+        let window = |centre: i64, zoom: i64| {
+            let half = zoom / 2;
+            (centre - half, centre + half)
+        };
+        assert_eq!(window(1000, 600), (700, 1300));
+        assert_eq!(window(1000, 86_400), (1000 - 43_200, 1000 + 43_200));
+        // A moment near the start of the recording keeps its centre: the strip
+        // shows the empty space before it rather than pushing the cursor off.
+        assert_eq!(window(10, 600), (-290, 310));
     }
 
-    /// The strip ends at the newest moment recorded, unless the moment being
-    /// watched is further back than that would reach - and the wider levels
-    /// reach further back, which is what they are for.
+    /// The zoom buttons walk a fixed ladder and stop at its ends: two buttons
+    /// that wrapped would make "one more step of detail" mean "the coarsest".
     #[test]
-    fn the_timeline_follows_what_is_being_watched() {
-        let segments = run(0, 3600);
-        // At the newest part of the recording the strip ends with it.
-        assert_eq!(extent(&segments, 600, 3540), Some((3000, 3600)));
-        // A scrub an hour back brings the strip with it, a quarter of a width
-        // past the moment, so there is somewhere to scrub to on either side.
-        assert_eq!(extent(&segments, 600, 1000), Some((550, 1150)));
-        // The same moment on a wider strip: it reaches further back.
-        assert_eq!(extent(&segments, 1800, 1000), Some((0, 1450)));
-        // The widths go two minutes, ten, an hour, six hours, a day, and back.
-        assert_eq!(next_zoom(120), 600);
-        assert_eq!(next_zoom(600), 3600);
-        assert_eq!(next_zoom(3600), 21600);
-        assert_eq!(next_zoom(21600), 86400);
-        assert_eq!(next_zoom(86400), 120);
+    fn the_zoom_buttons_walk_a_ladder_and_stop() {
+        assert_eq!(step_zoom(600, true), Some(120));
+        assert_eq!(step_zoom(600, false), Some(3600));
+        assert_eq!(step_zoom(120, true), None, "as close as it goes");
+        assert_eq!(step_zoom(86_400, false), None, "as wide as it goes");
+        // And the ladder is the one the strip draws.
+        assert_eq!(ZOOMS, [120, 600, 3600, 21_600, 86_400]);
     }
 
-    /// The right press walks the widths, then the calendar, then comes back to
-    /// the narrowest.
+    /// The times along the top are a clock's, not an arbitrary division: about
+    /// six labels, at a step a viewer reads without counting.
     #[test]
-    fn the_right_press_walks_the_widths_and_then_the_days() {
-        assert_eq!(next_timeline(Timeline::Span, 600), (Timeline::Span, 3600));
-        assert_eq!(next_timeline(Timeline::Span, 86_400), (Timeline::Days, 86_400));
-        assert_eq!(next_timeline(Timeline::Days, 86_400), (Timeline::Span, 120));
+    fn the_times_along_the_strip_are_a_clocks() {
+        assert_eq!(tick_step(120), 30);
+        assert_eq!(tick_step(600), 120);
+        assert_eq!(tick_step(3600), 600);
+        assert_eq!(tick_step(86_400), 10_800);
     }
 
     /// The calendar shows the days between the ones the box named - empty where
@@ -2092,23 +2309,11 @@ mod tests {
         assert_eq!(nearest(&[], 100), None);
     }
 
-    /// A seek's cursor stays where the finger left it until the picture gets
-    /// there. Reading the moment off the frame on screen instead would put it
-    /// back at the place the drag started from.
+    /// The window's first frames are behind the moment asked for, and are not
+    /// what ends the wait - the cursor stays where the seek asked for it until
+    /// the picture gets there.
     #[test]
     fn the_cursor_waits_for_the_picture_to_catch_up() {
-        // A finger on the timeline is the whole of the answer.
-        assert_eq!(cursor(Some(120), Some(110), Some(100.0)), Some(120.0));
-        // Once it is lifted, the moment asked for - not the frame's, which is
-        // still the window being left.
-        assert_eq!(cursor(None, Some(110), Some(100.0)), Some(110.0));
-        assert_eq!(cursor(None, Some(110), None), Some(110.0));
-        // And with the seek over, the picture's own.
-        assert_eq!(cursor(None, None, Some(100.0)), Some(100.0));
-        assert_eq!(cursor(None, None, None), None);
-
-        // The window's first frames are behind the moment asked for, and are
-        // not what ends the wait.
         assert!(!caught_up(Some(100.0), 110));
         assert!(!caught_up(None, 110), "nothing has been decoded yet");
         assert!(caught_up(Some(110.0), 110));

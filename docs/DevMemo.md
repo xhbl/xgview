@@ -4257,3 +4257,120 @@ and goes back to holding.
 Not watched on screen: the nine controls, the wrapping, the icons at 44 points
 and the ticks are arithmetic and plumbing. The shapes were looked at as a
 rendering, not on the wall.
+
+## 58. The timeline becomes a strip that moves under a cursor
+
+*Landed 2026-11-03, in 2.1.50.*
+
+Seven changes, and five of them are one idea: **the cursor is the still point.**
+Until now the strip was a picture of a stretch of recording and the cursor moved
+along it, which meant that a drag had two meanings - move the cursor, or move
+what the cursor looks at - and that the timeline could never be wider than what
+the eye could aim at.
+
+**The cursor is now the middle of the row and never moves; the strip slides.**
+A drag pushes the strip, and what it brings under the cursor is where playback
+will be when the finger lifts. The window is always the width being shown,
+centred on the cursor: `window_of` is the whole of it, and the `span` field that
+used to be re-anchored by every seek is gone. Two consequences fell out of it:
+
+* A seek no longer re-anchors anything. There is nothing to re-anchor.
+* The strip runs off the ends of the recording, and that is right: at the first
+  minute of a day's recording half the strip is empty, and an empty half is
+  honest. The *cursor* is held inside the recording (`clamp_centre`), so it
+  cannot be dragged into nothing.
+
+**The bar is twelve controls**, in the order a viewer reaches for them: play,
+speed, the two event jumps, the two ten-second steps, zoom in, zoom out, the
+calendar, the picture fit, the sound, and the way out. On a phone held upright
+they are two lines - the picture's controls, then the timeline's - and one line
+everywhere else: a wide picture, and a turned one. Turned, the strip runs down
+the screen's long side and twelve fit in that; a second line there would be a
+second column beside the picture. The break is the bar's own, not a width's: a
+greedy fill on a wide picture would put the date next to the events, and the two
+lines mean something.
+
+**The quarter turn is not a recording's control.** It belongs to the live
+picture: a recording is the same length whichever way up it is drawn, and the
+button would sit beside play and pause, where a mis-press costs the picture
+rather than turning it.
+
+**Forty points, six apart**, where the plan said forty-four and eight. Six have
+to stand in one line on a phone held upright, and 6 x 40 + 5 x 6 + 12 is 282 in
+the 363 a 411-wide picture leaves - 318 with the margins, which is what a
+320-wide screen has. At forty-four they would not fit, and the alternative is
+three lines on a phone, which is a panel deeper than the picture. The plan's
+forty-four was a touch target chosen for a bar of five; twelve controls is a
+different problem.
+
+**And four points of the panel's own around them**: a control flush with the
+rounded corner reads as clipped by it. At the far edge always, and at the docked
+edge only when nothing is under the controls - a timeline brings its own inset,
+and with a row under them the panel's edge is the row's. So a bar with no
+timeline is four deeper than its controls, and one with a timeline is four deeper
+at the top and not at the bottom.
+
+**Three apart between the lines, where six is the gap along one.** The two lines
+are two halves of one panel and read as a block, so they sit closer to each other
+than the controls within a line do. The line itself is forty-four deep - a
+forty-point control with a point above and below it - so what a viewer sees
+between two lines is seven points, half of the fourteen that forty-eight-point
+lines with six between them left. And **each line is centred in the panel**: with
+a timeline under it the panel is as wide as the picture, and a line of controls
+pushed against one end of that reads as belonging to that end.
+
+**The zoom is two buttons and the calendar a third.** The ladder is fixed and its
+ends are ends: two buttons that wrapped would make "one more step of detail"
+mean "back to the coarsest". And the calendar is not a width of the strip - it is
+a different picture of the same recording - so it has its own control rather than
+the end of the ladder, which is what it had been.
+
+**Speed is the one control that carries a word.** `1x`, `2x`, `4x`: a picture of
+a fast-forward cannot say which. The session takes the rate through the control
+channel and divides the wall clock by it, so the picture advances two or four
+seconds per second. **The sound is left out of anything but one** - a recording's
+audio is decoded as it arrives and there is nothing here that could resample it,
+so at two times the picture would run ahead of the sound and the two would never
+meet again. A silent fast-forward is the honest half of a speed control.
+
+**The times are above the strip and the moment below it.** Above, a step a clock
+shows - fifteen seconds at the closest width, two hours at the widest, chosen by
+`tick_step` so that about six labels fit. Below, the moment under the cursor to
+the second, which is the one thing a viewer scrubbing to an event actually needs
+to read.
+
+**The panel sits closer to the edge on a wide picture**: twelve points where it
+was twenty-four, on a wide picture and on a turned one. There the panel is over
+the picture, and every point of margin is picture given away; a phone held upright
+keeps the twenty-four, because there the panel sits in the black under the
+picture and there is nothing to give away. The margin *along* the strip does not
+change - that one keeps the bar clear of the band a touch screen's own gesture
+navigation claims along the screen's edge, and twelve points would be inside it.
+
+**And they turn with the picture.** A turned picture carries a strip that runs
+down the screen, so `across(t)` - a fraction of the way from the picture's top of
+the row to its bottom - is the whole of the geometry: down the screen for a
+picture as it arrives, right to left for one drawn turned. The two orientations
+are the same drawing, and the words are written turned rather than left out - a
+`TextShape` with its angle set, which is the same bargain `icons::label_in`
+makes.
+
+**Events are stretches of colour, not marks above the strip**: the same band as
+the recording, in the warning colour, so the strip reads as "recorded, and here
+is what happened in it". Which is also why they are read as spans now - `/api/events`
+answers a start and an end, and an event still going has no end, so it is given
+one second.
+
+**A remote can now work the strip.** Down from the controls puts the focus on it,
+left and right walk it, and Up leaves. The step is a twentieth of the width being
+shown, so an arrow is "a little further" at every level, and a held arrow
+accelerates - four times after half a second, sixteen after one and a half. The
+keys are read by the strip itself rather than through the navigation layer,
+because the strip is not one of the bar's controls: it is the thing they operate.
+
+**A tap that moves nothing no longer seeks.** It used to drop the open response
+and fetch the fragment again - 300 ms for a picture that was already on screen.
+
+Not watched on screen: the twelve controls, the two lines, the ticks, the stamp
+and the sliding are arithmetic and plumbing. The one thing that was looked at is
+the icons, rendered to a PNG beside the code.

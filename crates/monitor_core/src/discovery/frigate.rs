@@ -479,7 +479,7 @@ impl FrigateClient {
         Ok(playlist)
     }
 
-    /// The moments a camera's events began, between two times, oldest first.
+    /// When a camera's events began and ended, between two times, oldest first.
     ///
     /// Frigate's `/api/events` is the list of things it noticed - a person at
     /// the door, a car in the drive. Playback draws them as marks on the
@@ -489,7 +489,12 @@ impl FrigateClient {
     ///
     /// Asked for without thumbnails, which is what makes the answer small - a
     /// few hundred bytes an event rather than a JPEG each.
-    pub async fn event_times(&mut self, camera: &str, after: i64, before: i64) -> Result<Vec<i64>> {
+    pub async fn event_spans(
+        &mut self,
+        camera: &str,
+        after: i64,
+        before: i64,
+    ) -> Result<Vec<(i64, i64)>> {
         let url = format!(
             "{}/api/events?cameras={camera}&after={after}&before={before}             &limit=500&include_thumbnails=0",
             self.config.base_url()
@@ -504,14 +509,23 @@ impl FrigateClient {
         let text = response.text().await.unwrap_or_default();
         let events: Vec<serde_json::Value> = serde_json::from_str(&text)
             .map_err(|err| CoreError::parse(format!("the event list is not JSON: {err}")))?;
-        let mut times: Vec<i64> = events
+        let mut spans: Vec<(i64, i64)> = events
             .iter()
-            .filter_map(|event| event.get("start_time")?.as_f64())
-            .map(|at| at as i64)
+            .filter_map(|event| {
+                let start = event.get("start_time")?.as_f64()? as i64;
+                // An event still going has no end yet: it is a moment, and a
+                // moment is a second wide on the strip.
+                let end = event
+                    .get("end_time")
+                    .and_then(|end| end.as_f64())
+                    .map(|end| end as i64)
+                    .unwrap_or(start + 1);
+                Some((start, end))
+            })
             .collect();
-        times.sort_unstable();
-        times.dedup();
-        Ok(times)
+        spans.sort_unstable();
+        spans.dedup();
+        Ok(spans)
     }
 
     /// The days a camera has recordings on, as the box names them - `2026-10-31`.

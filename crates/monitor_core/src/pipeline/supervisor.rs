@@ -125,6 +125,7 @@ impl Supervisor {
                 ChannelCommand::HoldClip { index, held } => self.hold_clip(index, held),
                 ChannelCommand::SeekFragment { index, at } => self.seek_fragment(index, at),
                 ChannelCommand::PrefetchFragment { index, at } => self.prefetch_fragment(index, at),
+                ChannelCommand::SetRate { index, rate } => self.set_rate(index, rate),
                 ChannelCommand::Suspend { index } => self.suspend(index),
                 ChannelCommand::Wake => self.wake(),
                 ChannelCommand::PreferHardware(prefer) => self.prefer_hardware(prefer),
@@ -283,6 +284,13 @@ impl Supervisor {
     /// Told rather than replaced, for the same reason as a hold: the session is
     /// what knows where the recording has got to, and reopening the channel
     /// would fetch the init segment and start a decoder again.
+    fn set_rate(&mut self, index: usize, rate: f32) {
+        if let Some(control) = self.channels.get(&index).and_then(|runtime| runtime.endpoint.control.as_ref()) {
+            control.set_rate(rate);
+            tracing::debug!(target: "xgview::pipeline", index, rate, "playback rate");
+        }
+    }
+
     fn seek_fragment(&mut self, index: usize, at: i64) {
         if let Some(control) = self.channels.get(&index).and_then(|runtime| runtime.endpoint.control.as_ref()) {
             control.jump(at);

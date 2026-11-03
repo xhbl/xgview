@@ -62,12 +62,12 @@ pub const SOUND: bool = true;
 /// Deep enough for a track, the ticks over it and a row of labels under that,
 /// and no deeper: the panel covers the picture wherever it has no black to sit
 /// in.
-pub const TIMELINE: f32 = 48.0;
+pub const TIMELINE: f32 = 58.0;
 
 /// The panel's whole depth when it carries a timeline and one row of controls.
 ///
 /// Two rows of controls are [`FULL`] plus another row; see [`depth`].
-pub const FULL: f32 = THICK + GAP + TIMELINE;
+pub const FULL: f32 = INNER + THICK + ROW_GAP + TIMELINE;
 
 /// The panel's depth with `rows` rows of controls, and a timeline under them
 /// when `timeline`.
@@ -77,27 +77,34 @@ pub const FULL: f32 = THICK + GAP + TIMELINE;
 /// why this is a function and not the constant it used to be.
 pub fn depth(rows: usize, timeline: bool) -> f32 {
     let rows = rows.max(1) as f32;
-    let controls = rows * THICK + (rows - 1.0) * GAP;
+    let controls = rows * THICK + (rows - 1.0) * ROW_GAP;
     if timeline {
-        controls + GAP + TIMELINE
+        INNER + controls + ROW_GAP + TIMELINE
     } else {
-        controls
+        INNER + controls + INNER
     }
 }
 
 /// Which controls go on which line, in order.
 ///
-/// Greedy, and the line breaks where the next control would not fit: a strip
-/// laid out by arithmetic rather than by eye, where the alternative - balancing
-/// the lines - would move a control the viewer has just learned the place of
-/// every time one was added.
-fn wrap(widths: &[f32], available: f32) -> Vec<Vec<usize>> {
+/// Greedy, and the line breaks where the next control would not fit, or where
+/// `per_row` says it must: a strip laid out by arithmetic rather than by eye,
+/// where the alternative - balancing the lines - would move a control the viewer
+/// has just learned the place of every time one was added.
+///
+/// `break_after` is what makes a recording's two lines the two lines it means:
+/// the transport on one and the timeline's own controls on the other, rather
+/// than whatever a greedy fill happens to leave on each. It is the index of the
+/// control the second line starts at, and `None` when the strip is short enough
+/// that fitting is the only question.
+fn wrap(widths: &[f32], available: f32, break_after: Option<usize>) -> Vec<Vec<usize>> {
     let mut rows: Vec<Vec<usize>> = Vec::new();
     let mut row: Vec<usize> = Vec::new();
     let mut used = 0.0;
     for (index, width) in widths.iter().enumerate() {
         let wider = if row.is_empty() { *width } else { used + GAP + *width };
-        if !row.is_empty() && wider + 2.0 * PAD > available {
+        let broken = break_after == Some(index);
+        if !row.is_empty() && (broken || wider + 2.0 * PAD > available) {
             rows.push(std::mem::take(&mut row));
             used = *width;
         } else {
@@ -124,14 +131,19 @@ fn row_width(row: &[usize], widths: &[f32]) -> f32 {
 /// a scrub; the picture may be wider still.
 const WIDEST: f32 = 1180.0;
 
-/// Distance kept from the picture edge, in points.
+/// Distance kept from the picture edge along the strip, in points.
 ///
-/// Also what keeps the bar out of the band a touch screen's own gesture
-/// navigation claims along the screen's edge.
+/// Also the default distance from the docked edge: a caller may ask for less,
+/// and a recording does on a wide picture - see `XgViewApp::tile_bar_margin`.
 pub const EDGE: f32 = 24.0;
 
 /// Thickness of the strip, across the picture's edge.
-const THICK: f32 = 56.0;
+///
+/// Forty-four: a forty-point control with a point above and below it. Two lines
+/// of them are then [`ROW_GAP`] and two points apart, which is the seven a
+/// viewer sees - half of what two forty-eight-point lines with six between them
+/// left.
+const THICK: f32 = 44.0;
 
 /// How far the strip reaches in from the picture edge.
 ///
@@ -141,10 +153,34 @@ const THICK: f32 = 56.0;
 pub const DEPTH: f32 = EDGE + THICK;
 
 /// Side of a control across the strip, and of a square icon control along it.
-const BUTTON_H: f32 = 44.0;
+///
+/// Forty, where the plan said forty-four. A recording carries twelve controls -
+/// the whole of a transport and the whole of a timeline's zoom - and six of them
+/// have to stand in one line on a phone held upright: 6 x 40 + 5 x 6 + 12 is 282
+/// inside the 363 a 411-wide picture leaves, and 318 with the edge margins, which
+/// is what a 320-wide screen has. At forty-four they would not fit, and the
+/// alternative - three lines on a phone - is a panel deeper than the picture.
+const BUTTON_H: f32 = 40.0;
 
-/// Gap between two controls.
-const GAP: f32 = 8.0;
+/// Gap between two controls on one line.
+const GAP: f32 = 6.0;
+
+/// Room between the controls and the panel's own edge, across the strip.
+///
+/// Four, because a control flush with the panel's rounded corner reads as
+/// clipped by it. At the far edge always, and at the docked edge only when there
+/// is no timeline under the controls - a timeline brings its own inset, and the
+/// row is where the panel's edge is.
+const INNER: f32 = 4.0;
+
+/// Gap between two lines of controls, across the strip.
+///
+/// Three, where the gap along a line is six: the lines are two halves of one
+/// panel and read as a block, so they sit closer to each other than the controls
+/// within a line do. With a forty-point control in a forty-four-point line, the
+/// space a viewer sees between two lines is seven points - half of the fourteen
+/// it was.
+const ROW_GAP: f32 = 3.0;
 
 /// Padding between the controls and the strip's rounded end.
 const PAD: f32 = 6.0;
@@ -157,6 +193,10 @@ const RADIUS: u8 = 12;
 pub enum Control {
     /// A shape, drawn square.
     Icon(Icon),
+    /// A short word, drawn square: the speed the recording plays at, `1×` or
+    /// `4×`. The one control whose state cannot be a shape - a picture cannot
+    /// say whether it is two times or four.
+    Label(&'static str),
     /// The one control a call has: a red button carrying the handset that ends
     /// the talk-back. It takes over the whole bar while the viewer is talking,
     /// so that hanging up is one press and nothing else can be pressed by
@@ -179,7 +219,7 @@ pub fn icon_width() -> f32 {
 /// A focus on any of these ids is a focus the bar owns, whether or not that
 /// control is on screen this frame - the microphone a call has just turned into
 /// the handset is one, and the handset it becomes is another.
-pub const CONTROLS: usize = 9;
+pub const CONTROLS: usize = 12;
 
 /// Which edge of the picture the bar is docked to, in the picture's own frame.
 ///
@@ -326,11 +366,17 @@ pub fn owns(id: Id) -> bool {
 /// of controls over it, and a recording is scrubbed along a timeline that cannot
 /// be anywhere else - so this is the one thing that keeps the row off a picture
 /// down to a postage stamp.
-pub fn fits_timeline(tile: Rect, rotated: bool, widths: &[f32]) -> bool {
+pub fn fits_timeline(
+    tile: Rect,
+    rotated: bool,
+    margin: f32,
+    widths: &[f32],
+    break_after: Option<usize>,
+) -> bool {
     let across = if rotated { tile.width() } else { tile.height() };
     let local = if rotated { vec2(tile.height(), tile.width()) } else { tile.size() };
-    let rows = wrap(widths, (local.x - 2.0 * EDGE).max(0.0));
-    across >= EDGE + depth(rows.len(), true)
+    let rows = wrap(widths, (local.x - 2.0 * EDGE).max(0.0), break_after);
+    across >= margin + depth(rows.len(), true)
 }
 
 /// The navigation scope the controls register under.
@@ -390,12 +436,20 @@ impl Layout {
 /// The side it is docked to is the picture's own: `Dock::Bottom` is the edge the
 /// status bar would be on in a landscape wall, and the screen's left edge once
 /// the picture is turned.
-pub fn layout(tile: Rect, rotated: bool, dock: Dock, widths: &[f32], timeline: bool) -> Layout {
+pub fn layout(
+    tile: Rect,
+    rotated: bool,
+    dock: Dock,
+    margin: f32,
+    widths: &[f32],
+    break_after: Option<usize>,
+    timeline: bool,
+) -> Layout {
     let local = if rotated { vec2(tile.height(), tile.width()) } else { tile.size() };
     // The room a line of controls has: the picture's own length, less the margin
     // the panel keeps from each end.
     let available = (local.x - 2.0 * EDGE).max(0.0);
-    let rows = wrap(widths, available);
+    let rows = wrap(widths, available, break_after);
     let widest = rows.iter().map(|row| row_width(row, widths)).fold(0.0, f32::max);
     // A timeline wants the width of the picture, less the margin it keeps from
     // the edge - and no more than `WIDEST`, where a scrub would ask the eye to
@@ -409,8 +463,8 @@ pub fn layout(tile: Rect, rotated: bool, dock: Dock, widths: &[f32], timeline: b
     let depth = depth(rows.len(), timeline);
     let x = ((local.x - length) * 0.5).max(0.0);
     let y = match dock {
-        Dock::Top => EDGE,
-        Dock::Bottom => (local.y - EDGE - depth).max(EDGE),
+        Dock::Top => margin,
+        Dock::Bottom => (local.y - margin - depth).max(margin),
     };
 
     let bar = Rect::from_min_size(egui::pos2(x, y), vec2(length, depth));
@@ -418,15 +472,25 @@ pub fn layout(tile: Rect, rotated: bool, dock: Dock, widths: &[f32], timeline: b
     // docked to: the timeline is the row nearest that edge, so the controls
     // rise by one row when it appears rather than jumping to another edge - and
     // by two when they wrap.
-    let controls_depth = depth - if timeline { GAP + TIMELINE } else { 0.0 };
+    let controls_depth = if timeline {
+        depth - INNER - ROW_GAP - TIMELINE
+    } else {
+        depth - 2.0 * INNER
+    };
+    // The controls sit against the far edge of the panel with [`INNER`] between
+    // them and it, and against the docked edge only when nothing is under them.
     let controls_top = match dock {
-        Dock::Top => y + depth - controls_depth,
-        Dock::Bottom => y,
+        Dock::Top => y + depth - INNER - controls_depth,
+        Dock::Bottom => y + INNER,
     };
     let mut buttons = vec![Rect::NOTHING; widths.len()];
     for (line, row) in rows.iter().enumerate() {
-        let top = controls_top + line as f32 * (THICK + GAP);
-        let mut left = x + PAD;
+        let top = controls_top + line as f32 * (THICK + ROW_GAP);
+        // Centred in the panel, which is the picture's width when there is a
+        // timeline under it: a line of controls pushed against one end of a wide
+        // panel reads as belonging to that end.
+        let used = row_width(row, widths) - 2.0 * PAD;
+        let mut left = x + (length - used) * 0.5;
         for index in row {
             let at = top + (THICK - BUTTON_H) * 0.5;
             buttons[*index] = Rect::from_min_size(egui::pos2(left, at), vec2(widths[*index], BUTTON_H));
@@ -436,7 +500,7 @@ pub fn layout(tile: Rect, rotated: bool, dock: Dock, widths: &[f32], timeline: b
     let row = match dock {
         Dock::Top => Rect::from_min_max(egui::pos2(x + PAD, y + PAD), egui::pos2(x + length - PAD, y + TIMELINE)),
         Dock::Bottom => Rect::from_min_max(
-            egui::pos2(x + PAD, y + controls_depth + GAP),
+            egui::pos2(x + PAD, y + INNER + controls_depth + ROW_GAP),
             egui::pos2(x + length - PAD, y + depth - PAD),
         ),
     };
@@ -538,6 +602,9 @@ pub fn draw(
             Control::Icon(icon) => {
                 icons::button_in(ui, *rect, self::control(index), *icon, false, false, "", rotated)
             }
+            Control::Label(text) => {
+                icons::label_in(ui, *rect, self::control(index), text, "", rotated)
+            }
             Control::Hangup => {
                 icons::danger_in(ui, *rect, self::control(index), Icon::Hangup, "", rotated)
             }
@@ -568,12 +635,12 @@ mod tests {
     }
 
     fn placed(tile: Rect, rotated: bool, dock: Dock, widths: &[f32]) -> Layout {
-        layout(tile, rotated, dock, widths, false)
+        layout(tile, rotated, dock, EDGE, widths, None, false)
     }
 
     /// The same, with a timeline row under the controls.
     fn playing(tile: Rect, dock: Dock, widths: &[f32]) -> Layout {
-        layout(tile, false, dock, widths, true)
+        layout(tile, false, dock, EDGE, widths, None, true)
     }
 
     /// With a timeline the panel is deeper and wider, and its controls rise by
@@ -586,10 +653,14 @@ mod tests {
         let plain = placed(landscape(), false, Dock::Bottom, &widths);
         let full = playing(landscape(), Dock::Bottom, &widths);
 
-        assert!((full.bar.height() - plain.bar.height() - (TIMELINE + GAP)).abs() < 0.5);
+        // The timeline and the gap above it, less the inset it replaces at the
+        // docked edge: with a row under the controls the panel's own edge is the
+        // row's, and the inset is only at the far end.
+        let grows = TIMELINE + ROW_GAP - INNER;
+        assert!((full.bar.height() - plain.bar.height() - grows).abs() < 0.5);
         // The edge it is docked to has not moved; only the far side has.
         assert!((full.bar.bottom() - plain.bar.bottom()).abs() < 0.5);
-        assert!((plain.buttons[0].top() - full.buttons[0].top() - (TIMELINE + GAP)).abs() < 0.5);
+        assert!((plain.buttons[0].top() - full.buttons[0].top() - grows).abs() < 0.5);
 
         let row = full.timeline.expect("a timeline");
         assert!(row.top() >= full.buttons[0].bottom(), "the row is under the controls");
@@ -715,29 +786,74 @@ mod tests {
     #[test]
     fn a_timeline_is_given_to_a_tile_with_room_for_both_rows() {
         let five = [icon_width(); 5];
-        assert!(fits_timeline(landscape(), false, &five));
-        assert!(fits_timeline(portrait(), false, &five));
-        assert!(fits_timeline(portrait(), true, &five));
-        assert!(fits_timeline(landscape(), true, &five));
+        assert!(fits_timeline(landscape(), false, EDGE, &five, None));
+        assert!(fits_timeline(portrait(), false, EDGE, &five, None));
+        assert!(fits_timeline(portrait(), true, EDGE, &five, None));
+        assert!(fits_timeline(landscape(), true, EDGE, &five, None));
 
         // A strip of a tile has room for the controls and not for the row.
         let shallow = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 100.0));
-        assert!(!fits_timeline(shallow, false, &five));
-        assert!(fits_timeline(shallow, true, &five), "its width is the depth when turned");
+        assert!(!fits_timeline(shallow, false, EDGE, &five, None));
+        assert!(fits_timeline(shallow, true, EDGE, &five, None), "its width is the depth when turned");
         let narrow = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 1920.0));
-        assert!(!fits_timeline(narrow, true, &five));
-        assert!(fits_timeline(narrow, false, &five));
+        assert!(!fits_timeline(narrow, true, EDGE, &five, None));
+        assert!(fits_timeline(narrow, false, EDGE, &five, None));
         // And the edge it keeps clear of the picture edge is part of the room.
         let exact = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, EDGE + FULL));
-        assert!(fits_timeline(exact, false, &five));
-        assert!(!fits_timeline(exact.shrink2(vec2(0.0, 1.0)), false, &five), "a point short");
+        assert!(fits_timeline(exact, false, EDGE, &five, None));
+        assert!(!fits_timeline(exact.shrink2(vec2(0.0, 1.0)), false, EDGE, &five, None), "a point short");
 
         // Wrapping makes the panel deeper, so a tile that holds one row of five
         // need not hold two.
         let eight = [icon_width(); 8];
         let narrow_tile = Rect::from_min_size(Pos2::ZERO, vec2(320.0, 150.0));
-        assert!(fits_timeline(narrow_tile, false, &five));
-        assert!(!fits_timeline(narrow_tile, false, &eight), "a second line needs 64 more");
+        assert!(fits_timeline(narrow_tile, false, EDGE, &five, None));
+        assert!(!fits_timeline(narrow_tile, false, EDGE, &eight, None), "a second line needs 64 more");
+    }
+
+    /// The controls keep a little off the panel's own edge: at both ends when
+    /// there is nothing under them, and at the far end only when a timeline is -
+    /// the row is where the panel's edge is then.
+    #[test]
+    fn the_controls_keep_off_the_panels_edges() {
+        let widths = [icon_width(); 2];
+        // The inset, and the slack a control has in a line of its own.
+        let room = INNER + (THICK - BUTTON_H) * 0.5;
+        let plain = placed(landscape(), false, Dock::Bottom, &widths);
+        assert!((plain.buttons[0].top() - plain.bar.top() - room).abs() < 0.5, "above");
+        assert!((plain.bar.bottom() - plain.buttons[0].bottom() - room).abs() < 0.5, "below");
+
+        let full = playing(landscape(), Dock::Bottom, &widths);
+        assert!((full.buttons[0].top() - full.bar.top() - room).abs() < 0.5, "above");
+        let row = full.timeline.expect("a timeline");
+        assert!((full.bar.bottom() - row.bottom() - PAD).abs() < 0.5, "the row's own inset");
+        assert!(row.top() > full.buttons[0].bottom(), "and a gap under the controls");
+    }
+
+    /// A line of controls is centred in the panel, not pushed against one end of
+    /// it: a timeline makes the panel as wide as the picture, and controls at
+    /// the left of that read as belonging to the left.
+    #[test]
+    fn a_line_of_controls_is_centred_in_the_panel() {
+        let widths = [icon_width(); 3];
+        let centred = playing(landscape(), Dock::Bottom, &widths);
+        let first = centred.buttons[0];
+        let last = centred.buttons[2];
+        let left = first.left() - centred.bar.left();
+        let right = centred.bar.right() - last.right();
+        assert!((left - right).abs() < 1.0, "equal margins: {left} and {right}");
+
+        // Each line is centred on its own, so two lines of different lengths
+        // stack as a block rather than against a common edge.
+        let widths = [icon_width(); 5];
+        let two = layout(portrait(), false, Dock::Bottom, EDGE, &widths, Some(3), true);
+        for line in [&two.buttons[..3], &two.buttons[3..]] {
+            let first = line[0];
+            let last = line[line.len() - 1];
+            let left = first.left() - two.bar.left();
+            let right = two.bar.right() - last.right();
+            assert!((left - right).abs() < 1.0, "line margins: {left} and {right}");
+        }
     }
 
     /// A line of controls breaks where the next one would not fit, and the
@@ -746,13 +862,13 @@ mod tests {
     fn a_narrow_picture_wraps_the_controls() {
         let widths = [icon_width(); 8];
         // A 1920 wide picture holds all eight on one line.
-        let wide = layout(landscape(), false, Dock::Bottom, &widths, true);
+        let wide = layout(landscape(), false, Dock::Bottom, EDGE, &widths, None, true);
         assert_eq!(wide.buttons.len(), 8);
         assert!(wide.buttons.iter().all(|rect| rect.center().y == wide.buttons[0].center().y));
         // A phone in portrait is 411 wide: 363 for the panel, which is six
         // controls a line - 316 - and not seven, which needs 368.
         let phone = Rect::from_min_size(Pos2::ZERO, vec2(411.0, 800.0));
-        let narrow = layout(phone, false, Dock::Bottom, &widths, true);
+        let narrow = layout(phone, false, Dock::Bottom, EDGE, &widths, None, true);
         assert_eq!(narrow.buttons.len(), 8);
         let lines: Vec<f32> = {
             let mut seen: Vec<f32> = Vec::new();

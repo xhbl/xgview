@@ -11,8 +11,8 @@
 //! else that needs it.
 
 use egui::{
-    Color32, CornerRadius, Id, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui,
-    Vec2, vec2,
+    Color32, CornerRadius, FontId, Id, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind,
+    Ui, Vec2, vec2,
 };
 
 use crate::theme;
@@ -81,10 +81,16 @@ pub enum Icon {
     EventBack,
     /// The event after this moment: the same, mirrored, pointing forward.
     EventForward,
-    /// How much of the recording the timeline shows: two open rings facing each
-    /// other with a double-headed arrow through them, which is what "wider or
-    /// narrower" looks like without a word.
-    Zoom,
+    /// The days the camera recorded on: a page with a header and two rings
+    /// through it, which is what a calendar looks like at this size.
+    Calendar,
+    /// More detail on the timeline: two open rings facing each other with a
+    /// double-headed arrow through them, the arrows leaving the middle - which
+    /// is what "wider or narrower" looks like without a word.
+    TimelineZoomIn,
+    /// The whole of it: the same rings turned inside out, their arrows coming
+    /// in from the sides and stopping inside - the same control, the other way.
+    TimelineZoomOut,
     /// Back to the camera as it is now: a video camera, body and lens - the
     /// picture itself, since that is what the button switches to.
     Live,
@@ -224,6 +230,52 @@ pub fn danger_in(
     hover_text(response, tooltip)
 }
 
+/// A button carrying a short word rather than a shape, drawn in a rectangle the
+/// caller has placed.
+///
+/// The speed a recording plays at is the one control whose state cannot be a
+/// shape: a picture of a fast-forward cannot say whether it is two times or
+/// four. `turned` turns the word with the picture, the way [`button_in`] turns a
+/// glyph.
+pub fn label_in(ui: &mut Ui, rect: Rect, id: Id, text: &str, tooltip: &str, turned: bool) -> Response {
+    let response = ui.interact(rect, id, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&response);
+        let corner = CornerRadius::same(theme::radius::M);
+        let frame = rect.expand(visuals.expansion);
+        ui.painter().rect_filled(frame, corner, visuals.weak_bg_fill);
+        if visuals.bg_stroke.width > 0.0 {
+            ui.painter().rect_stroke(frame, corner, visuals.bg_stroke, StrokeKind::Inside);
+        }
+        let colour = ui
+            .visuals()
+            .override_text_color
+            .unwrap_or_else(|| visuals.text_color());
+        let font = FontId::proportional((rect.height() * 0.34).clamp(10.0, 15.0));
+        let galley = ui.fonts(|fonts| fonts.layout_no_wrap(text.to_owned(), font, colour));
+        let size = galley.size();
+        let centre = rect.center();
+        // A quarter turn clockwise about `pos` puts the word's own centre at
+        // `(-h/2, w/2)` from it, so the origin has to be moved back by that much
+        // for the word to sit on the button.
+        let pos = if turned {
+            Pos2::new(centre.x + size.y * 0.5, centre.y - size.x * 0.5)
+        } else {
+            Pos2::new(centre.x - size.x * 0.5, centre.y - size.y * 0.5)
+        };
+        ui.painter().add(egui::epaint::TextShape {
+            pos,
+            galley,
+            underline: Stroke::NONE,
+            fallback_color: colour,
+            override_text_color: None,
+            opacity_factor: 1.0,
+            angle: if turned { std::f32::consts::FRAC_PI_2 } else { 0.0 },
+        });
+    }
+    hover_text(response, tooltip)
+}
+
 /// [`Response::on_hover_text`], with an empty tooltip meaning none: the bar's
 /// controls carry no word of their own, and an empty box would still be drawn.
 fn hover_text(response: Response, tooltip: &str) -> Response {
@@ -275,7 +327,12 @@ fn paint_button(
     // fifth more brings them to the same visual size as the rest.
     let detail = matches!(
         icon,
-        Icon::StepBack | Icon::StepForward | Icon::EventBack | Icon::EventForward | Icon::Zoom
+        Icon::StepBack
+            | Icon::StepForward
+            | Icon::EventBack
+            | Icon::EventForward
+            | Icon::TimelineZoomIn
+            | Icon::TimelineZoomOut
     );
     let extent = side * if detail { glyph * 1.15 } else { glyph };
     let glyph_rect = Rect::from_center_size(rect.center(), Vec2::splat(extent));
@@ -521,7 +578,18 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
                 stroke,
             ));
         }
-        Icon::Zoom => {
+        Icon::Calendar => {
+            painter.rect_stroke(
+                square(0.06, 0.14, 0.94, 0.92),
+                CornerRadius::same(2),
+                stroke,
+                StrokeKind::Inside,
+            );
+            painter.add(line(&[at(0.06, 0.36), at(0.94, 0.36)]));
+            painter.add(line(&[at(0.30, 0.06), at(0.30, 0.24)]));
+            painter.add(line(&[at(0.70, 0.06), at(0.70, 0.24)]));
+        }
+        Icon::TimelineZoomIn => {
             // Two open rings facing each other - a link that can be pulled
             // apart - and a double-headed arrow through them. The rings and
             // the arrow share the weight of every other icon's line.
@@ -532,6 +600,17 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
             painter.add(Shape::line(vec![at(0.195, 0.5), at(0.805, 0.5)], light));
             painter.add(chevron(rect, turned, (0.195, 0.5), (-1.0, 0.0), 0.125, light));
             painter.add(chevron(rect, turned, (0.805, 0.5), (1.0, 0.0), 0.125, light));
+        }
+        Icon::TimelineZoomOut => {
+            // `TimelineZoomIn` turned inside out: the rings now close towards
+            // the middle and open outwards, and each arrow comes in from its own
+            // side, goes through the opening and stops inside the ring.
+            painter.add(circle_arc(rect, turned, (0.22, 0.5), 0.21, 225.0, 495.0, stroke));
+            painter.add(circle_arc(rect, turned, (0.78, 0.5), 0.21, 45.0, 315.0, stroke));
+            painter.add(Shape::line(vec![at(0.03, 0.5), at(0.27, 0.5)], stroke));
+            painter.add(Shape::line(vec![at(0.97, 0.5), at(0.73, 0.5)], stroke));
+            painter.add(chevron(rect, turned, (0.27, 0.5), (1.0, 0.0), 0.12, stroke));
+            painter.add(chevron(rect, turned, (0.73, 0.5), (-1.0, 0.0), 0.12, stroke));
         }
         Icon::Sound => {
             painter.add(speaker());

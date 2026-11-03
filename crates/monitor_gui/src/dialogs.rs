@@ -151,13 +151,13 @@ pub enum BackgroundEvent {
         /// kept until the seek that wants it.
         ahead: bool,
     },
-    /// The moments the camera's events began, in the stretch asked for. `None`
-    /// when the box could not be asked at all, which is a timeline with no marks
-    /// rather than a camera that noticed nothing.
+    /// When the camera's events began and ended, in the stretch asked for.
+    /// `None` when the box could not be asked at all, which is a timeline with
+    /// no marks rather than a camera that noticed nothing.
     EventsReady {
         index: usize,
         camera_id: String,
-        events: Option<Vec<i64>>,
+        events: Option<Vec<(i64, i64)>>,
     },
     /// The days the camera recorded on, as the box names them - `2026-10-31`.
     /// `None` when the camera could not be asked at all, which is not the same

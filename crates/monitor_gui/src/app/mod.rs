@@ -434,8 +434,14 @@ enum TileBarAction {
     PrevEvent,
     /// Step to the event after it.
     NextEvent,
-    /// Change how much of the recording the timeline shows.
-    Width,
+    /// More detail on the timeline.
+    ZoomIn,
+    /// The whole of it.
+    ZoomOut,
+    /// Play faster, or back to normal.
+    Speed,
+    /// Show the days, or go back to the stretch of one.
+    Date,
     /// Leave the recording and go back to the camera.
     Live,
 }
