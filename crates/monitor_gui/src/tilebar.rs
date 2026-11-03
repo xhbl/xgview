@@ -59,10 +59,18 @@ pub const SOUND: bool = true;
 
 /// Height of the timeline row, under the controls.
 ///
-/// Deep enough for a track, the ticks over it and a row of labels under that,
-/// and no deeper: the panel covers the picture wherever it has no black to sit
-/// in.
+/// Deep enough for a row of times, the ruler under them, the track and the
+/// moment under the cursor, and no deeper: the panel covers the picture wherever
+/// it has no black to sit in.
 pub const TIMELINE: f32 = 58.0;
+
+/// The timeline row's own depth: [`TIMELINE`] less the [`PAD`] it is inset by at
+/// the docked edge.
+///
+/// What the row is drawn in, so a band placed as a fraction of it lands where
+/// the same fraction would on any other row - see `across` in
+/// `XgViewApp::draw_timeline`.
+pub const TIMELINE_ROW: f32 = TIMELINE - PAD;
 
 /// The panel's whole depth when it carries a timeline and one row of controls.
 ///

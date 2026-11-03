@@ -39,6 +39,13 @@ pub const FOCUS: Color32 = Color32::from_rgb(0, 229, 255);
 pub const FOCUS_WIDTH: f32 = 2.0;
 /// Accent used by buttons and sub stream badges.
 pub const ACCENT: Color32 = Color32::from_rgb(80, 190, 255);
+/// The track a recording's timeline is drawn in: what a stretch with nothing
+/// recorded looks like.
+///
+/// A shade above [`PANEL`] and well below the [`ACCENT`] band, so a hole in a
+/// recording reads as a stretch of empty track rather than as the end of the
+/// band - and the strip still reads as one strip across it.
+pub const TRACK: Color32 = Color32::from_rgb(38, 43, 52);
 /// Live indicator.
 pub const LIVE: Color32 = Color32::from_rgb(74, 222, 128);
 /// Warning (main stream badge, retries).

@@ -275,6 +275,10 @@ impl XgViewApp {
         // over the whole wall, and no tile beside it to catch a drag as one. See
         // `PictureZoom`.
         let pinched = ui.ctx().input(|input| pinch_frame(input, area));
+        // Unless it is over the strip: two fingers there are asking for a wider
+        // or narrower timeline, and the picture keeps the window it has.
+        let pinched =
+            pinched.filter(|(_, at)| !self.timeline_row(area).is_some_and(|row| row.contains(*at)));
         // A wheel is the same thing to the picture as a pinch - the fingers or
         // the mouse, pushed in about the point between them - and it is read
         // separately only because egui hands it over as a *scroll*: the interface
@@ -713,6 +717,36 @@ impl XgViewApp {
             entries.push((tilebar::Control::Icon(Icon::History), TileBarAction::Playback));
         }
         (entries, None)
+    }
+
+    /// Where the timeline row is on screen this frame, if there is one.
+    ///
+    /// The wall asks before it gives a pinch to the picture: a gesture made over
+    /// the strip is the strip's - it changes how much of the recording is shown,
+    /// not how much of the picture - the same way one made over a panel belongs
+    /// to the panel. See [`XgViewApp::timeline_input`].
+    pub(super) fn timeline_row(&self, tile: Rect) -> Option<Rect> {
+        let playing = self.scheduler.zoom().is_some_and(|slot| self.is_playing_back(slot));
+        if !playing {
+            return None;
+        }
+        let rotated = self.magnified_rotated();
+        let (controls, break_after) = self.tile_bar_entries();
+        let widths = vec![tilebar::icon_width(); controls.len()];
+        let margin = self.tile_bar_margin();
+        if !tilebar::fits_timeline(tile, rotated, margin, &widths, break_after) {
+            return None;
+        }
+        let layout = tilebar::layout(
+            tile,
+            rotated,
+            self.tile_bar.dock(),
+            margin,
+            &widths,
+            break_after,
+            true,
+        );
+        layout.timeline
     }
 
     /// How far in from the docked edge the panel sits.

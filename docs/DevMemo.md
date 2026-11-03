@@ -4260,7 +4260,7 @@ rendering, not on the wall.
 
 ## 58. The timeline becomes a strip that moves under a cursor
 
-*Landed 2026-11-03, in 2.1.50.*
+*Landed 2026-11-03, in 2.1.50, and carried on in 2.1.51.*
 
 Seven changes, and five of them are one idea: **the cursor is the still point.**
 Until now the strip was a picture of a stretch of recording and the cursor moved
@@ -4333,6 +4333,60 @@ audio is decoded as it arrives and there is nothing here that could resample it,
 so at two times the picture would run ahead of the sound and the two would never
 meet again. A silent fast-forward is the honest half of a speed control.
 
+**The range stopped following the strip.** The playlist a session is opened on used
+to be as wide as the strip was drawn, because a seek was a pointer press and what
+could be pointed at was what one session had to hold. The strip slides now, so
+that equation is wrong: at ten minutes the range was ten minutes, and a drag
+longer than five left it - a session, not a fragment. Every seek and the way into
+a recording now ask for the widest range the box serves, two hours, centred on the
+moment. Measured on the box of 2026-11-03: two hours is 148-151 ms and 16-21 KB of
+playlist, against 129-218 ms for one hour and 101-150 ms for ten minutes, so the
+extra hour is nearly free and a drag has an hour either way before it costs
+anything.
+
+What this does not fix is a strip drawn wider than two hours: at the widest levels
+the strip still shows more than one range, and a drag there is still a session.
+That is the box's limit - three hours answers `503` - and not something the
+interface can arrange.
+
+**The strip is as long as the recording, not as long as the last read.** Two
+things were bounding it, and neither was the recording:
+
+* `clamp_centre` held the cursor inside the *segment list*, which is an hour when
+  playback opens and grew only when the strip was drawn wider than it. A drag at
+  ten minutes therefore stopped after an hour - the list's end, not the
+  recording's. The drag now reads the list on the way: within half a strip of its
+  start it asks for a stretch either side, which is at least a strip wide, and the
+  list grows under the finger.
+* `seek` snapped to `nearest` of what the list held, so a target outside it became
+  the list's edge. A target outside the list now reads the list around it and
+  comes back - `to_seek`, the same way a picked day is waited for - and the cursor
+  waits where the finger left it meanwhile.
+
+**And a jump is a jump.** The events list is the stretch the strip was showing,
+so the two event buttons could only find events inside it - an event one session
+away was "no event that way". A press that finds nothing now reads a day of events
+and makes the jump when they arrive; if the event is beyond the segment list, the
+seek above reads that too. Two reads, one press, and the picture ends up where the
+event was.
+
+**A drag shows itself while it happens.** It did not, and the reason was an
+ordering: `centre_of` asked the frame store first, and the frame store always has
+an answer while a recording plays - so the strip was drawn from the picture the
+drag began from until the finger lifted, and the finger saw nothing move. The
+finger now comes first, then the seek that has not arrived, then the picture.
+`timeline_input` runs before `draw_timeline` in the same frame, so the strip a
+viewer sees is the one their finger has just left it at.
+
+**Two fingers over the strip are the strip's.** A pinch is a width, not a place:
+it walks the same ladder the zoom buttons do, and the picture keeps the window it
+has - the wall asks `timeline_row` before it gives a pinch to the picture, the way
+it already asks whether a gesture was made over a panel. A pinch arrives as a
+ratio per frame rather than as a distance, so the ratios multiply and a step is
+taken each time they have doubled or halved; the rest is carried. A pinch that
+begins after a finger is already down does not also drag: the strip waits where it
+was until the fingers are gone.
+
 **The times are above the strip and the moment below it.** Above, a step a clock
 shows - fifteen seconds at the closest width, two hours at the widest, chosen by
 `tick_step` so that about six labels fit. Below, the moment under the cursor to
@@ -4374,3 +4428,75 @@ and fetch the fragment again - 300 ms for a picture that was already on screen.
 Not watched on screen: the twelve controls, the two lines, the ticks, the stamp
 and the sliding are arithmetic and plumbing. The one thing that was looked at is
 the icons, rendered to a PNG beside the code.
+
+## 59. The strip's upper edge becomes a ruler
+
+*Landed 2026-11-03, in 2.1.51.*
+
+The times above the strip named six moments and nothing said where a moment
+between two of them fell. **A tick now stands at every moment a label names, and
+a shorter one halfway between**, so the eye carries a time from the top down to
+the band instead of guessing at the space in between - and the half hour, which
+had neither a label nor a mark, has a mark.
+
+* **The step is the labels' own**, halved: `ruler_step` is `tick_step / 2`, and a
+  test asserts the halving is exact at every width in `ZOOMS` - the label step is
+  a clock's step, so half of it has to be one too, or a tick lands off the grid
+  the labels are on.
+* **Long six points, short three**, standing out of the band's upper edge into
+  the gap under the times. They are `GRID_LINE` at 0.8 and 0.45: the long one as
+  bright as a label, the short one dim enough to be a division rather than a
+  second time.
+* **The row's four bands are named constants now** - `TIME_ROW` 0.115,
+  `BAND_ROW` 0.48, `BAND` 10, `TICK`, `TICK_MINOR`, `TIME_SIZE` - because the
+  first cut put the band back at 0.42 and the six-point ticks reached a point
+  into the labels. Nothing but arithmetic catches that: the row is
+  `TIMELINE` 58 less the panel's `PAD` 6, so it is 52 deep and the times end at
+  13.0 where the ticks began at 11.9. A test now asserts the tick ends above the
+  times and the band is inside the row.
+* **Turned, the upper edge is the row's right side.** `across` already says so,
+  so the ticks stand out toward `across(0)` and the labels run down the screen
+  turned, as they did.
+
+**A tick drawn as a diagonal leans.** The first cut made a point-wide tick by
+moving its two ends half a point apart *along* the strip - which is a diagonal,
+and at six points long it leans about ten degrees. Nothing about the code reads
+wrong; it is a stroke that is asked to be a width and a line at the same time.
+Both ends now share the place along the strip and the stroke is the width, and
+`tick_ends` is a function so a test can say so: the ends differ only across the
+row.
+
+**And the strip is a track, not a band.** Where nothing was recorded the strip
+was the picture showing through, so a hole in a recording and the end of the
+recording looked the same - and on the box's own timeline the empty stretch is
+the hatched part, which is the one thing the eye needs to tell "no recording"
+from "not much recording". `theme::TRACK` - a shade above `PANEL`, well below the
+band - is now drawn across the whole window first, and the recorded stretches sit
+in it. So a gap reads as empty track, and so does the time before the first
+recording and after the last, where the strip runs off the ends of what exists.
+
+**The step is the strip's, not a fixed six.** `tick_step` asked for `span / 6`
+and nothing else, which had two faults at the ends of the ladder: at two minutes
+a label every thirty seconds still read `HH:MM`, so `14:30` stood there twice;
+and a day on a wide screen still showed six labels across sixteen hundred points,
+three hours apart. The count now comes from the room - `labels_across` measures a
+label with the painter rather than assuming a width, gives up half of one at each
+end because a label is centred on its moment, and `tick_step(span, labels)` takes
+the finest clock step that fits. **A step under a minute names the second**, and
+because that label is wider the step is chosen a second time at that width - so a
+day on a 1920-point strip is now an hour a label, 24 of them where it was eight,
+and the closest width is 24 labels five seconds apart.
+
+Two consequences worth naming:
+
+* The ladder gained 14 400 seconds. Six labels over a day want four hours, and
+  between three and six there was nothing - so a narrow strip fell to six hours
+  and four labels, leaving two of its six slots empty.
+* `ruler_step` divides now rather than halves. Halving 300 seconds is 150, which
+  is not a time a clock shows; the rule is the finest step *on the ladder* that
+  divides a label's own, which makes 300 five one-minute ticks, and never more
+  than five to a label.
+
+All three came back from the screen the same day, which is the point of saying
+so: a lean, a floating band and a time written twice are not things arithmetic
+catches. The tests written after them only hold the ground they were given.

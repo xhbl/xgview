@@ -38,6 +38,10 @@ pub(super) struct Playback {
     /// and the moment under the cursor then. What moves is the strip, so this is
     /// the anchor a drag is measured from rather than a place the cursor goes.
     pub(super) drag: Option<(f32, i64)>,
+    /// How far a pinch over the strip has spread, as a ratio that starts at one.
+    /// A pinch arrives as a factor per frame, so a step of the ladder is taken
+    /// when the product of them has doubled or halved.
+    pub(super) pinch: f32,
     /// An arrow held down on the timeline, and since when. A held key walks
     /// further per repeat the longer it is held - see
     /// [`XgViewApp::walk_timeline`].
@@ -96,6 +100,13 @@ pub(super) struct Playback {
     /// The moment a seek is waiting to play, while the range it needs is still
     /// being read.
     pub(super) awaiting: Option<i64>,
+    /// A moment a seek is waiting to reach, while the *segment list* is being
+    /// read to hold it. A drag or a jump can go anywhere the recording does, so
+    /// the list is read on the way rather than being the limit.
+    pub(super) to_seek: Option<i64>,
+    /// Which way a jump was asked for, while the events are being read to find
+    /// one. `true` is forwards.
+    pub(super) to_jump: Option<bool>,
     /// The stretch of segment list being read for a strip wider than what was
     /// held. See [`XgViewApp::read_older`].
     pub(super) reading_older: Option<(i64, i64)>,
@@ -299,6 +310,7 @@ impl XgViewApp {
             source,
             opened: begin.unwrap_or(from),
             speed: 1.0,
+            pinch: 1.0,
             drag: None,
             held: None,
             zoom: SPAN,
@@ -318,6 +330,8 @@ impl XgViewApp {
             to_day: None,
             ahead: None,
             awaiting: None,
+            to_seek: None,
+            to_jump: None,
             reading_older: None,
             oldest: None,
             paused: false,
@@ -370,22 +384,42 @@ impl XgViewApp {
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
-        if playback.events.is_empty() {
-            return;
-        }
+        let index = playback.index;
         let now = self.centre_of(playback);
         let target = if forward {
             playback.events.iter().map(|event| event.0).find(|at| *at > now + 1)
         } else {
             playback.events.iter().rev().map(|event| event.0).find(|at| *at < now - 1)
         };
-        match target {
-            Some(at) => {
-                tracing::debug!(target: "xgview::app", at, forward, "stepping to an event");
-                self.seek(at);
-            }
-            None => tracing::debug!(target: "xgview::app", forward, "no event that way"),
+        if let Some(at) = target {
+            tracing::debug!(target: "xgview::app", at, forward, "stepping to an event");
+            self.seek(at);
+            return;
         }
+        // Nothing in the list - but the list is only the stretch the strip was
+        // showing. A jump goes anywhere the recording does, so the events of the
+        // whole stretch that has been read are asked for and the jump is made
+        // when they arrive. Asking again for a list that already covers it would
+        // be a request a press, so the second answer is the last word.
+        // A day back from the newest moment recorded, which is as far as the
+        // list is worth reading in one go: an event outside it is found by the
+        // press after this one, once the recording has been read that far.
+        let to = playback.segments.last().map_or(now + LOOKBACK, |last| last.end);
+        let (from, to) = (to - DAY, to);
+        let covered = playback
+            .events
+            .first()
+            .zip(playback.events.last())
+            .is_some_and(|(first, last)| first.0 <= from && last.1 >= to);
+        if covered || playback.to_jump.is_some() {
+            tracing::debug!(target: "xgview::app", forward, "no event that way");
+            return;
+        }
+        tracing::debug!(target: "xgview::app", forward, "reading the events for a jump");
+        if let Some(playback) = self.playback.as_mut() {
+            playback.to_jump = Some(forward);
+        }
+        self.read_events_between(index, from, to);
     }
 
     /// The moment under the cursor: the middle of the strip, which never moves.
@@ -395,13 +429,20 @@ impl XgViewApp {
     /// seek that has not arrived yet is already there, and a finger on the strip
     /// has taken the cursor with it.
     fn centre_of(&self, playback: &Playback) -> i64 {
-        self.manager
-            .frames()
-            .latest(playback.index)
-            .and_then(|frame| frame.at)
-            .map(|at| at as i64)
+        // The finger first, then the seek that has not arrived, then the picture.
+        // The finger has to come first or the strip does not move until it is let
+        // go of: the frame store holds the picture the drag began from, and it is
+        // always there while a recording plays.
+        playback
+            .scrub
             .or(playback.pending)
-            .or(playback.scrub)
+            .or_else(|| {
+                self.manager
+                    .frames()
+                    .latest(playback.index)
+                    .and_then(|frame| frame.at)
+                    .map(|at| at as i64)
+            })
             .unwrap_or(playback.opened)
     }
 
@@ -423,10 +464,19 @@ impl XgViewApp {
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
+        let (from, to) = self.window_of(playback);
+        self.read_events_between(index, from, to);
+    }
+
+    /// Reads the events of a stretch. One at a time: a second ask while the
+    /// first is in flight would be two answers for one list.
+    fn read_events_between(&mut self, index: usize, from: i64, to: i64) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
         if playback.reading_events {
             return;
         }
-        let (from, to) = self.window_of(playback);
         let source = playback.source.clone();
         tracing::debug!(target: "xgview::app", index, from, to, "reading the events");
         if let Some(playback) = self.playback.as_mut() {
@@ -452,6 +502,14 @@ impl XgViewApp {
         playback.reading_events = false;
         if let Some(events) = events {
             playback.events = events;
+        }
+        // A jump was waiting for this list: it is made now, and it does not ask
+        // for the list again - `to_jump` is cleared first, so a second answer
+        // that still holds nothing says so instead of reading on.
+        if let Some(forward) = playback.to_jump.take() {
+            if !playback.events.is_empty() {
+                self.jump_event(forward);
+            }
         }
     }
 
@@ -688,7 +746,9 @@ impl XgViewApp {
                 row.right() - row.width() * t
             }
         };
-        let track = across(0.42);
+        // The strip's centre, and the edge of it the ruler stands on: the
+        // times above, the ticks, then the band itself.
+        let track = across(BAND_ROW);
         let band = |from: f32, to: f32, thick: f32| {
             let to = to.max(from + 1.0);
             if horizontal {
@@ -699,6 +759,12 @@ impl XgViewApp {
         };
 
         let painter = ui.painter();
+        // The track the recording sits in: the whole strip, in the colour of
+        // nothing recorded. Drawn first and across the whole window, so a hole
+        // reads as a stretch of empty track rather than as the end of the band -
+        // and so does the time before the first recording and after the last,
+        // where the strip runs off the ends of what exists.
+        painter.rect_filled(band(along(start), along(end), BAND), CornerRadius::same(2), theme::TRACK);
         // The stretches that were recorded. Merged first: the recorder's own file
         // boundaries are fractions of a second apart, and drawing them would put
         // a notch every ten seconds along a recording that is continuous.
@@ -708,7 +774,7 @@ impl XgViewApp {
             }
             let from = along(segment.start.max(start));
             let to = along(segment.end.min(end));
-            painter.rect_filled(band(from, to, 10.0), CornerRadius::same(2), theme::ACCENT.gamma_multiply(0.55));
+            painter.rect_filled(band(from, to, BAND), CornerRadius::same(2), theme::ACCENT.gamma_multiply(0.55));
         }
         // Where the camera noticed something: the same band in the colour the
         // wall uses for a warning, so the strip reads as "recorded, and here is
@@ -719,34 +785,70 @@ impl XgViewApp {
                 continue;
             }
             painter.rect_filled(
-                band(along(from), along(to), 10.0),
+                band(along(from), along(to), BAND),
                 CornerRadius::same(2),
                 theme::WARN.gamma_multiply(0.85),
             );
         }
-        // The times along the top, at a step a clock would show. On a turned
-        // picture they run down the screen's left instead, turned with it.
-        let step = tick_step(playback.zoom);
-        let mut at = start.div_euclid(step) * step;
+        // The ruler along the strip's upper edge, and the times over it. A tick
+        // stands at every moment a label would name and a shorter one between
+        // two of them, so the strip itself says where a moment falls rather
+        // than the label having to be written there - and the eye can carry a
+        // time from the top down to the band without guessing. On a turned
+        // picture the edge is the row's right side and the ticks stand out of
+        // it, and the times run down the screen turned with the picture.
+        //
+        // How many of them fit decides the step, so a wide screen reads a time
+        // every minute where a phone reads one every ten: the same recording is
+        // as finely divided as the room it is drawn in allows. And a step under
+        // a minute has to name the second - which is a wider label, so the step
+        // is chosen a second time at that width.
+        let length = if horizontal { row.width() } else { row.height() };
+        let wide = |text: &str| {
+            painter
+                .layout_no_wrap(text.to_owned(), egui::FontId::proportional(TIME_SIZE), theme::GRID_LINE)
+                .size()
+                .x
+        };
+        let fits = |text: &str| labels_across(length, wide(text), LABEL_GAP);
+        let mut step = tick_step(playback.zoom, fits("00:00"));
+        if step < 60 {
+            step = tick_step(playback.zoom, fits("00:00:00"));
+        }
+        let seconds = step < 60;
+        let minor = ruler_step(step);
+        let edge = if horizontal { track - BAND / 2.0 } else { track + BAND / 2.0 };
+        let out = if horizontal { -1.0 } else { 1.0 };
+        let mut at = start.div_euclid(minor) * minor;
         while at < end {
             if at >= start {
-                if let Some(label) = clock_of(at) {
-                    let spot = if horizontal {
-                        egui::pos2(along(at), across(0.135))
-                    } else {
-                        egui::pos2(across(0.135), along(at))
-                    };
-                    turned_text(
-                        painter,
-                        spot,
-                        label,
-                        9.5,
-                        theme::GRID_LINE.gamma_multiply(0.8),
-                        !horizontal,
-                    );
+                let long = at.rem_euclid(step) == 0;
+                let mark = along(at);
+                let tip = edge + out * if long { TICK } else { TICK_MINOR };
+                let shade = if long { 0.8 } else { 0.45 };
+                painter.line_segment(
+                    tick_ends(horizontal, mark, edge, tip),
+                    egui::Stroke::new(1.0_f32, theme::GRID_LINE.gamma_multiply(shade)),
+                );
+                if long {
+                    if let Some(label) = clock_of(at, seconds) {
+                        let spot = if horizontal {
+                            egui::pos2(mark, across(TIME_ROW))
+                        } else {
+                            egui::pos2(across(TIME_ROW), mark)
+                        };
+                        turned_text(
+                            painter,
+                            spot,
+                            label,
+                            TIME_SIZE,
+                            theme::GRID_LINE.gamma_multiply(0.8),
+                            !horizontal,
+                        );
+                    }
                 }
             }
-            at += step;
+            at += minor;
         }
         // The moment under the cursor, in full, where the eye already is.
         if let Some(stamp) = stamp_of(centre) {
@@ -887,6 +989,17 @@ impl XgViewApp {
             }
         }
 
+        // Two fingers spreading over the strip are the strip's, and they zoom
+        // it: a pinch is a width, not a place, so nothing moves along it. The
+        // picture keeps the window it has - the wall leaves this gesture to the
+        // strip when it is made over the row. See [`XgViewApp::timeline_row`].
+        let pinched = ui.ctx().input(|input| pinch_frame(input, row));
+        if let Some((spread, _)) = pinched {
+            self.pinch_timeline(spread);
+        } else if let Some(playback) = self.playback.as_mut() {
+            playback.pinch = 1.0;
+        }
+
         // A scrub is the left button's and a touch's. The right one is the
         // mouse's way to the widths, and reading it here as a press would have
         // it start a drag on the way.
@@ -917,7 +1030,9 @@ impl XgViewApp {
         if !scrubbing {
             // A press that starts on the strip holds the picture and takes the
             // strip with it. One that starts elsewhere is the picture's, and
-            // does nothing here.
+            // does nothing here. A pinch is neither: it is a width, and it was
+            // answered above.
+            if pinched.is_none() {
             if let (true, Some(pos)) = (down, pos) {
                 if row.contains(pos) {
                     self.manager.hold_clip(index, true);
@@ -933,9 +1048,15 @@ impl XgViewApp {
                     }
                 }
             }
+            }
             return;
         }
 
+        // A pinch that began after a finger was already down is still a width,
+        // not a place: the strip waits where it was until the fingers are gone.
+        if pinched.is_some() {
+            return;
+        }
         match (down, pos) {
             // The finger may leave the strip; what it has moved keeps going to
             // the end rather than stopping where the strip does.
@@ -950,6 +1071,17 @@ impl XgViewApp {
                 let at = anchor + ((from - along(pos)) * span) as i64;
                 let at = self.clamp_centre(at);
                 if self.playback.as_ref().is_some_and(|playback| playback.scrub != Some(at)) {
+                    // Near the start of what has been read, read further back:
+                    // the strip is as long as the recording, and a finger is
+                    // allowed to walk off the end of the last read.
+                    let near_start = self.playback.as_ref().is_some_and(|playback| {
+                        playback.segments.first().is_some_and(|first| {
+                            at < first.start + (playback.zoom / 2).max(LOOKBACK / 2)
+                        }) && playback.oldest.map_or(true, |oldest| at >= oldest)
+                    });
+                    if near_start {
+                        self.read_around(index, at);
+                    }
                     self.fetch_for(index, at);
                     if let Some(playback) = self.playback.as_mut() {
                         playback.scrub = Some(at);
@@ -1086,6 +1218,23 @@ impl XgViewApp {
             Some(speed) if speed > 3.0 => "4×",
             Some(speed) if speed > 1.5 => "2×",
             _ => "1×",
+        }
+    }
+
+    /// Spreads the strip, or closes it, as two fingers ask.
+    ///
+    /// A pinch arrives as a ratio per frame rather than as a distance, so what is
+    /// remembered is the product: a step of the ladder is taken when the fingers
+    /// have spread or closed by [`PINCH_STEP`], and the rest is kept for the step
+    /// after.
+    fn pinch_timeline(&mut self, spread: f32) {
+        let Some(playback) = self.playback.as_mut() else {
+            return;
+        };
+        let (step, pinch) = pinch_step(playback.pinch, spread);
+        playback.pinch = pinch;
+        if let Some(finer) = step {
+            self.zoom_timeline(finer);
         }
     }
 
@@ -1226,6 +1375,32 @@ impl XgViewApp {
         start_segments(&self.handle, &self.events_tx, index, source, at - 3600, at + 90_000);
     }
 
+    /// Reads the segment list around a moment the list does not reach.
+    ///
+    /// One stretch either side of it, which is what a recording is opened with:
+    /// a drag that leaves the list reads on the way, and a jump that leaves it
+    /// reads before it moves. A read that is already in flight is not asked
+    /// again - the answer merges, and the seek that was waiting tries again.
+    fn read_around(&mut self, index: usize, at: i64) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        if playback.reading_older.is_some() {
+            return;
+        }
+        // At least a recording's opening read either side, and at least as wide
+        // as the strip: a drag across a day's strip should not be one read per
+        // finger-width.
+        let span = playback.zoom.max(2 * LOOKBACK);
+        let (from, to) = (at - span / 2, at + span / 2);
+        let source = playback.source.clone();
+        tracing::debug!(target: "xgview::app", index, at, "reading the list around a moment");
+        if let Some(playback) = self.playback.as_mut() {
+            playback.reading_older = Some((from, to));
+        }
+        start_segments(&self.handle, &self.events_tx, index, source, from, to);
+    }
+
     /// Reads the stretch of segment list a wider strip needs. See
     /// [`older_window`].
     ///
@@ -1297,11 +1472,30 @@ impl XgViewApp {
                 // Nothing was recorded that far back: the strip stops here.
                 playback.oldest = playback.segments.first().map(|segment| segment.start);
             }
+            // A seek waiting for a list that came back empty is finished with:
+            // the recording is not there, and the picture stays where it is
+            // rather than the cursor waiting for a moment that will never come.
+            playback.to_seek = None;
+            playback.pending = None;
             return;
         }
         playback.segments.extend(segments);
         playback.segments.sort_by_key(|segment| segment.start);
         playback.segments.dedup_by_key(|segment| segment.start);
+        // A seek was waiting for the list to reach it: the picture goes there
+        // now, which is the same path a drag takes when the list already holds
+        // it.
+        if let Some(at) = playback.to_seek {
+            let reached = playback
+                .segments
+                .iter()
+                .any(|segment| segment.start <= at && at < segment.end);
+            if reached {
+                playback.to_seek = None;
+                self.seek(at);
+                return;
+            }
+        }
         // A day was picked, and this is the list that reaches it: the strip
         // becomes that day, and the picture goes to its first moment.
         if let Some(at) = picked {
@@ -1333,7 +1527,7 @@ impl XgViewApp {
         if playback.ahead.as_ref().is_some_and(|ahead| covered(Some(ahead.window), at)) {
             return;
         }
-        let width = range_width(playback.zoom);
+        let width = RANGE_CAP;
         let Some(window) = window_at(
             &playback.segments,
             range_start(&playback.segments, at, width / 2),
@@ -1367,6 +1561,27 @@ impl XgViewApp {
             return;
         };
         let (index, vod) = (playback.index, playback.vod);
+        // A moment the list does not reach is not a refusal, it is a read: a
+        // drag or a jump goes anywhere the recording does, and the list is what
+        // has been asked for so far. Asking for the stretch around it and coming
+        // back is what makes the strip as long as the recording rather than as
+        // long as the last read.
+        let reach = playback
+            .segments
+            .first()
+            .zip(playback.segments.last())
+            .map(|(first, last)| (first.start, last.end));
+        if reach.is_some_and(|(first, last)| at < first || at > last) {
+            self.read_around(index, at);
+            if let Some(playback) = self.playback.as_mut() {
+                playback.to_seek = Some(at);
+                // The cursor waits where the finger left it, as it does for a
+                // seek whose playlist is on its way: what is on screen is still
+                // the stretch being left.
+                playback.pending = Some(at);
+            }
+            return;
+        }
         // Neither of these can happen while the list is the one the window was
         // built from - and if it does, saying so is better than a picture that
         // silently carries on where it was, which reads as a drag that was
@@ -1434,10 +1649,10 @@ impl XgViewApp {
         // kept while it is read - the picture stays where it is rather than
         // running on to the end of the stretch being left - and the session that
         // replaces this one starts unpaused.
-        // The range is the stretch the timeline shows, at whatever width it is
-        // showing it - up to what the box will serve. A strip wider than that
-        // asks for its own width, and a drag past the range is another session.
-        let width = range_width(playback.zoom);
+        // The range is as wide as the box will serve, centred on where the seek
+        // is going: the strip slides, and a drag that left the range every ten
+        // minutes would be a session every ten minutes.
+        let width = RANGE_CAP;
         let Some(window) = window_at(
             &playback.segments,
             range_start(&playback.segments, target, width / 2),
@@ -1493,20 +1708,20 @@ const ZOOMS: [i64; 5] = [120, 600, 3600, 21600, 86400];
 /// How much of a recording the timeline shows when a recording is opened.
 const SPAN: i64 = 600;
 
-/// The widest range a playlist is asked for, however wide the strip is drawn.
+/// How wide a range a playlist is asked for: the widest the box will serve,
+/// whatever the strip is showing.
 ///
-/// The strip and the range are two different questions - what can be pointed at,
-/// and what one session holds - and they were the same until the strip grew past
-/// an hour. Past this the box stops answering: measured on the box of
-/// 2026-11-02, a range of 2.5 hours is served and one of 3 hours is `503`. So a
-/// wider strip asks for this much around the moment pointed at, and a drag
-/// beyond it is another range, which is a session rather than a fragment.
+/// The strip and the range used to be the same width, because a seek was a
+/// pointer press and what could be pointed at was what one session had to hold.
+/// The strip slides now, so the range is not "what can be pointed at" - it is
+/// **how far a drag can go before it costs a session**, and that should be as far
+/// as the box allows rather than as wide as the window happens to be. A strip
+/// drawn wider than this still shows more than one range, and a drag there is
+/// still a session; that is the box's limit, not the interface's.
+///
+/// Past this the box stops answering: measured on the box of 2026-11-02, a range
+/// of 2.5 hours is served and one of 3 hours is `503`.
 const RANGE_CAP: i64 = 7200;
-
-/// The width of the range a playlist is asked for, given the width on screen.
-fn range_width(zoom: i64) -> i64 {
-    zoom.min(RANGE_CAP)
-}
 
 /// The next width up or down the ladder, or `None` at an end of it.
 ///
@@ -1518,6 +1733,32 @@ fn step_zoom(zoom: i64, finer: bool) -> Option<i64> {
         ZOOMS.iter().copied().rev().find(|width| *width < zoom)
     } else {
         ZOOMS.iter().copied().find(|width| *width > zoom)
+    }
+}
+
+/// A day, in seconds: as far back as a jump looks for an event when the list it
+/// holds has none.
+const DAY: i64 = 86_400;
+
+/// How far two fingers have to spread over the strip to move it a step of the
+/// ladder. A pinch arrives as a factor per frame, and this is what those factors
+/// are multiplied up to before one is taken.
+const PINCH_STEP: f32 = 1.6;
+
+/// What a frame of a pinch asks for: a step of the ladder, or nothing, and what
+/// is left of the spread to carry into the next frame.
+///
+/// A pinch arrives as a ratio per frame rather than as a distance, so the ratios
+/// multiply: the ladder moves once the fingers have spread or closed by
+/// [`PINCH_STEP`] since the last step, and the rest is kept.
+fn pinch_step(pinch: f32, spread: f32) -> (Option<bool>, f32) {
+    let pinch = pinch * spread;
+    if pinch > PINCH_STEP {
+        (Some(true), pinch / PINCH_STEP)
+    } else if pinch < 1.0 / PINCH_STEP {
+        (Some(false), pinch * PINCH_STEP)
+    } else {
+        (None, pinch)
     }
 }
 
@@ -1642,17 +1883,110 @@ fn turned_text(
     });
 }
 
-/// The step between the times along the top of the strip: about six labels, at
-/// a distance a clock shows rather than an arbitrary division.
-fn tick_step(span: i64) -> i64 {
-    const STEPS: [i64; 14] = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200];
-    let want = (span / 6).max(1);
-    STEPS.iter().copied().find(|step| *step >= want).unwrap_or(10_800)
+/// How far a tick stands out of the strip's upper edge, and how far the one
+/// between two labels does. The row is `tilebar::TIMELINE` tall with the band
+/// ten points thick across its middle, which leaves the ruler the gap under the
+/// times: long enough to read against the band, short enough not to reach the
+/// labels.
+const TICK: f32 = 6.0;
+/// See [`TICK`].
+const TICK_MINOR: f32 = 3.0;
+
+/// Where the times sit across the row, and where the band's centre does: two
+/// fractions of the row's own depth, so a picture drawn turned is the same
+/// drawing - see `across` in [`XgViewApp::draw_timeline`].
+///
+/// A row of [`tilebar::TIMELINE_ROW`] then reads as four bands, top to bottom:
+/// the times, the ruler, the band, and the moment under the cursor.
+const TIME_ROW: f32 = 0.115;
+/// See [`TIME_ROW`].
+const BAND_ROW: f32 = 0.48;
+/// The band's thickness, in points. The ruler stands on its edge, so the two
+/// numbers are read together.
+const BAND: f32 = 10.0;
+/// The size of the times along the top.
+const TIME_SIZE: f32 = 9.5;
+/// The space kept between two times along the top, so that two of them read as
+/// two rather than as one long string.
+const LABEL_GAP: f32 = 14.0;
+
+/// The steps a time along the strip is allowed to land on: a clock's own
+/// divisions, from a second to a day.
+///
+/// A step from this list is what makes a label readable as a time; anything
+/// between them - seven seconds, two and a half minutes - reads as an arbitrary
+/// cut of a recording rather than as a moment.
+const STEPS: [i64; 19] = [
+    1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10_800, 14_400, 21_600, 43_200,
+    86_400,
+];
+
+/// The step between the times along the top of the strip: the finest clock step
+/// that fits `labels` of them across `span`.
+///
+/// The count is the strip's own, measured from how wide a label is - a wide
+/// screen reads a time every minute where a phone reads one every ten, and the
+/// same recording is as finely divided as the room it is drawn in allows.
+fn tick_step(span: i64, labels: i64) -> i64 {
+    let want = (span / labels.max(1)).max(1);
+    STEPS.iter().copied().find(|step| *step >= want).unwrap_or(86_400)
 }
 
-/// The hour and minute of a moment, on the viewer's own clock.
-fn clock_of(at: i64) -> Option<String> {
-    local_at(at).map(|local| format!("{:02}:{:02}", local.hour, local.minute))
+/// How many labels fit across a strip `length` long, each `wide` wide with
+/// `gap` between two of them.
+///
+/// Half a label is given up at each end, because a label is centred on its
+/// moment and the first and last of them hang over the ends of the strip.
+fn labels_across(length: f32, wide: f32, gap: f32) -> i64 {
+    (((length - wide) / (wide + gap)).floor() as i64).max(1)
+}
+
+/// The two ends of a tick: across the row from `edge` to `tip`, at `mark` along
+/// it.
+///
+/// Both ends share the place along the strip, so the stroke is the tick's width
+/// and nothing else. A pair that differed there would be a diagonal, and a
+/// point-wide diagonal leans - which is exactly how the first cut of this looked
+/// on screen.
+fn tick_ends(horizontal: bool, mark: f32, edge: f32, tip: f32) -> [egui::Pos2; 2] {
+    if horizontal {
+        [egui::pos2(mark, edge), egui::pos2(mark, tip)]
+    } else {
+        [egui::pos2(edge, mark), egui::pos2(tip, mark)]
+    }
+}
+
+/// The step between the short ticks of the ruler: the finest clock step that
+/// divides a label's own, so a tick lands where no time is written and still on
+/// the grid the times are on.
+///
+/// Dividing by five at most: a step of 300 seconds is five minutes, whose
+/// divisor is a minute, and a mark every minute under a label every five is a
+/// ruler rather than a hatch.
+fn ruler_step(step: i64) -> i64 {
+    STEPS.iter()
+        .rev()
+        .copied()
+        .find(|small| *small < step && step % *small == 0)
+        .unwrap_or(step)
+}
+
+/// The clock's name for a moment, to the second when the times are closer
+/// together than a minute.
+///
+/// Without the seconds two labels half a minute apart read the same, and the
+/// closest widths showed `14:30` twice.
+fn clock_text(local: LocalTime, seconds: bool) -> String {
+    if seconds {
+        format!("{:02}:{:02}:{:02}", local.hour, local.minute, local.second)
+    } else {
+        format!("{:02}:{:02}", local.hour, local.minute)
+    }
+}
+
+/// The clock's name for a moment, on the viewer's own clock.
+fn clock_of(at: i64, seconds: bool) -> Option<String> {
+    local_at(at).map(|local| clock_text(local, seconds))
 }
 
 /// The whole of a moment, to the second, on the viewer's own clock.
@@ -1732,15 +2066,6 @@ fn covered(vod: Option<(i64, i64)>, at: i64) -> bool {
     vod.is_some_and(|(start, end)| start <= at && at < end)
 }
 
-/// The range a playlist is asked for: what the timeline shows.
-///
-/// A range the width of the timeline and placed anywhere else would leave most
-/// scrubs outside it - half of what the viewer can see would be another range
-/// and another session. Widened only when the moment is outside the span, which
-/// a scrub taken to the edge of a recording can produce.
-fn range_for(segments: &[Segment], span: (i64, i64), at: i64) -> (i64, i64) {
-    (range_from(segments, span.0.min(at), at), span.1.max(at + 1))
-}
 
 /// Where a range begins, moved back to the start of the segment it falls in.
 ///
@@ -1898,12 +2223,13 @@ fn start_window(
         let entry = now - ENTRY_BACK;
         let span = extent(&segments, SPAN, entry);
         let at = entry_moment(span, entry);
-        // The playlist is asked for the stretch the timeline shows, so that a
-        // scrub anywhere within it is a fragment of the session already running
-        // rather than another range and another session. A box with no playlist
-        // gets a window from the moment itself, which is where a `clip.mp4` is
-        // cut.
-        let range = span.map(|span| range_for(&segments, span, at));
+        // The playlist is asked for the widest stretch the box will serve,
+        // centred on the moment, so that a drag either way is a fragment of the
+        // session already running rather than another range and another session.
+        // A box with no playlist gets a window from the moment itself, which is
+        // where a `clip.mp4` is cut.
+        let width = RANGE_CAP;
+        let range = window_at(&segments, range_start(&segments, at, width / 2), width);
         let playlist = match (range, client.as_mut()) {
             (Some(range), Some(client)) => {
                 read_playlist(client, &source.origin.camera, range).await
@@ -2107,14 +2433,119 @@ mod tests {
         assert_eq!(ZOOMS, [120, 600, 3600, 21_600, 86_400]);
     }
 
-    /// The times along the top are a clock's, not an arbitrary division: about
-    /// six labels, at a step a viewer reads without counting.
+    /// A pinch moves the ladder one step at a time, not one step per frame: the
+    /// ratios multiply, and the rest of the spread is carried.
+    #[test]
+    fn a_pinch_steps_the_ladder_once_it_has_spread() {
+        // A little at a time adds up.
+        let mut pinch = 1.0_f32;
+        let mut steps = 0;
+        for _ in 0..12 {
+            let (step, next) = pinch_step(pinch, 1.05);
+            pinch = next;
+            steps += usize::from(step.is_some());
+        }
+        // Twelve frames of a twentieth each is 1.80 times, which is one step
+        // and a little over.
+        assert_eq!(steps, 1, "twelve small spreads are one step, not twelve");
+        assert!(pinch > 1.0 / PINCH_STEP && pinch < PINCH_STEP, "and the rest is kept");
+
+        // Closing the fingers is the other way.
+        let (step, _) = pinch_step(1.0, 0.4);
+        assert_eq!(step, Some(false));
+
+        // A gesture that ends where it began asks for nothing.
+        let (step, pinch) = pinch_step(1.0, 1.0);
+        assert!(step.is_none());
+        assert_eq!(pinch, 1.0);
+    }
+
+    /// The times along the top are a clock's, not an arbitrary division: the
+    /// finest one that fits the labels the strip has room for.
     #[test]
     fn the_times_along_the_strip_are_a_clocks() {
-        assert_eq!(tick_step(120), 30);
-        assert_eq!(tick_step(600), 120);
-        assert_eq!(tick_step(3600), 600);
-        assert_eq!(tick_step(86_400), 10_800);
+        assert_eq!(tick_step(120, 6), 30);
+        assert_eq!(tick_step(600, 6), 120);
+        assert_eq!(tick_step(3600, 6), 600);
+        assert_eq!(tick_step(86_400, 6), 14_400);
+        // The same day on a wider strip is divided more finely, which is the
+        // whole point of counting labels rather than assuming six.
+        assert_eq!(tick_step(86_400, 24), 3600, "a day on a wide strip is an hour a label");
+        assert_eq!(tick_step(86_400, 48), 1800, "and half an hour on a wider one");
+    }
+
+    /// No two times read the same. A step finer than a minute has to name the
+    /// second, or the closest widths show `14:30` twice - which they did.
+    #[test]
+    fn no_two_times_read_the_same() {
+        let clock = |unix: i64| LocalTime {
+            year: 2026,
+            month: 11,
+            day: 3,
+            weekday: 0,
+            hour: (unix.div_euclid(3600) % 24) as u8,
+            minute: (unix.div_euclid(60) % 60) as u8,
+            second: unix.rem_euclid(60) as u8,
+        };
+        for zoom in ZOOMS {
+            for labels in [1, 2, 3, 5, 8, 12, 24, 48] {
+                let step = tick_step(zoom, labels);
+                let times: Vec<String> = (0..zoom / step)
+                    .map(|index| clock_text(clock(3600 * 9 + index * step), step < 60))
+                    .collect();
+                let mut unique = times.clone();
+                unique.sort();
+                unique.dedup();
+                assert_eq!(unique.len(), times.len(), "{zoom}s in {labels} labels: {times:?}");
+            }
+        }
+    }
+
+    /// A short tick divides a label's step and lands on the clock's own grid,
+    /// and never stands more than five to a label.
+    #[test]
+    fn a_short_tick_divides_a_label() {
+        for step in STEPS {
+            let minor = ruler_step(step);
+            assert_eq!(step % minor, 0, "{step}s divided into {minor}s");
+            assert!(step / minor <= 5, "{step}s divided into {} ticks", step / minor);
+        }
+    }
+
+    /// A label takes its own width plus a gap, and half of one is given up at
+    /// each end because a label is centred on its moment.
+    #[test]
+    fn labels_are_counted_by_the_room_they_need() {
+        assert_eq!(labels_across(600.0, 26.0, 14.0), 14);
+        assert_eq!(labels_across(360.0, 26.0, 14.0), 8, "a phone reads fewer");
+        assert_eq!(labels_across(30.0, 26.0, 14.0), 1, "and never none");
+    }
+
+    /// The ruler has the gap between the times and the band to itself: a long
+    /// tick must end above the labels and below the band's edge, or the row
+    /// reads as one smudge.
+    #[test]
+    fn the_ruler_stands_clear_of_the_times() {
+        let row = crate::tilebar::TIMELINE_ROW;
+        // Half a line of the label's own type, which is where its box ends.
+        let times = row * TIME_ROW + TIME_SIZE * 0.7;
+        let edge = row * BAND_ROW - BAND / 2.0;
+        let ruler = edge - TICK;
+        assert!(ruler > times, "the tick ends at {ruler:.1}pt, the times at {times:.1}pt");
+        assert!(TICK > TICK_MINOR, "a long tick is longer than a short one");
+        assert!(edge + BAND / 2.0 < row, "the band is inside the row");
+    }
+
+    /// A tick is straight: both its ends are at the same place along the strip,
+    /// so the stroke is its width rather than its lean.
+    #[test]
+    fn a_tick_stands_straight() {
+        let [foot, head] = tick_ends(true, 100.0, 20.0, 26.0);
+        assert_eq!(foot.x, head.x, "across a wide row a tick is vertical");
+        assert_eq!((foot.y, head.y), (20.0, 26.0), "and stands out of the edge");
+        let [foot, head] = tick_ends(false, 100.0, 20.0, 26.0);
+        assert_eq!(foot.y, head.y, "on a turned row it is horizontal");
+        assert_eq!((foot.x, head.x), (20.0, 26.0), "and stands out of the edge");
     }
 
     /// The calendar shows the days between the ones the box named - empty where
@@ -2183,15 +2614,22 @@ mod tests {
         assert_eq!(extent(&segments, zoom, 0), Some((0, zoom / 4)));
     }
 
-    /// A strip wider than the cap asks for the cap and no more: past about two
-    /// hours the box stops answering. Measured on the box of 2026-11-02 - 2.5
-    /// hours is served, 3 hours is `503`.
+    /// A seek asks for the widest range the box serves, not the width on screen:
+    /// the strip slides, and one that left its range every ten minutes would be
+    /// a session every ten minutes.
     #[test]
-    fn a_wide_strip_does_not_ask_for_a_wide_range() {
-        assert_eq!(range_width(600), 600, "under the cap the strip is the range");
-        assert_eq!(range_width(3600), 3600);
-        assert_eq!(range_width(21600), RANGE_CAP);
-        assert_eq!(range_width(86400), RANGE_CAP);
+    fn a_seek_asks_for_a_range_wider_than_the_strip() {
+        let segments = run(0, 86_400);
+        let at = 40_000;
+        let window = window_at(&segments, range_start(&segments, at, RANGE_CAP / 2), RANGE_CAP)
+            .expect("a stretch");
+        assert!(window.0 <= at && at < window.1, "it holds the moment");
+        assert_eq!(window.1 - window.0, RANGE_CAP, "and it is as wide as the box serves");
+
+        // A moment near the start of the recording gets what there is of it.
+        let near = window_at(&segments, range_start(&segments, 60, RANGE_CAP / 2), RANGE_CAP)
+            .expect("a stretch");
+        assert_eq!(near.0, 0);
     }
 
     /// A strip wider than what has been read asks for the rest of the list, once
@@ -2208,25 +2646,6 @@ mod tests {
         assert_eq!(older_window(&segments, 21600, 3600, Some(0)), None);
         // And a list that already reaches back far enough asks for nothing.
         assert_eq!(older_window(&run(-21600, 3600), 21600, 3600, None), None);
-    }
-
-    /// The range a playlist is asked for is the stretch the timeline shows, so
-    /// that a scrub anywhere inside it is another fragment of the same session.
-    #[test]
-    fn the_playlist_range_is_what_the_timeline_shows() {
-        let segments = run(900, 1800);
-        let span = (1000, 1600);
-        assert_eq!(range_for(&segments, span, 1100), span, "a moment inside it does not move it");
-        assert_eq!(range_for(&segments, span, 1600), (1000, 1601), "the end itself is inside");
-        // A moment the span does not reach - a scrub taken to the edge of the
-        // recording - widens it rather than leaving the moment outside.
-        assert_eq!(range_for(&segments, span, 900), (900, 1600));
-        assert_eq!(range_for(&segments, span, 1700), (1000, 1701));
-        // And a span that begins in the middle of a segment begins at the
-        // segment's own boundary instead: that is what the box serves without
-        // cutting. See [`range_from`].
-        assert_eq!(range_for(&segments, (1003, 1600), 1100), (1000, 1600));
-        assert_eq!(range_for(&segments, (1003, 1600), 1600), (1000, 1601));
     }
 
     /// A run of ten-second segments, the way the recorder writes them.
