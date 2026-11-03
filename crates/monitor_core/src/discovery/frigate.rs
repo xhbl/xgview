@@ -496,7 +496,7 @@ impl FrigateClient {
         before: i64,
     ) -> Result<Vec<(i64, i64)>> {
         let url = format!(
-            "{}/api/events?cameras={camera}&after={after}&before={before}             &limit=500&include_thumbnails=0",
+            "{}/api/events?cameras={camera}&after={after}&before={before}&limit=500&include_thumbnails=0",
             self.config.base_url()
         );
         let response = self.get(&url).await?;

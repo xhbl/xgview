@@ -393,25 +393,36 @@ impl XgViewApp {
         };
         if let Some(at) = target {
             tracing::debug!(target: "xgview::app", at, forward, "stepping to an event");
-            self.seek(at);
+            // Through `move_to`, so a picture held before the press is still
+            // held after it: an event is a moment to look at, not a reason to
+            // start playing again.
+            self.move_to(at);
             return;
         }
         // Nothing in the list - but the list is only the stretch the strip was
         // showing. A jump goes anywhere the recording does, so the events of the
-        // whole stretch that has been read are asked for and the jump is made
-        // when they arrive. Asking again for a list that already covers it would
-        // be a request a press, so the second answer is the last word.
-        // A day back from the newest moment recorded, which is as far as the
-        // list is worth reading in one go: an event outside it is found by the
-        // press after this one, once the recording has been read that far.
-        let to = playback.segments.last().map_or(now + LOOKBACK, |last| last.end);
-        let (from, to) = (to - DAY, to);
+        // stretch around the moment are asked for and the jump is made when they
+        // arrive. Asking again for a list that already covers it would be a
+        // request a press, so the second answer is the last word.
+        //
+        // A day of them, on the side the jump is going: an event beyond that is
+        // found by the press after this one, once the recording has been read
+        // that far. Anchored on the moment on screen rather than on the newest
+        // recording, because the viewer may be days back in the history - and a
+        // day ending at the newest would then be a list with nothing on the
+        // right side of the cursor at all.
+        let newest = playback.segments.last().map_or(now + LOOKBACK, |last| last.end);
+        let (from, to) = if forward {
+            (now, (now + DAY).min(newest))
+        } else {
+            (now - DAY, now)
+        };
         let covered = playback
             .events
             .first()
             .zip(playback.events.last())
             .is_some_and(|(first, last)| first.0 <= from && last.1 >= to);
-        if covered || playback.to_jump.is_some() {
+        if to <= from || covered || playback.to_jump.is_some() {
             tracing::debug!(target: "xgview::app", forward, "no event that way");
             return;
         }
@@ -731,9 +742,10 @@ impl XgViewApp {
                 row.top() + row.height() * t
             }
         };
-        // Three bands in one row: the times above, the strip itself, and the
-        // moment under the cursor below. The cursor never moves, so the strip
-        // does - which is what makes a long recording feel like a long strip.
+        // Four bands in one row: the times above, the ruler under them, the
+        // strip itself, and the moment under the cursor below. The cursor never
+        // moves, so the strip does - which is what makes a long recording feel
+        // like a long strip.
         //
         // `across` is a fraction of the way from the picture's top of the row to
         // its bottom, which is down the screen for a picture as it arrives and
@@ -1007,7 +1019,7 @@ impl XgViewApp {
         let pos = ui.ctx().input(|input| input.pointer.interact_pos());
         let scrubbing = self.playback.as_ref().is_some_and(|playback| playback.scrubbing);
         if response.secondary_clicked() && !scrubbing {
-            self.zoom_timeline(true);
+            self.cycle_zoom();
             return;
         }
 
@@ -1071,21 +1083,16 @@ impl XgViewApp {
                 let at = anchor + ((from - along(pos)) * span) as i64;
                 let at = self.clamp_centre(at);
                 if self.playback.as_ref().is_some_and(|playback| playback.scrub != Some(at)) {
-                    // Near the start of what has been read, read further back:
-                    // the strip is as long as the recording, and a finger is
-                    // allowed to walk off the end of the last read.
-                    let near_start = self.playback.as_ref().is_some_and(|playback| {
-                        playback.segments.first().is_some_and(|first| {
-                            at < first.start + (playback.zoom / 2).max(LOOKBACK / 2)
-                        }) && playback.oldest.map_or(true, |oldest| at >= oldest)
-                    });
-                    if near_start {
-                        self.read_around(index, at);
-                    }
                     self.fetch_for(index, at);
                     if let Some(playback) = self.playback.as_mut() {
                         playback.scrub = Some(at);
                     }
+                    // The strip is drawn a whole width around the cursor, so the
+                    // list has to reach half a width behind it - and it is asked
+                    // for now, while the finger is still down, rather than when
+                    // the strip has already run out of what was read and shows
+                    // nothing on its left.
+                    self.read_older(index);
                 }
             }
             _ => self.end_scrub(),
@@ -1102,33 +1109,35 @@ impl XgViewApp {
         };
         let Some(at) = at else {
             // Nothing under the finger: the recording goes on where it was held.
-            self.manager.hold_clip(index, false);
-            if let Some(playback) = self.playback.as_mut() {
-                playback.paused = false;
-            }
+            self.release_hold(index);
             return;
         };
+        // Held to the recording once more: a read may have answered while the
+        // finger was down and said where the beginning is, and what is read
+        // below is read for where the cursor will actually be.
+        let at = self.clamp_centre(at);
         // A tap that never moved the strip is not a seek: asking for the moment
         // already on screen would drop the open response and fetch the fragment
         // again for a picture that is already there.
         let centre = self.playback.as_ref().map_or(at, |playback| self.centre_of(playback));
         if (at - centre).abs() < 1 {
-            self.manager.hold_clip(index, false);
-            if let Some(playback) = self.playback.as_mut() {
-                playback.paused = false;
-            }
+            self.release_hold(index);
             return;
         }
         // A drag that has taken the strip somewhere the event list does not
         // reach reads the events there: the marks on the strip and the two
-        // buttons that step between them are the same list.
+        // buttons that step between them are the same list. The stretch asked
+        // for is the one the strip will show once the cursor is there - not the
+        // one it shows now, which is what `read_events` would ask for, the
+        // picture not having moved yet.
+        let zoom = self.playback.as_ref().map_or(SPAN, |playback| playback.zoom);
         let covered = self
             .playback
             .as_ref()
             .and_then(|playback| playback.events.first().zip(playback.events.last()))
             .is_some_and(|(first, last)| first.0 <= at && at <= last.1);
         if !covered {
-            self.read_events(index);
+            self.read_events_between(index, at - zoom / 2, at + zoom / 2);
         }
         // The hold is not let go of first: a session resumed for a moment
         // publishes a frame of the window that is being left, and that frame is
@@ -1136,34 +1145,71 @@ impl XgViewApp {
         // jumps inside the session - and lets go of the hold itself, with the
         // jump already in the session's hand - or replaces it, and a replaced
         // session ends the hold with it.
-        self.seek(at);
+        //
+        // Through `move_to`, so a picture paused before the finger came down is
+        // still paused after it: a scrub says where to look, not that it should
+        // start playing.
+        self.move_to(at);
     }
 
-    /// Widens the timeline a level, or takes it back to the narrowest.
+    /// Lets go of the drag's hold - and keeps it, if the picture was held before
+    /// the finger came down.
     ///
-    /// What is on screen does not move: the strip still ends where it ended, so
-    /// a wider one reaches further back and a narrower one reaches less far. The
-    /// range follows the next time one is asked for - a drag to a moment the
-    /// session does not hold asks for the stretch the timeline shows.
+    /// A tap on the strip that moved nothing is not a request to play: a viewer
+    /// who paused and then touched the strip meant to look at it.
+    fn release_hold(&mut self, index: usize) {
+        let paused = self.playback.as_ref().is_some_and(|playback| playback.paused);
+        self.manager.hold_clip(index, paused);
+    }
+
     /// More detail on the timeline, or more of it.
     ///
-    /// The ladder is fixed and its ends are ends: two minutes is as close as it
-    /// goes, a day as wide, and a press past either does nothing.
+    /// The strip is drawn around the cursor, so a width changes what is on
+    /// either side of it and not where it is: a wider level reaches further back
+    /// and a narrower one reaches less far. The ladder is fixed and its ends are
+    /// ends - two minutes is as close as it goes, a day as wide - because the
+    /// two buttons are a pair and a press past either would have to mean "back
+    /// to the other end". A right press on the strip is the one that goes round;
+    /// see [`Self::cycle_zoom`].
     pub(super) fn zoom_timeline(&mut self, finer: bool) {
+        let Some(zoom) = self
+            .playback
+            .as_ref()
+            .and_then(|playback| step_zoom(playback.zoom, finer))
+        else {
+            return;
+        };
+        self.set_zoom(zoom);
+    }
+
+    /// A right press on the strip: the mouse's way to the widths.
+    ///
+    /// Steps finer, and starts again at the widest at the end of the ladder. The
+    /// two buttons on the bar are a pair and their ends are ends - pressing "more
+    /// detail" again must not mean "back to the coarsest" - but a right press has
+    /// no partner, so it is the one control that goes round.
+    fn cycle_zoom(&mut self) {
+        let Some(zoom) = self.playback.as_ref().map(|playback| {
+            step_zoom(playback.zoom, true).unwrap_or(*ZOOMS.last().expect("a ladder of widths"))
+        }) else {
+            return;
+        };
+        self.set_zoom(zoom);
+    }
+
+    /// Draws the strip at a width, and reads what that width needs.
+    fn set_zoom(&mut self, zoom: i64) {
         let Some(playback) = self.playback.as_mut() else {
             return;
         };
         if playback.timeline == Timeline::Days {
             return;
         }
-        let Some(zoom) = step_zoom(playback.zoom, finer) else {
-            return;
-        };
         playback.zoom = zoom;
         // A strip of a different width holds events the old list does not.
         playback.events.clear();
         let index = playback.index;
-        tracing::debug!(target: "xgview::app", zoom, finer, "the timeline changed width");
+        tracing::debug!(target: "xgview::app", zoom, "the timeline changed width");
         self.read_events(index);
         self.read_older(index);
     }
@@ -1185,11 +1231,10 @@ impl XgViewApp {
             }
             Timeline::Days => {
                 // Back to a day's width, which is what "the day I was looking
-                // at" means when the strip returns.
+                // at" means when the strip returns - and a day's width needs a
+                // day of list, which the calendar may not have read.
                 playback.timeline = Timeline::Span;
-                playback.zoom = *ZOOMS.last().expect("a ladder of widths");
-                playback.events.clear();
-                self.read_events(index);
+                self.set_zoom(*ZOOMS.last().expect("a ladder of widths"));
             }
         }
     }
@@ -1293,14 +1338,22 @@ impl XgViewApp {
 
     /// A moment kept inside what the camera recorded: the cursor cannot be
     /// dragged off the end of the strip into nothing.
+    ///
+    /// The far end is the newest moment there is. The near end is the oldest
+    /// moment the camera *has* - `oldest`, once a read has said where the
+    /// recording begins - and not the first segment of the list: the list is
+    /// what has been asked for, and a drag that stopped at the end of it would
+    /// be a strip that could not be pushed back into a history nobody had read
+    /// yet. Until a read has said where the beginning is, there is no bound at
+    /// all, and the reads follow the finger.
     fn clamp_centre(&self, at: i64) -> i64 {
         let Some(playback) = self.playback.as_ref() else {
             return at;
         };
-        match (playback.segments.first(), playback.segments.last()) {
-            (Some(first), Some(last)) => at.clamp(first.start, last.end),
-            _ => at,
-        }
+        let Some(last) = playback.segments.last() else {
+            return at;
+        };
+        clamp_to(at, playback.oldest, last.end)
     }
 
     /// Fetches what a seek to `at` will need, while there is time to fetch it.
@@ -1378,9 +1431,9 @@ impl XgViewApp {
     /// Reads the segment list around a moment the list does not reach.
     ///
     /// One stretch either side of it, which is what a recording is opened with:
-    /// a drag that leaves the list reads on the way, and a jump that leaves it
-    /// reads before it moves. A read that is already in flight is not asked
-    /// again - the answer merges, and the seek that was waiting tries again.
+    /// a seek that lands outside the list - a jump, a step, a drag let go of
+    /// there - reads before it moves, and comes back through `to_seek` once the
+    /// answer has merged. A read that is already in flight is not asked again.
     fn read_around(&mut self, index: usize, at: i64) {
         let Some(playback) = self.playback.as_ref() else {
             return;
@@ -1415,9 +1468,12 @@ impl XgViewApp {
         if playback.reading_older.is_some() {
             return;
         }
-        let Some((from, to)) =
-            older_window(&playback.segments, playback.zoom, self.window_of(playback).1, playback.oldest)
-        else {
+        let Some((from, to)) = older_window(
+            &playback.segments,
+            playback.zoom,
+            self.centre_of(playback),
+            playback.oldest,
+        ) else {
             return;
         };
         let source = playback.source.clone();
@@ -1469,8 +1525,19 @@ impl XgViewApp {
         };
         if segments.is_empty() {
             if picked.is_none() {
-                // Nothing was recorded that far back: the strip stops here.
-                playback.oldest = playback.segments.first().map(|segment| segment.start);
+                // Nothing was recorded that far back. That is where the
+                // recording begins only when the read covered the beginning of
+                // the list: a stretch read around a moment that is nowhere near
+                // it says nothing about the gap between the two, and marking it
+                // as the end would put a wall there that the viewer cannot see.
+                let begins = playback
+                    .segments
+                    .first()
+                    .map(|first| first.start)
+                    .filter(|start| from <= *start && *start <= to);
+                if let Some(begins) = begins {
+                    playback.oldest = Some(begins);
+                }
             }
             // A seek waiting for a list that came back empty is finished with:
             // the recording is not there, and the picture stays where it is
@@ -1503,6 +1570,10 @@ impl XgViewApp {
                 playback.timeline = Timeline::Span;
                 playback.zoom = *ZOOMS.last().expect("a ladder of widths");
                 self.seek(at);
+                // The strip is centred on the moment it goes to, so half of it
+                // is the day before the one that was picked - which was not part
+                // of that read.
+                self.read_older(index);
             }
             return;
         }
@@ -1535,6 +1606,14 @@ impl XgViewApp {
         ) else {
             return;
         };
+        // A window that does not hold the moment is the list's nearest stretch,
+        // not the moment's own: the finger is over a stretch nobody has read
+        // yet, and the segment read that follows it is what will name the
+        // playlist. Asked for every frame, this would be a request a frame for a
+        // range the finger has already left.
+        if !covered(Some(window), at) {
+            return;
+        }
         let source = playback.source.clone();
         tracing::debug!(
             target: "xgview::app",
@@ -2030,30 +2109,38 @@ fn extent(segments: &[Segment], zoom: i64, anchor: i64) -> Option<(i64, i64)> {
 /// The stretch of segment list to read so the strip can be as wide as it is
 /// drawn.
 ///
-/// The strip is drawn inside what has been read, so a wider level does not show
-/// more of the recording - it shows the same hour stretched, and stops at the
-/// oldest segment held. What is missing is the list: this is the stretch before
-/// that segment, back as far as the width asks for. `None` when the strip
-/// already fits, which is the usual case.
+/// The strip is drawn from the cursor less half its width, so that is as far
+/// back as the list has to reach: a strip that showed a stretch nobody had asked
+/// for would be a band of nothing on its left, and no amount of dragging would
+/// fill it. `None` when the list already reaches that far, which is the usual
+/// case.
 ///
 /// `oldest` is the earliest moment the camera was asked about and answered
 /// nothing for: a strip reaching past it is not asked for again.
 fn older_window(
     segments: &[Segment],
     zoom: i64,
-    anchor: i64,
+    centre: i64,
     oldest: Option<i64>,
 ) -> Option<(i64, i64)> {
     let first = segments.first()?;
-    let last = segments.last()?;
-    // Where the strip would begin if the list reached as far back as it is wide,
-    // and no further back than the camera has already said it recorded nothing.
-    let want = last.end.min(anchor + zoom / 4).saturating_sub(zoom);
+    let want = centre.saturating_sub(zoom / 2);
     let want = oldest.map_or(want, |oldest| want.max(oldest));
     if want >= first.start {
         return None;
     }
     Some((want, first.start))
+}
+
+/// A moment kept between the oldest the camera has and the newest - or under
+/// the newest alone, while nothing has said where the oldest is.
+///
+/// The two are put in order first: a bound that crossed the other would make
+/// `clamp` panic, and a panic while a frame is being drawn is a crash. It cannot
+/// happen while a list only ever grows, but a strip is not worth a crash.
+fn clamp_to(at: i64, oldest: Option<i64>, newest: i64) -> i64 {
+    let oldest = oldest.unwrap_or(i64::MIN).min(newest);
+    at.clamp(oldest, newest)
 }
 
 /// Whether the playlist a channel is playing can reach a moment.
@@ -2065,7 +2152,6 @@ fn older_window(
 fn covered(vod: Option<(i64, i64)>, at: i64) -> bool {
     vod.is_some_and(|(start, end)| start <= at && at < end)
 }
-
 
 /// Where a range begins, moved back to the start of the segment it falls in.
 ///
@@ -2114,10 +2200,11 @@ fn range_from(segments: &[Segment], from: i64, at: i64) -> i64 {
 /// lands on after [`range_from`] moves it to one - which is what keeps the box
 /// from cutting the whole range. See [`range_from`].
 ///
-/// `lead` is half the width the timeline is showing, so that the range runs as
-/// far ahead of the moment as it does behind it and a scrub either way stays
-/// inside it: a jump within a playlist is half a second, and one out of it is a
-/// request and a session.
+/// `lead` is half the widest range the box serves, so that the range runs as far
+/// ahead of the moment as it does behind it and a scrub either way stays inside
+/// it: a jump within a playlist is half a second, and one out of it is a request
+/// and a session. It is not half the strip - the strip slides, and a range as
+/// narrow as the window would be a session every time the finger crossed it.
 fn range_start(segments: &[Segment], at: i64, lead: i64) -> i64 {
     range_from(segments, at - lead, at)
 }
@@ -2630,6 +2717,13 @@ mod tests {
         let near = window_at(&segments, range_start(&segments, 60, RANGE_CAP / 2), RANGE_CAP)
             .expect("a stretch");
         assert_eq!(near.0, 0);
+
+        // A moment before the list has no window of its own: the nearest
+        // stretch comes back and it does not hold the moment, which is what
+        // tells a read-ahead not to ask for a range the finger has not reached.
+        let before = window_at(&segments, range_start(&segments, -3600, RANGE_CAP / 2), RANGE_CAP)
+            .expect("a stretch");
+        assert!(!covered(Some(before), -3600), "the nearest stretch is not the moment's own");
     }
 
     /// A strip wider than what has been read asks for the rest of the list, once
@@ -2639,13 +2733,37 @@ mod tests {
         let segments = run(0, 3600);
         // Ten minutes of a list that holds an hour: nothing to read.
         assert_eq!(older_window(&segments, 600, 3600, None), None);
-        // Six hours: the strip would begin five hours before the list does.
-        assert_eq!(older_window(&segments, 21600, 3600, None), Some((-18000, 0)));
+        // Six hours: the strip is drawn from three hours back, and the list
+        // begins at 0, so that is the stretch to read.
+        assert_eq!(older_window(&segments, 21_600, 3600, None), Some((-7200, 0)));
+        // A day-wide strip asks back half a day - the strip's own left edge -
+        // and not a quarter of it, which left the leftmost six hours showing
+        // nothing however the strip was dragged.
+        assert_eq!(older_window(&segments, 86_400, 3600, None), Some((-39_600, 0)));
         // Once the camera has answered that nothing was recorded before it, the
         // same width asks for nothing.
-        assert_eq!(older_window(&segments, 21600, 3600, Some(0)), None);
+        assert_eq!(older_window(&segments, 21_600, 3600, Some(0)), None);
         // And a list that already reaches back far enough asks for nothing.
-        assert_eq!(older_window(&run(-21600, 3600), 21600, 3600, None), None);
+        assert_eq!(older_window(&run(-21_600, 3600), 21_600, 3600, None), None);
+    }
+
+    /// A drag stops where the recording begins, not where the list does: what
+    /// has been read is not the end of what exists, and a strip that stopped
+    /// there was a band of nothing the finger could not push out of.
+    #[test]
+    fn a_drag_stops_at_the_oldest_history_not_at_what_was_read() {
+        // The list begins at 100 and the camera has said nothing before 40: a
+        // drag back to 60 is fine, and one further goes to 40, not to 100.
+        assert_eq!(clamp_to(60, Some(40), 900), 60);
+        assert_eq!(clamp_to(10, Some(40), 900), 40);
+        // Nothing has said where the beginning is: no lower bound, so the strip
+        // keeps moving and the read follows the finger.
+        assert_eq!(clamp_to(10, None, 900), 10);
+        // The newest moment is a wall either way.
+        assert_eq!(clamp_to(1000, None, 900), 900);
+        // And a bound that crossed the other is put in order rather than
+        // panicking inside a frame.
+        assert_eq!(clamp_to(500, Some(900), 900), 900);
     }
 
     /// A run of ten-second segments, the way the recorder writes them.

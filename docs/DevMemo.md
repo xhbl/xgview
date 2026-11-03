@@ -4349,19 +4349,30 @@ the strip still shows more than one range, and a drag there is still a session.
 That is the box's limit - three hours answers `503` - and not something the
 interface can arrange.
 
-**The strip is as long as the recording, not as long as the last read.** Two
-things were bounding it, and neither was the recording:
+**The strip is as long as the recording, not as long as the last read.** Three
+things were bounding it, and none of them was the recording:
 
-* `clamp_centre` held the cursor inside the *segment list*, which is an hour when
-  playback opens and grew only when the strip was drawn wider than it. A drag at
-  ten minutes therefore stopped after an hour - the list's end, not the
-  recording's. The drag now reads the list on the way: within half a strip of its
-  start it asks for a stretch either side, which is at least a strip wide, and the
-  list grows under the finger.
+* `clamp_centre` held the cursor inside the *segment list*, which is what has been
+  asked for rather than what exists. A drag at ten minutes stopped after an hour,
+  and at a day's width it stopped with a band of nothing on the left that the
+  finger could not push out of. The lower bound is `oldest` now - the moment a
+  read said the recording begins - and there is no bound at all until a read has
+  said it.
+* `older_window` asked back to a quarter of the strip before the cursor rather
+  than to its own left edge, so the leftmost quarter was never read at all: at a
+  day's width, six hours that no request had ever named. It asks for the strip's
+  left edge now, and it is asked for while the finger is still down - half a
+  strip before the cursor reaches the end of what was read, rather than after it.
 * `seek` snapped to `nearest` of what the list held, so a target outside it became
   the list's edge. A target outside the list now reads the list around it and
   comes back - `to_seek`, the same way a picked day is waited for - and the cursor
   waits where the finger left it meanwhile.
+
+**A read that found nothing does not always mark the beginning.** `oldest` was
+set to the first segment whenever a read came back empty - but a read centred on
+a moment says nothing about the stretch between that moment and the list, and
+marking it there put a wall in the timeline the viewer could not see or argue
+with. Only a read that ends where the list begins says where the recording does.
 
 **And a jump is a jump.** The events list is the stretch the strip was showing,
 so the two event buttons could only find events inside it - an event one session
@@ -4500,3 +4511,74 @@ Two consequences worth naming:
 All three came back from the screen the same day, which is the point of saying
 so: a lean, a floating band and a time written twice are not things arithmetic
 catches. The tests written after them only hold the ground they were given.
+
+## 60. The timeline, read twice
+
+*Landed 2026-11-03, in 2.1.51.*
+
+Asked to read the strip's code again, twice over. Six things came out of it, and
+five are one shape: **a rule that was true while the cursor was pinned to what
+had been read, and is not true now that it can walk into a history nobody has
+read.** Each is a line that reads fine on its own.
+
+**A jump read the day before the newest recording, not the day around the
+moment.** `jump_event` asked for `[last.end - DAY, last.end]`, which is the right
+day when the viewer is near the present and the wrong one when they are three
+days back - the list would hold nothing on the right side of the cursor, and the
+button would say "no event that way" over a stretch full of them. It asks for a
+day on the side the jump is going now, anchored on the moment on screen.
+
+**A jump started a paused recording.** `seek`'s fragment branch lets go of the
+hold - it has to, the jump is already in the session's hand - and only
+`move_to` put it back. The step buttons went through `move_to`; the event buttons
+did not. Both do now.
+
+**A tap on the strip resumed a paused picture.** `end_scrub` unheld the channel
+unconditionally, including the two paths that seek nothing: the finger lifted
+with nothing under it, and the tap that moved the strip not at all. A viewer who
+pauses and then touches the strip means to look at it. `release_hold` gives the
+channel the hold it had.
+
+**The right press dead-ended at the closest width.** It was the mouse's only way
+to the widths - there is no wheel on the strip - and it stepped finer and
+stopped. The two buttons on the bar are a pair and their ends are ends; a right
+press has no partner, so it cycles. Both go through `set_zoom` now.
+
+**A drag into unread history asked for a playlist every frame.** `window_at`
+answers with the *nearest* stretch when the moment is not in the list at all, and
+the read-ahead took that window as the moment's own: it stored it, the next frame
+found the moment still uncovered, and asked again. One request a frame for a
+range the finger had already left. The read-ahead refuses a window that does not
+hold the moment - which also stops a drag through a hole from asking every frame,
+a fault that was there before the cursor was let loose.
+
+**And coming back from the calendar left the day-wide strip half unread.**
+`toggle_calendar` set the width and read the events, but not the list, so the day
+before the one that was picked was a band of empty track until something else
+asked. It goes through `set_zoom`, which reads both.
+
+Nothing here is measured: it is arithmetic read a second time, and the tests that
+hold it are `a_wider_strip_reads_the_list_it_needs`,
+`a_drag_stops_at_the_oldest_history_not_at_what_was_read`, and the range one,
+which now also pins the window a moment *before* the list has.
+
+A third reading, after those six were fixed - and the same lesson: the faults
+were in what the *previous* fix had left true only by accident.
+
+**The event read after a drag asked for the stretch the picture was still at.**
+`read_events` takes `window_of`, which is the cursor less half a width - and at
+that moment the cursor is the *picture's* moment, because the finger's has just
+been taken out of `scrub`. A drag of a full width therefore read the events of
+the stretch it had left, and the strip it landed on showed no marks. It reads
+`at ± zoom/2` now, and `at` is held to the recording once more first: a read may
+have answered while the finger was down and said where the beginning is.
+
+**And a clamp could panic.** `clamp_to` puts the two bounds in order before
+`i64::clamp`, which panics when they cross. They cannot cross while a list only
+grows, but the panic would happen inside a frame, which is a crash rather than a
+wrong line on a strip.
+
+One thing outside the strip came out of the same reading: the events URL had a
+run of thirteen spaces in it, left by a wrapped line. The URL parser
+percent-encodes them and the box parses `before=123   ` as a number, so it
+worked - which is why nobody had noticed.
