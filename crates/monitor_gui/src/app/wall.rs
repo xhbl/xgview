@@ -462,12 +462,14 @@ impl XgViewApp {
         // given only to a tile with room for both of the panel's rows: a panel
         // deeper than the picture is no longer a strip of controls.
         let playing = self.scheduler.zoom().is_some_and(|slot| self.is_playing_back(slot));
-        let timeline = playing && tilebar::fits_timeline(rect, rotated);
         // The controls are read again below, after the press, so a press that
         // changes the picture fit also redraws the bar with the set it has in the
         // same frame it changes it. Every control is a square.
         let controls = self.tile_bar_controls();
         let widths = vec![tilebar::icon_width(); controls.len()];
+        // How deep the panel is depends on how many lines the controls need, so
+        // the timeline is only promised to a tile that has room for both.
+        let timeline = playing && tilebar::fits_timeline(rect, rotated, &widths);
         let layout = tilebar::layout(rect, rotated, self.tile_bar.dock(), &widths, timeline);
         let now = Instant::now();
         let mut consumed = false;
@@ -610,14 +612,38 @@ impl XgViewApp {
         if self.is_portrait() {
             entries.push((tilebar::Control::Icon(Icon::Rotate), TileBarAction::Rotate));
         }
+        // A recording has its own controls, and they are not the live ones: what
+        // a viewer watching the past wants is the picture held and moved, not
+        // the microphone and the way in. The way *out* is the last control, as
+        // it is on the live bar.
+        if playing {
+            entries.push((tilebar::Control::Icon(Icon::StepBack), TileBarAction::StepBack));
+            let play = if self.playback_paused() { Icon::Play } else { Icon::Pause };
+            entries.push((tilebar::Control::Icon(play), TileBarAction::PlayPause));
+            entries.push((tilebar::Control::Icon(Icon::StepForward), TileBarAction::StepForward));
+            entries.push((tilebar::Control::Icon(Icon::EventBack), TileBarAction::PrevEvent));
+            entries.push((tilebar::Control::Icon(Icon::EventForward), TileBarAction::NextEvent));
+            // How much of the recording the strip shows. It is here rather than
+            // on the strip because a control on the bar is a control the remote
+            // can reach, and the timeline has to be usable without a drag.
+            if let Some(width) = self.width_control() {
+                entries.push((width, TileBarAction::Width));
+            }
+            if tilebar::SOUND && self.magnified_has_audio() {
+                let icon = if self.sound_on { Icon::Sound } else { Icon::Mute };
+                entries.push((tilebar::Control::Icon(icon), TileBarAction::Sound));
+            }
+            entries.push((tilebar::Control::Icon(Icon::Live), TileBarAction::Live));
+            return entries;
+        }
         entries.push((tilebar::Control::Icon(Icon::AspectRatio), TileBarAction::Fit));
         if tilebar::SOUND && self.magnified_has_audio() {
             let icon = if self.sound_on { Icon::Sound } else { Icon::Mute };
             entries.push((tilebar::Control::Icon(icon), TileBarAction::Sound));
         }
-        // Not while a recording plays: a microphone is something to hold to a
-        // camera, and there is nothing behind a recording to hear it.
-        if !playing && self.magnified_has_backchannel() {
+        // The live bar only: a microphone is something to hold to a camera, and
+        // there is nothing behind a recording to hear it.
+        if self.magnified_has_backchannel() {
             entries.push((tilebar::Control::Icon(Icon::Mic), TileBarAction::Mic));
         }
         // The way into this camera's recordings, for a camera that came from a
@@ -626,7 +652,7 @@ impl XgViewApp {
         // Not while it is already playing: the way in is not also the way out,
         // and pressing it again would ask for the same stretch from its first
         // frame. Back leaves the viewport, and the recording with it.
-        if !playing && self.magnified_camera().is_some_and(|camera| camera.frigate.is_some()) {
+        if self.magnified_camera().is_some_and(|camera| camera.frigate.is_some()) {
             entries.push((tilebar::Control::Icon(Icon::History), TileBarAction::Playback));
         }
         entries
@@ -668,6 +694,13 @@ impl XgViewApp {
                 // recording can be played in.
                 self.enter_playback();
             }
+            TileBarAction::StepBack => self.step_playback(-playback::STEP),
+            TileBarAction::StepForward => self.step_playback(playback::STEP),
+            TileBarAction::PlayPause => self.toggle_play(),
+            TileBarAction::PrevEvent => self.jump_event(false),
+            TileBarAction::NextEvent => self.jump_event(true),
+            TileBarAction::Width => self.zoom_timeline(),
+            TileBarAction::Live => self.leave_playback(),
             TileBarAction::Fit => {
                 // The fit this writes is the magnified viewport's own: it is kept
                 // per camera, and the wall's landscape and portrait fits - the

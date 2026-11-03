@@ -10,7 +10,10 @@
 //! it is asked for, which is what lets one definition serve the bar and anything
 //! else that needs it.
 
-use egui::{Color32, CornerRadius, Id, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, vec2};
+use egui::{
+    Color32, CornerRadius, Id, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui,
+    Vec2, vec2,
+};
 
 use crate::theme;
 
@@ -58,9 +61,33 @@ pub enum Icon {
     /// Turn the magnified picture a quarter turn: an arrow curving round a
     /// square, the shape a phone means by "rotate".
     Rotate,
-    /// Go back over what has already happened: a clock face, its hands at a
-    /// past hour.
+    /// The way into a camera's recordings: a screen with the play mark in it -
+    /// something to open, rather than a clock to read.
     History,
+    /// Start playing: a solid triangle.
+    Play,
+    /// Hold the picture: two solid bars.
+    Pause,
+    /// Back over the recording by ten seconds: a ring open at the left, a
+    /// double arrowhead at its top pointing back, and the number it steps by
+    /// inside it.
+    StepBack,
+    /// The same, forwards.
+    StepForward,
+    /// The event before this moment: a ring open at the lower left, a
+    /// corner-shaped arrowhead at its upper left, and an exclamation mark inside
+    /// it - the shape a viewer of a camera app already knows as "step to what
+    /// happened".
+    EventBack,
+    /// The event after this moment: the same, mirrored, pointing forward.
+    EventForward,
+    /// How much of the recording the timeline shows: two open rings facing each
+    /// other with a double-headed arrow through them, which is what "wider or
+    /// narrower" looks like without a word.
+    Zoom,
+    /// Back to the camera as it is now: a video camera, body and lens - the
+    /// picture itself, since that is what the button switches to.
+    Live,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -242,7 +269,15 @@ fn paint_button(
         // whatever has the keyboard focus, and that state carries a stroke.
         ui.painter().rect_stroke(frame, corner, visuals.bg_stroke, StrokeKind::Inside);
     }
-    let extent = side * glyph;
+    // The five that carry a number, a mark or two heads need a little more of
+    // the button than a plain shape, because their drawing fills less of its own
+    // square (a ring, not a full-width stroke) and the digits need room. A
+    // fifth more brings them to the same visual size as the rest.
+    let detail = matches!(
+        icon,
+        Icon::StepBack | Icon::StepForward | Icon::EventBack | Icon::EventForward | Icon::Zoom
+    );
+    let extent = side * if detail { glyph * 1.15 } else { glyph };
     let glyph_rect = Rect::from_center_size(rect.center(), Vec2::splat(extent));
     // The theme sets `override_text_color` so that every label draws in the
     // project's text colour; egui's text widgets take it too, so an icon that
@@ -397,6 +432,107 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
             painter.add(line(&[at(0.27, 0.52), at(0.27, 0.40), at(0.41, 0.40)]));
             painter.add(line(&[at(0.73, 0.48), at(0.73, 0.60), at(0.59, 0.60)]));
         }
+        Icon::Play => {
+            let colour = stroke.color;
+            painter.add(Shape::convex_polygon(
+                vec![at(0.30, 0.12), at(0.30, 0.88), at(0.84, 0.50)],
+                colour,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Pause => {
+            let colour = stroke.color;
+            for (x0, x1) in [(0.28, 0.42), (0.58, 0.72)] {
+                painter.rect_filled(square(x0, 0.14, x1, 0.86), CornerRadius::ZERO, colour);
+            }
+        }
+        Icon::StepBack | Icon::StepForward => {
+            // A ring open on the side the arrow has come from, a double
+            // arrowhead riding its top, and the number inside - the shape the
+            // camera apps draw for "ten seconds". The ring starts level with its
+            // centre, on the left going back and on the right going forward, and
+            // runs three quarters of the way round to the arrowheads.
+            let forward = matches!(icon, Icon::StepForward);
+            let heavy = stroke;
+            let (centre, radius) = ((0.5_f32, 0.57_f32), 0.375_f32);
+            // How far the inner arrowhead's point sits from the top of the ring:
+            // the ring runs on to that point, so the shaft reaches the head.
+            let lead = 0.0656_f32;
+            let overrun = (lead / radius).asin().to_degrees();
+            let (sign, from, to) = if forward {
+                (1.0_f32, 0.0_f32, 270.0 + overrun)
+            } else {
+                (-1.0, 180.0, -90.0 - overrun)
+            };
+            painter.add(circle_arc(rect, turned, centre, radius, from, to, heavy));
+            let y = centre.1 - (radius * radius - lead * lead).sqrt();
+            for offset in [lead, lead + 0.1556] {
+                painter.add(chevron(rect, turned, (centre.0 + sign * offset, y), (sign, 0.0), 0.208, heavy));
+            }
+            let [one, zero] = ten(rect, turned, Stroke::new(stroke.width * 0.85, stroke.color));
+            painter.add(one);
+            painter.add(zero);
+        }
+        Icon::EventBack | Icon::EventForward => {
+            // The same ring, but open at the bottom corner and ended by a
+            // single corner-shaped head - two bars meeting at a right angle,
+            // pointing down and outwards - with an exclamation mark inside.
+            let forward = matches!(icon, Icon::EventForward);
+            let heavy = stroke;
+            let colour = stroke.color;
+            let extent = rect.width();
+            let radius = 0.42_f32;
+            let side = if forward { 1.0_f32 } else { -1.0 };
+            let (from, to) = if forward { (45.0_f32, 333.0_f32) } else { (135.0, -153.0) };
+            painter.add(circle_arc(rect, turned, (0.5, 0.5), radius, from, to, heavy));
+            // The head sits a little past the end of the ring, at the side, and
+            // always points diagonally down and outwards; its bars run up and
+            // inwards along the ring's own edge.
+            let tip = (0.5 + side * radius, 0.329);
+            let diagonal = std::f32::consts::FRAC_1_SQRT_2;
+            painter.add(chevron(rect, turned, tip, (side * diagonal, diagonal), 0.205, heavy));
+            // The mark, drawn rather than typed: a stem that tapers from a broad
+            // rounded top to a narrower rounded foot, and a round dot.
+            let mut stem: Vec<Pos2> = Vec::with_capacity(18);
+            for step in 0..=8 {
+                let angle = (180.0 + 180.0 * step as f32 / 8.0).to_radians();
+                stem.push(at(0.5 + 0.082 * angle.cos(), 0.341 + 0.082 * angle.sin()));
+            }
+            for step in 0..=8 {
+                let angle = (180.0 * step as f32 / 8.0).to_radians();
+                stem.push(at(0.5 + 0.059 * angle.cos(), 0.483 + 0.059 * angle.sin()));
+            }
+            painter.add(Shape::convex_polygon(stem, colour, Stroke::NONE));
+            painter.circle_filled(at(0.5, 0.67), extent * 0.084, colour);
+        }
+        Icon::Live => {
+            // A video camera: the body, and the lens flaring out of its front.
+            // The button switches the view to the camera as it is now, so the
+            // camera itself is the picture - nothing inside it to say it is
+            // recording.
+            painter.rect_stroke(
+                square(0.05, 0.20, 0.63, 0.80),
+                CornerRadius::same(2),
+                stroke,
+                StrokeKind::Inside,
+            );
+            painter.add(Shape::closed_line(
+                vec![at(0.63, 0.44), at(0.93, 0.25), at(0.93, 0.75), at(0.63, 0.56)],
+                stroke,
+            ));
+        }
+        Icon::Zoom => {
+            // Two open rings facing each other - a link that can be pulled
+            // apart - and a double-headed arrow through them. The rings and
+            // the arrow share the weight of every other icon's line.
+            let heavy = stroke;
+            let light = stroke;
+            painter.add(circle_arc(rect, turned, (0.265, 0.5), 0.195, 45.0, 315.0, heavy));
+            painter.add(circle_arc(rect, turned, (0.735, 0.5), 0.195, 225.0, 495.0, heavy));
+            painter.add(Shape::line(vec![at(0.195, 0.5), at(0.805, 0.5)], light));
+            painter.add(chevron(rect, turned, (0.195, 0.5), (-1.0, 0.0), 0.125, light));
+            painter.add(chevron(rect, turned, (0.805, 0.5), (1.0, 0.0), 0.125, light));
+        }
         Icon::Sound => {
             painter.add(speaker());
             painter.add(line(&[at(0.64, 0.38), at(0.74, 0.50), at(0.64, 0.62)]));
@@ -416,12 +552,22 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
             painter.add(line(&[at(0.34, 0.92), at(0.66, 0.92)]));
         }
         Icon::History => {
-            // A clock face, hands turned back. It is the one shape that reads
-            // as "already recorded" without a word beside it.
-            let centre = at(0.5, 0.5);
-            painter.circle_stroke(centre, rect.width() * 0.40, stroke);
-            painter.add(line(&[centre, at(0.5, 0.24)]));
-            painter.add(line(&[centre, at(0.70, 0.58)]));
+            // A screen with the play mark in it: the recordings, as a picture to
+            // open, rather than a clock to read. Nothing about time in it, so it
+            // cannot be mistaken for a timer or a schedule, and it has no ring to
+            // be confused with the buttons that step through the recording once
+            // it is open.
+            painter.rect_stroke(
+                square(0.06, 0.18, 0.94, 0.82),
+                CornerRadius::same(2),
+                stroke,
+                StrokeKind::Inside,
+            );
+            painter.add(Shape::convex_polygon(
+                vec![at(0.41, 0.34), at(0.41, 0.66), at(0.67, 0.50)],
+                stroke.color,
+                Stroke::NONE,
+            ));
         }
         Icon::Rotate => {
             // A circular arrow: an arc most of the way round, a head that says
@@ -472,6 +618,67 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
             painter.add(Shape::closed_line(points, stroke));
         }
     }
+}
+
+/// An arc of the circle of `radius` about `centre`, from `from` to `to` degrees.
+///
+/// Degrees rather than radians because these are read off a drawing: zero is the
+/// right of the square, ninety is its bottom, and an arc that runs clockwise on
+/// the screen goes from a smaller number to a larger one. Any sweep is allowed,
+/// including a negative angle or one past 360.
+fn circle_arc(rect: Rect, turned: bool, centre: (f32, f32), radius: f32, from: f32, to: f32, stroke: Stroke) -> Shape {
+    // About every eight degrees: at the size of a button that is a fraction of a
+    // pixel off the true curve.
+    let steps = (((to - from).abs() / 8.0).ceil() as usize).max(2);
+    let points: Vec<Pos2> = (0..=steps)
+        .map(|step| {
+            let angle = (from + (to - from) * step as f32 / steps as f32).to_radians();
+            unit_at(rect, turned, centre.0 + radius * angle.cos(), centre.1 + radius * angle.sin())
+        })
+        .collect();
+    Shape::line(points, stroke)
+}
+
+/// An arrowhead: a V with its point at `tip`, the way the arrow travels being
+/// `direction` (a unit vector), and two arms of length `arm` falling back from
+/// the point at forty-five degrees either side - a right angle between them.
+fn chevron(rect: Rect, turned: bool, tip: (f32, f32), direction: (f32, f32), arm: f32, stroke: Stroke) -> Shape {
+    let diagonal = std::f32::consts::FRAC_1_SQRT_2;
+    // Back along the shaft, and across it.
+    let (back, across) = ((-direction.0, -direction.1), (-direction.1, direction.0));
+    let end = |side: f32| {
+        unit_at(
+            rect,
+            turned,
+            tip.0 + (back.0 + side * across.0) * diagonal * arm,
+            tip.1 + (back.1 + side * across.1) * diagonal * arm,
+        )
+    };
+    Shape::line(vec![end(1.0), unit_at(rect, turned, tip.0, tip.1), end(-1.0)], stroke)
+}
+
+/// The number the step buttons carry, "10", drawn rather than typed.
+///
+/// A font's digits are a different weight from the ring they sit in, and which
+/// font is a matter of the target; a one with a flag and a squared-off nought,
+/// drawn with the ring's own painter, are the same bold figures everywhere and
+/// turn with the picture like the rest of the icon.
+fn ten(rect: Rect, turned: bool, stroke: Stroke) -> [Shape; 2] {
+    let at = |x: f32, y: f32| unit_at(rect, turned, x, y);
+    let one = Shape::line(vec![at(0.328, 0.525), at(0.4056, 0.478), at(0.4056, 0.714)], stroke);
+    // A nought is an oval with straighter sides than an ellipse has - a
+    // superellipse of exponent 2.5, which is what a bold sans-serif nought is.
+    const STEPS: usize = 32;
+    let nought: Vec<Pos2> = (0..STEPS)
+        .map(|step| {
+            let (sin, cos) = (step as f32 * std::f32::consts::TAU / STEPS as f32).sin_cos();
+            at(
+                0.599 + 0.086 * cos.signum() * cos.abs().powf(0.8),
+                0.596 + 0.118 * sin.signum() * sin.abs().powf(0.8),
+            )
+        })
+        .collect();
+    [one, Shape::closed_line(nought, stroke)]
 }
 
 #[cfg(test)]

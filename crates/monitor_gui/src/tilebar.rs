@@ -64,9 +64,59 @@ pub const SOUND: bool = true;
 /// in.
 pub const TIMELINE: f32 = 48.0;
 
-/// The panel's whole depth when it carries a timeline: the controls, the gap
-/// under them, and the timeline.
+/// The panel's whole depth when it carries a timeline and one row of controls.
+///
+/// Two rows of controls are [`FULL`] plus another row; see [`depth`].
 pub const FULL: f32 = THICK + GAP + TIMELINE;
+
+/// The panel's depth with `rows` rows of controls, and a timeline under them
+/// when `timeline`.
+///
+/// A narrow picture cannot hold every control in one line - the bar is as long
+/// as the picture is wide - so the controls wrap and the panel deepens. Which is
+/// why this is a function and not the constant it used to be.
+pub fn depth(rows: usize, timeline: bool) -> f32 {
+    let rows = rows.max(1) as f32;
+    let controls = rows * THICK + (rows - 1.0) * GAP;
+    if timeline {
+        controls + GAP + TIMELINE
+    } else {
+        controls
+    }
+}
+
+/// Which controls go on which line, in order.
+///
+/// Greedy, and the line breaks where the next control would not fit: a strip
+/// laid out by arithmetic rather than by eye, where the alternative - balancing
+/// the lines - would move a control the viewer has just learned the place of
+/// every time one was added.
+fn wrap(widths: &[f32], available: f32) -> Vec<Vec<usize>> {
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut row: Vec<usize> = Vec::new();
+    let mut used = 0.0;
+    for (index, width) in widths.iter().enumerate() {
+        let wider = if row.is_empty() { *width } else { used + GAP + *width };
+        if !row.is_empty() && wider + 2.0 * PAD > available {
+            rows.push(std::mem::take(&mut row));
+            used = *width;
+        } else {
+            used = wider;
+        }
+        row.push(index);
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+/// How much room the controls of `row` ask for along the strip.
+fn row_width(row: &[usize], widths: &[f32]) -> f32 {
+    row.iter().map(|index| widths[*index]).sum::<f32>()
+        + row.len().saturating_sub(1) as f32 * GAP
+        + 2.0 * PAD
+}
 
 /// The widest the panel is drawn, timeline or not.
 ///
@@ -119,15 +169,17 @@ pub fn icon_width() -> f32 {
     BUTTON_H
 }
 
-/// How many controls the bar can carry at once: the quarter turn, the picture
-/// fit, the sound switch, the microphone and the way into a camera's
-/// recordings. A call takes all of them away and leaves the handset in the
-/// first place.
+/// How many controls the bar can carry at once.
+///
+/// Nine, which is a recording's row: the quarter turn on a portrait wall, the
+/// two steps, play, the two event jumps, the timeline's width, the sound switch
+/// and the way back to the camera. The live bar is shorter - five - and a call
+/// takes all of them away and leaves the handset in the first place.
 ///
 /// A focus on any of these ids is a focus the bar owns, whether or not that
 /// control is on screen this frame - the microphone a call has just turned into
 /// the handset is one, and the handset it becomes is another.
-pub const CONTROLS: usize = 5;
+pub const CONTROLS: usize = 9;
 
 /// Which edge of the picture the bar is docked to, in the picture's own frame.
 ///
@@ -274,9 +326,11 @@ pub fn owns(id: Id) -> bool {
 /// of controls over it, and a recording is scrubbed along a timeline that cannot
 /// be anywhere else - so this is the one thing that keeps the row off a picture
 /// down to a postage stamp.
-pub fn fits_timeline(tile: Rect, rotated: bool) -> bool {
+pub fn fits_timeline(tile: Rect, rotated: bool, widths: &[f32]) -> bool {
     let across = if rotated { tile.width() } else { tile.height() };
-    across >= EDGE + FULL
+    let local = if rotated { vec2(tile.height(), tile.width()) } else { tile.size() };
+    let rows = wrap(widths, (local.x - 2.0 * EDGE).max(0.0));
+    across >= EDGE + depth(rows.len(), true)
 }
 
 /// The navigation scope the controls register under.
@@ -338,19 +392,21 @@ impl Layout {
 /// the picture is turned.
 pub fn layout(tile: Rect, rotated: bool, dock: Dock, widths: &[f32], timeline: bool) -> Layout {
     let local = if rotated { vec2(tile.height(), tile.width()) } else { tile.size() };
-    let controls = widths.iter().sum::<f32>()
-        + widths.len().saturating_sub(1) as f32 * GAP
-        + 2.0 * PAD;
+    // The room a line of controls has: the picture's own length, less the margin
+    // the panel keeps from each end.
+    let available = (local.x - 2.0 * EDGE).max(0.0);
+    let rows = wrap(widths, available);
+    let widest = rows.iter().map(|row| row_width(row, widths)).fold(0.0, f32::max);
     // A timeline wants the width of the picture, less the margin it keeps from
     // the edge - and no more than `WIDEST`, where a scrub would ask the eye to
     // travel further than it can follow. The controls are centred in whatever
     // it turns out to be.
     let length = if timeline {
-        controls.max((local.x - 2.0 * EDGE).min(WIDEST))
+        widest.max(available.min(WIDEST))
     } else {
-        controls
+        widest
     };
-    let depth = if timeline { FULL } else { THICK };
+    let depth = depth(rows.len(), timeline);
     let x = ((local.x - length) * 0.5).max(0.0);
     let y = match dock {
         Dock::Top => EDGE,
@@ -360,25 +416,27 @@ pub fn layout(tile: Rect, rotated: bool, dock: Dock, widths: &[f32], timeline: b
     let bar = Rect::from_min_size(egui::pos2(x, y), vec2(length, depth));
     // The controls sit against the picture, away from the edge the panel is
     // docked to: the timeline is the row nearest that edge, so the controls
-    // rise by one row when it appears rather than jumping to another edge.
-    let top = match dock {
-        Dock::Top => y + depth - THICK,
+    // rise by one row when it appears rather than jumping to another edge - and
+    // by two when they wrap.
+    let controls_depth = depth - if timeline { GAP + TIMELINE } else { 0.0 };
+    let controls_top = match dock {
+        Dock::Top => y + depth - controls_depth,
         Dock::Bottom => y,
     };
-    let mut left = x + PAD;
-    let buttons: Vec<Rect> = widths
-        .iter()
-        .map(|width| {
+    let mut buttons = vec![Rect::NOTHING; widths.len()];
+    for (line, row) in rows.iter().enumerate() {
+        let top = controls_top + line as f32 * (THICK + GAP);
+        let mut left = x + PAD;
+        for index in row {
             let at = top + (THICK - BUTTON_H) * 0.5;
-            let rect = Rect::from_min_size(egui::pos2(left, at), vec2(*width, BUTTON_H));
-            left += *width + GAP;
-            rect
-        })
-        .collect();
+            buttons[*index] = Rect::from_min_size(egui::pos2(left, at), vec2(widths[*index], BUTTON_H));
+            left += widths[*index] + GAP;
+        }
+    }
     let row = match dock {
         Dock::Top => Rect::from_min_max(egui::pos2(x + PAD, y + PAD), egui::pos2(x + length - PAD, y + TIMELINE)),
         Dock::Bottom => Rect::from_min_max(
-            egui::pos2(x + PAD, y + THICK + GAP),
+            egui::pos2(x + PAD, y + controls_depth + GAP),
             egui::pos2(x + length - PAD, y + depth - PAD),
         ),
     };
@@ -656,22 +714,57 @@ mod tests {
     /// the depth runs along the width instead.
     #[test]
     fn a_timeline_is_given_to_a_tile_with_room_for_both_rows() {
-        assert!(fits_timeline(landscape(), false));
-        assert!(fits_timeline(portrait(), false));
-        assert!(fits_timeline(portrait(), true));
-        assert!(fits_timeline(landscape(), true));
+        let five = [icon_width(); 5];
+        assert!(fits_timeline(landscape(), false, &five));
+        assert!(fits_timeline(portrait(), false, &five));
+        assert!(fits_timeline(portrait(), true, &five));
+        assert!(fits_timeline(landscape(), true, &five));
 
         // A strip of a tile has room for the controls and not for the row.
         let shallow = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 100.0));
-        assert!(!fits_timeline(shallow, false));
-        assert!(fits_timeline(shallow, true), "its width is the depth when turned");
+        assert!(!fits_timeline(shallow, false, &five));
+        assert!(fits_timeline(shallow, true, &five), "its width is the depth when turned");
         let narrow = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 1920.0));
-        assert!(!fits_timeline(narrow, true));
-        assert!(fits_timeline(narrow, false));
+        assert!(!fits_timeline(narrow, true, &five));
+        assert!(fits_timeline(narrow, false, &five));
         // And the edge it keeps clear of the picture edge is part of the room.
         let exact = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, EDGE + FULL));
-        assert!(fits_timeline(exact, false));
-        assert!(!fits_timeline(exact.shrink2(vec2(0.0, 1.0)), false), "a point short");
+        assert!(fits_timeline(exact, false, &five));
+        assert!(!fits_timeline(exact.shrink2(vec2(0.0, 1.0)), false, &five), "a point short");
+
+        // Wrapping makes the panel deeper, so a tile that holds one row of five
+        // need not hold two.
+        let eight = [icon_width(); 8];
+        let narrow_tile = Rect::from_min_size(Pos2::ZERO, vec2(320.0, 150.0));
+        assert!(fits_timeline(narrow_tile, false, &five));
+        assert!(!fits_timeline(narrow_tile, false, &eight), "a second line needs 64 more");
+    }
+
+    /// A line of controls breaks where the next one would not fit, and the
+    /// panel deepens by a row for each line it takes.
+    #[test]
+    fn a_narrow_picture_wraps_the_controls() {
+        let widths = [icon_width(); 8];
+        // A 1920 wide picture holds all eight on one line.
+        let wide = layout(landscape(), false, Dock::Bottom, &widths, true);
+        assert_eq!(wide.buttons.len(), 8);
+        assert!(wide.buttons.iter().all(|rect| rect.center().y == wide.buttons[0].center().y));
+        // A phone in portrait is 411 wide: 363 for the panel, which is six
+        // controls a line - 316 - and not seven, which needs 368.
+        let phone = Rect::from_min_size(Pos2::ZERO, vec2(411.0, 800.0));
+        let narrow = layout(phone, false, Dock::Bottom, &widths, true);
+        assert_eq!(narrow.buttons.len(), 8);
+        let lines: Vec<f32> = {
+            let mut seen: Vec<f32> = Vec::new();
+            for rect in &narrow.buttons {
+                if !seen.iter().any(|y| (*y - rect.center().y).abs() < 0.5) {
+                    seen.push(rect.center().y);
+                }
+            }
+            seen
+        };
+        assert_eq!(lines.len(), 2, "two lines on a phone");
+        assert!(narrow.bar.height() > wide.bar.height(), "and a deeper panel");
     }
 
     /// The scope is a row across the wall and a column down a turned picture, so

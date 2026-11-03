@@ -4104,3 +4104,156 @@ recorded there" and the camera not answering at all look the same if both are an
 empty vector - and the first should stop the strip from widening, while the
 second must not. So the answer is an `Option`, and only `Some(empty)` sets the
 floor the strip stops at.
+
+## 56. The timeline becomes a calendar
+
+*Landed 2026-11-02, in 2.1.49.*
+
+The plan's sixth width is not a width: a row per day, which is a different
+picture of the same recording. It is what answers "which night was that" rather
+than "what time was that", and it is now the step after a day-wide strip on the
+right press.
+
+**The days come from `/api/recordings/summary`**, which lists only the days that
+hold something - three of them on the box of 2026-11-02 - so the calendar fills
+the quiet days in itself: a calendar with holes in it cannot be aimed at.
+
+**Day boundaries are walked, not computed.** An hour at a time through
+`blackout::local_at`, because a day is not always 86400 seconds - a clock that
+goes forward or back makes one 23 or 25 hours long - and the walk is the only
+thing in the program that knows the local rules. The first moment of a day it
+meets is that day's start, within an hour of midnight, which is as close as the
+strip that follows needs.
+
+**A day is a touch target**, so the strip shows as many as fit at the plan's 44
+points each and no fewer than one - the newest, because a calendar ends today.
+
+**Picking a day reads it before going to it.** What is held is an hour around
+where the viewer was, and a seek can only land where the list reaches, so the
+day's own segments are read first (an hour either side, 25 hours in all); when
+they arrive the strip becomes that day and the picture goes to its first moment.
+
+**Two things went wrong while wiring it, both worth keeping.**
+
+- Picking a *quiet* day left the "go to this day" mark set for ever, because the
+  answer that would have cleared it never came - and every later pick was
+  refused by the guard that stops two picks at once. The answer now carries the
+  window it was asked for, so the pick can be finished with whether it found
+  anything or not.
+- The strip came out as the seven hours the list happened to hold rather than the
+  day. `extent` anchors a strip a quarter of a width past the moment it is given,
+  so a day anchored on its *first* moment is eighteen hours before midnight and
+  six after it - and `start_seek` then re-anchored on the seek target and cut it
+  down again. A picked day is now anchored on its **end**, and a seek no longer
+  re-anchors a strip that already holds its target.
+
+**The entry was missing, and that was the first thing asked of it.** The widths
+were reached by a right press on the strip and nothing on screen said so; the
+day level inherited the same silence. A button at the strip's leading end,
+saying what it is showing - `2m`, `10m`, `1h`, `6h`, `24h`, `1d` - and walking
+the ladder on a press. Symbols rather than words, so the one control on the
+timeline needs no translation, and the right press is kept as a mouse's shortcut
+to the same walk.
+
+**It did not stay there.** §57 moved it to the bar, where a control is a widget
+and the remote can reach it; the words went with it, and the ladder is walked by
+a double-headed arrow instead. What is left of it here is the reasoning, which
+holds either way: the entry had to be visible.
+
+Not watched on screen: the bands, their labels, the button and the press are
+arithmetic and plumbing that compiles and is tested where it is arithmetic.
+Whether a band is where the finger thinks it is has not been seen.
+
+## 57. A recording gets its own bar, and the bar learns to wrap
+
+*Landed 2026-11-02, in 2.1.49.*
+
+**The playback view had no controls at all.** Entering a recording swapped the
+picture and drew a timeline, and the bar above it was still the live bar: the
+quarter turn, the picture fit, the sound switch - with the microphone and the
+way in taken away. There was no pause. A viewer could drag the strip and watch,
+and that was the whole vocabulary.
+
+The plan's row is five controls - back ten seconds, play, forward ten, the speed
+and the way out - and it has never been built. What it did not have room for is
+what this adds: **the two event jumps and the timeline's width**, which are eight
+controls in all.
+
+| live | a recording |
+| --- | --- |
+| quarter turn (portrait) | quarter turn (portrait) |
+| picture fit | back ten seconds |
+| sound | play / pause |
+| microphone | forward ten seconds |
+| the way in | the event before |
+| | the event after |
+| | how wide the timeline is |
+| | sound |
+| | back to the camera |
+
+**Nine is more than the bar was built for**, and it is more than a phone can hold
+in one line: 44 x 9 + 8 x 8 + 12 is 472 points, and a phone in portrait has 363
+for the panel. So `layout` wraps the controls onto as many lines as they need and
+the panel deepens by a row for each. Greedy, breaking where the next control
+would not fit - not balanced, because balancing moves a control the viewer has
+just learned the place of every time one is added.
+
+**The width control went onto the bar, and that was the point of it.** It was a
+chip drawn on the strip: 38 by 22 points, a third of a touch target, and - the
+part that mattered - not a widget. It answered a raw pointer press and nothing
+else. A control on the bar is `icons::button_in`, which is focusable, draws the
+ring and answers the confirm key, so the one thing the timeline most needed -
+being reachable without a drag - comes with the move rather than after it.
+
+**The words went.** The chip said `10m` or `1d`; a shape says it without a
+translation and without a font that has to carry digits at nine points. The
+shapes are the ones every camera app draws, taken from a Synology screenshot and
+then redrawn by hand:
+
+* **A step** is a ring open on the side the arrow has come from, with a **double
+  arrowhead** riding its top - two chevrons, which is what separates "ten
+  seconds" from "one event" at a glance - and the number inside it.
+* **An event** is a ring open at the bottom corner, ended by a single
+  **corner-shaped head** - two bars meeting at a right angle, pointing down and
+  out - with an exclamation mark inside.
+* **The width** is two open rings facing each other with a double-headed arrow
+  through them: a link that can be pulled apart, rather than an arrow alone.
+* **Back to the camera** is a video camera, body and lens. The button switches
+  the view to the camera as it is now, so the camera is the picture - there is
+  nothing inside it to say it is recording.
+* **The way in** - the live bar's recordings button - is a screen with the play
+  mark in it: something to open rather than a clock to read. It carries no ring
+  and no hands, so it cannot be mistaken for a timer, a schedule, or one of the
+  buttons that step through a recording once it is open.
+
+The digits are **drawn, not typed**: a `1` with a flag and a nought that is a
+superellipse rather than an ellipse - a bold sans-serif nought - in the ring's
+own weight and turned with the picture. A font's digits would be a different
+weight from the ring they sit in, and which font is a matter of the target.
+
+The five that carry something inside get a fifth more of the button than a plain
+shape (`glyph * 1.15`): their drawing fills less of its own square - a ring, not
+a full-width stroke - and the digits need room. At the plain half the ring is a
+dozen points across and there is no room for what tells one from another.
+
+They were rendered to a PNG beside the code and looked at before being believed,
+which is how the first heads went from ticks to arrows.
+
+**The events come from `/api/events`**, asked for over the stretch the timeline
+shows: 124 ms and 2.7 KB for three of them on the box of 2026-11-02, without
+thumbnails. Only the moments are kept - a mark is its moment - and they are drawn
+on the strip as amber ticks between the blue stretches and the cyan cursor. Three
+colours, three meanings: where something was recorded, where something happened,
+and where the picture is.
+
+**A step while the picture is held had to be taught to the session.** A seek was
+taken at the top of the read loop and between two samples, and a held session
+sits in a block that only watched for the hold being let go. So a jump asked for
+while paused waited for the resume, and the frame the viewer asked for arrived
+together with the recording carrying on from it. The hold now watches the jumps
+too: a jump is a step, the loop takes it, publishes the one sample it lands on,
+and goes back to holding.
+
+Not watched on screen: the nine controls, the wrapping, the icons at 44 points
+and the ticks are arithmetic and plumbing. The shapes were looked at as a
+rendering, not on the wall.

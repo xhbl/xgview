@@ -305,6 +305,10 @@ pub(super) async fn run_recording_session(
                     // after the finger was lifted would wait for a change that
                     // has already happened.
                     let mut lifted = paused.clone();
+                    // The jumps too, for the same reason: a step while the
+                    // picture is held is a jump, and one that arrived after the
+                    // handle was taken is not a change to it.
+                    let mut moved = jumps.clone();
                     // What this hold has acted on. Started empty rather than
                     // carried over: the last drag's last word is not where this
                     // finger is, even when it is the same moment.
@@ -325,6 +329,21 @@ pub(super) async fn run_recording_session(
                                     break;
                                 }
                             }
+                            result = wait_for_jump(moved.as_mut()) => {
+                                if result.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        // A jump is a step: the picture is held, and the one
+                        // frame it lands on is the whole of what the viewer
+                        // asked for. The loop takes it, publishes that sample,
+                        // and comes back here - still held.
+                        if jumps
+                            .as_ref()
+                            .is_some_and(|receiver| receiver.borrow().is_some_and(|jump| jump.asked != jumped))
+                        {
+                            break;
                         }
                     }
                     // The clock stopped with the picture, so the wait is not
@@ -845,6 +864,17 @@ async fn wait_for_hint(
     hints: Option<&mut tokio::sync::watch::Receiver<Option<i64>>>,
 ) -> Result<(), ()> {
     match hints {
+        Some(receiver) => receiver.changed().await.map_err(|_| ()),
+        None => std::future::pending().await,
+    }
+}
+
+/// Waits for a jump to be asked for, or for ever when the session has no jump
+/// channel - which is a session nobody can seek.
+async fn wait_for_jump(
+    jumps: Option<&mut tokio::sync::watch::Receiver<Option<Jump>>>,
+) -> Result<(), ()> {
+    match jumps {
         Some(receiver) => receiver.changed().await.map_err(|_| ()),
         None => std::future::pending().await,
     }

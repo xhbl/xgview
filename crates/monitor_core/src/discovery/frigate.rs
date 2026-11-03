@@ -479,6 +479,69 @@ impl FrigateClient {
         Ok(playlist)
     }
 
+    /// The moments a camera's events began, between two times, oldest first.
+    ///
+    /// Frigate's `/api/events` is the list of things it noticed - a person at
+    /// the door, a car in the drive. Playback draws them as marks on the
+    /// timeline and steps between them, and a mark is its moment: the label and
+    /// the boxes are not drawn, so asking for them would be bytes per event for
+    /// nothing.
+    ///
+    /// Asked for without thumbnails, which is what makes the answer small - a
+    /// few hundred bytes an event rather than a JPEG each.
+    pub async fn event_times(&mut self, camera: &str, after: i64, before: i64) -> Result<Vec<i64>> {
+        let url = format!(
+            "{}/api/events?cameras={camera}&after={after}&before={before}             &limit=500&include_thumbnails=0",
+            self.config.base_url()
+        );
+        let response = self.get(&url).await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(CoreError::network(format!(
+                "Frigate /api/events answered {status}"
+            )));
+        }
+        let text = response.text().await.unwrap_or_default();
+        let events: Vec<serde_json::Value> = serde_json::from_str(&text)
+            .map_err(|err| CoreError::parse(format!("the event list is not JSON: {err}")))?;
+        let mut times: Vec<i64> = events
+            .iter()
+            .filter_map(|event| event.get("start_time")?.as_f64())
+            .map(|at| at as i64)
+            .collect();
+        times.sort_unstable();
+        times.dedup();
+        Ok(times)
+    }
+
+    /// The days a camera has recordings on, as the box names them - `2026-10-31`.
+    ///
+    /// Only the days that hold something: a day the camera recorded nothing is
+    /// absent rather than `false`. What a calendar draws between them is the
+    /// calendar's business - see `calendar` in the interface.
+    ///
+    /// No timezone is asked for, so the box answers in its own. The viewer is
+    /// usually on the same clock as the recorder, and the alternative - naming
+    /// the viewer's zone - is a name this program does not have.
+    pub async fn recorded_days(&mut self, camera: &str) -> Result<Vec<String>> {
+        let url =
+            format!("{}/api/recordings/summary?cameras={camera}", self.config.base_url());
+        let response = self.get(&url).await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(CoreError::network(format!(
+                "Frigate /api/recordings/summary answered {status}"
+            )));
+        }
+        let text = response.text().await.unwrap_or_default();
+        let days: HashMap<String, bool> = serde_json::from_str(&text)
+            .map_err(|err| CoreError::parse(format!("the day list is not JSON: {err}")))?;
+        let mut days: Vec<String> =
+            days.into_iter().filter(|(_, recorded)| *recorded).map(|(day, _)| day).collect();
+        days.sort();
+        Ok(days)
+    }
+
     /// Fetches, groups, measures and builds the two groups of cameras.
     pub async fn import_cameras(&mut self) -> Result<FrigateImport> {
         let config = self.config_json().await?;

@@ -7,8 +7,11 @@
 
 use super::*;
 
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::tilebar;
+use monitor_core::blackout::{LocalTime, local_at};
 use monitor_core::config::FrigateConfig;
 use monitor_core::discovery::frigate::{FrigateClient, Segment, VodPlaylist, stretches, window_at};
 use monitor_core::model::FrigateOrigin;
@@ -73,6 +76,16 @@ pub(super) struct Playback {
     /// it stops, so the range is read while it is still there and the answer is
     /// waiting when it lifts. See [`XgViewApp::read_ahead`].
     pub(super) ahead: Option<Ahead>,
+    /// What the strip is showing. See [`Timeline`].
+    pub(super) timeline: Timeline,
+    /// The days the calendar shows, oldest first, once the box has answered.
+    /// Empty until it has.
+    pub(super) days: Vec<Day>,
+    /// Whether the day list is being read.
+    pub(super) reading_days: bool,
+    /// A day whose recording the strip should move to once its segment list has
+    /// been read. See [`XgViewApp::pick_day`].
+    pub(super) to_day: Option<i64>,
     /// The moment a seek is waiting to play, while the range it needs is still
     /// being read.
     pub(super) awaiting: Option<i64>,
@@ -82,6 +95,41 @@ pub(super) struct Playback {
     /// The earliest moment the camera answered "nothing recorded" for, once a
     /// strip has been drawn that far back. The strip stops there.
     pub(super) oldest: Option<i64>,
+    /// Whether the picture is held. The session is told, and stops reading; the
+    /// bar draws the control as the one that lets it go.
+    pub(super) paused: bool,
+    /// The moments the camera's events began, in the stretch that was read.
+    /// Empty until the box has answered, and empty for a camera with none.
+    pub(super) events: Vec<i64>,
+    /// Whether the event list is being read.
+    pub(super) reading_events: bool,
+}
+
+/// What the timeline is showing.
+///
+/// Two projections of the same recording: a stretch of it, where a moment is a
+/// distance along the strip, and the days it was recorded on, where a day is a
+/// band and the strip is a calendar. They are the plan's six widths and its
+/// lowest level - the one that answers "which night was that" rather than "what
+/// time was that".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Timeline {
+    /// Seconds across the strip.
+    Span,
+    /// One band per day, the newest at the end.
+    Days,
+}
+
+/// One day of the calendar.
+#[derive(Debug, Clone)]
+pub(super) struct Day {
+    /// Where the day begins, near enough for the strip that follows it: the
+    /// first moment of it the local clock was seen at.
+    pub(super) start: i64,
+    /// What the day is called on the strip - `10/31`.
+    pub(super) label: String,
+    /// Whether the camera recorded anything in it.
+    pub(super) recorded: bool,
 }
 
 /// A range read before it was needed, and the answer to it.
@@ -255,14 +303,156 @@ impl XgViewApp {
             // starts - not the range's - that the cursor waits for.
             pending: Some(begin.unwrap_or(from)),
             scrubbing: false,
+            timeline: Timeline::Span,
+            days: Vec::new(),
+            reading_days: false,
+            to_day: None,
             ahead: None,
             awaiting: None,
             reading_older: None,
             oldest: None,
+            paused: false,
+            events: Vec::new(),
+            reading_events: false,
         });
         // The speaker belongs to the channel whose picture is on screen, and
         // that has just become the recording's.
         self.apply_audio();
+        // The events of the stretch the timeline shows, so that the two marks
+        // either side of the cursor are known before anyone asks to step to one.
+        self.read_events(index);
+    }
+
+    /// Holds the picture, or lets it go.
+    ///
+    /// A hold is the session's own pause: it stops reading, so nothing is
+    /// decoded and nothing is published, and the clock owes no time for the wait.
+    pub(super) fn toggle_play(&mut self) {
+        let Some(playback) = self.playback.as_mut() else {
+            return;
+        };
+        playback.paused = !playback.paused;
+        let (index, paused) = (playback.index, playback.paused);
+        self.manager.hold_clip(index, paused);
+        tracing::debug!(target: "xgview::app", index, paused, "playback held or let go");
+    }
+
+    /// Moves the picture by `by` seconds.
+    ///
+    /// Held, the step is the whole of what happens: a seek while the session is
+    /// paused lands on one frame and stays there - the session publishes the
+    /// sample it lands on and goes back to holding. Playing, it is a jump and
+    /// the recording carries on from there.
+    pub(super) fn step_playback(&mut self, by: i64) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        let (index, paused) = (playback.index, playback.paused);
+        let now = self.playback_moment(playback);
+        self.seek(now + by);
+        if paused {
+            // A seek lets the hold go - that is what a drag needs - so the hold
+            // a step is under has to be put back, and the bar told, or the next
+            // frame draws a play control over a held picture. The session reads
+            // the value when it next looks, so one set here is not lost.
+            self.manager.hold_clip(index, true);
+            if let Some(playback) = self.playback.as_mut() {
+                playback.paused = true;
+            }
+        }
+    }
+
+    /// Steps to the event before or after the moment on screen.
+    ///
+    /// "Before" is strictly before: an event that begins where the picture is
+    /// would otherwise be the answer every time the button was pressed, and the
+    /// button would do nothing. A second of slack, because an event's first
+    /// frame and the moment it is named by are not the same instant.
+    pub(super) fn jump_event(&mut self, forward: bool) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        if playback.events.is_empty() {
+            return;
+        }
+        let now = self.playback_moment(playback);
+        let target = if forward {
+            playback.events.iter().copied().find(|at| *at > now + 1)
+        } else {
+            playback.events.iter().rev().copied().find(|at| *at < now - 1)
+        };
+        match target {
+            Some(at) => {
+                tracing::debug!(target: "xgview::app", at, forward, "stepping to an event");
+                self.seek(at);
+            }
+            None => tracing::debug!(target: "xgview::app", forward, "no event that way"),
+        }
+    }
+
+    /// The moment the picture is of, as near as anything here knows.
+    ///
+    /// The frame store is the answer when there is one - it is the picture on
+    /// screen - and the last moment asked for before that, which is where a seek
+    /// that has not arrived yet is going.
+    fn playback_moment(&self, playback: &Playback) -> i64 {
+        self.manager
+            .frames()
+            .latest(playback.index)
+            .and_then(|frame| frame.at)
+            .map(|at| at as i64)
+            .or(playback.pending)
+            .or(playback.scrub)
+            .unwrap_or(playback.span.1)
+    }
+
+    /// The bar's control for the timeline's width: the double-headed arrow that
+    /// says "wider or narrower", and the press that walks the levels.
+    pub(super) fn width_control(&self) -> Option<tilebar::Control> {
+        self.playback.as_ref()?;
+        Some(tilebar::Control::Icon(crate::icons::Icon::Zoom))
+    }
+
+    /// Whether the picture is held, for the bar's play control to draw.
+    pub(super) fn playback_paused(&self) -> bool {
+        self.playback.as_ref().is_some_and(|playback| playback.paused)
+    }
+
+    /// Reads the events of the stretch the timeline shows.
+    fn read_events(&mut self, index: usize) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        if playback.reading_events {
+            return;
+        }
+        let (from, to) = playback.span;
+        let source = playback.source.clone();
+        tracing::debug!(target: "xgview::app", index, from, to, "reading the events");
+        if let Some(playback) = self.playback.as_mut() {
+            playback.reading_events = true;
+        }
+        start_events(&self.handle, &self.events_tx, index, source, from, to);
+    }
+
+    /// Takes the events of a stretch. A box that could not be asked leaves the
+    /// list empty, which is a timeline with no marks rather than an error.
+    pub(super) fn events_arrived(
+        &mut self,
+        index: usize,
+        camera_id: String,
+        events: Option<Vec<i64>>,
+    ) {
+        let Some(playback) = self.playback.as_mut() else {
+            return;
+        };
+        if playback.index != index || playback.source.camera != camera_id {
+            return;
+        }
+        playback.reading_events = false;
+        if let Some(events) = events {
+            playback.events = events;
+        }
     }
 
     /// Plays another stretch of the recording on the channel already playing it.
@@ -306,11 +496,17 @@ impl XgViewApp {
             // The seek this drag was going to make has been made.
             playback.ahead = None;
             playback.awaiting = None;
-            // The strip follows the picture: a drag into the recording's history
+            // The strip follows the picture - a drag into the recording's history
             // would otherwise leave the cursor pressed against its left edge,
-            // with the stretch being watched somewhere off it.
-            if let Some(span) = extent(&playback.segments, playback.zoom, begin.unwrap_or(window.0)) {
-                playback.span = span;
+            // with the stretch being watched somewhere off it. Only when it does
+            // not already hold it: a day the calendar was told to open is a
+            // whole day, and re-anchoring on its first moment would cut it down
+            // to the hours around midnight.
+            let target = begin.unwrap_or(window.0);
+            if !covered(Some(playback.span), target) {
+                if let Some(span) = extent(&playback.segments, playback.zoom, target) {
+                    playback.span = span;
+                }
             }
             // The moment the picture begins at, held to the stretch that will
             // play: a scrub taken to the edge of the nearest recording does not
@@ -467,6 +663,10 @@ impl XgViewApp {
         let Some(playback) = &self.playback else {
             return;
         };
+        if let Timeline::Days = playback.timeline {
+            self.draw_days(ui, row, playback);
+            return;
+        }
         let (start, end) = playback.span;
         let span = (end - start).max(1) as f32;
         let horizontal = row.width() > row.height();
@@ -507,6 +707,20 @@ impl XgViewApp {
             let to = along(segment.end.min(end));
             painter.rect_filled(band(from, to, 6.0), CornerRadius::same(2), theme::ACCENT.gamma_multiply(0.55));
         }
+        // Where the camera noticed something: a tick over the track, in the
+        // colour the wall uses for a warning - not a stretch and not the cursor,
+        // because an event is a moment and those two are a span and a place.
+        for at in &playback.events {
+            if *at < start || *at >= end {
+                continue;
+            }
+            let x = along(*at);
+            painter.rect_filled(
+                band(x - 1.0, x + 1.0, 16.0),
+                CornerRadius::same(1),
+                theme::WARN.gamma_multiply(0.85),
+            );
+        }
         // Where the picture has got to. Its moment comes from the frame itself,
         // so a stalled stream leaves the cursor where the picture is rather
         // than where a clock thinks it should be - and a seek that is on its
@@ -519,6 +733,64 @@ impl XgViewApp {
         if let Some(at) = position {
             let x = along(at.round() as i64);
             painter.rect_filled(band(x - 1.5, x + 1.5, 18.0), CornerRadius::same(1), theme::FOCUS);
+        }
+    }
+}
+
+impl XgViewApp {
+    /// Draws the calendar: one band per day, filled where the camera recorded and
+    /// dark where it did not, with the day's name wherever one fits.
+    ///
+    /// The plan's rule is 44 points a day, which is a touch target; a strip too
+    /// short for all of them shows the newest, which is where a calendar ends.
+    fn draw_days(&self, ui: &egui::Ui, row: Rect, playback: &Playback) {
+        let horizontal = row.width() > row.height();
+        let length = if horizontal { row.width() } else { row.height() };
+        let shown = days_across(length, playback.days.len());
+        if shown == 0 {
+            return;
+        }
+        let days = &playback.days[playback.days.len() - shown..];
+        let each = length / shown as f32;
+        let middle = row.center();
+        let painter = ui.painter();
+        for (index, day) in days.iter().enumerate() {
+            let from = each * index as f32;
+            let to = (from + each).max(from + 1.0);
+            let (from, to) = if horizontal {
+                (row.left() + from, row.left() + to)
+            } else {
+                (row.top() + from, row.top() + to)
+            };
+            let band = if horizontal {
+                Rect::from_min_max(
+                    egui::pos2(from + 1.0, middle.y - 3.0),
+                    egui::pos2((to - 1.0).max(from + 2.0), middle.y + 3.0),
+                )
+            } else {
+                Rect::from_min_max(
+                    egui::pos2(middle.x - 3.0, from + 1.0),
+                    egui::pos2(middle.x + 3.0, (to - 1.0).max(from + 2.0)),
+                )
+            };
+            // Filled where something was recorded, and only just visible where
+            // nothing was: a day with no recording is still a day to aim at.
+            let accent = if day.recorded { 0.75 } else { 0.18 };
+            painter.rect_filled(band, CornerRadius::same(2), theme::ACCENT.gamma_multiply(accent));
+            if each >= 34.0 {
+                let at = if horizontal {
+                    egui::pos2((from + to) / 2.0, row.bottom() - 7.0)
+                } else {
+                    egui::pos2(middle.x, to - 7.0)
+                };
+                painter.text(
+                    at,
+                    egui::Align2::CENTER_CENTER,
+                    &day.label,
+                    egui::FontId::proportional(9.0),
+                    theme::GRID_LINE,
+                );
+            }
         }
     }
 }
@@ -557,14 +829,24 @@ impl XgViewApp {
         let down = ui.ctx().input(|input| input.pointer.button_down(egui::PointerButton::Primary));
         let pos = ui.ctx().input(|input| input.pointer.interact_pos());
         let scrubbing = self.playback.as_ref().is_some_and(|playback| playback.scrubbing);
-        // A right press widens the strip a level - two minutes, ten, an hour,
-        // six hours, a day, and back - and the list is read as it widens.
-        // Aiming a scrub is a left press, so the
-        // gesture that changes what the timeline shows cannot be mistaken for
-        // the one that moves the picture - and nothing else on the wall uses
-        // that button.
+        // The same walk the strip's own button makes, for a mouse: two minutes,
+        // ten, an hour, six hours, a day, the calendar, and back. Aiming a scrub
+        // is a left press, so this cannot be mistaken for the one that moves the
+        // picture, and nothing else on the wall uses that button.
         if response.secondary_clicked() && !scrubbing {
             self.zoom_timeline();
+            return;
+        }
+        // The calendar is a picture of days, not a stretch: a press on a band is
+        // that day, and nothing is held while it is pressed.
+        if let Timeline::Days = playback.timeline {
+            if let (true, Some(pos)) = (down, pos) {
+                if row.contains(pos) {
+                    if let Some(at) = day_at(row, &playback.days, pos).map(|day| day.start) {
+                        self.pick_day(index, at);
+                    }
+                }
+            }
             return;
         }
 
@@ -644,8 +926,14 @@ impl XgViewApp {
             // replaced session ends the hold with it.
             Some(at) => self.seek(at),
             // Nothing under the finger: the recording goes on where it was
-            // held.
-            None => self.manager.hold_clip(index, false),
+            // held - and the bar says so, or it would draw a pause for a picture
+            // that is running.
+            None => {
+                self.manager.hold_clip(index, false);
+                if let Some(playback) = self.playback.as_mut() {
+                    playback.paused = false;
+                }
+            }
         }
     }
 
@@ -655,19 +943,96 @@ impl XgViewApp {
     /// a wider one reaches further back and a narrower one reaches less far. The
     /// range follows the next time one is asked for - a drag to a moment the
     /// session does not hold asks for the stretch the timeline shows.
-    fn zoom_timeline(&mut self) {
+    pub(super) fn zoom_timeline(&mut self) {
         let Some(playback) = self.playback.as_mut() else {
             return;
         };
-        let zoom = next_zoom(playback.zoom);
+        let (timeline, zoom) = next_timeline(playback.timeline, playback.zoom);
+        playback.timeline = timeline;
         playback.zoom = zoom;
         let (index, anchor) = (playback.index, playback.span.1);
-        if let Some(span) = extent(&playback.segments, zoom, anchor) {
-            playback.span = span;
+        tracing::debug!(target: "xgview::app", ?timeline, zoom, "the timeline changed");
+        match timeline {
+            Timeline::Span => {
+                if let Some(span) = extent(&playback.segments, zoom, anchor) {
+                    playback.span = span;
+                }
+                // A wider strip holds events the narrower one's list does not,
+                // and they are read again from the stretch now on screen. The
+                // narrowest level would have been covered by the old list, and
+                // asking again is one request for a list that has just changed
+                // width - not one per repaint.
+                playback.events.clear();
+                self.read_events(index);
+                // A strip wider than what has been read needs the rest of it.
+                self.read_older(index);
+            }
+            // The calendar is the days the box recorded on, which it has not
+            // been asked for yet.
+            Timeline::Days => self.read_days(index),
         }
-        tracing::debug!(target: "xgview::app", zoom, "the timeline changed width");
-        // A strip wider than what has been read needs the rest of the list.
-        self.read_older(index);
+    }
+
+    /// Asks the box which days it recorded on, the first time the calendar is
+    /// shown. One answer per recording: a day does not appear or disappear while
+    /// the viewer is looking at it.
+    fn read_days(&mut self, index: usize) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        if playback.reading_days || !playback.days.is_empty() {
+            return;
+        }
+        let source = playback.source.clone();
+        tracing::debug!(target: "xgview::app", index, "reading the recorded days");
+        if let Some(playback) = self.playback.as_mut() {
+            playback.reading_days = true;
+        }
+        start_days(&self.handle, &self.events_tx, index, source);
+    }
+
+    /// Takes the days the box recorded on, and draws the calendar from them.
+    pub(super) fn days_arrived(
+        &mut self,
+        index: usize,
+        camera_id: String,
+        days: Option<Vec<String>>,
+    ) {
+        let Some(playback) = self.playback.as_mut() else {
+            return;
+        };
+        if playback.index != index || playback.source.camera != camera_id {
+            return;
+        }
+        playback.reading_days = false;
+        let Some(days) = days else {
+            return;
+        };
+        let recorded: HashSet<String> = days.into_iter().collect();
+        playback.days = calendar(&local_at, epoch_now(), &recorded, DAYS);
+    }
+
+    /// Goes to a day the calendar shows.
+    ///
+    /// The day's own segment list is read first: what is held is an hour around
+    /// where the viewer was, and a seek can only land where the list reaches.
+    /// When the answer arrives the strip moves to that day and the picture
+    /// follows - see [`Self::segments_arrived`].
+    fn pick_day(&mut self, index: usize, at: i64) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        if playback.to_day.is_some() {
+            return;
+        }
+        let source = playback.source.clone();
+        tracing::debug!(target: "xgview::app", index, at, "going to a day");
+        if let Some(playback) = self.playback.as_mut() {
+            playback.to_day = Some(at);
+        }
+        // The whole day, and an hour either side of it: the strip that follows
+        // shows a day's width around the moment, and a day is not always a day.
+        start_segments(&self.handle, &self.events_tx, index, source, at - 3600, at + 90_000);
     }
 
     /// Reads the stretch of segment list a wider strip needs. See
@@ -709,6 +1074,8 @@ impl XgViewApp {
         &mut self,
         index: usize,
         camera_id: String,
+        from: i64,
+        to: i64,
         segments: Option<Vec<Segment>>,
     ) {
         let Some(playback) = self.playback.as_mut() else {
@@ -718,6 +1085,16 @@ impl XgViewApp {
             return;
         }
         playback.reading_older = None;
+        // The read a picked day asked for, if this is it: whether it found
+        // anything or not, the picking is finished with - a day with nothing
+        // recorded leaves the calendar where it is rather than waiting for an
+        // answer that will never come.
+        let picked = playback.to_day.filter(|at| from <= *at && *at < to);
+        if picked.is_some() {
+            // Finished with either way: a read that could not be made must not
+            // leave the calendar waiting for a day it will never reach.
+            playback.to_day = None;
+        }
         let Some(segments) = segments else {
             // The camera could not be asked. Nothing is marked, so the next
             // width the viewer chooses asks again - and a failed read is not
@@ -725,8 +1102,10 @@ impl XgViewApp {
             return;
         };
         if segments.is_empty() {
-            // Nothing was recorded that far back: the strip stops here.
-            playback.oldest = playback.segments.first().map(|segment| segment.start);
+            if picked.is_none() {
+                // Nothing was recorded that far back: the strip stops here.
+                playback.oldest = playback.segments.first().map(|segment| segment.start);
+            }
             return;
         }
         playback.segments.extend(segments);
@@ -735,6 +1114,22 @@ impl XgViewApp {
         let anchor = playback.span.1;
         if let Some(span) = extent(&playback.segments, playback.zoom, anchor) {
             playback.span = span;
+        }
+        // A day was picked, and this is the list that reaches it: the strip
+        // becomes that day, and the picture goes to its first moment.
+        if let Some(at) = picked {
+            if playback.segments.iter().any(|segment| segment.start <= at && at < segment.end) {
+                playback.timeline = Timeline::Span;
+                playback.zoom = *ZOOMS.last().expect("a ladder of widths");
+                // Anchored on the day's end, so the strip is the day rather than
+                // the eighteen hours before midnight and the six after it.
+                let anchor = at + playback.zoom * 3 / 4;
+                if let Some(span) = extent(&playback.segments, playback.zoom, anchor) {
+                    playback.span = span;
+                }
+                self.seek(at);
+            }
+            return;
         }
         // A wider strip may want more than this one answered.
         self.read_older(index);
@@ -797,6 +1192,9 @@ impl XgViewApp {
         // refused.
         let Some(target) = nearest(&stretches(&playback.segments), at) else {
             self.manager.hold_clip(index, false);
+            if let Some(playback) = self.playback.as_mut() {
+                playback.paused = false;
+            }
             self.flash(monitor_i18n::tr("toast-no-recording"), ToastKind::Error);
             return;
         };
@@ -818,6 +1216,7 @@ impl XgViewApp {
                 playback.scrub = None;
                 playback.scrubbing = false;
                 playback.pending = Some(target);
+                playback.paused = false;
             }
             return;
         }
@@ -864,6 +1263,9 @@ impl XgViewApp {
             width,
         ) else {
             self.manager.hold_clip(index, false);
+            if let Some(playback) = self.playback.as_mut() {
+                playback.paused = false;
+            }
             self.flash(monitor_i18n::tr("toast-no-recording"), ToastKind::Error);
             return;
         };
@@ -928,6 +1330,114 @@ fn range_width(zoom: i64) -> i64 {
 /// The next width up, wrapping back to the narrowest.
 fn next_zoom(zoom: i64) -> i64 {
     ZOOMS.iter().copied().find(|width| *width > zoom).unwrap_or(ZOOMS[0])
+}
+
+/// How far the two step controls move the picture.
+///
+/// Ten seconds, the same as a double tap on a phone's video player: long enough
+/// to skip a pause in what is being watched, short enough that a viewer who
+/// presses it twice is still where they meant to be.
+pub(super) const STEP: i64 = 10;
+
+/// How many days a calendar shows.
+///
+/// Three weeks: enough that "the night before last" and "last Tuesday" are both
+/// on it, and few enough that a band is still a target on a strip this short.
+const DAYS: usize = 21;
+
+/// What the right press shows next: the next width up, the calendar after the
+/// widest of them, and the narrowest after the calendar.
+fn next_timeline(timeline: Timeline, zoom: i64) -> (Timeline, i64) {
+    match timeline {
+        Timeline::Span if zoom < *ZOOMS.last().expect("a ladder of widths") => {
+            (Timeline::Span, next_zoom(zoom))
+        }
+        Timeline::Span => (Timeline::Days, zoom),
+        Timeline::Days => (Timeline::Span, ZOOMS[0]),
+    }
+}
+
+/// The days a calendar shows: `days` of them, oldest first, ending with the day
+/// `now` falls in.
+///
+/// Walked an hour at a time through the local clock rather than computed,
+/// because a day is not always 86400 seconds - a clock that goes forward or back
+/// makes one 23 or 25 hours long - and the walk is the only thing here that
+/// knows the local rules. The first moment of a day it meets is that day's
+/// start, within an hour of midnight, which is as close as the strip that
+/// follows it needs.
+///
+/// `recorded` is what the box answered: the days that hold something, named
+/// `YYYY-MM-DD`. A day it did not name is still shown, empty - a calendar with
+/// its quiet days left out cannot be aimed at.
+fn calendar(
+    clock: &dyn Fn(i64) -> Option<LocalTime>,
+    now: i64,
+    recorded: &HashSet<String>,
+    days: usize,
+) -> Vec<Day> {
+    // A day of slack at the start, so the first day the walk meets is whole.
+    let hours = (days as i64 + 1) * 24;
+    let mut out: Vec<Day> = Vec::with_capacity(days + 1);
+    let mut current: Option<(String, i64)> = None;
+    for hour in 0..=hours {
+        let at = now - (hours - hour) * 3600;
+        let Some(local) = clock(at) else {
+            // A platform with no clock has no calendar either.
+            return Vec::new();
+        };
+        let key = format!("{:04}-{:02}-{:02}", local.year, local.month, local.day);
+        if current.as_ref().is_some_and(|(seen, _)| *seen == key) {
+            continue;
+        }
+        if let Some((seen, first)) = current.take() {
+            out.push(Day {
+                start: first,
+                // `YYYY-MM-DD`, so the month and the day are where the dashes
+                // are not.
+                label: format!("{}/{}", &seen[5..7], &seen[8..10]),
+                recorded: recorded.contains(&seen),
+            });
+        }
+        current = Some((key, at));
+    }
+    if let Some((seen, first)) = current.take() {
+        out.push(Day {
+            start: first,
+            label: format!("{}/{}", &seen[5..7], &seen[8..10]),
+            recorded: recorded.contains(&seen),
+        });
+    }
+    let skip = out.len().saturating_sub(days);
+    out.split_off(skip)
+}
+
+/// The day a point on the strip is over.
+fn day_at(row: Rect, days: &[Day], pos: egui::Pos2) -> Option<&Day> {
+    let horizontal = row.width() > row.height();
+    let length = if horizontal { row.width() } else { row.height() };
+    let shown = days_across(length, days.len());
+    if shown == 0 {
+        return None;
+    }
+    let along = if horizontal {
+        (pos.x - row.left()) / row.width().max(1.0)
+    } else {
+        (pos.y - row.top()) / row.height().max(1.0)
+    };
+    let index = (along * shown as f32).floor().max(0.0) as usize;
+    days[days.len() - shown..].get(index.min(shown - 1))
+}
+
+/// How many of the calendar's days fit across the strip.
+///
+/// The plan's rule: at least 44 points each, which is a touch target. A strip
+/// too short for all of them shows the newest, because a calendar ends today.
+fn days_across(length: f32, days: usize) -> usize {
+    if days == 0 {
+        return 0;
+    }
+    ((length / 44.0).floor() as usize).clamp(1, days)
 }
 
 /// What the timeline is drawn across: `zoom` seconds of what was read, ending
@@ -1223,6 +1733,52 @@ fn start_playlist(
     });
 }
 
+/// Reads the events of a stretch of recording. See [`XgViewApp::read_events`].
+fn start_events(
+    handle: &Handle,
+    events: &Sender<BackgroundEvent>,
+    index: usize,
+    source: Source,
+    from: i64,
+    to: i64,
+) {
+    let sender = events.clone();
+    handle.spawn(async move {
+        let (user, pass) = source.credentials.clone().unwrap_or_default();
+        let config = FrigateConfig::at(&source.origin.base_url, &user, &pass);
+        let times = match FrigateClient::new(config) {
+            Ok(mut client) => client.event_times(&source.origin.camera, from, to).await.ok(),
+            Err(_) => None,
+        };
+        let _ = sender.send(BackgroundEvent::EventsReady {
+            index,
+            camera_id: source.camera,
+            events: times,
+        });
+    });
+}
+
+/// Asks the box which days it recorded on. See [`XgViewApp::read_days`].
+///
+/// Answered with `None` when the camera could not be asked at all, which the
+/// calendar shows as no calendar rather than as a camera that recorded nothing.
+fn start_days(handle: &Handle, events: &Sender<BackgroundEvent>, index: usize, source: Source) {
+    let sender = events.clone();
+    handle.spawn(async move {
+        let (user, pass) = source.credentials.clone().unwrap_or_default();
+        let config = FrigateConfig::at(&source.origin.base_url, &user, &pass);
+        let days = match FrigateClient::new(config) {
+            Ok(mut client) => client.recorded_days(&source.origin.camera).await.ok(),
+            Err(_) => None,
+        };
+        let _ = sender.send(BackgroundEvent::DaysReady {
+            index,
+            camera_id: source.camera,
+            days,
+        });
+    });
+}
+
 /// Reads the stretch of segment list a wider timeline needs.
 ///
 /// Answered with `None` when the camera could not be asked at all, which is not
@@ -1250,6 +1806,8 @@ fn start_segments(
         let _ = sender.send(BackgroundEvent::SegmentsReady {
             index,
             camera_id: source.camera,
+            from,
+            to,
             segments,
         });
     });
@@ -1331,6 +1889,81 @@ mod tests {
         assert_eq!(next_zoom(3600), 21600);
         assert_eq!(next_zoom(21600), 86400);
         assert_eq!(next_zoom(86400), 120);
+    }
+
+    /// The right press walks the widths, then the calendar, then comes back to
+    /// the narrowest.
+    #[test]
+    fn the_right_press_walks_the_widths_and_then_the_days() {
+        assert_eq!(next_timeline(Timeline::Span, 600), (Timeline::Span, 3600));
+        assert_eq!(next_timeline(Timeline::Span, 86_400), (Timeline::Days, 86_400));
+        assert_eq!(next_timeline(Timeline::Days, 86_400), (Timeline::Span, 120));
+    }
+
+    /// The calendar shows the days between the ones the box named - empty where
+    /// it named nothing - and ends with the day it is now.
+    #[test]
+    fn the_calendar_fills_the_days_between_what_was_recorded() {
+        // A clock whose day is 86400 seconds, so the walk can be counted.
+        let clock = |unix: i64| {
+            Some(LocalTime {
+                year: 2026,
+                month: 11,
+                day: (unix.div_euclid(86_400) % 28 + 1) as u8,
+                weekday: 0,
+                hour: 0,
+                minute: 0,
+                second: 0,
+            })
+        };
+        let recorded: HashSet<String> = ["2026-11-10".to_string()].into_iter().collect();
+        let days = calendar(&clock, 86_400 * 10, &recorded, 3);
+        let labels: Vec<&str> = days.iter().map(|day| day.label.as_str()).collect();
+        assert_eq!(labels, ["11/09", "11/10", "11/11"], "three days, ending today");
+        let recorded: Vec<bool> = days.iter().map(|day| day.recorded).collect();
+        assert_eq!(recorded, [false, true, false], "the quiet days are still shown");
+        // The fake clock counts its days from one, so day 9 is epoch 86400 * 8.
+        let starts: Vec<i64> = days.iter().map(|day| day.start).collect();
+        assert_eq!(starts, [86_400 * 8, 86_400 * 9, 86_400 * 10]);
+
+        // A platform with no clock has no calendar.
+        assert!(calendar(&|_| None, 86_400 * 10, &HashSet::new(), 3).is_empty());
+    }
+
+    /// A day is a touch target: the strip shows as many as fit at the plan's 44
+    /// points each, the newest first, and never fewer than one.
+    #[test]
+    fn the_calendar_shows_as_many_days_as_fit() {
+        assert_eq!(days_across(1100.0, 21), 21, "room for all of them");
+        assert_eq!(days_across(200.0, 21), 4);
+        assert_eq!(days_across(10.0, 21), 1, "never none");
+        assert_eq!(days_across(1100.0, 0), 0, "nothing to show");
+
+        let days: Vec<Day> = (0..3)
+            .map(|index| Day { start: index, label: format!("11/0{index}"), recorded: true })
+            .collect();
+        let row = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(210.0, 48.0));
+        assert_eq!(day_at(row, &days, egui::pos2(10.0, 24.0)).map(|day| day.start), Some(0));
+        assert_eq!(day_at(row, &days, egui::pos2(100.0, 24.0)).map(|day| day.start), Some(1));
+        assert_eq!(day_at(row, &days, egui::pos2(205.0, 24.0)).map(|day| day.start), Some(2));
+        // A strip too short for all of them shows the newest.
+        let narrow = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 48.0));
+        assert_eq!(day_at(narrow, &days, egui::pos2(10.0, 24.0)).map(|day| day.start), Some(1));
+        assert!(day_at(row, &[], egui::pos2(10.0, 24.0)).is_none());
+    }
+
+    /// A picked day is the whole day. The strip is anchored on the day's end,
+    /// so it runs from midnight to midnight rather than from the eighteen hours
+    /// before the moment to the six after it.
+    #[test]
+    fn a_picked_day_is_the_whole_day() {
+        // A day and a bit of recording, which is what picking one reads.
+        let segments = run(0, 90_000);
+        let zoom = 86_400;
+        assert_eq!(extent(&segments, zoom, zoom * 3 / 4), Some((0, zoom)));
+        // Anchored on the moment instead, the strip would start where the list
+        // does and end six hours later.
+        assert_eq!(extent(&segments, zoom, 0), Some((0, zoom / 4)));
     }
 
     /// A strip wider than the cap asks for the cap and no more: past about two

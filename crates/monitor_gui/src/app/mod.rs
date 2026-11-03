@@ -424,6 +424,20 @@ enum TileBarAction {
     Hangup,
     /// Play this camera's recordings in the viewport.
     Playback,
+    /// Back over the recording by ten seconds.
+    StepBack,
+    /// The same, forwards.
+    StepForward,
+    /// Hold the picture, or let it go.
+    PlayPause,
+    /// Step to the event before this moment.
+    PrevEvent,
+    /// Step to the event after it.
+    NextEvent,
+    /// Change how much of the recording the timeline shows.
+    Width,
+    /// Leave the recording and go back to the camera.
+    Live,
 }
 
 /// Detects the frame a panel appears on.
@@ -1806,8 +1820,20 @@ impl XgViewApp {
                         self.start_seek(*index, camera_id.clone(), *window, *at, playlist.clone());
                     }
                 }
-                BackgroundEvent::SegmentsReady { index, camera_id, segments } => {
-                    self.segments_arrived(*index, camera_id.clone(), segments.clone());
+                BackgroundEvent::EventsReady { index, camera_id, events } => {
+                    self.events_arrived(*index, camera_id.clone(), events.clone());
+                }
+                BackgroundEvent::DaysReady { index, camera_id, days } => {
+                    self.days_arrived(*index, camera_id.clone(), days.clone());
+                }
+                BackgroundEvent::SegmentsReady { index, camera_id, from, to, segments } => {
+                    self.segments_arrived(
+                        *index,
+                        camera_id.clone(),
+                        *from,
+                        *to,
+                        segments.clone(),
+                    );
                 }
                 BackgroundEvent::Go2rtcFailed(error) => {
                     toast = Some((
