@@ -160,8 +160,6 @@ pub(super) struct Day {
     pub(super) start: i64,
     /// What the day is called on the strip - `10/31`.
     pub(super) label: String,
-    /// Whether the camera recorded anything in it.
-    pub(super) recorded: bool,
 }
 
 /// A range read before it was needed, and the answer to it.
@@ -946,10 +944,9 @@ impl XgViewApp {
                     egui::pos2(row.right() - DAY_PAD, row.top() + to),
                 )
             };
-            // A day with a recording is a button that is filled, and one without
-            // is a button that is not: still a day, still something to aim at.
-            let fill = if day.recorded { theme::ACCENT.gamma_multiply(0.45) } else { theme::TRACK };
-            painter.rect_filled(band, CornerRadius::same(6), fill);
+            // A day the camera recorded on is a button; the days it did not are
+            // not here at all, so every one of them is filled.
+            painter.rect_filled(band, CornerRadius::same(6), theme::ACCENT.gamma_multiply(0.45));
             if here == Some(day.start) {
                 painter.rect_stroke(
                     band,
@@ -959,13 +956,12 @@ impl XgViewApp {
                 );
             }
             if each >= 34.0 {
-                let ink = if day.recorded { theme::TEXT_BRIGHT } else { theme::TEXT_DIM };
                 painter.text(
                     band.center(),
                     egui::Align2::CENTER_CENTER,
                     &day.label,
                     egui::FontId::proportional(DAY_SIZE),
-                    ink,
+                    theme::TEXT_BRIGHT,
                 );
             }
         }
@@ -1539,7 +1535,7 @@ impl XgViewApp {
             return;
         };
         let recorded: HashSet<String> = days.into_iter().collect();
-        playback.days = calendar(&local_at, epoch_now(), &recorded, DAYS);
+        playback.days = calendar(&local_at, epoch_now(), &recorded);
     }
 
     /// Goes to a day the calendar shows.
@@ -2014,11 +2010,14 @@ fn pinch_step(pinch: f32, spread: f32) -> (Option<bool>, f32) {
 /// presses it twice is still where they meant to be.
 pub(super) const STEP: i64 = 10;
 
-/// How many days a calendar shows.
+/// How far back the calendar will walk looking for the first day the camera
+/// recorded on, in hours.
 ///
-/// Three weeks: enough that "the night before last" and "last Tuesday" are both
-/// on it, and few enough that a band is still a target on a strip this short.
-const DAYS: usize = 21;
+/// Three years. A camera whose oldest recording is older than that is a clock
+/// that is wrong rather than an archive, and the walk is an hour at a time: a
+/// bound is what keeps a wrong clock from walking to the beginning of time
+/// inside a frame.
+const CALENDAR_LIMIT: i64 = 3 * 365 * 24;
 
 /// How far a day's button is inset from the row's edges, and how much of a gap
 /// is left between two of them.
@@ -2087,8 +2086,8 @@ fn day_target(
     (picked.start != here).then(|| same_clock(clock, picked, now, here))
 }
 
-/// The days a calendar shows: `days` of them, oldest first, ending with the day
-/// `now` falls in.
+/// The days a calendar shows: every day the camera recorded on, oldest first,
+/// ending with the day `now` falls in.
 ///
 /// Walked an hour at a time through the local clock rather than computed,
 /// because a day is not always 86400 seconds - a clock that goes forward or back
@@ -2098,48 +2097,65 @@ fn day_target(
 /// follows it needs.
 ///
 /// `recorded` is what the box answered: the days that hold something, named
-/// `YYYY-MM-DD`. A day it did not name is still shown, empty - a calendar with
-/// its quiet days left out cannot be aimed at.
+/// `YYYY-MM-DD`. **Only those are kept**, and the walk goes back as far as the
+/// earliest of them - so the calendar is as long as the recording is rather than
+/// three weeks ending today, and the days a camera was switched off are not
+/// buttons that lead nowhere.
 fn calendar(
     clock: &dyn Fn(i64) -> Option<LocalTime>,
     now: i64,
     recorded: &HashSet<String>,
-    days: usize,
 ) -> Vec<Day> {
-    // A day of slack at the start, so the first day the walk meets is whole.
-    let hours = (days as i64 + 1) * 24;
-    let mut out: Vec<Day> = Vec::with_capacity(days + 1);
+    let Some(earliest) = recorded.iter().min() else {
+        // A camera that has recorded nothing has nothing to show.
+        return Vec::new();
+    };
+    let mut out: Vec<Day> = Vec::with_capacity(recorded.len());
     let mut current: Option<(String, i64)> = None;
-    for hour in 0..=hours {
-        let at = now - (hours - hour) * 3600;
+    let mut hour = 0;
+    while hour <= CALENDAR_LIMIT {
+        let at = now - hour * 3600;
+        hour += 1;
         let Some(local) = clock(at) else {
             // A platform with no clock has no calendar either.
             return Vec::new();
         };
         let key = format!("{:04}-{:02}-{:02}", local.year, local.month, local.day);
-        if current.as_ref().is_some_and(|(seen, _)| *seen == key) {
-            continue;
+        match current.as_mut() {
+            // The walk goes backwards, so the oldest moment of a day it meets is
+            // the last one it sees: the day's start is the sample before the
+            // clock names an older day.
+            Some((seen, first)) if *seen == key => *first = at,
+            _ => {
+                if let Some((seen, first)) = current.take() {
+                    if recorded.contains(&seen) {
+                        out.push(day_of(seen, first));
+                    }
+                }
+                if key < *earliest {
+                    // The walk has passed the first day the camera recorded on,
+                    // and the day it is on now is not one of them: there is
+                    // nothing older to name.
+                    break;
+                }
+                current = Some((key, at));
+            }
         }
-        if let Some((seen, first)) = current.take() {
-            out.push(Day {
-                start: first,
-                // `YYYY-MM-DD`, so the month and the day are where the dashes
-                // are not.
-                label: format!("{}/{}", &seen[5..7], &seen[8..10]),
-                recorded: recorded.contains(&seen),
-            });
-        }
-        current = Some((key, at));
     }
     if let Some((seen, first)) = current.take() {
-        out.push(Day {
-            start: first,
-            label: format!("{}/{}", &seen[5..7], &seen[8..10]),
-            recorded: recorded.contains(&seen),
-        });
+        if recorded.contains(&seen) {
+            out.push(day_of(seen, first));
+        }
     }
-    let skip = out.len().saturating_sub(days);
-    out.split_off(skip)
+    out.reverse();
+    out
+}
+
+/// One day of the calendar, from the `YYYY-MM-DD` the walk named it by and the
+/// first moment of it the walk met.
+fn day_of(key: String, start: i64) -> Day {
+    // `YYYY-MM-DD`, so the month and the day are where the dashes are not.
+    Day { start, label: format!("{}/{}", &key[5..7], &key[8..10]) }
 }
 
 /// How wide a day's button is on this row, and how long the whole run of them is.
@@ -2898,10 +2914,11 @@ mod tests {
         assert_eq!((foot.x, head.x), (20.0, 26.0), "and stands out of the edge");
     }
 
-    /// The calendar shows the days between the ones the box named - empty where
-    /// it named nothing - and ends with the day it is now.
+    /// The calendar is as long as the recording is: every day the box named,
+    /// from the earliest of them to today, and none of the days between that it
+    /// did not name.
     #[test]
-    fn the_calendar_fills_the_days_between_what_was_recorded() {
+    fn the_calendar_is_the_days_that_were_recorded() {
         // A clock whose day is 86400 seconds, so the walk can be counted.
         let clock = |unix: i64| {
             Some(LocalTime {
@@ -2914,18 +2931,23 @@ mod tests {
                 second: 0,
             })
         };
-        let recorded: HashSet<String> = ["2026-11-10".to_string()].into_iter().collect();
-        let days = calendar(&clock, 86_400 * 10, &recorded, 3);
+        // Three days named, the oldest of them four days back, with a quiet day
+        // between it and today.
+        let recorded: HashSet<String> = ["2026-11-07", "2026-11-10", "2026-11-11"]
+            .iter()
+            .map(|day| day.to_string())
+            .collect();
+        let days = calendar(&clock, 86_400 * 10, &recorded);
         let labels: Vec<&str> = days.iter().map(|day| day.label.as_str()).collect();
-        assert_eq!(labels, ["11/09", "11/10", "11/11"], "three days, ending today");
-        let recorded: Vec<bool> = days.iter().map(|day| day.recorded).collect();
-        assert_eq!(recorded, [false, true, false], "the quiet days are still shown");
-        // The fake clock counts its days from one, so day 9 is epoch 86400 * 8.
+        assert_eq!(labels, ["11/07", "11/10", "11/11"], "the quiet days are not buttons");
+        // The fake clock counts its days from one, so day 7 is epoch 86400 * 6.
         let starts: Vec<i64> = days.iter().map(|day| day.start).collect();
-        assert_eq!(starts, [86_400 * 8, 86_400 * 9, 86_400 * 10]);
+        assert_eq!(starts, [86_400 * 6, 86_400 * 9, 86_400 * 10]);
 
-        // A platform with no clock has no calendar.
-        assert!(calendar(&|_| None, 86_400 * 10, &HashSet::new(), 3).is_empty());
+        // A camera that has recorded nothing has no calendar, and neither has a
+        // platform with no clock.
+        assert!(calendar(&clock, 86_400 * 10, &HashSet::new()).is_empty());
+        assert!(calendar(&|_| None, 86_400 * 10, &recorded).is_empty());
     }
 
     /// A clock whose every day is 86400 seconds, which is what most of them are.
@@ -2947,7 +2969,7 @@ mod tests {
     fn a_picked_day_keeps_the_time_of_day() {
         // Starts a minute past midnight, which is where the walk through the
         // clock finds them - the same minute every day.
-        let day = |start: i64| Day { start, label: String::new(), recorded: true };
+        let day = |start: i64| Day { start, label: String::new() };
         let days = vec![day(60), day(86_400 + 60), day(2 * 86_400 + 60)];
         // Half past two in the afternoon of the middle day.
         let now = 86_400 + 60 + 14 * 3600 + 30 * 60;
@@ -2998,7 +3020,7 @@ mod tests {
                 second: local.rem_euclid(60) as u8,
             })
         };
-        let day = |start: i64| Day { start, label: String::new(), recorded: true };
+        let day = |start: i64| Day { start, label: String::new() };
         let days = vec![day(0), day(NOV_1), day(NOV_2)];
 
         // Half past two in the afternoon of 10/31, carried to 11/01: the clock
@@ -3036,7 +3058,7 @@ mod tests {
         assert_eq!(days_across(1100.0, 0), 0, "nothing to show");
 
         let days: Vec<Day> = (0..3)
-            .map(|index| Day { start: index, label: format!("11/0{index}"), recorded: true })
+            .map(|index| Day { start: index, label: format!("11/0{index}") })
             .collect();
         let row = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(210.0, 48.0));
         let (each, total) = day_metrics(row, days.len());

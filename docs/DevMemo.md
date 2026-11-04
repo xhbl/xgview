@@ -4669,3 +4669,19 @@ which is what a day that is a day long wants anyway.
 
 The test walks a twenty-five-hour day: 14:30 on 10/31 is 15:30 past 11/01's start
 and reads 14:30 there, and carrying that back to 11/02 takes the hour off again.
+
+**And it is as long as the recording, not three weeks.** `DAYS` was twenty-one,
+and the box's answer only decided which of those twenty-one were dark: a camera
+with ninety days of recordings could not be taken to the ninetieth, and one that
+had been off for a week had a week of buttons that led nowhere. The walk now goes
+back until it passes the **earliest** day the box named, and only the days it
+named are kept - so the row is as long as the recording is, and a day with
+nothing on it is not a button at all.
+
+Two things follow from walking backwards. The first is that a day's start is the
+*last* sample the walk sees of it rather than the first, so `current.start` is
+rewritten on every sample of the same day: what is kept is the oldest moment the
+clock was seen at, which is what "the first moment of the day" was always meant
+to be. The second is that the walk needs a bound - `CALENDAR_LIMIT`, three years
+in hours - or a camera whose clock is wrong by a decade would walk to the
+beginning of time inside a frame.
