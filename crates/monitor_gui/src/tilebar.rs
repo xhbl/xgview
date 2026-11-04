@@ -376,6 +376,22 @@ pub fn index_of(id: Id) -> Option<usize> {
     (0..CONTROLS).find(|index| control(*index) == id)
 }
 
+/// The next control in the row that is still live, counting from `index` and
+/// round the end - `None` when every one of them is grey.
+///
+/// A greyed control is not in the walk and takes no press, so the focus it holds
+/// has to go somewhere: this is where. Round the end rather than to the seat,
+/// because a viewer who walked to the far end of the bar expects the row to go
+/// on, and only a row with nothing live in it has nowhere to go.
+pub fn next_live(live: &[bool], index: usize) -> Option<usize> {
+    if live.is_empty() {
+        return None;
+    }
+    (1..=live.len())
+        .map(|step| (index + step) % live.len())
+        .find(|at| live[*at])
+}
+
 /// Whether a tile has room for the panel's two rows.
 ///
 /// The panel's depth runs along the tile's height, or along its width once the
@@ -633,10 +649,13 @@ pub fn draw(
         let Some(control) = controls.get(index) else {
             continue;
         };
-        // A control with nothing beyond it - a step off the end of the
-        // recording, a wider strip than the ladder has - is drawn grey and takes
-        // no press. It keeps its place in the row: a bar whose controls moved
-        // about as a recording played would be a bar nobody could aim at.
+        // A control with nothing beyond it - a wider strip than the ladder has -
+        // is drawn grey and takes no press. It keeps its **place** in the row: a
+        // bar whose controls moved about as a recording played would be a bar
+        // nobody could aim at. It does not keep its place in the **walk**, though:
+        // a greyed control cannot take the focus, so a walk that stopped on one
+        // would stop for good. See `XgViewApp::end_frame`, which hands a focus on a
+        // control that has just gone grey to the next one that is still live.
         let muted = muted.get(index).copied().unwrap_or(false);
         let response = match control {
             Control::Icon(icon) => {
@@ -649,7 +668,9 @@ pub fn draw(
                 icons::danger_in(ui, *rect, self::control(index), Icon::Hangup, "", rotated)
             }
         };
-        nav.item(&response);
+        if !muted {
+            nav.item(&response);
+        }
         if response.clicked() {
             pressed = Some(index);
         }
@@ -675,6 +696,17 @@ mod tests {
         assert_eq!(index_of(seat()), None, "the seat is not a control");
         assert_eq!(index_of(Id::new("somewhere else")), None);
         assert!(owns(seat()) && owns(control(11)), "and both are still the bar's");
+    }
+
+    /// A greyed control hands the focus on: to the next live one, round the end
+    /// when it is the last, and to nothing at all when the row is all grey.
+    #[test]
+    fn a_greyed_control_hands_the_focus_on() {
+        assert_eq!(next_live(&[true, true, false, true], 2), Some(3), "the next one");
+        assert_eq!(next_live(&[true, true, false], 2), Some(0), "round the end");
+        assert_eq!(next_live(&[true, false, false, true], 1), Some(3), "a run of grey");
+        assert_eq!(next_live(&[false, false], 0), None, "nowhere to go");
+        assert_eq!(next_live(&[], 0), None, "and no row at all");
     }
 
     fn portrait() -> Rect {

@@ -4949,3 +4949,16 @@ down the screen, and its days are buttons as wide as the row is deep - a name
 written across one was the last thing on that side of the wall that did not turn,
 while the times above the strip already did. The names are `turned_text` now, like
 everything else on a turned row.
+
+**And the focus goes on past a greyed control.** A greyed control is drawn, takes
+no press, and is no longer in the walk - so a focus left on one has nowhere to go.
+Pressing "more detail" at the end of the ladder greyed the button the ring was on:
+the ring went, and the row could not be walked past it, because the walk stopped on
+a control that could not take the focus and the arrows had nothing to step from.
+
+Two halves to it. `tilebar::draw` leaves a greyed control out of the navigation
+layer, so the walk steps over it; and the end of the frame hands a focus that is on
+one to the **next live control** (`tilebar::next_live`), round the end of the row -
+to the seat only when the whole row is grey. Round the end rather than to the seat,
+because a viewer who walked to the far end of the bar expects the row to go on. A
+stop the walk cannot leave is worse than a control nobody can reach.

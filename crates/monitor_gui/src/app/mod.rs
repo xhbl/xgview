@@ -2378,6 +2378,13 @@ impl XgViewApp {
             // during the frame, so the items were collected for the old page -
             // and it would be surrendered here if this ran after.  Next frame
             // the button is in the items and the focus is kept.
+            //
+            // A control that has just gone grey is handed on first: it takes no
+            // press and it is no longer in the walk, so a focus left on it is a
+            // focus with nowhere to go. See `step_off_a_greyed_control`.
+            if self.tile_bar.is_open() {
+                self.step_off_a_greyed_control(ctx);
+            }
             if let Some(focused) = ctx.memory(|memory| memory.focused()) {
                 // The strip under the magnified bar is the one focus that is not
                 // the layer's: it is a row rather than a control, it reads its

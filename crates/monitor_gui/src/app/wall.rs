@@ -657,7 +657,7 @@ impl XgViewApp {
     /// with no event ahead of it is the case a viewer notices, where greying would
     /// be a claim this side cannot make. **A control that is right most of the
     /// time is worse than one that never claims to know.**
-    fn tile_bar_available(&self, action: TileBarAction) -> bool {
+    pub(super) fn tile_bar_available(&self, action: TileBarAction) -> bool {
         let Some(playback) = self.playback.as_ref() else {
             return true;
         };
@@ -672,6 +672,33 @@ impl XgViewApp {
             }
             _ => true,
         }
+    }
+
+    /// Hands the focus on from a control that has just gone grey.
+    ///
+    /// A greyed control takes no press and is not in the walk, so a focus left on
+    /// one is a focus with nowhere to go: the arrows stop dead at it, which is
+    /// what a viewer pressing "more detail" at the end of the ladder saw - the
+    /// ring went, and the row could not be walked past it. The focus goes to the
+    /// next live control instead, wrapping round the row, and to the seat when the
+    /// whole row is grey.
+    pub(super) fn step_off_a_greyed_control(&mut self, ctx: &egui::Context) {
+        let Some(index) = ctx.memory(|memory| memory.focused()).and_then(tilebar::index_of) else {
+            return;
+        };
+        let entries = self.tile_bar_entries().0;
+        let Some((_, action)) = entries.get(index) else {
+            return;
+        };
+        if self.tile_bar_available(*action) {
+            return;
+        }
+        let live: Vec<bool> = entries
+            .iter()
+            .map(|(_, action)| self.tile_bar_available(*action))
+            .collect();
+        let target = tilebar::next_live(&live, index).map_or_else(tilebar::seat, tilebar::control);
+        ctx.memory_mut(|memory| memory.request_focus(target));
     }
 
     pub(super) fn tile_bar_entries(&self) -> (Vec<(tilebar::Control, TileBarAction)>, Option<usize>) {
