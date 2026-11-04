@@ -4685,3 +4685,193 @@ clock was seen at, which is what "the first moment of the day" was always meant
 to be. The second is that the walk needs a bound - `CALENDAR_LIMIT`, three years
 in hours - or a camera whose clock is wrong by a decade would walk to the
 beginning of time inside a frame.
+
+## 62. The strip's keys were read by nobody
+
+*Landed 2026-11-03, in 2.1.55.*
+
+§58 said a remote could work the strip: Down from the controls puts the focus on
+it, left and right walk it, Up leaves. The code for all of that was there. **None
+of it ran.** The bar's controls are members of the navigation layer, and
+`parse_keys` took all four arrows out of the queue whenever one of them had the
+focus - so by the time the strip was drawn and asked whether Down had been
+pressed, the answer was always no. A key that is consumed is a key nobody below
+can see.
+
+**Up and Down are left in the queue when the focus is the bar's own.** Its scope
+is a row with nothing above or below it, so the layer has nowhere to put them
+anyway; the strip underneath is what they lead to. Down takes the focus into it,
+Up hands it back to the first control - the handset, during a call, which is the
+only control there is.
+
+**The page keys are the events while the strip has the focus**, and the wall's
+pages everywhere else. That needed two other places taught: `keys_of_the_wall`
+turned the page from wherever the focus was, and `keys_of_the_application` took
+the bar down on a page key - which would have taken the strip with it, one frame
+into a jump.
+
+**And a held arrow stepped once a frame.** Sixty steps a second, and sixteen times
+the distance after a second and a half: the acceleration was written as a
+multiplier on a step that was already happening every frame. `hold_step` is the
+clock it was missing - a step at once, then one every 160 ms; twice the distance
+every 120 ms after half a second, four times every 100 ms after one and a half.
+A press is still one step, which is what a tap of the remote is.
+
+Not watched on screen: a keyboard is not a finger, and what the arrows do is
+arithmetic on the same `move_to` a drag uses.
+
+**And egui walks the focus on the arrows itself.** 0.32 reads an arrow as a
+*direction*: `Focus::begin_pass` notes it, and `end_pass` gives the focus to the
+nearest widget that way - unless the focused widget's `EventFilter` claims the
+arrow. The bar's controls are covered, because `Nav::finish` sets that filter on
+whatever the layer has focused. **The strip is not on the layer**, so its filter
+was the default and the first arrow press moved the focus off it: one press and
+the strip was gone. It locks both axes now, and so does the bar's seat, which is
+not on the layer either.
+
+**And a focus that is not the bar's own went back to the seat every frame.** The
+end of the frame has a second rule about the focus: anything the bar does not
+recognise is put on its seat, so the arrows have somewhere to stand and the
+panels behind it cannot take them back. The strip is neither a bar control nor on
+the navigation layer, so **both** rules took it: entered on Down and handed to the
+seat in the same frame. The seat draws nothing, so the ring on the button simply
+went - and the next arrow walked off the seat onto the first control, which is
+"left or right brings the focus back to the button". That was the one actually
+being seen, and the other three were in the way of fixing it.
+
+So there were **four** faults, and any one of them was enough to make the strip
+unreachable: a Down taken out of the queue before the strip could see it, a focus
+the first Left took away, a focus surrendered at the end of the frame it was given
+in, and a focus put back on the seat. The first two were found by reading; the
+last two only by writing the frame down - `the_strip_keeps_the_focus_after_it_is_entered`
+runs the sequence both ways, and the run that models the old rules ends
+`button, seat, nothing, seat, button, button`: the ring gone, the arrows walking
+the seat back onto the button, and no timeline anywhere in it.
+
+`egui_walks_the_focus_on_an_arrow_unless_the_widget_claims_it` pins the other
+half - without the lock the focus lands on the widget below, with it the focus
+stays - so an egui that changes its mind about arrows is a failing test rather
+than a strip that quietly stops working.
+
+**What it cost, and what to do next time.** Four faults and four rebuilds, and
+three of the four were in the same place: the end of a frame, where a focus is
+surrendered if the navigation layer does not own it, put back on the bar's seat if
+the bar does not recognise it, and given a lock filter by `Nav::finish` if it is
+one of the layer's own. Each rule reads as sensible on its own and none mentions
+the other two. **A widget that is not on the navigation layer cannot keep a focus
+in this application without being exempted from all of them.**
+
+The way to find that is not to read harder. Three readings of the same code found
+three faults and each fix was followed by "still not working", because the fourth
+rule was in a function nobody had a reason to open. What found it was **writing
+the frame down**: a headless `egui::Context` in a test, a button above and the
+strip below, the keys pressed on the frames a viewer would press them, and the
+application's end-of-frame rules modelled in the order they run. That test failed
+in exactly the shape the viewer described - `button, seat, nothing, seat, button,
+button` - and the fourth rule was visible in the diff between what the model did
+and what the code said.
+
+So: **when a focus will not stick, test the frame, not the code.** A focus is not
+a property of a widget; it is what three or four rules spread across the frame
+agree on by the time the frame ends.
+
+## 63. The ring the platform draws, and the bars a key asked for
+
+*Landed 2026-11-03, in 2.1.55.*
+
+Two faults found on the screen once the strip finally answered the arrows.
+
+**The focus ring was not the buttons'.** The strip's ring was written as `FOCUS`
+at `FOCUS_WIDTH`, which is what the bar's buttons get - on a phone. On a desktop
+it was egui's own ring: `theme::install` fills the style of the theme *in force*,
+and with the preference left to the system that is the light slot on a light
+machine, whose `widgets.active` is egui's. So the ring is **taken from the style**
+now - `ui.style().visuals.widgets.active.bg_stroke`, the very value the buttons are
+given - and the preference is pinned to `Dark`, so the style in force is always
+the one the application filled. A phone has no system theme to disagree with,
+which is why the two agreed there.
+
+**And Up out of the strip woke the bars.** `viewer_active` reads "the focus is not
+on the wall" as "the viewer is in the menus" and asks for the bars on any key at
+all. The strip is neither the wall's nor the bar's, so Up - which hands the focus
+to a control - was read as a request for the menus, and the bars came up over a
+full-screen picture. The rule that already exempts the bar's own controls exempts
+the strip now: it is the picture's own surface, and using it is the viewer at the
+picture.
+
+**A press no longer takes the keys.** `timeline_input` asked for the focus on the
+press as well as on Down, so a finger or a mouse on the strip left the ring on it:
+the remote's mark, drawn by a thumb. Nothing in the pointer path needs the keys -
+a drag is tracked by `scrubbing` and a tap by `scrub`, both of which are the
+application's own - so the line is gone, and the ring comes from Down and nowhere
+else. A strip that already had it keeps it, which is what "the ring is the
+remote's" means when the remote is already there.
+
+**And Escape woke the bars where Back did not.** `viewer_active` read `owner`,
+which is stored at the end of the last frame - and egui takes Escape as "drop the
+focus" at the beginning of the next one. So the very press that left the menus was
+answered with a value that still said "in the menus", and the bars came up behind
+a bar that was closing. Back is not touched by egui, which is why the two keys
+behaved differently for the same press. It reads this frame's focus now.
+
+Both are old: the first since the strip took the pointer at all, the second since
+`owner` was stored rather than read.
+
+**And a press on the wall woke the bars.** `viewer_active` reads "the focus is
+not on the wall" as "the viewer is in the menus", and answers *any* input with
+"yes, keep them up". A press on the wall is the wall's - `actions.focus` takes the
+focus back from whatever control held it - but it was answered as a menu press
+first, so the bars came up **before the wall was drawn**. The bars take their
+height from the wall: the tile under the pointer was no longer where the press was
+answered, so the click landed on another tile or on none at all.
+
+That is why the picture could be magnified once after a start and never again
+after coming back from it. The first time there is no focus anywhere, so the rule
+never fires and the double click lands. After a viewport has been left, something
+still holds the focus - the seat, a control, the strip - and the first press of
+the next double click is spent resizing the wall instead of placing the ring; the
+second press then has nothing to be a second press on.
+
+`menus_input` is that rule with the pointer told apart: a key, or a press in the
+band a bar occupies, is the menus - a press anywhere else is the wall's, and the
+wall takes the focus back rather than the bars taking the press. The single click
+that places the ring and the double press that magnifies are the same gesture
+again.
+
+**And the bands were in the wrong place.** `Chrome::bars` keeps the rectangles
+the two bars were last drawn in, because the band a bar occupies is the pointer's
+way of asking for it back while the bars are away. `in_a_bar_band` read their
+**absolute** y, though, and the doc above it had always said only their *height*
+was meant to be read. A start in full screen draws the bars once in the window
+the window still is - 1280 x 720, say - and the screen is 1920 x 1080 by the time
+anyone clicks: the bottom band's 690..720 is the **middle** of that screen.
+
+Two things followed from that one rectangle, and both were the report. The
+overlay that claims the band for the pointer (see `bands_hidden` in
+`draw_chrome`) sat over the middle of the wall and ate the press, so no ring moved
+and no double press began; and `viewer_active` read the same press as a request
+for the bars, so the bars came up over the picture. Summoning the bars re-measured
+them at the real size, which is why the double press worked again from then on,
+and why a windowed run never had the fault at all.
+
+`bands` holds the rectangles to the screen the viewer is looking at, and both the
+overlay and the band test go through it. `a_band_from_another_screen_is_not_a_band_in_this_one`
+pins it: the bands of a 720-tall window asked about a 1080-tall screen are at the
+top and bottom of *that* screen, and a press in the middle is the wall's.
+
+**How it got here.** Two pieces, five days apart in October, and neither is wrong
+on its own. `v1.1.60` (2026-10-05, *adjust full screen navigation*) gave the band
+an overlay that claims a press in it for the pointer, and a test that reads the
+stored rectangles' absolute y. `v1.2.101` (2026-10-08, *Start the viewer full
+screen in one step on every desktop*) made the window full screen from the
+viewport builder, with the bars taken away at once - so the one frame the bars are
+ever measured in can be the window the window still is. A band is a band and a bar
+is thirty-six points tall; it is the two together, in a state nobody calls normal -
+full screen, bars hidden, a window that was resized before the bars were ever
+drawn - that puts the band in the middle of the picture.
+
+The code is identical in 2.1.53 (`git show 44e6113` has the same overlay and the
+same absolute-y test), so nothing was *introduced* between 2.1.53 and this build:
+what differs is the state, and the state is the size the bars were last drawn at.
+The fix takes that dependence away rather than the symptom: only the heights are
+kept, so no resize can put a band anywhere but the top and bottom of the screen.

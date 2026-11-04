@@ -42,10 +42,8 @@ pub(super) struct Playback {
     /// A pinch arrives as a factor per frame, so a step of the ladder is taken
     /// when the product of them has doubled or halved.
     pub(super) pinch: f32,
-    /// An arrow held down on the timeline, and since when. A held key walks
-    /// further per repeat the longer it is held - see
-    /// [`XgViewApp::walk_timeline`].
-    pub(super) held: Option<(bool, std::time::Instant)>,
+    /// An arrow held down on the timeline. See [`Held`].
+    pub(super) held: Option<Held>,
     /// What the camera recorded around it. Read once when playback opens, and
     /// kept: the timeline draws the stretches that exist, and asking again for
     /// every repaint would be a request a frame.
@@ -150,6 +148,24 @@ pub(super) enum Timeline {
     Span,
     /// One band per day, the newest at the end.
     Days,
+}
+
+/// An arrow held down on the strip.
+///
+/// A press steps at once; after that the step repeats on its own clock. It has
+/// to: a key that is down is down every frame, so a step a frame would cross the
+/// strip three times a second, and the OS repeat is not something this side can
+/// see the shape of. Two moments are kept because two things are measured from
+/// them - how long it has been held, which is what the step grows with, and when
+/// it last stepped, which is what the repeat waits for.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Held {
+    /// Which way it is walking. `true` is forwards.
+    pub(super) forward: bool,
+    /// When it went down.
+    pub(super) since: std::time::Instant,
+    /// When it last stepped.
+    pub(super) stepped: std::time::Instant,
 }
 
 /// One day of the calendar.
@@ -739,6 +755,19 @@ impl XgViewApp {
         let Some(playback) = &self.playback else {
             return;
         };
+        // The remote is on the strip: the ring is the one this application draws
+        // for "the keys are here", and it is **taken from the style rather than
+        // named**, so that it is the same ring the bar's controls are given -
+        // whatever visuals the platform ended up with.
+        if self.strip_has_focus(ui.ctx()) {
+            let ring = ui.style().visuals.widgets.active.bg_stroke;
+            ui.painter().rect_stroke(
+                row,
+                CornerRadius::same(theme::radius::M),
+                ring,
+                StrokeKind::Inside,
+            );
+        }
         if let Timeline::Days = playback.timeline {
             self.draw_days(ui, row, playback);
             return;
@@ -1016,6 +1045,15 @@ impl XgViewApp {
         }
     }
 
+    /// The id the strip is focused by: the row's own, claimed by
+    /// [`XgViewApp::timeline_input`] and the thing the keys that enter it ask
+    /// for.
+    pub(super) fn timeline_id(&self) -> Option<Id> {
+        self.playback
+            .as_ref()
+            .map(|playback| Id::new(("xgview-timeline", playback.index)))
+    }
+
     /// Answers a finger on the timeline.
     ///
     /// Pressing holds the picture where it is - a recording is paced by its own
@@ -1042,7 +1080,26 @@ impl XgViewApp {
         };
 
         // Claimed so the wall behind does not take the press for a page swipe.
-        let response = ui.interact(row, Id::new(("xgview-timeline", index)), Sense::click_and_drag());
+        let id = self.timeline_id().unwrap_or_else(|| Id::new("xgview-timeline"));
+        let response = ui.interact(row, id, Sense::click_and_drag());
+        // egui walks the focus itself when an arrow is pressed and the focused
+        // widget does not claim that arrow: the widget in that direction gets
+        // the focus instead, which is the opposite of what a viewer walking the
+        // strip is asking for - one press and the strip is gone. The navigation
+        // layer locks the arrows for its own controls (see `Nav::finish`); the
+        // strip is not one of them, so it locks them here.
+        if response.has_focus() {
+            ui.ctx().memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    id,
+                    egui::EventFilter {
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        ..Default::default()
+                    },
+                );
+            });
+        }
         // The strip is a slider for a remote: left and right are its own, Down
         // walks into it from the controls and Up walks back out. Those keys are
         // read here rather than through the navigation layer because the strip
@@ -1173,7 +1230,11 @@ impl XgViewApp {
                 if let (true, Some(pos)) = (down, pos) {
                     if row.contains(pos) {
                         self.manager.hold_clip(index, true);
-                        response.request_focus();
+                        // **No focus**: a finger or a mouse on the strip is
+                        // asking for the time, not for the arrows - the ring is
+                        // the remote's, and a press does not put it here. The
+                        // keyboard enters by Down, which is a different line and
+                        // a different intention.
                         self.fetch_for(index, centre);
                         if let Some(playback) = self.playback.as_mut() {
                             playback.scrubbing = true;
@@ -1420,37 +1481,36 @@ impl XgViewApp {
     ///
     /// The step is a twentieth of what the strip is showing, so it is a few
     /// seconds at the closest width and an hour at the widest - the arrow means
-    /// "a little further" at every level. Held down it accelerates: four times
-    /// the step after half a second, sixteen after one and a half.
+    /// "a little further" at every level. **A press steps at once and a held key
+    /// repeats on its own clock**, which is what [`hold_step`] answers: a key
+    /// that is down is down every frame, and a step a frame would cross the strip
+    /// three times a second.
     pub(super) fn walk_timeline(&mut self, forward: bool) {
         let now = std::time::Instant::now();
-        let step = {
-            let Some(playback) = self.playback.as_mut() else {
-                return;
-            };
-            let base = (playback.zoom / 20).max(1);
-            match playback.held {
-                Some((direction, since)) if direction == forward => {
-                    let held = now.duration_since(since).as_secs_f32();
-                    if held > 1.5 {
-                        base * 16
-                    } else if held > 0.6 {
-                        base * 4
-                    } else {
-                        base
-                    }
-                }
-                _ => {
-                    playback.held = Some((forward, now));
-                    base
-                }
-            }
-        };
-        let Some(playback) = self.playback.as_ref() else {
+        let Some(playback) = self.playback.as_mut() else {
             return;
         };
-        let at = self.centre_of(playback) + if forward { step } else { -step };
-        self.move_to(at);
+        let base = (playback.zoom / 20).max(1);
+        // A press - or a change of direction - steps at once, and starts both
+        // clocks: the hold's, which the step grows with, and the repeat's.
+        let fresh = playback.held.map_or(true, |held| held.forward != forward);
+        if fresh {
+            playback.held = Some(Held { forward, since: now, stepped: now });
+        }
+        let Some(held) = playback.held else {
+            return;
+        };
+        let (step, repeat) = hold_step(base, now.saturating_duration_since(held.since));
+        if !fresh && now.saturating_duration_since(held.stepped) < repeat {
+            return;
+        }
+        if let Some(playback) = self.playback.as_mut() {
+            if let Some(held) = playback.held.as_mut() {
+                held.stepped = now;
+            }
+        }
+        let at = self.playback.as_ref().map_or(0, |playback| self.centre_of(playback));
+        self.move_to(at + if forward { step } else { -step });
     }
 
     /// Takes the picture to a moment, keeping the hold it was under.
@@ -2085,6 +2145,32 @@ fn day_target(
         .map_or(now, |day| day.start);
     (picked.start != here).then(|| same_clock(clock, picked, now, here))
 }
+
+/// How far a held arrow steps, and how soon it steps again.
+///
+/// A press steps at once; this is what the repeats after it do. Both halves move
+/// with the hold: the step grows, so a long hold covers ground, and the repeat
+/// shortens, so it covers it sooner. A twentieth of the strip every 160 ms is a
+/// third of a strip a second, which is fine walking; a fifth of it every 100 ms
+/// is two strips a second, which is crossing a day's recording in a breath.
+fn hold_step(base: i64, held: std::time::Duration) -> (i64, std::time::Duration) {
+    let held = held.as_secs_f32();
+    if held > 1.5 {
+        (base * 4, REPEAT_FAST)
+    } else if held > 0.6 {
+        (base * 2, REPEAT_MID)
+    } else {
+        (base, REPEAT_SLOW)
+    }
+}
+
+/// How often a held arrow steps: at first, after half a second, and after one
+/// and a half.
+const REPEAT_SLOW: std::time::Duration = std::time::Duration::from_millis(160);
+/// See [`REPEAT_SLOW`].
+const REPEAT_MID: std::time::Duration = std::time::Duration::from_millis(120);
+/// See [`REPEAT_SLOW`].
+const REPEAT_FAST: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The days a calendar shows: every day the camera recorded on, oldest first,
 /// ending with the day `now` falls in.
@@ -2826,6 +2912,20 @@ mod tests {
         assert_eq!(pinch, 1.0);
     }
 
+    /// A held arrow walks further and steps sooner the longer it is held - which
+    /// is what makes a hold accelerate rather than merely stride, and what keeps
+    /// a key that is down every frame from crossing the strip three times a
+    /// second.
+    #[test]
+    fn a_held_arrow_walks_further_and_steps_sooner() {
+        let at = |millis: u64| hold_step(100, std::time::Duration::from_millis(millis));
+        assert_eq!(at(0), (100, REPEAT_SLOW), "a press is one step");
+        assert_eq!(at(600), (100, REPEAT_SLOW), "and half a second is not yet a hold");
+        assert_eq!(at(700), (200, REPEAT_MID), "then twice the ground, sooner");
+        assert_eq!(at(1600), (400, REPEAT_FAST), "and four times, sooner still");
+        assert!(REPEAT_FAST < REPEAT_MID && REPEAT_MID < REPEAT_SLOW);
+    }
+
     /// The times along the top are a clock's, not an arbitrary division: the
     /// finest one that fits the labels the strip has room for.
     #[test]
@@ -2912,6 +3012,172 @@ mod tests {
         let [foot, head] = tick_ends(false, 100.0, 20.0, 26.0);
         assert_eq!(foot.y, head.y, "on a turned row it is horizontal");
         assert_eq!((foot.x, head.x), (20.0, 26.0), "and stands out of the edge");
+    }
+
+    /// The strip's focus as the application does it: a button above, the bar's
+    /// seat beside it, the strip below, Down moving in, Left walking it - and the
+    /// two rules the end of a frame has for a focus that is not the bar's own.
+    ///
+    /// **That is what took it**: the strip was entered and handed to the seat in
+    /// the same frame - the button's ring went, nothing had the keys - and the
+    /// next arrow walked off the seat onto the first control, which is exactly
+    /// "the focus disappears from the button, and left or right brings it back".
+    #[test]
+    fn the_strip_keeps_the_focus_after_it_is_entered() {
+        let (button, seat, strip) = (Id::new("button"), Id::new("seat"), Id::new("strip"));
+        let walk = |keep_strip: bool| {
+            let ctx = egui::Context::default();
+            let mut seen = Vec::new();
+            for frame in 0..6 {
+                let key = match frame {
+                    1 => Some(egui::Key::ArrowDown),
+                    3 | 4 => Some(egui::Key::ArrowLeft),
+                    _ => None,
+                };
+                let events = key
+                    .map(|key| {
+                        vec![egui::Event::Key {
+                            key,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: egui::Modifiers::NONE,
+                        }]
+                    })
+                    .unwrap_or_default();
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))),
+                    events,
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let top = ui.max_rect().min;
+                        let button_rect = Rect::from_min_size(top, vec2(100.0, 40.0));
+                        let strip_rect =
+                            Rect::from_min_size(top + vec2(0.0, 60.0), vec2(600.0, 50.0));
+                        let _ = ui.interact(button_rect, button, Sense::click());
+                        let strip_response = ui.interact(strip_rect, strip, Sense::click_and_drag());
+                        if frame == 0 {
+                            ctx.memory_mut(|memory| memory.request_focus(button));
+                        }
+                        // The bar's own rule: the first arrow steps off the seat
+                        // onto the first control.
+                        if ctx.memory(|memory| memory.focused()) == Some(seat) && key.is_some() {
+                            ctx.memory_mut(|memory| memory.request_focus(button));
+                        }
+                        // The strip's: Down enters it, and a focused strip locks
+                        // the arrows. See `timeline_input`.
+                        if frame == 1 && ctx.memory(|memory| memory.focused()) == Some(button) {
+                            strip_response.request_focus();
+                        }
+                        if strip_response.has_focus() {
+                            ctx.memory_mut(|memory| {
+                                memory.set_focus_lock_filter(
+                                    strip,
+                                    egui::EventFilter {
+                                        horizontal_arrows: true,
+                                        vertical_arrows: true,
+                                        ..Default::default()
+                                    },
+                                );
+                            });
+                        }
+                    });
+                    // The end of the frame, in the order the application has it:
+                    // a focus the layer does not own is surrendered, and one that
+                    // is not the bar's own goes back to the seat.
+                    let kept = ctx.memory(|memory| memory.focused());
+                    let strip_kept = keep_strip && kept == Some(strip);
+                    if let Some(focused) = kept {
+                        if focused != button && !strip_kept {
+                            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+                        }
+                    }
+                    if !strip_kept {
+                        let focused = ctx.memory(|memory| memory.focused());
+                        if focused != Some(button) && focused != Some(seat) {
+                            ctx.memory_mut(|memory| memory.request_focus(seat));
+                        }
+                    }
+                });
+                seen.push(ctx.memory(|memory| memory.focused()));
+            }
+            seen
+        };
+
+        // As it was: entered and given up in one frame - the seat draws nothing,
+        // so the ring on the button simply goes - and the next arrows walk the
+        // seat onto the first control.
+        let taken = walk(false);
+        assert_eq!(taken[1], Some(seat), "the strip is entered and given up at once");
+        assert_eq!(taken[4], Some(button), "and the arrows walk the seat onto the button");
+
+        // Kept: Down enters, and the arrows stay where they are put.
+        let kept = walk(true);
+        assert_eq!(kept[1], Some(strip), "Down takes the focus into the strip");
+        assert_eq!(kept[2], Some(strip), "and the frame after keeps it");
+        assert_eq!(kept[3], Some(strip), "a Left does not take it back");
+        assert_eq!(kept[4], Some(strip), "nor does a second Left");
+    }
+
+    /// egui walks the focus itself when an arrow is pressed: the widget in that
+    /// direction takes it, unless the focused one claims the arrow. That is what
+    /// took the strip's focus away the moment a viewer walked it - one press and
+    /// the strip was gone - and what the lock in `timeline_input` is for.
+    #[test]
+    fn egui_walks_the_focus_on_an_arrow_unless_the_widget_claims_it() {
+        // Two widgets, one above the other, with an arrow pressed down the page.
+        let walk = |lock: bool| {
+            let ctx = egui::Context::default();
+            let (above, below) = (Id::new("above"), Id::new("below"));
+            for frame in 0..4 {
+                let events = if frame == 2 {
+                    vec![egui::Event::Key {
+                        key: egui::Key::ArrowDown,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))),
+                    events,
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let top = ui.max_rect().min;
+                        let above_rect = Rect::from_min_size(top, vec2(100.0, 20.0));
+                        let below_rect =
+                            Rect::from_min_size(top + vec2(0.0, 100.0), vec2(100.0, 20.0));
+                        let _ = ui.interact(above_rect, above, Sense::click());
+                        let _ = ui.interact(below_rect, below, Sense::click());
+                        if frame == 0 {
+                            ctx.memory_mut(|memory| memory.request_focus(above));
+                        }
+                        if lock && ctx.memory(|memory| memory.has_focus(above)) {
+                            ctx.memory_mut(|memory| {
+                                memory.set_focus_lock_filter(
+                                    above,
+                                    egui::EventFilter {
+                                        horizontal_arrows: true,
+                                        vertical_arrows: true,
+                                        ..Default::default()
+                                    },
+                                );
+                            });
+                        }
+                    });
+                });
+            }
+            ctx.memory(|memory| memory.focused())
+        };
+        assert_eq!(walk(false), Some(Id::new("below")), "the arrow walks the focus away");
+        assert_eq!(walk(true), Some(Id::new("above")), "and a widget that claims it stays");
     }
 
     /// The calendar is as long as the recording is: every day the box named,

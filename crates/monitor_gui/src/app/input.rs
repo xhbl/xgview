@@ -169,17 +169,39 @@ impl XgViewApp {
     /// anything that keeps the control reachable keeps the bars - which the
     /// control it is part of cannot be drawn without. See
     /// [`Self::chrome_visible`].
-    pub(super) fn any_input(input: &egui::InputState) -> bool {
-        input.pointer.any_down()
-            || input.events.iter().any(|event| match event {
-                egui::Event::Key { pressed, .. } => *pressed,
-                egui::Event::PointerButton { pressed, .. } => *pressed,
-                egui::Event::PointerMoved(_)
-                | egui::Event::WindowFocused(_)
-                | egui::Event::Screenshot { .. }
-                | egui::Event::PointerGone => false,
-                _ => true,
-            })
+    /// Whether what the viewer did this frame is for the menus, when the focus is
+    /// already in them.
+    ///
+    /// This is the whole of [`Self::viewer_active`] for a viewer who is in the
+    /// menus: with the focus on a control there is no wall to leave alone, and
+    /// anything that keeps the control reachable keeps the bars - which the
+    /// control it is part of cannot be drawn without. See
+    /// [`Self::chrome_visible`].
+    ///
+    /// **A press on the wall is not one of them.** The wall takes the focus back
+    /// from a control on any press (see the `actions.focus` arm in `paint_wall`),
+    /// and waking the bars for that press would move the wall under the very
+    /// click that placed it: the bars take their height from the wall, so the
+    /// tile under the pointer is no longer where the press was answered - and the
+    /// second press of a double click lands on a different one, or on none. That
+    /// is why the picture could be magnified once after a start and never again
+    /// after coming back from it. What keeps the bars up is a key, or a press on
+    /// the bars themselves - the band they occupy, which is where the pointer
+    /// asks for them.
+    pub(super) fn menus_input(input: &egui::InputState, bars: Option<(Rect, Rect)>) -> bool {
+        input.events.iter().any(|event| match event {
+            egui::Event::Key { pressed, .. } => *pressed,
+            egui::Event::PointerButton { pos, pressed: true, .. } => {
+                Self::in_a_bar_band(bars, *pos)
+            }
+            egui::Event::PointerButton { pressed: false, .. } => false,
+            egui::Event::Touch { pos, .. } => Self::in_a_bar_band(bars, *pos),
+            egui::Event::PointerMoved(_)
+            | egui::Event::WindowFocused(_)
+            | egui::Event::Screenshot { .. }
+            | egui::Event::PointerGone => false,
+            _ => true,
+        })
     }
 
     /// Whether the keys read this frame walk the focus ring, which is what arms
@@ -243,20 +265,32 @@ impl XgViewApp {
 
     /// Whether `pos` is in the band one of the bars occupies.
     ///
-    /// The bands are the ones the bars were last drawn in; see [`Chrome::bars`].
-    /// Only their height is read: a bar spans the width of the window, and the
-    /// rectangles can be a frame or two old - the frame the bars are drawn in to
-    /// be measured, before a start in full screen takes them away again, is laid
-    /// out for a window that may still be on its way to the screen it ends up
-    /// on. Their height is what the viewer is aiming at either way.
-    ///
-    /// Before they have been drawn once there is no band at all, and a press
-    /// anywhere is a press on the wall.
+    /// The bands are the ones the bars were last drawn in, **held to the screen
+    /// the viewer is looking at** - see [`Self::bands`]. Before they have been
+    /// drawn once there is no band at all, and a press anywhere is a press on the
+    /// wall.
     pub(super) fn in_a_bar_band(bars: Option<(Rect, Rect)>, pos: egui::Pos2) -> bool {
         bars.is_some_and(|(top, bottom)| {
             (top.top()..=top.bottom()).contains(&pos.y)
                 || (bottom.top()..=bottom.bottom()).contains(&pos.y)
         })
+    }
+
+    /// The bands the bars occupy, on the screen the viewer is looking at.
+    ///
+    /// Only their **heights** are kept from the rectangles the bars were last
+    /// drawn in: a bar spans the width of the window, and a rectangle from
+    /// another window size is a band in the *middle* of this one - one that eats
+    /// every press meant for a tile there, and wakes the bars for it. A window
+    /// made full screen since the bars were last drawn is exactly that case, and
+    /// it is why a double press on a tile worked in a window and in full screen
+    /// only once the bars had been shown again.
+    pub(super) fn bands(bars: Option<(Rect, Rect)>, screen: Rect) -> Option<(Rect, Rect)> {
+        let (top, bottom) = bars?;
+        Some((
+            Rect::from_min_max(screen.min, egui::pos2(screen.max.x, screen.min.y + top.height())),
+            Rect::from_min_max(egui::pos2(screen.min.x, screen.max.y - bottom.height()), screen.max),
+        ))
     }
 
     pub(super) fn back(&mut self, ctx: &egui::Context) {
@@ -802,6 +836,7 @@ impl XgViewApp {
         nav_owns: bool,
         nav_kind: Option<Kind>,
         typing: bool,
+        bar_owns: bool,
     ) -> Keys {
         ctx.input_mut(|input| {
             let none = Modifiers::NONE;
@@ -861,6 +896,15 @@ impl XgViewApp {
                             // walk the form.
                             keys.up = input.consume_key(none, Key::ArrowUp);
                             keys.down = input.consume_key(none, Key::ArrowDown);
+                        }
+                        _ if bar_owns => {
+                            // The magnified bar is a row with nothing above or
+                            // below it, so the layer has nowhere to put the focus
+                            // on Up or Down. They are left in the queue for the
+                            // strip underneath, which is what they lead to: Down
+                            // takes the focus into it and Up brings it back.
+                            keys.left = input.consume_key(none, Key::ArrowLeft);
+                            keys.right = input.consume_key(none, Key::ArrowRight);
                         }
                         _ => {
                             // A plain control: all four arrows move the focus.
@@ -947,16 +991,28 @@ impl XgViewApp {
         }
         // A key that opens a panel, or changes the shape of the wall, is not the
         // magnified viewport's bar's: it takes the bar down before it acts, so
-        // the two are never up at once. See [`crate::tilebar`].
+        // the two are never up at once. See [`crate::tilebar`]. The page keys are
+        // the exception while the strip has the focus - there they are the
+        // events, and a bar that went down on them would take the strip with it.
+        let pages_are_the_strips = self.strip_has_focus(ctx);
         if keys.settings
             || keys.devices
             || keys.fullscreen
-            || keys.page_prev
-            || keys.page_next
+            || (!pages_are_the_strips && (keys.page_prev || keys.page_next))
             || keys.layout.iter().any(|pressed| *pressed)
         {
             self.tile_bar.hide();
         }
+    }
+
+    /// Whether the strip under the bar has the keyboard.
+    ///
+    /// Its arrows are its own, and the page keys are the events rather than the
+    /// wall's pages: one press cannot mean both. It is also the one focus the
+    /// navigation layer does not own - see the two rules at the end of a frame.
+    pub(super) fn strip_has_focus(&self, ctx: &egui::Context) -> bool {
+        self.timeline_id()
+            .is_some_and(|id| ctx.memory(|memory| memory.focused()) == Some(id))
     }
 
     /// The wall's own keys: the page turns and the layout digits.
@@ -974,11 +1030,17 @@ impl XgViewApp {
             // turn is what took the button it stood on away. A tile's focus, or
             // a focus anywhere else, turns the page and stays put.
             let on_page_button = self.page_button_has_focus(ctx);
-            if keys.page_prev {
-                self.advance(false, on_page_button);
-            }
-            if keys.page_next {
-                self.advance(true, on_page_button);
+            // A page key is the events while the strip has the focus, and the
+            // wall's page everywhere else: the strip is what the remote is in,
+            // and paging the wall behind it would be a second answer to one
+            // press.
+            if !self.strip_has_focus(ctx) {
+                if keys.page_prev {
+                    self.advance(false, on_page_button);
+                }
+                if keys.page_next {
+                    self.advance(true, on_page_button);
+                }
             }
             for (slot, pressed) in keys.layout.iter().enumerate() {
                 if !*pressed {
@@ -1004,46 +1066,47 @@ impl XgViewApp {
 
     /// The magnified viewport's keys: one channel, not a grid.
     ///
-    /// The strip owns them only where the remote is in it - its controls are
-    /// egui's own buttons on the navigation layer, and the arrows walk them. A
-    /// strip that is merely up - the upright default, or one a tap put there -
-    /// leaves the remote on the wall, so the arrows keep stepping channels and
-    /// the confirm key is what walks into the strip.
+    /// This is the frame with nothing focused, which is why it is the one that
+    /// steps channels: with the remote on the bar's controls the keys are
+    /// [`Self::keys_off_the_grid`]'s, and with it on the strip the strip reads
+    /// them itself - the time moves under a cursor that does not, and a held key
+    /// walks further the longer it is held. See [`XgViewApp::timeline_input`].
     fn keys_of_the_magnified(&mut self, ctx: &egui::Context, keys: &Keys) {
         let bar_owns_keys = self.tile_bar.is_open()
             && ctx.memory(|memory| memory.focused()).is_some_and(tilebar::owns);
-        if !bar_owns_keys {
-            // A magnified viewport is one channel, not a grid: Right and Left
-            // are the next and previous channel in channel order, and Up and
-            // Down have no grid to walk, so they go straight to the bars.
-            if keys.left {
-                self.step_zoom(false);
+        if bar_owns_keys {
+            return;
+        }
+        // A magnified viewport is one channel, not a grid: Right and Left
+        // are the next and previous channel in channel order, and Up and
+        // Down have no grid to walk, so they go straight to the bars.
+        if keys.left {
+            self.step_zoom(false);
+        }
+        if keys.right {
+            self.step_zoom(true);
+        }
+        if keys.down {
+            self.hand_off(ctx, Bar::Status);
+        }
+        if keys.up {
+            self.hand_off(ctx, Bar::Toolbar);
+        }
+        // The confirm key brings the viewport's bar up rather than unwinding
+        // the magnification: Back is the way out now, a layer at a time. A
+        // held key is not a second press. The bar appears without its
+        // selection drawn - the focus is put on its seat, not on a control -
+        // and the first arrow is what lights it. A bar that is already up is
+        // entered the same way, without being shown again.
+        //
+        // It comes up along the bottom: the remote asks for it without
+        // pointing at an edge, and the status side is where the hand and the
+        // eye expect a strip of controls.
+        if keys.enter && keys.enter_fresh {
+            if !self.tile_bar.is_open() {
+                self.tile_bar.show(tilebar::Dock::Bottom, Instant::now());
             }
-            if keys.right {
-                self.step_zoom(true);
-            }
-            if keys.down {
-                self.hand_off(ctx, Bar::Status);
-            }
-            if keys.up {
-                self.hand_off(ctx, Bar::Toolbar);
-            }
-            // The confirm key brings the viewport's bar up rather than unwinding
-            // the magnification: Back is the way out now, a layer at a time. A
-            // held key is not a second press. The bar appears without its
-            // selection drawn - the focus is put on its seat, not on a control -
-            // and the first arrow is what lights it. A bar that is already up is
-            // entered the same way, without being shown again.
-            //
-            // It comes up along the bottom: the remote asks for it without
-            // pointing at an edge, and the status side is where the hand and the
-            // eye expect a strip of controls.
-            if keys.enter && keys.enter_fresh {
-                if !self.tile_bar.is_open() {
-                    self.tile_bar.show(tilebar::Dock::Bottom, Instant::now());
-                }
-                ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
-            }
+            ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
         }
     }
 
@@ -1147,10 +1210,23 @@ impl XgViewApp {
     /// The layer ends the chain: with the wall not holding the keys, one of
     /// these surfaces has them, and nothing below this point is reached.
     fn keys_off_the_grid(&mut self, ctx: &egui::Context, keys: &Keys) {
-        // The magnified viewport's bar opens on its seat, which is not one
-        // of its controls: the first arrow is what steps off it, onto the
-        // first control - the handset while a call is up - and no arrow ever
-        // walks back onto it. See `tilebar::seat`.
+        // The recording's strip has the focus: its arrows are its own and it
+        // reads them itself, and the page keys are the events - the marks on the
+        // strip and the two buttons on the bar are the same list. Back is not
+        // answered here: it still unwinds the bar below, which is the layer the
+        // strip lives in.
+        if self.strip_has_focus(ctx) {
+            if keys.page_prev {
+                self.jump_event(false);
+            }
+            if keys.page_next {
+                self.jump_event(true);
+            }
+        }
+        // The magnified viewport's bar opens on its seat, which is not one of
+        // its controls: the first arrow is what steps off it, onto the first
+        // control - the handset while a call is up - and no arrow ever walks
+        // back onto it. See `tilebar::seat`.
         if self.tile_bar.is_open()
             && ctx.memory(|memory| memory.focused()) == Some(tilebar::seat())
             && (keys.left || keys.right || keys.up || keys.down)
@@ -1333,7 +1409,10 @@ impl XgViewApp {
         }
 
         let grid_owns = self.owner == Owner::Grid;
-        let keys = Self::parse_keys(ctx, grid_owns, nav_owns, nav_kind, typing);
+        // The magnified bar's own controls, and the strip under them: the two
+        // answers the arrow keys are read against.
+        let bar_owns = ctx.memory(|memory| memory.focused()).is_some_and(tilebar::owns);
+        let keys = Self::parse_keys(ctx, grid_owns, nav_owns, nav_kind, typing, bar_owns);
 
         // The focus ring is armed here, before any of these keys is acted on:
         // what arms it is the keys that walk it, whatever else they end up

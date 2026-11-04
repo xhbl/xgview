@@ -599,7 +599,24 @@ pub fn draw(
     // among them does not stick - the bar then loses its seat on the next frame
     // and the focus goes with it.
     let seat_rect = Rect::from_min_size(layout.bar.min + vec2(PAD * 0.5, PAD * 0.5), vec2(2.0, 2.0));
-    let _seat = ui.interact(seat_rect, seat(), Sense::focusable_noninteractive());
+    let seat = ui.interact(seat_rect, seat(), Sense::focusable_noninteractive());
+    // The seat keeps the arrows for the bar as well: egui moves the focus to
+    // whatever is in the direction of an arrow the focused widget does not claim,
+    // and the rule here is that the first arrow steps off the seat onto the first
+    // control - or, for Down, into the strip under it. See `Nav::finish`, which
+    // does the same for the controls themselves.
+    if seat.has_focus() {
+        ui.ctx().memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                seat.id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
 
     let mut pressed = None;
     for (index, rect) in layout.buttons.iter().enumerate() {

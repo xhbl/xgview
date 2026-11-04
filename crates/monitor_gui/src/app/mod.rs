@@ -1122,6 +1122,13 @@ pub struct XgViewApp {
     audio: Option<Arc<crate::audio::Sink>>,
     /// Who answered the last frame's direction presses.
     owner: Owner,
+    /// Whether the recording's strip was drawn this frame.
+    ///
+    /// It is the one focus that the navigation layer does not own: the strip is a
+    /// row rather than a control and reads its own keys, so the end of the frame
+    /// has to know it has a widget before it can leave that focus alone. See the
+    /// surrender in [`Self::end_frame`].
+    timeline_shown: bool,
     /// Explicit directional navigation for the windows that opted into it.
     ///
     /// Keeps egui's geometric walk off the arrows of the registered controls;
@@ -1562,6 +1569,7 @@ impl XgViewApp {
             reorder_trigger_anchor: None,
             reorder_focus: false,
             owner: Owner::Grid,
+            timeline_shown: false,
             focus_names: HashMap::new(),
             focused_name: None,
             from_autostart,
@@ -2173,6 +2181,10 @@ impl XgViewApp {
     /// queue: what is behind the black must not answer the press that takes the
     /// wall out of it.
     fn begin_frame(&mut self, ctx: &egui::Context) -> FrameStart {
+        // The strip under the magnified bar is drawn by the wall, and the end of
+        // the frame needs to know whether it was: it is the one focus kept that
+        // the navigation layer does not own.
+        self.timeline_shown = false;
         // The frame is timed from here to the end of it, and only when
         // `XGVIEW_FRAME_MS` asks: `start` reads a clock, which is cheap, but the
         // `Option` in front of it is cheaper and the default is that nobody is
@@ -2367,7 +2379,12 @@ impl XgViewApp {
             // and it would be surrendered here if this ran after.  Next frame
             // the button is in the items and the focus is kept.
             if let Some(focused) = ctx.memory(|memory| memory.focused()) {
-                if !self.nav.owns_now(focused) {
+                // The strip under the magnified bar is the one focus that is not
+                // the layer's: it is a row rather than a control, it reads its
+                // own keys, and it was drawn - so it is a focus with a widget,
+                // and the one the arrows were put on to walk the recording.
+                let strip = self.timeline_shown && Some(focused) == self.timeline_id();
+                if !self.nav.owns_now(focused) && !strip {
                     ctx.memory_mut(|memory| memory.surrender_focus(focused));
                 }
             }
@@ -2408,8 +2425,15 @@ impl XgViewApp {
             // handset is one, and the handset it becomes is another. Anything
             // else goes back to the seat, where it draws nothing until an arrow
             // walks it off.
+            //
+            // **The strip under the bar is the exception**: it is what Down goes
+            // to and what the arrows walk, and it is not one of the bar's ids.
+            // Without this it was put back on the seat every frame - the button
+            // lost its ring, nothing had the keys, and the next arrow walked off
+            // the seat onto the first control. See `timeline_input`.
             let focused = ctx.memory(|memory| memory.focused());
-            if !focused.is_some_and(tilebar::owns) {
+            let strip = self.timeline_shown && focused.is_some() && focused == self.timeline_id();
+            if !focused.is_some_and(tilebar::owns) && !strip {
                 ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
             }
         }
@@ -2758,7 +2782,12 @@ impl XgViewApp {
         // where that bar is drawn, so one of them would eat the press before the
         // tile could open it. See `crate::tilebar` and `wall_event`.
         if bands_hidden && !self.scheduler.is_zoomed() {
-            if let Some((top, bottom)) = self.chrome.bars {
+            // Held to this frame's screen: the rectangles are from the frame the
+            // bars were last drawn in, and a window made full screen since has
+            // bands at the top and bottom of a taller screen than those - an
+            // overlay over the middle of the wall eats every press on a tile
+            // there. See `XgViewApp::bands`.
+            if let Some((top, bottom)) = XgViewApp::bands(self.chrome.bars, ctx.screen_rect()) {
                 for (id, band) in [("xgview-toolbar-band", top), ("xgview-status-band", bottom)] {
                     // The size is given, and never left to the area's own
                     // default: an area with none starts at `default_area_size`
@@ -3390,6 +3419,117 @@ mod tests {
     #[test]
     fn the_text_half_of_a_printable_key_does_not_ask_for_the_bars() {
         assert!(!XgViewApp::wall_event(bars(), true, true, &egui::Event::Text("3".to_owned())));
+    }
+
+    /// A press on the wall is the wall's, even when a control holds the focus.
+    ///
+    /// Waking the bars for it moves the wall under the very click that placed it
+    /// - the bars take their height from the wall - so the press lands on another
+    /// tile or on none, and the second press of a double click never reaches the
+    /// first. A press in the band a bar occupies is still the pointer asking for
+    /// it, and so is a key.
+    #[test]
+    fn a_press_on_the_wall_does_not_ask_for_the_bars() {
+        let read = |events: Vec<egui::Event>| {
+            let ctx = egui::Context::default();
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1280.0, 720.0))),
+                    events,
+                    ..Default::default()
+                },
+                |_| {},
+            );
+            ctx.input(|input| XgViewApp::menus_input(input, bars()))
+        };
+        let press = |at: egui::Pos2| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        };
+        assert!(!read(vec![press(pos2(600.0, 360.0))]), "a tile in the middle is the wall's");
+        assert!(read(vec![press(pos2(600.0, 18.0))]), "the band above is the bar's");
+        assert!(read(vec![press(pos2(600.0, 705.0))]), "and so is the band below");
+        assert!(
+            !read(vec![egui::Event::PointerMoved(pos2(600.0, 360.0))]),
+            "a movement asks for nothing"
+        );
+        let key = egui::Event::Key {
+            key: egui::Key::F1,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        assert!(read(vec![key]), "a key is the menus'");
+    }
+
+    /// A band drawn on one screen is a band at the top and bottom of the next
+    /// one, not a rectangle where it used to be.
+    ///
+    /// The rectangles are kept from the frame the bars were last drawn in, and a
+    /// window made full screen since holds bands from the window it was: the
+    /// bottom one lands in the middle of the screen, where it eats every press
+    /// meant for a tile and wakes the bars for it.
+    #[test]
+    fn a_band_from_another_screen_is_not_a_band_in_this_one() {
+        // Drawn when the window was 1280 x 720, asked about a 1920 x 1080 screen.
+        let drawn = Some((
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1280.0, 36.0)),
+            Rect::from_min_max(pos2(0.0, 690.0), pos2(1280.0, 720.0)),
+        ));
+        let screen = Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1080.0));
+        let (top, bottom) = XgViewApp::bands(drawn, screen).expect("two bands");
+        assert_eq!(top, Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 36.0)));
+        assert_eq!(bottom, Rect::from_min_max(pos2(0.0, 1050.0), pos2(1920.0, 1080.0)));
+        assert!(
+            !XgViewApp::in_a_bar_band(Some((top, bottom)), pos2(960.0, 700.0)),
+            "a press in the middle of the taller screen is the wall's"
+        );
+        assert!(XgViewApp::in_a_bar_band(Some((top, bottom)), pos2(960.0, 20.0)), "and the band above");
+    }
+
+    /// A tile is clicked and dragged but *not* focusable, and a double press on
+    /// one is the way into the picture. That has to hold for a widget egui does
+    /// not put in its focus walk - it is the whole of the wall's gesture.
+    #[test]
+    fn a_double_press_on_a_tile_is_a_double_press() {
+        let ctx = egui::Context::default();
+        let id = Id::new("a-tile");
+        let at = pos2(200.0, 200.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let mut doubles = 0;
+        for frame in 0..6 {
+            let events = match frame {
+                1 => vec![egui::Event::PointerMoved(at), button(true)],
+                2 => vec![button(false)],
+                3 => vec![button(true)],
+                4 => vec![button(false)],
+                _ => Vec::new(),
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let rect = Rect::from_min_size(egui::Pos2::ZERO, vec2(400.0, 400.0));
+                    // The tile's own sense: clickable, draggable, not focusable.
+                    let response = ui.interact(rect, id, Sense::CLICK | Sense::DRAG);
+                    if response.double_clicked() {
+                        doubles += 1;
+                    }
+                });
+            });
+        }
+        assert_eq!(doubles, 1, "one double press, on a widget that cannot be focused");
     }
 
     /// A tap on a touch screen reaches egui as a `Start` and an `End` at the

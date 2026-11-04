@@ -137,6 +137,13 @@ impl XgViewApp {
     /// away again 3.5 seconds later. See [`Self::wall_event`] for the whole of
     /// the decision, one event at a time.
     pub(super) fn viewer_active(&self, ctx: &egui::Context) -> bool {
+        // Read from this frame's focus rather than from `owner`: Escape is taken
+        // by egui as "drop the focus" before this runs, so an answer stored at
+        // the end of the last frame still says "the viewer is in the menus" on
+        // the very press that left them - which is how closing the viewport's bar
+        // with Escape woke the bars behind it, while the remote's Back, which
+        // egui leaves alone, did not.
+        let focused = ctx.memory(|memory| memory.focused());
         // The magnified viewport's bar is the picture's own surface, not one of
         // the wall's bars: using it is the viewer at the picture. Waking the
         // bars for it would take the next press out of the strip's hands - and
@@ -144,15 +151,27 @@ impl XgViewApp {
         // holds while the remote is *in* the strip: a strip that is merely up,
         // the upright default, leaves the remote on the wall, and an arrow off
         // it is still a press that asks for the bars.
+        //
+        // The strip itself is the same surface, and it is not one of the bar's
+        // ids - without it here, Up out of the strip put the focus on a control
+        // and this read the frame's key as "the viewer is in the menus", so the
+        // bars came up over a full screen picture.
         if self.tile_bar.is_open()
-            && ctx.memory(|memory| memory.focused()).is_some_and(tilebar::owns)
+            && (focused.is_some_and(tilebar::owns) || self.strip_has_focus(ctx))
         {
             return false;
         }
         // The remote's focus is in a bar, in the settings panel or in a window:
-        // the viewer is in the menus, and everything they do belongs to them.
-        if self.owner != Owner::Grid {
-            return ctx.input(Self::any_input);
+        // the viewer is in the menus, and everything they do belongs to them -
+        // except a press on the wall, which takes the focus back and must not
+        // move the wall under the click that did it. See [`Self::menus_input`].
+        //
+        // The bands are held to this frame's screen: a rectangle from another
+        // window size is a band in the middle of this one, and a press there is
+        // a press on a tile. See [`Self::bands`].
+        let bands = Self::bands(self.chrome.bars, ctx.screen_rect());
+        if focused.is_some() {
+            return ctx.input(|input| Self::menus_input(input, bands));
         }
         ctx.input(|input| {
             // While the picture is magnified and the bars are away, the band
@@ -162,7 +181,7 @@ impl XgViewApp {
             // their own as it always was.
             let band_is_a_door = !self.scheduler.is_zoomed() || self.chrome.visible;
             input.events.iter().any(|event| {
-                Self::wall_event(self.chrome.bars, self.back_is_a_door(), band_is_a_door, event)
+                Self::wall_event(bands, self.back_is_a_door(), band_is_a_door, event)
             })
         })
     }

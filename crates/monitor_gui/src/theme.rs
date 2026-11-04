@@ -115,6 +115,14 @@ pub mod radius {
 
 /// Installs the dark theme and the larger TV friendly typography.
 pub fn install(ctx: &egui::Context) {
+    // The palette below is the one this application was designed in - a dark wall
+    // for a dim room - and the system's own light or dark choice is not the
+    // application's. egui keeps one style per theme and `set_visuals` fills the
+    // one in force, so a machine whose desktop is light got the light slot: the
+    // wall came up in the wrong palette and the focus ring in a colour of its
+    // own, which is how the strip and the bar's buttons came to disagree on the
+    // desktop and agree on a phone, where there is no system theme at all.
+    ctx.set_theme(egui::ThemePreference::Dark);
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = PANEL;
     visuals.window_fill = PANEL;
@@ -140,6 +148,9 @@ pub fn install(ctx: &egui::Context) {
     visuals.widgets.active.bg_fill = FOCUS_FILL;
     visuals.widgets.active.weak_bg_fill = FOCUS_FILL;
     visuals.widgets.active.bg_stroke = Stroke::new(FOCUS_WIDTH, FOCUS);
+    // Into both slots, so a theme change cannot lose it: the preference above is
+    // the one in force, and this is what it will be if anything sets it again.
+    ctx.set_visuals_of(egui::Theme::Dark, visuals.clone());
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
@@ -177,4 +188,34 @@ pub fn truncate(text: &str, max: usize) -> String {
     let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The palette is the application's, whatever the machine's own theme is.
+    ///
+    /// A desktop set to light used to put the app in egui's *light* slot - the
+    /// one `set_visuals` does not fill when the preference is the system's - and
+    /// that came up with egui's own focus ring. The strip and the bar's buttons
+    /// then drew two different rings, and only on the desktop: a phone has no
+    /// system theme to be wrong about.
+    #[test]
+    fn the_palette_is_the_applications_whatever_the_system_theme() {
+        let ctx = egui::Context::default();
+        // A machine whose desktop is light, as the system theme arrives before
+        // the first frame.
+        ctx.set_theme(egui::ThemePreference::Light);
+        install(&ctx);
+        assert_eq!(ctx.theme(), egui::Theme::Dark, "the preference is the application's");
+        let ring = ctx.style().visuals.widgets.active.bg_stroke;
+        assert_eq!(ring, Stroke::new(FOCUS_WIDTH, FOCUS), "and so is the ring");
+        assert_eq!(ctx.style().visuals.panel_fill, PANEL, "and the panel it is drawn on");
+
+        // What eframe reports is the *system* theme, and egui resolves it against
+        // this preference: a preference that is not the system's cannot be moved
+        // by it, which is what keeps the two platforms the same. There is no way
+        // to set that field from here, so the argument stops at the preference.
+    }
 }

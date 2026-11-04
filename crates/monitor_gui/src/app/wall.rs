@@ -605,6 +605,7 @@ impl XgViewApp {
             // On top of the strip and its controls: what the recording holds is
             // drawn by the one thing that knows it, and the row it is drawn in
             // is the strip's own geometry.
+            self.timeline_shown = layout.timeline.is_some();
             if let Some(row) = layout.timeline {
                 // Answered first, so a finger that moves this frame moves the
                 // cursor in it.
