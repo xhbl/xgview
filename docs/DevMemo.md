@@ -5277,3 +5277,126 @@ because a chain of reads and the strip's own reads are in flight together.
 `what_has_been_asked_about_is_merged`, `a_hole_longer_than_a_day_is_looked_past_a_day_at_a_time`
 and `a_look_is_recognised_by_its_range` hold the halves, and
 `a_press_at_a_stop_starts_again_where_the_viewer_is` the last.
+
+## 70. The strip's right half
+
+*Landed 2026-11-04, in 2.1.65.*
+
+Pick an earlier day, drag towards later moments, and the strip runs out at the
+cursor: nothing to its right, and at the edge a tile that says the stream failed -
+"nothing recorded at that moment".
+
+**Nothing read forward.** The strip is drawn a whole width around the cursor, and
+only half of that was ever asked for: `read_older` goes back, `read_around` reads
+either side but only when a seek lands outside the list, and a session reads the
+range it plays. So the right half of the strip was fed by whatever the last range
+happened to reach, and a drag towards later moments walked off it. `newer_window`
+is the mirror of `older_window` - half a strip ahead of the cursor, and never into
+the future, where a recording has nothing - and it has a slot of its own
+(`reading_newer`) so that a strip short on both sides at once does not starve one
+of them. Asked where it is needed: on every move (`move_to`, which is where an
+arrow, a step, an event jump and a drag all pass), while a finger is down, and
+after every answer.
+
+**A seek whose read was turned away waited for ever.** `read_around` returns early
+when a read is already in flight, and nothing asked again when that read landed:
+the seek's moment stayed in `to_seek`, and the picture stayed where it was with no
+answer coming. The answer that lands now re-asks when the moment has still not
+been asked about, and gives up - cursor back to the picture - when it has been
+asked about and there is nothing at it. That is a hole, and the strip is how the
+viewer leaves it.
+
+**And a hole was reported as a failure.** `CoreError::empty` - "the box answered,
+and there is nothing there" - was a permanent failure, so the tile drew the error
+panel over a camera that was working perfectly and the toast said the stream had
+failed. It is a `Finished` now: the picture stays, the corner says it is not
+moving, and the continuation from §69 looks past the hole. A hole is not a broken
+camera.
+
+**And the window was measured against the wrong end of the list.** `newer_window`
+asked "does the list reach the cursor's right" of the **newest segment in it** -
+and a list holding the 4th as well as the 1st answers yes for ever: the newest is
+days ahead of the cursor. So the right half of the 1st was never read, and the
+strip ran out where the last backward read had stopped - 22:22 on the 1st, with the
+recording continuous across it. The reach is the end of the stretch **at the
+cursor** now, and the read is a strip ahead rather than half of one, so a drag is
+one read per strip rather than one per movement. `a_later_day_does_not_fill_this_one`
+is the failing case.
+
+`the_strip_is_read_ahead_as_well_as_behind` holds the window; the rest is the
+absence of a request that is no longer made.
+
+**A review of the rest of the reading, after that.** Three more, all of the same
+shape - a list standing in for what has been asked about.
+
+*Inside the list is not the same as known.* `seek` read around a moment only when
+it fell **outside** the list's span, and the span of a list holding the 31st and
+today is four days it has never asked about: a seek into the middle of that
+snapped to whichever stretch was nearest, which is a jump across days. It is
+`covered_between` that answers now - an uncovered moment is read around first, and
+comes back through `to_seek` like any other.
+
+*And opening was not recorded as a read at all.* `PlaybackReady` carried the
+segments but not the stretch they were asked about, so `covered` started empty and
+the first drag after opening read the strip it was already holding - and waited for
+the answer before moving the picture. The event carries the range now (`read`), and
+that is what `covered` starts as.
+
+*And a stop could be acted on for a moment the picture had not reached.* A session
+that finished just as a seek was asked for reports `Finished` with the seek still
+in flight; `centre_of` then answers with the *pending* moment, and the look past
+the hole went looking past a hole where nobody had been. `recording_stopped` does
+nothing while `pending` is set: what has stopped is the stretch being left, and the
+seek's own session reports when it reaches a hole.
+
+What the review left alone, having looked: the two read slots cannot starve each
+other; `after_hole` is forgotten by a seek and by a failed read, and is sticky only
+for the stop it was made for; `covered` merges empty answers, which is what makes a
+hole a hole; a pinch widens the strip and both sides are read again; `pick_day`
+reads its day through the same path. One edge is knowingly left: a read that
+*fails* leaves `to_seek` waiting, so a seek made while the box is unreachable waits
+until the next thing the viewer does.
+
+**And a hold that nobody let go of.** The drag holds the picture while the finger is
+down, and every way out of a seek lets go of it - except the ways out that *give up*.
+Four of them, and each one left the picture held for ever: a moment that was asked
+about and has nothing at it; a read that could not be made; a seek with no window to
+play; and the session that replaced another, which started playing and so had to be
+told about the pause the viewer had set. That is the "sometimes it freezes, and I
+cannot make it happen twice": it takes a drag that ends somewhere the box has
+nothing, which is not every drag.
+
+The hold is let go of on all four now (`release_hold`, which respects a pause the
+viewer set before the finger came down).
+
+**And a stop could be ignored for a reason that was not true.** The guard added in
+the last round - "a seek is in flight, so this stop is the stretch being left" -
+tested `pending`, which is also set while a *playlist* is on its way and while a
+moment asked for has not arrived. A session that reached a hole in either of those
+windows was told to do nothing, and stayed stopped. The guard is `to_seek` now: only
+a segment read on its way means the seek has not been answered. The pending moment
+is dropped instead, because the session that would have taken the picture there is
+the one that has just stopped.
+
+**Two more passes, and three more of the same shape.**
+
+*A wider strip was read on one side.* `set_zoom` - the bar's two buttons, a right
+press, and a pinch all end there - read the list for the new width's **left** and
+not its right, so widening the strip left its right half empty until something else
+moved the cursor. Both halves are read now.
+
+*And a seek into a hole stayed held.* The empty answer has its own path - "the box
+was asked about this range and there is nothing in it" - and it cleared the wait
+without letting go of the hold a press had taken, so the picture stayed stopped for
+ever. It is the fifth of these (§ above): every way out of a seek has to release the
+hold, including the ways that end in nothing. Gated on a seek having been the one
+waiting, because a read of the strip's own comes back empty while a finger is still
+on the timeline, and letting go there would start the picture under the hand.
+
+*And the cursor was held to the edge of what had been read.* `clamp_centre` bounded
+a drag by the newest segment in the list - which is what has been *read*, not what
+was recorded. A drag into a hole, or past the last thing read, was pulled back to
+that edge and could not be moved further: the strip stopped exactly where the
+reading stopped. The bound is **now** instead - a recording has nothing in the
+future - and the reads follow the cursor, so the list catches up. What the drag can
+reach is what the camera could have recorded, not what this session has asked about.

@@ -1815,7 +1815,7 @@ impl XgViewApp {
                         ToastKind::Info,
                     ));
                 }
-                BackgroundEvent::PlaybackReady { channel, camera_id, origin, credentials, window, begin, playlist, segments } => {
+                BackgroundEvent::PlaybackReady { channel, camera_id, origin, credentials, window, begin, playlist, segments, read } => {
                     match window {
                         Some(window) => self.start_playback(
                             *channel,
@@ -1828,6 +1828,7 @@ impl XgViewApp {
                             *begin,
                             playlist.clone(),
                             segments.clone(),
+                            *read,
                         ),
                         // The camera is there and its server answered; there is
                         // simply nothing recorded to play. Said once, and the

@@ -128,6 +128,11 @@ pub enum BackgroundEvent {
         /// What the camera recorded around the window, for the timeline. Empty
         /// when there is nothing to play.
         segments: Vec<Segment>,
+        /// The stretch of time those segments were asked about - which is not
+        /// the window: it is read wider, so that a strip either side of the
+        /// moment has something to draw. What it says is "the box was asked
+        /// about this", empty stretches included.
+        read: (i64, i64),
     },
     /// A seek that left the playlist it was playing has been read: the stretch
     /// it asked for, and the fragments it is cut into - or `None` for a box

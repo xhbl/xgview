@@ -271,6 +271,25 @@ pub(super) async fn run_channel(
         // or the scheduler parking the channel and putting it back - a page
         // away and back is enough, because `Suspend` drops the runtime and
         // `Activate` then starts a fresh attempt.
+        // The box answered, and what it answered was "there is nothing at that
+        // moment". A recording that has nothing to give at a moment is not a
+        // stream that failed - it is a hole, and the interface carries the
+        // picture on at the next stretch (see `recording_stopped`). Reported as
+        // a finish rather than as a failure, so a hole is not drawn as a broken
+        // camera, and so a seek that lands in one does not have to be undone.
+        if kind == Some(FailureKind::Empty) {
+            emit(
+                &events,
+                StreamEvent::State {
+                    index,
+                    camera_id: endpoint.camera_id.clone(),
+                    state: ConnectionState::Finished,
+                    detail: failure,
+                },
+            );
+            return;
+        }
+
         if kind.is_some_and(FailureKind::is_permanent) {
             emit(
                 &events,

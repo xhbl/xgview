@@ -133,6 +133,10 @@ pub(super) struct Playback {
     /// The stretch of segment list being read for a strip wider than what was
     /// held. See [`XgViewApp::read_older`].
     pub(super) reading_older: Option<(i64, i64)>,
+    /// The stretch being read for the strip's *right* edge. A slot of its own,
+    /// because a strip can be short on both sides at once and one slot would
+    /// starve one of them. See [`XgViewApp::read_newer`].
+    pub(super) reading_newer: Option<(i64, i64)>,
     /// The earliest moment the camera answered "nothing recorded" for, once a
     /// strip has been drawn that far back. The strip stops there.
     pub(super) oldest: Option<i64>,
@@ -388,6 +392,9 @@ impl XgViewApp {
     ///
     /// Separate from [`Self::enter_playback`] because it is what the answer to
     /// the question arrives at, a request later.
+    // Everything the answer to the opening read carries, and it is one answer:
+    // a struct for it would be a struct with one caller.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_playback(
         &mut self,
         channel: usize,
@@ -396,6 +403,7 @@ impl XgViewApp {
         begin: Option<i64>,
         playlist: Option<VodPlaylist>,
         segments: Vec<Segment>,
+        read: (i64, i64),
     ) {
         let index = self.playback_index();
         let from = window.0;
@@ -435,12 +443,16 @@ impl XgViewApp {
             to_seek: None,
             to_jump: None,
             reading_older: None,
+            reading_newer: None,
             oldest: None,
             paused: false,
             events: Vec::new(),
             reading_events: false,
             after_hole: None,
-            covered: Vec::new(),
+            // What opening asked the box about: without it the first drag would
+            // read the strip it is already holding, and wait for the answer
+            // before moving. See [`covered_between`].
+            covered: vec![read],
         });
         // The bar's row has changed under the focus: the camera's controls are
         // gone and the recording's are here, and the place the focus was on means
@@ -529,6 +541,24 @@ impl XgViewApp {
         if playback.scrubbing {
             return;
         }
+        // A segment read is on its way for a moment the viewer asked for: when
+        // it lands the seek goes through and its own session reports a hole.
+        // Nothing else holds this back - a *playlist* on its way, or a moment
+        // asked for that has not arrived, is not a reason to leave the picture
+        // stopped for ever.
+        if playback.to_seek.is_some() {
+            return;
+        }
+        // The moment a seek was waiting for is not coming: the session that
+        // would have taken the picture there is the one that has just stopped.
+        // What is on screen is the stretch being left, and the moment to act on
+        // is the one the picture is of.
+        if let Some(playback) = self.playback.as_mut() {
+            playback.pending = None;
+        }
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
         let stop = self.centre_of(playback);
         // Looked past this moment already: the recording is over, and nothing
         // is asked of the box again.
@@ -789,15 +819,25 @@ impl XgViewApp {
             Some(_) => (window, Some(begin_in(window, at))),
             None => match window_at(&playback.segments, at, WINDOW) {
                 Some(window) => (window, None),
-                None => return,
+                // Nothing to play there and no session started: the hold a
+                // press took has to be let go of, or the picture stops for ever.
+                None => {
+                    self.release_hold(index);
+                    return;
+                }
             },
         };
         let source = playback.source.clone();
-        let speed = playback.speed;
+        let (speed, paused) = (playback.speed, playback.paused);
         let vod = self.play_recording(index, &source, window, playlist, begin);
         // A new session starts at normal speed, so the rate the viewer chose is
         // put back on it: the control says "2x" and the picture has to agree.
         self.manager.set_rate(index, speed);
+        // And it starts playing, so a picture the viewer had held is held
+        // again: a drag says where to look, not that it should start.
+        if paused {
+            self.manager.hold_clip(index, true);
+        }
         if let Some(playback) = self.playback.as_mut() {
             playback.scrub = None;
             playback.scrubbing = false;
@@ -1577,8 +1617,12 @@ impl XgViewApp {
                     // list has to reach half a width behind it - and it is asked
                     // for now, while the finger is still down, rather than when
                     // the strip has already run out of what was read and shows
-                    // nothing on its left.
+                    // nothing on its left. The same on the right: a drag towards
+                    // later moments runs off the end of what has been read, and a
+                    // strip that only ever grows to the left has a right half
+                    // that is always a hole.
                     self.read_older(index);
+                    self.read_newer(index);
                 }
             }
             _ => self.end_scrub(),
@@ -1697,7 +1741,11 @@ impl XgViewApp {
         let index = playback.index;
         tracing::debug!(target: "xgview::app", zoom, "the timeline changed width");
         self.read_events(index);
+        // Both halves: a wider strip reaches further either way, and only the
+        // left one used to be read - so widening the strip left its right half
+        // empty until something else moved the cursor.
         self.read_older(index);
+        self.read_newer(index);
     }
 
     /// Shows the days, or goes back to the stretch of one.
@@ -1825,7 +1873,12 @@ impl XgViewApp {
         // here, which is where all three pass; without it a held arrow walked the
         // strip off the end of what had been read and left a band of nothing on
         // the left, which only a drag ever filled. See [`Self::read_older`].
+        //
+        // And the same on the right: nothing else reads forward, so without it
+        // the strip runs out at the cursor and every drag towards later moments
+        // ends in a request for a moment nobody has asked the box about.
         self.read_older(index);
+        self.read_newer(index);
         if paused {
             self.manager.hold_clip(index, true);
             if let Some(playback) = self.playback.as_mut() {
@@ -1848,10 +1901,12 @@ impl XgViewApp {
         let Some(playback) = self.playback.as_ref() else {
             return at;
         };
-        let Some(last) = playback.segments.last() else {
-            return at;
-        };
-        clamp_to(at, playback.oldest, last.end)
+        // The newest bound is **now**, not the newest segment that has been
+        // read: a recording has nothing in the future, and holding the cursor to
+        // the edge of what is read pins it there - a drag into a hole, or past
+        // the last thing read, stopped at that edge and could not be moved
+        // further. The reads follow the cursor, so the list catches up.
+        clamp_to(at, playback.oldest, epoch_now())
     }
 
     /// Fetches what a seek to `at` will need, while there is time to fetch it.
@@ -2004,6 +2059,45 @@ impl XgViewApp {
         start_segments(&self.handle, &self.events_tx, index, source, from, to);
     }
 
+    /// Reads the segment list the strip needs on its right.
+    ///
+    /// The strip is drawn a whole width around the cursor, so the list has to
+    /// reach half a width **ahead** of it - and nothing else reads forward:
+    /// `read_older` only ever goes back, and a session reads the range it plays.
+    /// A strip whose right half was never read runs out at the cursor, and a
+    /// seek past that edge is a request for a moment nobody has asked the box
+    /// about - which is the request that comes back "nothing recorded at that
+    /// moment".
+    ///
+    /// A read of its own rather than sharing [`Self::read_older`]'s slot: a
+    /// strip can be short on both sides at once, and one slot would starve one
+    /// of them.
+    fn read_newer(&mut self, index: usize) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        if playback.reading_newer.is_some() {
+            return;
+        }
+        let Some((from, to)) =
+            newer_window(&playback.segments, playback.zoom, self.centre_of(playback), epoch_now())
+        else {
+            return;
+        };
+        // Asked about already and nothing there: a recording that ends, or a
+        // hole that reaches the edge. Asking again would be the same answer for
+        // ever, one request per frame.
+        if covered_between(&playback.covered, from, to) {
+            return;
+        }
+        let source = playback.source.clone();
+        tracing::debug!(target: "xgview::app", index, from, to, "reading newer segments");
+        if let Some(playback) = self.playback.as_mut() {
+            playback.reading_newer = Some((from, to));
+        }
+        start_segments(&self.handle, &self.events_tx, index, source, from, to);
+    }
+
     /// Takes the segment list read for a wider strip.
     ///
     /// Nothing moves by itself: the strip widens to what the list now reaches,
@@ -2025,6 +2119,7 @@ impl XgViewApp {
             return;
         }
         playback.reading_older = None;
+        playback.reading_newer = None;
         // The read a picked day asked for, if this is it: whether it found
         // anything or not, the picking is finished with - a day with nothing
         // recorded leaves the calendar where it is rather than waiting for an
@@ -2045,6 +2140,14 @@ impl XgViewApp {
             // next press - asks again.
             if look_past(&playback.after_hole, from, to).is_some() {
                 playback.after_hole = None;
+            }
+            // A hold taken for a seek that this read was to answer is let go of
+            // too: a read that could not be made must not leave the picture
+            // held for ever.
+            if playback.to_seek.is_some() {
+                playback.to_seek = None;
+                playback.pending = None;
+                self.release_hold(index);
             }
             return;
         };
@@ -2071,7 +2174,10 @@ impl XgViewApp {
             // A seek waiting for a list that came back empty is finished with:
             // the recording is not there, and the picture stays where it is
             // rather than the cursor waiting for a moment that will never come.
-            playback.to_seek = None;
+            // The hold a press took goes with it, or the picture stays stopped
+            // for ever - but only a *seek*'s, since a read of the strip's own
+            // comes back empty while a finger is still on the timeline.
+            let seeking = playback.to_seek.take().is_some();
             playback.pending = None;
             // A look past a hole that found nothing. A day that held nothing is
             // a hole longer than a day: the next day is asked about the same
@@ -2089,6 +2195,9 @@ impl XgViewApp {
                 // A day with nothing on it: the calendar stays where it is and
                 // says so, rather than reading as a press that missed.
                 self.flash(monitor_i18n::tr("toast-no-recording"), ToastKind::Error);
+            }
+            if seeking {
+                self.release_hold(index);
             }
             return;
         }
@@ -2108,6 +2217,22 @@ impl XgViewApp {
                 self.seek(at);
                 return;
             }
+            // The moment was asked about and there is nothing at it: a hole. The
+            // picture stays where it is and the cursor goes back to it, rather
+            // than waiting for a sample nobody has.
+            if covered_between(&playback.covered, at, at + 1) {
+                playback.to_seek = None;
+                playback.pending = None;
+                // The hold a press took is let go of, or the picture stays
+                // stopped for ever.
+                self.release_hold(index);
+                return;
+            }
+            // Nobody has asked about it yet - the read that has just landed was
+            // another's. Asked now, or a seek whose read was turned away for
+            // being one too many waits for an answer that is never coming.
+            self.read_around(index, at);
+            return;
         }
         // A look past a hole was waiting for this list: it says where the
         // recording carries on, if it does.
@@ -2138,8 +2263,9 @@ impl XgViewApp {
             }
             return;
         }
-        // A wider strip may want more than this one answered.
+        // A wider strip may want more than this one answered, on either side.
         self.read_older(index);
+        self.read_newer(index);
     }
 
     /// Reads the range a finger is over while it is still on the timeline.
@@ -2224,6 +2350,19 @@ impl XgViewApp {
                 // The cursor waits where the finger left it, as it does for a
                 // seek whose playlist is on its way: what is on screen is still
                 // the stretch being left.
+                playback.pending = Some(at);
+            }
+            return;
+        }
+        // Inside the list's span is not the same as known: a list holding the
+        // 31st and today spans four days it has never asked about, and the
+        // nearest stretch in it is a jump nobody asked for. A moment the box has
+        // not been asked about is read around first, and comes back through
+        // `to_seek` like any other. See [`covered_between`].
+        if !covered_between(&playback.covered, at, at + 1) {
+            self.read_around(index, at);
+            if let Some(playback) = self.playback.as_mut() {
+                playback.to_seek = Some(at);
                 playback.pending = Some(at);
             }
             return;
@@ -2921,6 +3060,36 @@ fn older_window(
     Some((want, first.start))
 }
 
+/// The stretch of segment list the strip needs on its right, or `None` when it
+/// already reaches there.
+///
+/// The mirror of [`older_window`]: half a strip ahead of the cursor, and no
+/// further than the newest moment there is - a recording has nothing in the
+/// future, and asking for it is a request the box answers with an empty list
+/// every time.
+fn newer_window(segments: &[Segment], zoom: i64, centre: i64, newest: i64) -> Option<(i64, i64)> {
+    // The end of what has been read **at the cursor**: the stretch it is in, or
+    // the one before it. Not the newest segment in the list - a list that holds
+    // today as well as this moment has a newest that is days away, and asking
+    // "does it reach the cursor's right" of that says yes for ever. That is the
+    // strip that ran out at the end of the 1st while the list held the 4th.
+    let reach = stretches(segments)
+        .into_iter()
+        .filter(|stretch| stretch.start <= centre)
+        .map(|stretch| stretch.end)
+        .max()
+        .unwrap_or(centre);
+    // A strip ahead rather than half of one: what is read now is still ahead
+    // when the finger has moved on a little, so a drag is one read per strip
+    // rather than one per movement.
+    let want = centre.saturating_add(zoom).min(newest);
+    let from = reach.max(centre.saturating_sub(zoom / 2));
+    if want <= from {
+        return None;
+    }
+    Some((from, want))
+}
+
 /// A moment kept between the oldest the camera has and the newest - or under
 /// the newest alone, while nothing has said where the oldest is.
 ///
@@ -3212,6 +3381,7 @@ fn start_window(
             begin,
             playlist,
             segments,
+            read: (now - LOOKBACK, now),
         });
     });
 }
@@ -3450,6 +3620,49 @@ mod tests {
         assert_eq!(look_past(&looking, 2_000, 3_000), None, "another day's read");
         assert_eq!(look_past(&looking, 900, 1_100), None, "a read around the cursor");
         assert_eq!(look_past(&Some(AfterHole::Nothing(1_000)), 1_000, 2_000), None);
+    }
+
+    /// The strip is read ahead as well as behind.
+    ///
+    /// Nothing else reads forward: `read_older` only goes back, and a session
+    /// reads the range it plays. So the right half of the strip was never asked
+    /// about, and a drag towards later moments ended at the edge of what had
+    /// been read.
+    #[test]
+    fn the_strip_is_read_ahead_as_well_as_behind() {
+        let segments = [Segment { start: 1000, end: 1100 }];
+        let now = 5000;
+        // A strip ahead of the cursor, from the end of what is held.
+        assert_eq!(newer_window(&segments, 600, 1000, now), Some((1100, 1600)));
+        // A cursor before the list: from the cursor itself.
+        assert_eq!(newer_window(&segments, 600, 800, now), Some((800, 1400)));
+        // A cursor past the end of the list: the strip's own width around it,
+        // rather than everything between the two.
+        assert_eq!(newer_window(&segments, 600, 4900, now), Some((4600, 5000)));
+        // And never into the future: a recording has nothing there.
+        assert_eq!(newer_window(&segments, 600, 4900, 4900), Some((4600, 4900)));
+        // The list already reaches a strip ahead: nothing to ask for.
+        let far = [Segment { start: 1000, end: 1700 }];
+        assert_eq!(newer_window(&far, 600, 1000, now), None);
+    }
+
+    /// A list that holds a later day says nothing about the right of this one.
+    ///
+    /// The newest segment in the list is days ahead of the cursor, and asking
+    /// "does the list reach the cursor's right" of it answers yes for ever: the
+    /// strip ran out at the end of the 1st while the list held the 4th.
+    #[test]
+    fn a_later_day_does_not_fill_this_one() {
+        let segments = [
+            Segment { start: 1000, end: 1100 },
+            // Three days later.
+            Segment { start: 260_000, end: 260_100 },
+        ];
+        assert_eq!(
+            newer_window(&segments, 600, 1000, 260_200),
+            Some((1100, 1600)),
+            "the read is from this stretch's end, not from the far one's"
+        );
     }
 
     /// What has been asked about is kept merged and in order, so a gap between
