@@ -577,7 +577,17 @@ impl XgViewApp {
             // gesture that opened the bar must not also press it - and the act.
             let controls: Vec<tilebar::Control> =
                 entries.iter().map(|(control, _)| *control).collect();
-            if let Some(index) = tilebar::draw(ui, &mut self.nav, &layout, rotated, &controls) {
+            // A control with nothing beyond it in the direction it points - a step
+            // off the end of the recording, a wider strip than the ladder has - is
+            // drawn grey rather than offering a press that does nothing. It keeps
+            // its place: see `tilebar::draw`.
+            let muted: Vec<bool> = entries
+                .iter()
+                .map(|(_, action)| !self.tile_bar_available(*action))
+                .collect();
+            if let Some(index) =
+                tilebar::draw(ui, &mut self.nav, &layout, rotated, &controls, &muted)
+            {
                 if !self.tile_bar.ignoring(now) {
                     // Was the ring on a control, or still on the seat? The
                     // difference is whether the remote is driving the bar.
@@ -634,6 +644,36 @@ impl XgViewApp {
     /// controls and wants them as the transport and the timeline's own, which is
     /// a grouping a greedy fill would not find on a wide picture. `None` is one
     /// line, which is what a live camera has.
+    /// Whether a control on the bar would do anything.
+    ///
+    /// One pair has an end this side can know: the two that widen the strip, where
+    /// `step_zoom` has no next step at either end of the ladder. They are drawn
+    /// grey and take no press. See `tilebar::draw`.
+    ///
+    /// **The rest are always drawn live**, because none of them has an answer that
+    /// is a fact before the press. A step off the end of a recording takes the
+    /// picture to the end, which is what the press asked for; an event jump reads
+    /// a day of events before it says there is none; and a recording just opened
+    /// with no event ahead of it is the case a viewer notices, where greying would
+    /// be a claim this side cannot make. **A control that is right most of the
+    /// time is worse than one that never claims to know.**
+    fn tile_bar_available(&self, action: TileBarAction) -> bool {
+        let Some(playback) = self.playback.as_ref() else {
+            return true;
+        };
+        match action {
+            TileBarAction::ZoomIn => {
+                playback.timeline == playback::Timeline::Span
+                    && playback::step_zoom(playback.zoom, true).is_some()
+            }
+            TileBarAction::ZoomOut => {
+                playback.timeline == playback::Timeline::Span
+                    && playback::step_zoom(playback.zoom, false).is_some()
+            }
+            _ => true,
+        }
+    }
+
     pub(super) fn tile_bar_entries(&self) -> (Vec<(tilebar::Control, TileBarAction)>, Option<usize>) {
         if self.talking {
             return (vec![(tilebar::Control::Hangup, TileBarAction::Hangup)], None);

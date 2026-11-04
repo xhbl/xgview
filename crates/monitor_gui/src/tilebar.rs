@@ -564,6 +564,7 @@ pub fn draw(
     layout: &Layout,
     rotated: bool,
     controls: &[Control],
+    muted: &[bool],
 ) -> Option<usize> {
     let painter = ui.painter();
     painter.rect_filled(layout.bar, CornerRadius::same(RADIUS), Color32::from_black_alpha(190));
@@ -632,9 +633,14 @@ pub fn draw(
         let Some(control) = controls.get(index) else {
             continue;
         };
+        // A control with nothing beyond it - a step off the end of the
+        // recording, a wider strip than the ladder has - is drawn grey and takes
+        // no press. It keeps its place in the row: a bar whose controls moved
+        // about as a recording played would be a bar nobody could aim at.
+        let muted = muted.get(index).copied().unwrap_or(false);
         let response = match control {
             Control::Icon(icon) => {
-                icons::button_in(ui, *rect, self::control(index), *icon, false, false, "", rotated)
+                icons::button_in(ui, *rect, self::control(index), *icon, false, muted, "", rotated)
             }
             Control::Label(text) => {
                 icons::label_in(ui, *rect, self::control(index), text, "", rotated)

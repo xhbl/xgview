@@ -4909,3 +4909,37 @@ the cursor the two questions are different ones, "where would a press go" and
 
 Two tests hold the arithmetic: `a_control_is_known_by_its_place` and
 `the_calendar_follows_its_ring`.
+
+## 65. A rate that goes to eight, and controls with nothing beyond them
+
+*Landed 2026-11-03, in 2.1.57.*
+
+**The speed ladder gains an eight.** One, two, four, eight, one. The session
+divides the wall clock by the rate, so the picture advances eight seconds per
+second; the sound stays out of anything but one, as it always has. The ladder and
+the word the control carries are `next_speed` and `speed_label` now, and a test
+walks the one through the other: the number the viewer reads has to be the one the
+next press leaves behind, and two lists that are written separately are two lists
+that drift.
+
+**And two controls are grey when there is nothing beyond them.** Only the two that
+widen the strip: at either end of the ladder `step_zoom` has no next step, and the
+control is drawn grey and takes no press.
+
+The other four were tried and taken back out, one pair at a time. **The event
+jumps**: a strip holds the events of the stretch it shows, and a press with nothing
+in that list reads a day of them before it says there is none - greyed on the list
+the control would be grey over an event it could reach, and greyed on the end of
+the recording it stays grey for the whole minute of nothing before it, which is the
+case a viewer notices. **The two steps**: a step off the end of a recording takes
+the picture to the end, which is what the press asked for, so there is nothing to
+grey - the control does what it says even at the edge.
+
+A control that is right most of the time is worse than one that never claims to
+know, and only the ladder's ends are a fact this side can read before the press.
+
+`tilebar::draw` takes a `muted` slice beside the controls. A muted one is drawn in
+`TEXT_DIM` and takes no press (`Sense::hover`), and it **keeps its place in the
+row and in the walk**: a bar whose controls moved about as a recording played
+would be a bar nobody could aim at, and a walk that skipped them would leave the
+focus with nothing to own it.

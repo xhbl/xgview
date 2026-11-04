@@ -1543,31 +1543,26 @@ impl XgViewApp {
         }
     }
 
-    /// Plays faster, or back to normal: one, two, four, one.
+    /// Plays faster, or back to normal: one, two, four, eight, one.
+    ///
+    /// Eight is where the ladder ends. The session divides the wall clock by the
+    /// rate, so the picture advances eight seconds per second - and the sound is
+    /// left out of anything but one, because there is nothing here that could
+    /// resample it.
     pub(super) fn cycle_speed(&mut self) {
         let Some(playback) = self.playback.as_mut() else {
             return;
         };
-        let speed = if playback.speed < 1.5 {
-            2.0
-        } else if playback.speed < 3.0 {
-            4.0
-        } else {
-            1.0
-        };
+        let speed = next_speed(playback.speed);
         playback.speed = speed;
         let index = playback.index;
         self.manager.set_rate(index, speed);
         tracing::debug!(target: "xgview::app", index, speed, "playback rate");
     }
 
-    /// The word the speed control carries: `1×`, `2×` or `4×`.
+    /// The word the speed control carries: `1×`, `2×`, `4×` or `8×`.
     pub(super) fn playback_speed_label(&self) -> &'static str {
-        match self.playback.as_ref().map(|playback| playback.speed) {
-            Some(speed) if speed > 3.0 => "4×",
-            Some(speed) if speed > 1.5 => "2×",
-            _ => "1×",
-        }
+        speed_label(self.playback.as_ref().map_or(1.0, |playback| playback.speed))
     }
 
     /// Spreads the strip, or closes it, as two fingers ask.
@@ -2139,7 +2134,7 @@ const RANGE_CAP: i64 = 7200;
 /// The ends are the ends: two buttons that wrapped would make "one step more
 /// detail" mean "back to the coarsest", which is the one thing a viewer pressing
 /// it again does not want.
-fn step_zoom(zoom: i64, finer: bool) -> Option<i64> {
+pub(super) fn step_zoom(zoom: i64, finer: bool) -> Option<i64> {
     if finer {
         ZOOMS.iter().copied().rev().find(|width| *width < zoom)
     } else {
@@ -2179,6 +2174,37 @@ fn pinch_step(pinch: f32, spread: f32) -> (Option<bool>, f32) {
 /// to skip a pause in what is being watched, short enough that a viewer who
 /// presses it twice is still where they meant to be.
 pub(super) const STEP: i64 = 10;
+
+/// The next rate the speed control asks for: one, two, four, eight, and back to
+/// one. Eight is the end of the ladder.
+fn next_speed(speed: f32) -> f32 {
+    if speed < 1.5 {
+        2.0
+    } else if speed < 3.0 {
+        4.0
+    } else if speed < 6.0 {
+        8.0
+    } else {
+        1.0
+    }
+}
+
+/// The word a rate is written as, on the control that carries it.
+///
+/// A picture of a fast-forward cannot say how fast it is, so this one control
+/// carries a word rather than a glyph. It has to agree with [`next_speed`]: the
+/// number the viewer reads is the one the next press will leave behind.
+fn speed_label(speed: f32) -> &'static str {
+    if speed > 6.0 {
+        "8×"
+    } else if speed > 3.0 {
+        "4×"
+    } else if speed > 1.5 {
+        "2×"
+    } else {
+        "1×"
+    }
+}
 
 /// How far back the calendar will walk looking for the first day the camera
 /// recorded on, in hours.
@@ -3452,6 +3478,20 @@ mod tests {
         assert_eq!(day_scroll_for(0, each, 50.0, length, total), 0.0, "and the first back");
         // A row that holds them all never moves.
         assert_eq!(day_scroll_for(2, each, 0.0, 210.0, total), 0.0);
+    }
+
+    /// The speed control's ladder and its word are the same ladder: the number
+    /// the viewer reads is the one the next press leaves behind, and eight is the
+    /// end of it.
+    #[test]
+    fn the_speed_ladder_and_its_word_agree() {
+        let mut speed = 1.0;
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            seen.push(speed_label(speed));
+            speed = next_speed(speed);
+        }
+        assert_eq!(seen, ["1×", "2×", "4×", "8×", "1×"], "one, two, four, eight, one");
     }
 
     /// A day is a touch target: the row shows as many as fit at the plan's 44
