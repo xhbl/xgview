@@ -826,8 +826,16 @@ impl ClipControl {
         self.hint.subscribe()
     }
 
+    /// Holds the picture, or lets it go.
+    ///
+    /// Written with `send_replace` rather than `send`, and so is every other
+    /// setter here: `send` **fails when nothing is listening**, and a control
+    /// made a moment ago has nothing listening - the session subscribes when its
+    /// task first runs, which is after the command that made the control. A
+    /// rate, a hold or a jump asked for in that window used to be dropped on the
+    /// floor, which is a seek at eight times that comes back at one.
     fn set(&self, paused: bool) {
-        let _ = self.paused.send(paused);
+        self.paused.send_replace(paused);
     }
 
     /// A handle the session takes its rate from, taken before it starts so that
@@ -837,19 +845,19 @@ impl ClipControl {
     }
 
     fn set_rate(&self, rate: f32) {
-        let _ = self.rate.send(rate);
+        self.rate.send_replace(rate);
     }
 
     /// Asks the session to play from `at`.
     fn jump(&self, at: i64) {
         let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let _ = self.jump.send(Some(Jump { at, asked }));
+        self.jump.send_replace(Some(Jump { at, asked }));
     }
 
     /// Says where a finger on the timeline is. No count is kept: a hint names a
     /// fragment, and saying the same one again asks for nothing new.
     fn hint(&self, at: i64) {
-        let _ = self.hint.send(Some(at));
+        self.hint.send_replace(Some(at));
     }
 }
 
@@ -1093,6 +1101,28 @@ mod tests {
     use super::ws_session::is_frigate_mse;
     use super::*;
     use crate::model::{CameraOrigin, TileAspect};
+
+    /// A control keeps what it is told before anybody is listening.
+    ///
+    /// `watch::Sender::send` fails when every receiver has been dropped, and a
+    /// control made a moment ago has none: the session subscribes when its task
+    /// first runs, which is after the command that made the control. So a rate
+    /// set in that window used to vanish - a seek made at eight times came back
+    /// at one, with the control still saying eight.
+    #[test]
+    fn a_control_keeps_what_it_is_told_before_a_session_listens() {
+        let control = ClipControl::new();
+        control.set_rate(8.0);
+        control.set(true);
+        control.jump(1_700_000_000);
+
+        let rates = control.subscribe_rate();
+        assert_eq!(*rates.borrow(), 8.0, "the rate was kept for the session to come");
+        let held = control.subscribe();
+        assert!(*held.borrow(), "and the hold");
+        let jumps = control.subscribe_jumps();
+        assert_eq!(jumps.borrow().map(|jump| jump.at), Some(1_700_000_000), "and the jump");
+    }
 
     /// A "yes" is kept for the run and a "no" is asked again after a while; a
     /// failure is not an answer at all, so the next magnification asks again.

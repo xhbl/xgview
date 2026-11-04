@@ -132,6 +132,10 @@ pub(super) async fn run_recording_session(
     // the bytes came from - see [`Recording::origin`].
     let mut began = Instant::now();
     let mut base_elapsed: i64 = 0;
+    // The rate the clock was last anchored at. A change of rate is a change of
+    // what `played` means over the stretch already played, so it is a moment to
+    // anchor again rather than to divide differently - see [`due_at`].
+    let mut clocked_rate = 1.0;
     let mut first: Option<i64> = None;
     let mut origin: Option<f64> = None;
     let mut held = control.as_ref().map(|control| control.subscribe());
@@ -370,9 +374,11 @@ pub(super) async fn run_recording_session(
             }
             if begin.is_none() {
                 let rate = rate_of(rates.as_ref());
-                let played = played_since(elapsed, base_elapsed, rate);
-                let due = began + played;
                 let now = Instant::now();
+                let (anchor, due, played) =
+                    due_at(began, elapsed, base_elapsed, rate, clocked_rate, now);
+                began = anchor;
+                clocked_rate = rate;
                 if now > due + MAX_LAG {
                     // Behind by more than a hiccup: the pictures in between are
                     // dropped rather than played at speed. Moving the clock on
@@ -902,6 +908,33 @@ fn origin_of(start: Option<i64>, from: i64, first_pts_us: i64) -> f64 {
     }
 }
 
+/// Where the clock stands for a sample, and when that sample is due.
+///
+/// `played` measures the **whole** stretch already played, at the rate in force:
+/// eight seconds into the picture at eight times is one second of wall clock,
+/// and the same eight seconds at normal speed is eight. So a rate that changes
+/// under the clock moves the due moment by the entire stretch - slowing from
+/// eight to one makes the clock owe seven times everything already shown, and
+/// the picture stops while it pays it back, which is what a viewer sees as a
+/// freeze after pressing the speed control.
+///
+/// What a change of rate means is "from here on, at this rate". So the clock is
+/// anchored to the moment on screen when the rate changes, and only divided
+/// differently when it has not: the sample about to be shown is due now, and the
+/// ones after it are spaced by the new rate.
+fn due_at(
+    began: Instant,
+    elapsed: i64,
+    base_elapsed: i64,
+    rate: f32,
+    clocked: f32,
+    now: Instant,
+) -> (Instant, Instant, Duration) {
+    let played = played_since(elapsed, base_elapsed, rate);
+    let began = if rate == clocked { began } else { now.checked_sub(played).unwrap_or(now) };
+    (began, began + played, played)
+}
+
 /// How far into the picture a sample is, measured from where playback began.
 ///
 /// Both moments are distances from the session's first sample, and both are
@@ -1115,6 +1148,34 @@ mod tests {
         // What the distance from the session's first sample is, for comparison:
         // negative, which is what the clock used to read as zero.
         assert!(landed - base < 0);
+    }
+
+    /// A rate that slows down does not owe the time already played.
+    ///
+    /// `played` is the whole stretch already shown, divided by the rate - so at
+    /// the moment the control goes from eight to one, the same eight seconds of
+    /// recording become eight seconds of wall clock instead of one, and the
+    /// clock would sit seven seconds in the future for every second played. The
+    /// picture then stops while it pays that back: this is the freeze a viewer
+    /// sees after pressing the speed control down.
+    #[test]
+    fn a_rate_that_slows_down_is_anchored_where_the_picture_is() {
+        let now = Instant::now();
+        // One second of wall clock so far, eight seconds into the picture.
+        let began = now - Duration::from_secs(1);
+        let elapsed = 8_000_000;
+
+        // Eight to one: the clock is anchored to the moment on screen, so the
+        // sample about to be shown is due now rather than seven seconds late.
+        let (anchor, due, played) = due_at(began, elapsed, 0, 1.0, 8.0, now);
+        assert_eq!(due, now, "the picture carries on from here");
+        assert_eq!(played, Duration::from_secs(8));
+        assert_eq!(anchor, now - played, "and the clock is set back to the picture");
+
+        // The rate unchanged: the clock is left exactly where it was.
+        let (same, due, _) = due_at(anchor, elapsed, 0, 1.0, 1.0, now);
+        assert_eq!(same, anchor);
+        assert_eq!(due, anchor + Duration::from_secs(8));
     }
 
     /// A moment part-way into a range begins at the fragment it falls in, and

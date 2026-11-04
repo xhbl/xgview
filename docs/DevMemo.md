@@ -5123,3 +5123,58 @@ nothing about the channel. A recording's channel is created by the press, so its
 first window starts then - and its startup is the long one: a login, a playlist and a
 fragment the box has to cut. Watch a live channel that has just connected and the
 same zeros (now dashes) appear for the same two seconds.
+
+## 67. The clock a rate moved under
+
+*Landed 2026-11-04, in 2.1.62.*
+
+Eight times, then back to one, and the picture stops. It is not the reader and not
+the decoder: the session is asleep, and it is sleeping on purpose.
+
+A recording is played against a clock. A sample's due moment is `began + played`,
+and `played` is its distance into the picture divided by the rate - so **the rate
+divides the whole stretch already shown, not the step about to be shown**. That is
+correct while the rate holds: eight seconds into the picture at eight times is one
+second of wall clock. It stops being correct the moment the rate changes. Eight to
+one turns those eight seconds into eight seconds of wall clock, so the due moment
+jumps seven seconds into the future for every second already played, and the loop
+does what it is told: `sleep(due - now)`, capped at `LONGEST_WAIT` - two seconds.
+One picture every two seconds, until the wall clock has caught up with a moment
+that is seven times the length of everything already watched. That is the freeze.
+
+Slowing down was the direction that broke. Speeding up moves the due moment into
+the past, and the `MAX_LAG` branch already re-anchors a clock that is behind - so
+one to eight always worked, and eight to one never did.
+
+`due_at` is the clock now, and it re-anchors when the rate differs from the one it
+was anchored at (`clocked_rate`): `began = now - played`, which puts the sample
+about to be shown due **now**, and leaves the ones after it spaced by the new rate.
+A change of rate means "from here on, at this rate", which is not something a
+division can say - the division has to be given a new origin.
+
+`a_rate_that_slows_down_is_anchored_where_the_picture_is` pins it: eight seconds in,
+one second of wall clock so far, the rate going to one - the sample is due now, and
+the clock is set back to the picture rather than left seven seconds ahead.
+
+**And the rate was dropped on the floor.** A seek that replaces the session - one made
+after a recording ran out of range, or anywhere outside the playlist the open session
+holds - asked for eight times and got one, while the control still said eight.
+
+The control is a set of `watch` channels, and every setter wrote with
+`Sender::send`. **`send` fails when there is no receiver** - it does not store the
+value and returns an error, which every setter threw away with `let _ =`. A control
+is made by the command that starts a session (`Endpoint::vod`), and the session
+subscribes to it when its task first runs: between those two moments there is no
+receiver at all. `start_seek` calls `play_recording` and then `set_rate`, both in
+that window, so the rate was written to a channel nobody was holding and lost. The
+new session then subscribed and read the default `1.0`.
+
+`send_replace` stores the value whether anybody is listening or not, and all four
+setters use it now. The same hole was in the **hold** and the **jump**: a press or a
+step asked for in that window was dropped the same way, which is why a seek could
+come back unheld or a jump could do nothing at all - the "sometimes" in reports about
+both.
+
+`a_control_keeps_what_it_is_told_before_a_session_listens` is the failing case: set a
+rate on a fresh control, subscribe afterwards, and it reads what was set. With `send`
+it reads `1.0`.
