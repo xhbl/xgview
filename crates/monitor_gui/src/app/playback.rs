@@ -3015,8 +3015,15 @@ fn start_days(handle: &Handle, events: &Sender<BackgroundEvent>, index: usize, s
     handle.spawn(async move {
         let (user, pass) = source.credentials.clone().unwrap_or_default();
         let config = FrigateConfig::at(&source.origin.base_url, &user, &pass);
+        // The days are counted in the viewer's zone: the box answers in UTC
+        // otherwise, and a recording made in the evening of one day is the next
+        // day to a UTC box - so the calendar starts a day late. See
+        // `blackout::zone_name`.
+        let zone = monitor_core::blackout::zone_name();
         let days = match FrigateClient::new(config) {
-            Ok(mut client) => client.recorded_days(&source.origin.camera).await.ok(),
+            Ok(mut client) => {
+                client.recorded_days(&source.origin.camera, zone.as_deref()).await.ok()
+            }
             Err(_) => None,
         };
         let _ = sender.send(BackgroundEvent::DaysReady {

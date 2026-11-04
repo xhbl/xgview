@@ -49,6 +49,67 @@ pub fn local_at(unix: i64) -> Option<LocalTime> {
     imp::at(unix)
 }
 
+/// The viewer's clock as a name an API understands: `Etc/GMT-8` for UTC+8.
+///
+/// Frigate buckets its recordings by day in whatever zone it is told, and
+/// answers in **UTC** when it is told none - which is not the viewer's day. A
+/// recording made at 17:00 on the 31st is 01:00 on the 1st to a box answering in
+/// UTC, and the calendar loses the day it was made on: the strip's own times are
+/// drawn in the viewer's clock (`local_at`), so the two disagree.
+///
+/// The name is built from the offset rather than looked up, because this
+/// workspace carries no date/time crate and the platform APIs hand out an offset
+/// or a Windows zone name, not an IANA one. `None` on a platform with no clock,
+/// which asks the question the way it was asked before - in UTC.
+pub fn zone_name() -> Option<String> {
+    let local = local_now()?;
+    let wall = days_from_civil(local.year as i64, local.month as u32, local.day as u32) * 86_400
+        + local.hour as i64 * 3600
+        + local.minute as i64 * 60
+        + local.second as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    Some(zone_name_of(wall - now))
+}
+
+/// The name a zone offset goes by, `Etc/GMT-8` for eight hours **ahead** of UTC.
+///
+/// The sign is the other way round in these names - a tzdata convention, not a
+/// mistake - so the inversion lives here and nowhere else. The offset is taken
+/// to the nearest whole hour: a zone half an hour off (India, parts of
+/// Australia) names the hour it is nearest, which moves its day boundary by half
+/// an hour, and only a recording within half an hour of midnight could land on
+/// the wrong day. The extremes are the ones tzdata has, `Etc/GMT+12` (twelve
+/// behind) and `Etc/GMT-14` (fourteen ahead).
+fn zone_name_of(offset: i64) -> String {
+    let hours = (offset as f64 / 3600.0).round() as i64;
+    let hours = hours.clamp(-12, 14);
+    if hours > 0 {
+        format!("Etc/GMT-{hours}")
+    } else if hours < 0 {
+        format!("Etc/GMT+{}", -hours)
+    } else {
+        "Etc/GMT".to_string()
+    }
+}
+
+/// Days since 1970-01-01 for a calendar date, by the civil-from-days algorithm.
+///
+/// Written out rather than pulled in: one subtraction needs it, and it is
+/// arithmetic that has not changed since the Gregorian calendar was agreed on.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_from_march = i64::from((month + 9) % 12);
+    let day_of_year = (153 * month_from_march + 2) / 5 + i64::from(day) - 1;
+    let day_of_era =
+        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 /// Which moment of the week it is locally, as minutes from Monday 00:00.
 pub fn minute_of_week() -> Option<u32> {
     let now = local_now()?;
@@ -247,6 +308,48 @@ mod imp {
 mod tests {
     use super::*;
     use crate::config::EVERY_DAY;
+
+    /// A zone is named with its sign the other way round, and the day a
+    /// recording was made on depends on getting it right: an `Etc/GMT+8` that
+    /// meant eight hours ahead would put every evening's recording on the wrong
+    /// day.
+    #[test]
+    fn a_zone_is_named_with_the_sign_the_other_way_round() {
+        assert_eq!(zone_name_of(0), "Etc/GMT", "the meridian");
+        assert_eq!(zone_name_of(8 * 3600), "Etc/GMT-8", "eight ahead");
+        assert_eq!(zone_name_of(-8 * 3600), "Etc/GMT+8", "eight behind");
+        assert_eq!(zone_name_of(-7 * 3600), "Etc/GMT+7");
+        // A zone half an hour off names the hour it is nearest, and the extremes
+        // are the ones tzdata has.
+        assert_eq!(zone_name_of(5 * 3600 + 1800), "Etc/GMT-6");
+        assert_eq!(zone_name_of(20 * 3600), "Etc/GMT-14");
+        assert_eq!(zone_name_of(-20 * 3600), "Etc/GMT+12");
+    }
+
+    /// The day arithmetic the offset is measured with, against two dates whose
+    /// day numbers are known.
+    #[test]
+    fn a_date_counts_days_from_the_epoch() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2000, 1, 1), 10_957);
+        assert_eq!(days_from_civil(2026, 11, 4), 20_761);
+    }
+
+    /// The name comes from the machine's own clock, and is one tzdata has.
+    ///
+    /// The arithmetic is tested above; this is the half that reads the clock, so
+    /// a platform where `local_now` and the epoch disagree by a whole day - a
+    /// clock that is wrong, or a sign that got inverted twice - is a failure
+    /// rather than a calendar that starts a day early.
+    #[test]
+    fn the_viewers_zone_is_named_from_the_clock() {
+        let Some(name) = zone_name() else {
+            return;
+        };
+        assert!(name.starts_with("Etc/GMT"), "{name}");
+        let hours: i64 = name.trim_start_matches("Etc/GMT").parse().unwrap_or(0);
+        assert!((-12..=14).contains(&hours), "{name}");
+    }
 
     /// Minute of the week for a day counted from Monday, as the schedule does.
     fn at(day: u32, hour: u32, minute: u32) -> u32 {

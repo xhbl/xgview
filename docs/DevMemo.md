@@ -5178,3 +5178,38 @@ both.
 `a_control_keeps_what_it_is_told_before_a_session_listens` is the failing case: set a
 rate on a fresh control, subscribe afterwards, and it reads what was set. With `send`
 it reads `1.0`.
+
+## 68. The days a box counts in
+
+*Landed 2026-11-04, in 2.1.63.*
+
+The calendar started at the 1st and the camera had recordings from the 31st. The
+list was not dropped on the way in: the box does not call that day the 31st.
+
+`/api/recordings/summary` answers in **UTC** unless it is given a `timezone`, and
+the code sent none - on the reasoning, written in the doc comment, that the box
+would answer in its own. It does not. Asked bare, this box answers `2026-11-01`
+onwards; asked for `America/Los_Angeles` it answers `2026-10-31` onwards, and the
+two lists are the same recordings. The recording that starts at 17:00 on the 31st
+is 01:00 on the 1st to a box counting in UTC, and a day the calendar never saw is
+a day with no button.
+
+The calendar draws its days in the **viewer's** clock - `local_at`, the same clock
+the strip's times are written in - so that is the zone the box has to be asked in.
+This program has no IANA name for its own zone: the platform APIs hand out an
+offset, or a Windows zone name. What it does have is the offset, and tzdata has a
+name for every whole-hour offset - `Etc/GMT-8` is eight hours **ahead** of UTC,
+the sign inverted, which is a tzdata convention and the one place that inversion
+is written. `blackout::zone_name` builds it from the local clock and the epoch,
+with the days-from-civil arithmetic written out for the one subtraction it needs.
+
+Two edges, both documented in the code: a zone half an hour off (India, parts of
+Australia) names the hour it is nearest, so its day boundary moves half an hour
+and only a recording within half an hour of midnight can land on the wrong day;
+and a fixed offset does not follow daylight saving, so a recording within an hour
+of midnight on the day the clocks change can do the same. Both are an hour's worth
+of edge on a calendar, against a day that was missing entirely.
+
+The `+` is escaped: a query string reads it as a space, and every zone west of
+Greenwich has one - `Etc/GMT+8` sent as it is arrives as `Etc/GMT 8`, which the
+box answers with UTC, the very answer the parameter exists to avoid.

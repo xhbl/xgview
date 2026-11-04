@@ -534,12 +534,22 @@ impl FrigateClient {
     /// absent rather than `false`. What a calendar draws between them is the
     /// calendar's business - see `calendar` in the interface.
     ///
-    /// No timezone is asked for, so the box answers in its own. The viewer is
-    /// usually on the same clock as the recorder, and the alternative - naming
-    /// the viewer's zone - is a name this program does not have.
-    pub async fn recorded_days(&mut self, camera: &str) -> Result<Vec<String>> {
-        let url =
+    /// `timezone` is the zone the days are counted in, and it has to be the
+    /// viewer's: the box answers in **UTC** when it is given none, and a day is
+    /// not the same day in UTC. A recording made at 17:00 on the 31st at UTC-8
+    /// is 01:00 on the 1st to a box answering in UTC, so the calendar loses the
+    /// day it was made on. See `blackout::zone_name`.
+    pub async fn recorded_days(
+        &mut self,
+        camera: &str,
+        timezone: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let mut url =
             format!("{}/api/recordings/summary?cameras={camera}", self.config.base_url());
+        if let Some(timezone) = timezone {
+            url.push_str("&timezone=");
+            url.push_str(&in_a_query(timezone));
+        }
         let response = self.get(&url).await?;
         let status = response.status();
         if !status.is_success() {
@@ -562,6 +572,16 @@ impl FrigateClient {
         let parts = parse_config(&config, &self.config.host, self.config.rtsp_port);
         Ok(build_sources(&self.config, parts).await)
     }
+}
+
+/// A zone name as it goes into a query string.
+///
+/// `+` is a space in a query, and every zone west of Greenwich has one:
+/// `Etc/GMT+8` sent as it is arrives as `Etc/GMT 8`, which the box answers with
+/// UTC - the one answer this parameter exists to avoid. The slash is escaped for
+/// the same reason, one character further out.
+fn in_a_query(zone: &str) -> String {
+    zone.replace('/', "%2F").replace('+', "%2B")
 }
 
 /// Splits a `/api/config` body into the cameras, the leftover streams, the
@@ -939,6 +959,16 @@ mod tests {
     use super::*;
     use crate::config::StreamProtocol;
     use crate::model::ConnectionMode;
+
+    /// A `+` in a query string is a space, and every zone west of Greenwich has
+    /// one: sent as it is, `Etc/GMT+8` arrives as `Etc/GMT 8` and the box answers
+    /// with UTC - the one answer this parameter exists to avoid.
+    #[test]
+    fn a_zone_name_is_escaped_into_the_query() {
+        assert_eq!(in_a_query("Etc/GMT+8"), "Etc%2FGMT%2B8");
+        assert_eq!(in_a_query("Etc/GMT-8"), "Etc%2FGMT-8");
+        assert_eq!(in_a_query("Etc/GMT"), "Etc%2FGMT");
+    }
 
     /// A login is kept for the requests that follow it, and dropped when the box
     /// stops accepting it. Two accounts on one box are two logins.
