@@ -1631,6 +1631,13 @@ impl XgViewApp {
         let (index, paused) = (playback.index, playback.paused);
         let at = self.clamp_centre(at);
         self.seek(at);
+        // The strip is drawn a whole width around the cursor, so the list has to
+        // reach half a width behind it - and it is the same obligation whether the
+        // cursor was moved by a finger, by an arrow or by an event. Asked for
+        // here, which is where all three pass; without it a held arrow walked the
+        // strip off the end of what had been read and left a band of nothing on
+        // the left, which only a drag ever filled. See [`Self::read_older`].
+        self.read_older(index);
         if paused {
             self.manager.hold_clip(index, true);
             if let Some(playback) = self.playback.as_mut() {

@@ -4962,3 +4962,13 @@ one to the **next live control** (`tilebar::next_live`), round the end of the ro
 to the seat only when the whole row is grey. Round the end rather than to the seat,
 because a viewer who walked to the far end of the bar expects the row to go on. A
 stop the walk cannot leave is worse than a control nobody can reach.
+
+**And the read was the drag's, not the movement's.** `read_older` was asked for by
+the drag itself, and by a read that had just landed - so a finger filled the strip's
+left edge and a held arrow did not: the cursor walked off the end of what had been
+read and left a band of nothing there, until a drag or a change of width happened
+to fill it. Every way of moving the cursor passes through `move_to` - an arrow, a
+step, an event jump, a drag let go of - so that is where the read is asked for now,
+and the strip is as long as the recording however it was walked. The obligation is
+the same one either way: the strip is drawn a whole width around the cursor, so the
+list has to reach half a width behind it.
