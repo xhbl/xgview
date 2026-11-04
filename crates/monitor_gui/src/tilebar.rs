@@ -364,7 +364,16 @@ pub fn control(index: usize) -> Id {
 /// call has just turned into the handset is one, and the handset it becomes is
 /// another.
 pub fn owns(id: Id) -> bool {
-    id == seat() || (0..CONTROLS).any(|index| id == control(index))
+    id == seat() || index_of(id).is_some()
+}
+
+/// Which place in the bar's row an id is, if it is one of its controls.
+///
+/// The place is what the remote's focus is remembered by - the strip hands it
+/// back to the control it was taken from - and what the control's own id is
+/// built from.
+pub fn index_of(id: Id) -> Option<usize> {
+    (0..CONTROLS).find(|index| control(*index) == id)
 }
 
 /// Whether a tile has room for the panel's two rows.
@@ -649,6 +658,17 @@ mod tests {
 
     fn landscape() -> Rect {
         Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1080.0))
+    }
+
+    /// A control is known by its place, and the seat is not one of them: the
+    /// strip remembers the place the remote came from, and hands it back there.
+    #[test]
+    fn a_control_is_known_by_its_place() {
+        assert_eq!(index_of(control(0)), Some(0));
+        assert_eq!(index_of(control(7)), Some(7));
+        assert_eq!(index_of(seat()), None, "the seat is not a control");
+        assert_eq!(index_of(Id::new("somewhere else")), None);
+        assert!(owns(seat()) && owns(control(11)), "and both are still the bar's");
     }
 
     fn portrait() -> Rect {

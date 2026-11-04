@@ -1222,6 +1222,12 @@ impl XgViewApp {
             if keys.page_next {
                 self.jump_event(true);
             }
+            // And the confirm key is the calendar's: it picks the day the ring is
+            // on. The strip itself has nothing to confirm, and the date axis is
+            // the one row where a press has to mean "this one".
+            if keys.enter {
+                self.pick_day_cursor();
+            }
         }
         // The magnified viewport's bar opens on its seat, which is not one of
         // its controls: the first arrow is what steps off it, onto the first

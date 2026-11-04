@@ -44,6 +44,10 @@ pub(super) struct Playback {
     pub(super) pinch: f32,
     /// An arrow held down on the timeline. See [`Held`].
     pub(super) held: Option<Held>,
+    /// Which of the bar's controls the focus came from when Down took it into
+    /// the strip, so Up can hand it back to the one it left rather than to the
+    /// first. `None` when it came from the seat, which is not a control.
+    pub(super) from_control: Option<usize>,
     /// What the camera recorded around it. Read once when playback opens, and
     /// kept: the timeline draws the stretches that exist, and asking again for
     /// every repaint would be a request a frame.
@@ -103,6 +107,12 @@ pub(super) struct Playback {
     /// Whether the calendar should bring the day the picture is on into view.
     /// Set when it is shown, and cleared once it has been.
     pub(super) days_follow: bool,
+    /// The day the remote is on in the calendar, as a place in [`Self::days`].
+    ///
+    /// A calendar is a row of buttons, and the remote walks it: the arrows move
+    /// this, the ring is drawn on it, and the confirm key picks it. `None` until
+    /// the calendar is shown, when it starts on the day the picture is on.
+    pub(super) day_cursor: Option<usize>,
     /// Whether the day list is being read.
     pub(super) reading_days: bool,
     /// The moment on a picked day the strip should move to, once that day's
@@ -341,6 +351,7 @@ impl XgViewApp {
             pinch: 1.0,
             drag: None,
             held: None,
+            from_control: None,
             zoom: SPAN,
             segments,
             vod,
@@ -357,6 +368,7 @@ impl XgViewApp {
             days_scroll: 0.0,
             days_drag: None,
             days_follow: false,
+            day_cursor: None,
             reading_days: false,
             to_day: None,
             ahead: None,
@@ -369,6 +381,11 @@ impl XgViewApp {
             events: Vec::new(),
             reading_events: false,
         });
+        // The bar's row has changed under the focus: the camera's controls are
+        // gone and the recording's are here, and the place the focus was on means
+        // something else in this row. It goes to the seat, which draws nothing
+        // until an arrow picks a control. See [`Self::leave_playback`].
+        self.restore_focus = Some(tilebar::seat());
         // The speaker belongs to the channel whose picture is on screen, and
         // that has just become the recording's.
         self.apply_audio();
@@ -729,6 +746,11 @@ impl XgViewApp {
         let Some(playback) = self.playback.take() else {
             return;
         };
+        // The bar's row is not the row it was: the recording's controls are gone
+        // and the camera's are back. The focus was on a place in the old row, and
+        // the place means something else now - so it goes to the seat, where the
+        // first arrow picks a control by name rather than by number.
+        self.restore_focus = Some(tilebar::seat());
         self.manager.stop_clip(playback.index);
         self.channels.remove(&playback.index);
         self.textures.remove(&playback.index);
@@ -940,8 +962,11 @@ impl XgViewApp {
     /// is a window on them, so what is off its ends is clipped by its edge rather
     /// than drawn over what is beside it.
     ///
-    /// The day the picture is on is ringed: picking a date is a move to another
-    /// one, and the date already showing is the way back to the strip.
+    /// The day the picture is on is the one that looks chosen, and **the day the
+    /// remote is on is the one that is ringed**: picking a date is a move to
+    /// another one, and the date already showing is the way back to the strip.
+    /// With the ring on the cursor the two are told apart - the cursor is where a
+    /// press would go, the brighter button is where the picture already is.
     fn draw_days(&self, ui: &egui::Ui, row: Rect, playback: &Playback) {
         let (each, total) = day_metrics(row, playback.days.len());
         if each <= 0.0 {
@@ -955,7 +980,15 @@ impl XgViewApp {
         // chosen: a calendar with no mark on it does not say which date the
         // viewer is already looking at.
         let now = self.centre_of(playback);
-        let here = playback.days.iter().rev().find(|day| day.start <= now).map(|day| day.start);
+        let here = playback
+            .days
+            .iter()
+            .rposition(|day| day.start <= now)
+            .map(|index| playback.days[index].start);
+        // The ring is the remote's, so it is on the cursor while the remote is
+        // here, and on the day the picture is on when it is not.
+        let focused = self.strip_has_focus(ui.ctx());
+        let cursor = focused.then_some(playback.day_cursor).flatten();
         for (index, day) in playback.days.iter().enumerate() {
             let from = index as f32 * each - scroll + DAY_GAP / 2.0;
             let to = (from + each - DAY_GAP).max(from + 1.0);
@@ -974,9 +1007,16 @@ impl XgViewApp {
                 )
             };
             // A day the camera recorded on is a button; the days it did not are
-            // not here at all, so every one of them is filled.
-            painter.rect_filled(band, CornerRadius::same(6), theme::ACCENT.gamma_multiply(0.45));
-            if here == Some(day.start) {
+            // not here at all, so every one of them is filled - the one the
+            // picture is on a shade brighter.
+            let here_day = here == Some(day.start);
+            let fill = if here_day { 0.75 } else { 0.45 };
+            painter.rect_filled(band, CornerRadius::same(6), theme::ACCENT.gamma_multiply(fill));
+            let ringed = match cursor {
+                Some(cursor) => cursor == index,
+                None => here_day,
+            };
+            if ringed {
                 painter.rect_stroke(
                     band,
                     CornerRadius::same(6),
@@ -1025,23 +1065,65 @@ impl XgViewApp {
 }
 
 impl XgViewApp {
-    /// Slides the calendar a day under the arrows, and no further than it goes.
+    /// Moves the calendar's ring a day under the arrows, and slides the row to
+    /// keep it in view.
     ///
     /// A day a press, and not a day a frame: a held arrow is not repeated into a
-    /// flood, and the row is twenty-one days long - which is a press each.
-    fn slide_days(&mut self, row: Rect, forward: bool) {
+    /// flood, and the row is as many days as the camera has recorded - a press
+    /// each. The cursor is where the ring is drawn and where the confirm key
+    /// picks, so it is the one thing the row has to keep on screen.
+    fn move_day_cursor(&mut self, row: Rect, forward: bool) {
+        let Some(playback) = self.playback.as_mut() else {
+            return;
+        };
+        let last = playback.days.len().saturating_sub(1);
+        if playback.days.is_empty() {
+            return;
+        }
+        let at = playback.day_cursor.unwrap_or(0);
+        let at = if forward { (at + 1).min(last) } else { at.saturating_sub(1) };
+        playback.day_cursor = Some(at);
+        // A row that does not move with it is a ring that walks off the edge.
+        let (each, total) = day_metrics(row, playback.days.len());
+        let length = if row.width() > row.height() { row.width() } else { row.height() };
+        playback.days_scroll = day_scroll_for(at, each, playback.days_scroll, length, total);
+    }
+
+    /// Picks the day the calendar's ring is on, for the confirm key.
+    pub(super) fn pick_day_cursor(&mut self) {
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
-        let (each, total) = day_metrics(row, playback.days.len());
-        if each <= 0.0 {
+        if playback.timeline != Timeline::Days {
             return;
         }
-        let length = if row.width() > row.height() { row.width() } else { row.height() };
-        let step = if forward { each } else { -each };
-        let scroll = day_scroll_to(playback.days_scroll + step, total, length);
+        let index = playback.index;
+        let day = playback
+            .day_cursor
+            .and_then(|cursor| playback.days.get(cursor))
+            .cloned();
+        if let Some(day) = day {
+            self.pick_day(index, &day);
+        }
+    }
+
+    /// Puts the ring on the day the picture is on, when the calendar is first
+    /// shown: the remote opens where the viewer already is.
+    fn start_day_cursor(&mut self) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        if playback.day_cursor.is_some() || playback.days.is_empty() {
+            return;
+        }
+        let now = self.centre_of(playback);
+        let at = playback
+            .days
+            .iter()
+            .rposition(|day| day.start <= now)
+            .unwrap_or(0);
         if let Some(playback) = self.playback.as_mut() {
-            playback.days_scroll = scroll;
+            playback.day_cursor = Some(at);
         }
     }
 
@@ -1061,6 +1143,16 @@ impl XgViewApp {
     /// the finger with nothing asked of the server. Letting go asks for the
     /// stretch under the finger and plays it from there.
     pub(super) fn timeline_input(&mut self, ui: &egui::Ui, row: Rect) {
+        // The calendar's ring is the remote's, and it opens on the day the picture
+        // is on - before any arrow can move it, which is why this is the first
+        // thing the frame does.
+        if self
+            .playback
+            .as_ref()
+            .is_some_and(|playback| playback.timeline == Timeline::Days)
+        {
+            self.start_day_cursor();
+        }
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
@@ -1118,18 +1210,33 @@ impl XgViewApp {
             && down_key
             && ui.memory(|memory| memory.focused()).is_some_and(tilebar::owns)
         {
+            // Where it came from, so Up can put it back there rather than at the
+            // head of the row: a viewer who walked to the sixth control to get
+            // here does not want to walk back from the first.
+            let from = ui.memory(|memory| memory.focused()).and_then(tilebar::index_of);
+            if let Some(playback) = self.playback.as_mut() {
+                playback.from_control = from;
+            }
             response.request_focus();
         }
         if response.has_focus() {
             if up_key {
-                ui.memory_mut(|memory| memory.request_focus(tilebar::control(0)));
+                // Back to the control it left, or to the first when it came from
+                // the seat - which is not a control and cannot take it back.
+                let back = self
+                    .playback
+                    .as_ref()
+                    .and_then(|playback| playback.from_control)
+                    .unwrap_or(0);
+                ui.memory_mut(|memory| memory.request_focus(tilebar::control(back)));
             } else if days {
-                // The calendar slides under the arrows: a remote has no finger,
-                // and a day it cannot reach is a day that is not there.
+                // The calendar is a row of buttons and the remote walks it: the
+                // arrows move the ring a day at a time, and the row slides to
+                // keep it in view. See [`Self::move_day_cursor`].
                 if left_press {
-                    self.slide_days(row, false);
+                    self.move_day_cursor(row, false);
                 } else if right_press {
-                    self.slide_days(row, true);
+                    self.move_day_cursor(row, true);
                 }
             } else if left || right {
                 self.walk_timeline(right);
@@ -1420,6 +1527,9 @@ impl XgViewApp {
                 // opens on the day the picture is on rather than on whichever
                 // end the last look left it at.
                 playback.days_follow = true;
+                // And the remote starts there too: the ring opens on the date
+                // the picture is already showing.
+                playback.day_cursor = None;
                 self.read_days(index);
             }
             // Back to the strip exactly as it was left: nothing to restore,
@@ -2263,6 +2373,24 @@ fn day_metrics(row: Rect, days: usize) -> (f32, f32) {
 /// further than the row shows. A row that holds every day does not move.
 fn day_scroll_to(scroll: f32, total: f32, length: f32) -> f32 {
     scroll.clamp(0.0, (total - length).max(0.0))
+}
+
+/// Where the calendar has to be slid to so that `index`'s button is in the row -
+/// and where it already is, when it is.
+///
+/// The cursor is the ring and the confirm key's target, so a row that does not
+/// follow it is a ring that walks off the edge and a press that picks something
+/// nobody can see.
+fn day_scroll_for(index: usize, each: f32, scroll: f32, length: f32, total: f32) -> f32 {
+    let start = index as f32 * each;
+    let scroll = if start < scroll {
+        start
+    } else if start + each > scroll + length {
+        start + each - length
+    } else {
+        scroll
+    };
+    day_scroll_to(scroll, total, length)
 }
 
 /// How far along the row a point is, in points from the first day's edge - the
@@ -3311,6 +3439,19 @@ mod tests {
         let band = crate::tilebar::TIMELINE_ROW - 2.0 * DAY_PAD;
         assert!(band > DAY_SIZE * 1.4, "a {band}pt button for {DAY_SIZE}pt type");
         assert!(DAY_GAP > 0.0, "and a gap, or two days read as one");
+    }
+
+    /// The calendar's row follows its ring: a day the remote walks to is a day
+    /// the row slides to show, and one already in view leaves the row alone.
+    #[test]
+    fn the_calendar_follows_its_ring() {
+        // Three days of fifty points across a row that shows two.
+        let (each, total, length) = (50.0, 150.0, 100.0);
+        assert_eq!(day_scroll_for(1, each, 0.0, length, total), 0.0, "already in view");
+        assert_eq!(day_scroll_for(2, each, 0.0, length, total), 50.0, "the third is slid in");
+        assert_eq!(day_scroll_for(0, each, 50.0, length, total), 0.0, "and the first back");
+        // A row that holds them all never moves.
+        assert_eq!(day_scroll_for(2, each, 0.0, 210.0, total), 0.0);
     }
 
     /// A day is a touch target: the row shows as many as fit at the plan's 44

@@ -4875,3 +4875,37 @@ same absolute-y test), so nothing was *introduced* between 2.1.53 and this build
 what differs is the state, and the state is the size the bars were last drawn at.
 The fix takes that dependence away rather than the symptom: only the heights are
 kept, so no resize can put a band anywhere but the top and bottom of the screen.
+
+## 64. The bar's row changes under the focus
+
+*Landed 2026-11-03, in 2.1.56.*
+
+Three small things, all of them about a focus that is a **place in a row** rather
+than a control.
+
+**A row that is not the row it was.** Entering a recording replaces the camera's
+controls with the recording's - twelve of them, in another order - and leaving it
+puts the camera's back. The focus is `control(index)`, and the index means
+something else in the new row: the ring came back on a control nobody had chosen,
+and which one depended on where in the old row the viewer had been. Both ways
+across now put the focus on the **seat**, which draws nothing and takes the first
+arrow onto the first control: the viewer has not chosen anything in this row yet.
+That is the same place the bar opens on, so there is one rule rather than two.
+
+**The strip hands the keys back where it took them.** Down remembers the place in
+the row it came from (`from_control`) and Up returns there, instead of always to
+the first control - a viewer who walked to the sixth button to get here does not
+want to walk back from the head of the row. From the seat there is nothing to
+remember, and the first control is what the first arrow would have chosen anyway.
+
+**And the calendar is a row of buttons, so it gets a cursor.** It had sliding and
+picking with a finger, and the arrows only slid the row: nothing said *which* day
+a press would take, and there was no way to pick one without a pointer. The ring
+is now the cursor's - the day the remote is on, moved a day a press, with the row
+sliding to keep it in view - and the confirm key picks it. The day the picture is
+on is still marked, by a brighter button rather than the ring: with the ring on
+the cursor the two questions are different ones, "where would a press go" and
+"where am I already".
+
+Two tests hold the arithmetic: `a_control_is_known_by_its_place` and
+`the_calendar_follows_its_ring`.
