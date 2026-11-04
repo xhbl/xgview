@@ -92,10 +92,24 @@ pub(super) struct Playback {
     /// The days the calendar shows, oldest first, once the box has answered.
     /// Empty until it has.
     pub(super) days: Vec<Day>,
+    /// How far the calendar is scrolled along, in points from its first day.
+    ///
+    /// A calendar is twenty-one days and a phone shows eight of them, so the
+    /// rest have to be reachable: the row slides under the finger, and what is
+    /// off its ends is simply not drawn.
+    pub(super) days_scroll: f32,
+    /// The finger that is sliding the calendar: where it went down, and what the
+    /// scroll was then. A press that moves is a scroll and one that does not is
+    /// a pick, so a press alone picks nothing.
+    pub(super) days_drag: Option<(f32, f32)>,
+    /// Whether the calendar should bring the day the picture is on into view.
+    /// Set when it is shown, and cleared once it has been.
+    pub(super) days_follow: bool,
     /// Whether the day list is being read.
     pub(super) reading_days: bool,
-    /// A day whose recording the strip should move to once its segment list has
-    /// been read. See [`XgViewApp::pick_day`].
+    /// The moment on a picked day the strip should move to, once that day's
+    /// segment list has been read. It is the same time of day as the moment on
+    /// screen, not the day's first moment. See [`XgViewApp::pick_day`].
     pub(super) to_day: Option<i64>,
     /// The moment a seek is waiting to play, while the range it needs is still
     /// being read.
@@ -326,6 +340,9 @@ impl XgViewApp {
             scrubbing: false,
             timeline: Timeline::Span,
             days: Vec::new(),
+            days_scroll: 0.0,
+            days_drag: None,
+            days_follow: false,
             reading_days: false,
             to_day: None,
             ahead: None,
@@ -888,64 +905,121 @@ impl XgViewApp {
 }
 
 impl XgViewApp {
-    /// Draws the calendar: one band per day, filled where the camera recorded and
-    /// dark where it did not, with the day's name wherever one fits.
+    /// Draws the calendar: one button per day, filled where the camera recorded
+    /// and dark where it did not, with the day's name inside it.
     ///
-    /// The plan's rule is 44 points a day, which is a touch target; a strip too
-    /// short for all of them shows the newest, which is where a calendar ends.
+    /// The plan's rule is 44 points a day, which is a touch target. A row that
+    /// cannot hold them all slides: the days are laid out end to end and the row
+    /// is a window on them, so what is off its ends is clipped by its edge rather
+    /// than drawn over what is beside it.
+    ///
+    /// The day the picture is on is ringed: picking a date is a move to another
+    /// one, and the date already showing is the way back to the strip.
     fn draw_days(&self, ui: &egui::Ui, row: Rect, playback: &Playback) {
-        let horizontal = row.width() > row.height();
-        let length = if horizontal { row.width() } else { row.height() };
-        let shown = days_across(length, playback.days.len());
-        if shown == 0 {
+        let (each, total) = day_metrics(row, playback.days.len());
+        if each <= 0.0 {
             return;
         }
-        let days = &playback.days[playback.days.len() - shown..];
-        let each = length / shown as f32;
-        let middle = row.center();
-        let painter = ui.painter();
-        for (index, day) in days.iter().enumerate() {
-            let from = each * index as f32;
-            let to = (from + each).max(from + 1.0);
-            let (from, to) = if horizontal {
-                (row.left() + from, row.left() + to)
-            } else {
-                (row.top() + from, row.top() + to)
-            };
+        let horizontal = row.width() > row.height();
+        let length = if horizontal { row.width() } else { row.height() };
+        let scroll = day_scroll_to(playback.days_scroll, total, length);
+        let painter = ui.painter().with_clip_rect(row);
+        // Where the picture is, so the day it is on can be the one that looks
+        // chosen: a calendar with no mark on it does not say which date the
+        // viewer is already looking at.
+        let now = self.centre_of(playback);
+        let here = playback.days.iter().rev().find(|day| day.start <= now).map(|day| day.start);
+        for (index, day) in playback.days.iter().enumerate() {
+            let from = index as f32 * each - scroll + DAY_GAP / 2.0;
+            let to = (from + each - DAY_GAP).max(from + 1.0);
+            if to <= 0.0 || from >= length {
+                continue;
+            }
             let band = if horizontal {
                 Rect::from_min_max(
-                    egui::pos2(from + 1.0, middle.y - 3.0),
-                    egui::pos2((to - 1.0).max(from + 2.0), middle.y + 3.0),
+                    egui::pos2(row.left() + from, row.top() + DAY_PAD),
+                    egui::pos2(row.left() + to, row.bottom() - DAY_PAD),
                 )
             } else {
                 Rect::from_min_max(
-                    egui::pos2(middle.x - 3.0, from + 1.0),
-                    egui::pos2(middle.x + 3.0, (to - 1.0).max(from + 2.0)),
+                    egui::pos2(row.left() + DAY_PAD, row.top() + from),
+                    egui::pos2(row.right() - DAY_PAD, row.top() + to),
                 )
             };
-            // Filled where something was recorded, and only just visible where
-            // nothing was: a day with no recording is still a day to aim at.
-            let accent = if day.recorded { 0.75 } else { 0.18 };
-            painter.rect_filled(band, CornerRadius::same(2), theme::ACCENT.gamma_multiply(accent));
-            if each >= 34.0 {
-                let at = if horizontal {
-                    egui::pos2((from + to) / 2.0, row.bottom() - 7.0)
-                } else {
-                    egui::pos2(middle.x, to - 7.0)
-                };
-                painter.text(
-                    at,
-                    egui::Align2::CENTER_CENTER,
-                    &day.label,
-                    egui::FontId::proportional(9.0),
-                    theme::GRID_LINE,
+            // A day with a recording is a button that is filled, and one without
+            // is a button that is not: still a day, still something to aim at.
+            let fill = if day.recorded { theme::ACCENT.gamma_multiply(0.45) } else { theme::TRACK };
+            painter.rect_filled(band, CornerRadius::same(6), fill);
+            if here == Some(day.start) {
+                painter.rect_stroke(
+                    band,
+                    CornerRadius::same(6),
+                    egui::Stroke::new(theme::FOCUS_WIDTH, theme::FOCUS),
+                    StrokeKind::Inside,
                 );
             }
+            if each >= 34.0 {
+                let ink = if day.recorded { theme::TEXT_BRIGHT } else { theme::TEXT_DIM };
+                painter.text(
+                    band.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &day.label,
+                    egui::FontId::proportional(DAY_SIZE),
+                    ink,
+                );
+            }
+        }
+    }
+
+    /// Brings the day the picture is on into the middle of the calendar, once,
+    /// when it is first shown with a list to show.
+    ///
+    /// A calendar slid away from that day cannot answer "which date am I on", and
+    /// the ring around the day is the answer - so showing the calendar brings it
+    /// into view rather than leaving the row wherever the last look left it.
+    fn follow_days(&mut self, row: Rect) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        if !playback.days_follow || playback.days.is_empty() {
+            return;
+        }
+        let (each, total) = day_metrics(row, playback.days.len());
+        if each <= 0.0 {
+            return;
+        }
+        let length = if row.width() > row.height() { row.width() } else { row.height() };
+        let now = self.centre_of(playback);
+        let index = playback.days.iter().rposition(|day| day.start <= now).unwrap_or(0);
+        let scroll = day_scroll_to(index as f32 * each - (length - each) / 2.0, total, length);
+        if let Some(playback) = self.playback.as_mut() {
+            playback.days_scroll = scroll;
+            playback.days_follow = false;
         }
     }
 }
 
 impl XgViewApp {
+    /// Slides the calendar a day under the arrows, and no further than it goes.
+    ///
+    /// A day a press, and not a day a frame: a held arrow is not repeated into a
+    /// flood, and the row is twenty-one days long - which is a press each.
+    fn slide_days(&mut self, row: Rect, forward: bool) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        let (each, total) = day_metrics(row, playback.days.len());
+        if each <= 0.0 {
+            return;
+        }
+        let length = if row.width() > row.height() { row.width() } else { row.height() };
+        let step = if forward { each } else { -each };
+        let scroll = day_scroll_to(playback.days_scroll + step, total, length);
+        if let Some(playback) = self.playback.as_mut() {
+            playback.days_scroll = scroll;
+        }
+    }
+
     /// Answers a finger on the timeline.
     ///
     /// Pressing holds the picture where it is - a recording is paced by its own
@@ -977,12 +1051,14 @@ impl XgViewApp {
         // walks into it from the controls and Up walks back out. Those keys are
         // read here rather than through the navigation layer because the strip
         // is not one of the bar's controls - it is the thing they operate.
-        let (down_key, up_key, left, right) = ui.ctx().input(|input| {
+        let (down_key, up_key, left, right, left_press, right_press) = ui.ctx().input(|input| {
             (
                 input.key_pressed(egui::Key::ArrowDown),
                 input.key_pressed(egui::Key::ArrowUp),
                 input.key_down(egui::Key::ArrowLeft),
                 input.key_down(egui::Key::ArrowRight),
+                input.key_pressed(egui::Key::ArrowLeft),
+                input.key_pressed(egui::Key::ArrowRight),
             )
         });
         if !response.has_focus()
@@ -994,6 +1070,14 @@ impl XgViewApp {
         if response.has_focus() {
             if up_key {
                 ui.memory_mut(|memory| memory.request_focus(tilebar::control(0)));
+            } else if days {
+                // The calendar slides under the arrows: a remote has no finger,
+                // and a day it cannot reach is a day that is not there.
+                if left_press {
+                    self.slide_days(row, false);
+                } else if right_press {
+                    self.slide_days(row, true);
+                }
             } else if left || right {
                 self.walk_timeline(right);
             } else if let Some(playback) = self.playback.as_mut() {
@@ -1023,17 +1107,62 @@ impl XgViewApp {
             return;
         }
 
-        // The calendar is a picture of days, not a stretch: a press on a band is
-        // that day, and nothing is held while it is pressed.
+        // The calendar is a row of dates, not a stretch: a finger slides it, and
+        // a press that goes nowhere picks the day under it. The two cannot be
+        // told apart until the finger lifts, which is why a press alone picks
+        // nothing and nothing is held while it is down.
         if days {
-            if let (true, Some(pos)) = (down, pos) {
-                if row.contains(pos) {
-                    let Some(playback) = self.playback.as_ref() else {
-                        return;
-                    };
-                    if let Some(at) = day_at(row, &playback.days, pos).map(|day| day.start) {
-                        self.pick_day(index, at);
+            self.follow_days(row);
+            let Some(playback) = self.playback.as_ref() else {
+                return;
+            };
+            let (each, total) = day_metrics(row, playback.days.len());
+            if each <= 0.0 {
+                return;
+            }
+            let length = if horizontal { row.width() } else { row.height() };
+            if down {
+                let Some(pos) = pos else {
+                    return;
+                };
+                let at = day_along(row, pos);
+                if let Some((from, scroll)) = playback.days_drag {
+                    // A finger that leaves the row keeps sliding it: the row is
+                    // a window on the days, and the finger is still pointing at
+                    // a place in them.
+                    let scroll = day_scroll_to(scroll + (from - at), total, length);
+                    if let Some(playback) = self.playback.as_mut() {
+                        playback.days_scroll = scroll;
                     }
+                } else if row.contains(pos) {
+                    if let Some(playback) = self.playback.as_mut() {
+                        playback.days_drag = Some((at, playback.days_scroll));
+                    }
+                }
+            } else {
+                // Lifted, or gone: a slide is finished with, and a press that
+                // did not move is the day under the finger.
+                let Some((from, scroll)) = self
+                    .playback
+                    .as_mut()
+                    .and_then(|playback| playback.days_drag.take())
+                else {
+                    return;
+                };
+                let Some(pos) = pos else {
+                    return;
+                };
+                if (day_along(row, pos) - from).abs() > DAY_SLOP {
+                    return;
+                }
+                let Some(playback) = self.playback.as_ref() else {
+                    return;
+                };
+                // Cloned: picking borrows the application mutably, and the day
+                // it is picking belongs to the list borrowed here.
+                let picked = day_at(row, &playback.days, pos, scroll, each).cloned();
+                if let Some(day) = picked {
+                    self.pick_day(index, &day);
                 }
             }
             return;
@@ -1045,21 +1174,21 @@ impl XgViewApp {
             // does nothing here. A pinch is neither: it is a width, and it was
             // answered above.
             if pinched.is_none() {
-            if let (true, Some(pos)) = (down, pos) {
-                if row.contains(pos) {
-                    self.manager.hold_clip(index, true);
-                    response.request_focus();
-                    self.fetch_for(index, centre);
-                    if let Some(playback) = self.playback.as_mut() {
-                        playback.scrubbing = true;
-                        playback.drag = Some((along(pos), centre));
-                        playback.scrub = Some(centre);
-                        // The range the last drag read is not this drag's.
-                        playback.ahead = None;
-                        playback.awaiting = None;
+                if let (true, Some(pos)) = (down, pos) {
+                    if row.contains(pos) {
+                        self.manager.hold_clip(index, true);
+                        response.request_focus();
+                        self.fetch_for(index, centre);
+                        if let Some(playback) = self.playback.as_mut() {
+                            playback.scrubbing = true;
+                            playback.drag = Some((along(pos), centre));
+                            playback.scrub = Some(centre);
+                            // The range the last drag read is not this drag's.
+                            playback.ahead = None;
+                            playback.awaiting = None;
+                        }
                     }
                 }
-            }
             }
             return;
         }
@@ -1218,7 +1347,10 @@ impl XgViewApp {
     ///
     /// The calendar is not a width of the strip - it is a different picture of
     /// the recording - so it has its own control rather than the end of the
-    /// ladder.
+    /// ladder. Showing it changes nothing: the width is the one it was, the
+    /// events are the ones they were, and the recording has been playing all
+    /// along. Coming back is therefore the same non-change, which is what makes
+    /// the button a look at the dates rather than a move.
     pub(super) fn toggle_calendar(&mut self) {
         let Some(playback) = self.playback.as_mut() else {
             return;
@@ -1227,14 +1359,19 @@ impl XgViewApp {
         match playback.timeline {
             Timeline::Span => {
                 playback.timeline = Timeline::Days;
+                // Twenty-one days do not fit on a phone, so the row is slid: it
+                // opens on the day the picture is on rather than on whichever
+                // end the last look left it at.
+                playback.days_follow = true;
                 self.read_days(index);
             }
+            // Back to the strip exactly as it was left: nothing to restore,
+            // because nothing was changed to show the dates. A pick that is
+            // still being read is dropped with it - the button that showed the
+            // calendar is the same one that leaves it.
             Timeline::Days => {
-                // Back to a day's width, which is what "the day I was looking
-                // at" means when the strip returns - and a day's width needs a
-                // day of list, which the calendar may not have read.
                 playback.timeline = Timeline::Span;
-                self.set_zoom(*ZOOMS.last().expect("a ladder of widths"));
+                playback.to_day = None;
             }
         }
     }
@@ -1407,25 +1544,45 @@ impl XgViewApp {
 
     /// Goes to a day the calendar shows.
     ///
-    /// The day's own segment list is read first: what is held is an hour around
-    /// where the viewer was, and a seek can only land where the list reaches.
-    /// When the answer arrives the strip moves to that day and the picture
-    /// follows - see [`Self::segments_arrived`].
-    fn pick_day(&mut self, index: usize, at: i64) {
+    /// **The time of day is kept**: a date is a place in the recording, and a
+    /// viewer picking one is asking for the same moment a day earlier or later -
+    /// the hour, the minute, the second they were watching. Every day's start is
+    /// found by the same walk through the local clock, so the distance into one
+    /// day is the same time of day in another.
+    ///
+    /// The day the picture is already on is not a move at all: it is the way out
+    /// of the calendar, and it leaves the strip showing what it was showing.
+    ///
+    /// Any other day is read before it is gone to - what is held is an hour
+    /// around where the viewer was, and a seek can only land where the list
+    /// reaches - and the strip moves there when the answer arrives. See
+    /// [`Self::segments_arrived`].
+    fn pick_day(&mut self, index: usize, day: &Day) {
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
         if playback.to_day.is_some() {
             return;
         }
+        let now = self.centre_of(playback);
+        let Some(at) = day_target(&local_at, &playback.days, now, day) else {
+            // The date already showing: back to the strip, with nothing asked of
+            // the box and nothing moved.
+            tracing::debug!(target: "xgview::app", index, "the day already showing");
+            if let Some(playback) = self.playback.as_mut() {
+                playback.timeline = Timeline::Span;
+            }
+            return;
+        };
         let source = playback.source.clone();
         tracing::debug!(target: "xgview::app", index, at, "going to a day");
         if let Some(playback) = self.playback.as_mut() {
             playback.to_day = Some(at);
         }
-        // The whole day, and an hour either side of it: the strip that follows
-        // shows a day's width around the moment, and a day is not always a day.
-        start_segments(&self.handle, &self.events_tx, index, source, at - 3600, at + 90_000);
+        // The whole day, and an hour before it: the strip that follows keeps the
+        // width it had, and a day is not always a day. The moment asked for is
+        // somewhere in it - `now - here` is at most the length of a day.
+        start_segments(&self.handle, &self.events_tx, index, source, day.start - 3600, day.start + 90_000);
     }
 
     /// Reads the segment list around a moment the list does not reach.
@@ -1544,6 +1701,11 @@ impl XgViewApp {
             // rather than the cursor waiting for a moment that will never come.
             playback.to_seek = None;
             playback.pending = None;
+            if picked.is_some() {
+                // A day with nothing on it: the calendar stays where it is and
+                // says so, rather than reading as a press that missed.
+                self.flash(monitor_i18n::tr("toast-no-recording"), ToastKind::Error);
+            }
             return;
         }
         playback.segments.extend(segments);
@@ -1564,15 +1726,19 @@ impl XgViewApp {
             }
         }
         // A day was picked, and this is the list that reaches it: the strip
-        // becomes that day, and the picture goes to its first moment.
+        // becomes that day, and the picture goes to the moment asked for.
         if let Some(at) = picked {
-            if playback.segments.iter().any(|segment| segment.start <= at && at < segment.end) {
+            // The day's list reaches the moment asked for: the strip goes there
+            // at the width it had, and the picture to that moment - or to the
+            // nearest recorded one, when the recording has a hole where that
+            // time of day used to be.
+            if let Some(target) = nearest(&stretches(&playback.segments), at) {
                 playback.timeline = Timeline::Span;
-                playback.zoom = *ZOOMS.last().expect("a ladder of widths");
-                self.seek(at);
-                // The strip is centred on the moment it goes to, so half of it
-                // is the day before the one that was picked - which was not part
-                // of that read.
+                self.seek(target);
+                // The marks are the new day's, and the strip is centred on the
+                // moment it went to, so half of it is the day before - which was
+                // not part of this read either.
+                self.read_events(index);
                 self.read_older(index);
             }
             return;
@@ -1854,6 +2020,73 @@ pub(super) const STEP: i64 = 10;
 /// on it, and few enough that a band is still a target on a strip this short.
 const DAYS: usize = 21;
 
+/// How far a day's button is inset from the row's edges, and how much of a gap
+/// is left between two of them.
+///
+/// The row is `tilebar::TIMELINE_ROW` deep, so a button is that less twice the
+/// inset: deep enough to read a date in, and still a row of buttons rather than
+/// a bar with marks on it.
+const DAY_PAD: f32 = 7.0;
+/// See [`DAY_PAD`].
+const DAY_GAP: f32 = 3.0;
+/// The size of a day's name.
+const DAY_SIZE: f32 = 10.0;
+
+/// How far a finger may move on the calendar and still be a press rather than a
+/// slide. A few points, which is what a touch screen's own slop is: below it a
+/// finger that meant to press has not moved, and above it one that meant to
+/// slide has.
+const DAY_SLOP: f32 = 4.0;
+
+/// The moment on a picked day whose clock reads what the moment on screen does.
+///
+/// The distance into the day is added as seconds, which is right on every day
+/// that is 86 400 of them and an hour out on the two that are not: a clock that
+/// goes back at two in the morning makes the same distance land at half past one,
+/// and one that goes forward makes it land at half past three. So the clock is
+/// read at the answer and the difference taken out - **once**, because an hour is
+/// all a day can be out by, and because a moment a clock skipped has no moment of
+/// its own to be taken to.
+///
+/// A platform with no clock falls back to the distance in seconds, which is what
+/// a day that is a day long wants anyway.
+fn same_clock(clock: &dyn Fn(i64) -> Option<LocalTime>, picked: &Day, now: i64, here: i64) -> i64 {
+    let at = picked.start + (now - here);
+    let seconds = |local: LocalTime| {
+        local.hour as i64 * 3600 + local.minute as i64 * 60 + local.second as i64
+    };
+    let (Some(want), Some(got)) = (clock(now), clock(at)) else {
+        return at;
+    };
+    at + (seconds(want) - seconds(got))
+}
+
+/// The moment a picked day is asked for: the same time of day as the moment on
+/// screen.
+///
+/// The day that moment is in comes from the starts the calendar holds, and the
+/// distance into it is carried to the picked day - see [`same_clock`], which is
+/// where the hour a clock gains or loses is taken out. That works because every
+/// day's start is found by the same walk through the local clock, which lands on
+/// the same second of the hour each day: `now - here` is therefore a time of day
+/// and not an offset from a midnight that was never found.
+///
+/// `None` when the two are the same day: picking the date already showing is the
+/// way out of the calendar, not a seek.
+fn day_target(
+    clock: &dyn Fn(i64) -> Option<LocalTime>,
+    days: &[Day],
+    now: i64,
+    picked: &Day,
+) -> Option<i64> {
+    let here = days
+        .iter()
+        .rev()
+        .find(|day| day.start <= now)
+        .map_or(now, |day| day.start);
+    (picked.start != here).then(|| same_clock(clock, picked, now, here))
+}
+
 /// The days a calendar shows: `days` of them, oldest first, ending with the day
 /// `now` falls in.
 ///
@@ -1909,21 +2142,51 @@ fn calendar(
     out.split_off(skip)
 }
 
-/// The day a point on the strip is over.
-fn day_at(row: Rect, days: &[Day], pos: egui::Pos2) -> Option<&Day> {
-    let horizontal = row.width() > row.height();
-    let length = if horizontal { row.width() } else { row.height() };
-    let shown = days_across(length, days.len());
+/// How wide a day's button is on this row, and how long the whole run of them is.
+///
+/// A row shows as many days as fit at the plan's 44 points each, so the buttons
+/// fill it exactly when they do. When they do not, the run is longer than the
+/// row - which is what there is to slide.
+fn day_metrics(row: Rect, days: usize) -> (f32, f32) {
+    let length = if row.width() > row.height() { row.width() } else { row.height() };
+    let shown = days_across(length, days);
     if shown == 0 {
+        return (0.0, 0.0);
+    }
+    let each = length / shown as f32;
+    (each, each * days as f32)
+}
+
+/// Where the calendar can be slid to: from its first day to its last, and no
+/// further than the row shows. A row that holds every day does not move.
+fn day_scroll_to(scroll: f32, total: f32, length: f32) -> f32 {
+    scroll.clamp(0.0, (total - length).max(0.0))
+}
+
+/// How far along the row a point is, in points from the first day's edge - the
+/// axis the days are laid out on, which is the screen's x for a picture as it
+/// arrives and its y for one drawn turned.
+fn day_along(row: Rect, pos: egui::Pos2) -> f32 {
+    if row.width() > row.height() {
+        pos.x - row.left()
+    } else {
+        pos.y - row.top()
+    }
+}
+
+/// The day under a point on a calendar slid by `scroll`, `each` points a day.
+///
+/// Held to the run of them: a point on the row's very last pixel is a fraction
+/// of a day past the last one, and it is the last one the finger is over.
+fn day_at(row: Rect, days: &[Day], pos: egui::Pos2, scroll: f32, each: f32) -> Option<&Day> {
+    if each <= 0.0 {
         return None;
     }
-    let along = if horizontal {
-        (pos.x - row.left()) / row.width().max(1.0)
-    } else {
-        (pos.y - row.top()) / row.height().max(1.0)
-    };
-    let index = (along * shown as f32).floor().max(0.0) as usize;
-    days[days.len() - shown..].get(index.min(shown - 1))
+    let index = ((day_along(row, pos) + scroll) / each).floor();
+    if index < 0.0 {
+        return None;
+    }
+    days.get((index as usize).min(days.len().saturating_sub(1)))
 }
 
 /// Draws `text` centred on `spot`, turned a quarter turn clockwise when
@@ -2665,8 +2928,106 @@ mod tests {
         assert!(calendar(&|_| None, 86_400 * 10, &HashSet::new(), 3).is_empty());
     }
 
-    /// A day is a touch target: the strip shows as many as fit at the plan's 44
-    /// points each, the newest first, and never fewer than one.
+    /// A clock whose every day is 86400 seconds, which is what most of them are.
+    fn plain_clock(unix: i64) -> Option<LocalTime> {
+        Some(LocalTime {
+            year: 2026,
+            month: 11,
+            day: 3,
+            weekday: 0,
+            hour: (unix.div_euclid(3600) % 24) as u8,
+            minute: (unix.div_euclid(60) % 60) as u8,
+            second: unix.rem_euclid(60) as u8,
+        })
+    }
+
+    /// A picked day keeps the time of day: the hour, the minute and the second
+    /// the viewer was watching, on another date.
+    #[test]
+    fn a_picked_day_keeps_the_time_of_day() {
+        // Starts a minute past midnight, which is where the walk through the
+        // clock finds them - the same minute every day.
+        let day = |start: i64| Day { start, label: String::new(), recorded: true };
+        let days = vec![day(60), day(86_400 + 60), day(2 * 86_400 + 60)];
+        // Half past two in the afternoon of the middle day.
+        let now = 86_400 + 60 + 14 * 3600 + 30 * 60;
+        assert_eq!(day_target(&plain_clock, &days, now, &days[0]), Some(60 + 14 * 3600 + 30 * 60));
+        assert_eq!(
+            day_target(&plain_clock, &days, now, &days[2]),
+            Some(2 * 86_400 + 60 + 14 * 3600 + 30 * 60)
+        );
+        // The day it is already on is the way out, not a move.
+        assert_eq!(day_target(&plain_clock, &days, now, &days[1]), None);
+        // A moment before every start the calendar holds has no day of its own:
+        // the picked day's start is the answer, carried to the clock the moment
+        // reads - ten seconds past midnight, whichever day that is on.
+        assert_eq!(day_target(&plain_clock, &days, 10, &days[1]), Some(86_400 + 10));
+    }
+
+    /// A day that gains an hour keeps the clock, not the distance: at the end of
+    /// daylight saving the same distance into the day lands an hour early, which
+    /// is what a pick on that date came back as.
+    #[test]
+    fn a_day_that_gains_an_hour_keeps_the_clock() {
+        // 10/31 starts at zero and is a day long; 11/01 starts at 86400 and is
+        // twenty-five hours long - at two in the morning its clock goes back to
+        // one, so the hour from one to two happens twice; 11/02 starts where it
+        // ends.
+        const NOV_1: i64 = 86_400;
+        const NOV_2: i64 = 86_400 + 90_000;
+        let clock = |unix: i64| {
+            let local = if unix < NOV_1 {
+                unix
+            } else if unix < NOV_2 {
+                let into = unix - NOV_1;
+                if into < 7200 {
+                    into
+                } else {
+                    into - 3600
+                }
+            } else {
+                unix - NOV_2
+            };
+            Some(LocalTime {
+                year: 2026,
+                month: 11,
+                day: 1,
+                weekday: 0,
+                hour: (local.div_euclid(3600) % 24) as u8,
+                minute: (local.div_euclid(60) % 60) as u8,
+                second: local.rem_euclid(60) as u8,
+            })
+        };
+        let day = |start: i64| Day { start, label: String::new(), recorded: true };
+        let days = vec![day(0), day(NOV_1), day(NOV_2)];
+
+        // Half past two in the afternoon of 10/31, carried to 11/01: the clock
+        // reads 14:30 there too, which is an hour and a half past the distance
+        // in seconds.
+        let now = 14 * 3600 + 30 * 60;
+        let at = day_target(&clock, &days, now, &days[1]).expect("another day");
+        assert_eq!(clock(at).map(|local| (local.hour, local.minute)), Some((14, 30)));
+        assert_eq!(at, NOV_1 + 15 * 3600 + 30 * 60, "the hour the day gained is passed over");
+
+        // And back the other way: from 11/01 at 14:30 to 11/02, which is a day
+        // long again - the hour has to be taken off rather than added.
+        let back = day_target(&clock, &days, at, &days[2]).expect("another day");
+        assert_eq!(clock(back).map(|local| (local.hour, local.minute)), Some((14, 30)));
+        assert_eq!(back, NOV_2 + 14 * 3600 + 30 * 60);
+    }
+
+    /// A day's button is deep enough for its name: the row less the two insets
+    /// has to be deeper than the type that goes in it.
+    #[test]
+    fn a_day_button_holds_its_name() {
+        let band = crate::tilebar::TIMELINE_ROW - 2.0 * DAY_PAD;
+        assert!(band > DAY_SIZE * 1.4, "a {band}pt button for {DAY_SIZE}pt type");
+        assert!(DAY_GAP > 0.0, "and a gap, or two days read as one");
+    }
+
+    /// A day is a touch target: the row shows as many as fit at the plan's 44
+    /// points each, and the days it cannot hold are a slide away rather than
+    /// lost.
     #[test]
     fn the_calendar_shows_as_many_days_as_fit() {
         assert_eq!(days_across(1100.0, 21), 21, "room for all of them");
@@ -2678,13 +3039,25 @@ mod tests {
             .map(|index| Day { start: index, label: format!("11/0{index}"), recorded: true })
             .collect();
         let row = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(210.0, 48.0));
-        assert_eq!(day_at(row, &days, egui::pos2(10.0, 24.0)).map(|day| day.start), Some(0));
-        assert_eq!(day_at(row, &days, egui::pos2(100.0, 24.0)).map(|day| day.start), Some(1));
-        assert_eq!(day_at(row, &days, egui::pos2(205.0, 24.0)).map(|day| day.start), Some(2));
-        // A strip too short for all of them shows the newest.
+        let (each, total) = day_metrics(row, days.len());
+        assert_eq!((each, total), (70.0, 210.0), "three days fill the row exactly");
+        let at = |x: f32, scroll: f32| day_at(row, &days, egui::pos2(x, 24.0), scroll, each);
+        assert_eq!(at(10.0, 0.0).map(|day| day.start), Some(0));
+        assert_eq!(at(100.0, 0.0).map(|day| day.start), Some(1));
+        assert_eq!(at(205.0, 0.0).map(|day| day.start), Some(2));
+        assert_eq!(day_scroll_to(30.0, total, 210.0), 0.0, "a row that holds them all does not slide");
+        assert!(day_at(row, &[], egui::pos2(10.0, 24.0), 0.0, each).is_none());
+
+        // A row too short for all of them is a window on the run: two days
+        // across, and the third a slide of one day away.
         let narrow = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 48.0));
-        assert_eq!(day_at(narrow, &days, egui::pos2(10.0, 24.0)).map(|day| day.start), Some(1));
-        assert!(day_at(row, &[], egui::pos2(10.0, 24.0)).is_none());
+        let (each, total) = day_metrics(narrow, days.len());
+        assert_eq!(each, 50.0, "two days across a hundred points");
+        assert_eq!(day_scroll_to(f32::MAX, total, 100.0), 50.0, "one day's worth of slide");
+        assert_eq!(day_scroll_to(-10.0, total, 100.0), 0.0, "and no further back than the first");
+        let at = |x: f32| day_at(narrow, &days, egui::pos2(x, 24.0), 50.0, each);
+        assert_eq!(at(10.0).map(|day| day.start), Some(1));
+        assert_eq!(at(90.0).map(|day| day.start), Some(2));
     }
 
     /// A picked day is the whole day. The strip is anchored on the day's end,

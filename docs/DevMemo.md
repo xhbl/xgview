@@ -4582,3 +4582,90 @@ One thing outside the strip came out of the same reading: the events URL had a
 run of thirteen spaces in it, left by a wrapped line. The URL parser
 percent-encodes them and the box parses `before=123   ` as a number, so it
 worked - which is why nobody had noticed.
+
+## 61. The calendar becomes a place to go
+
+*Landed 2026-11-03, in 2.1.53.*
+
+The date button used to be a mode. Showing the calendar kept the width, but
+leaving it set the strip to a day wide, and picking a date went to that day's
+**first moment** at that width - so the calendar was a different timeline rather
+than a look at the dates, and a viewer who only wanted to see which night it was
+lost the hour, the minute and the width they had.
+
+**Showing it now changes nothing at all.** The width is the one it was, the
+events are the ones they were, the recording has been playing the whole time.
+Leaving is therefore the same non-change, which is what makes the button a look
+rather than a move - and a pick still being read is dropped with it, because the
+button that showed the calendar is the one that leaves it.
+
+**The date the picture is on is the way out.** A press on it asks the box
+nothing and moves nothing: it returns to the strip exactly as it was left.
+
+**Any other date keeps the time of day**, which is the part worth writing down.
+`day_target` is `picked.start + (now - here)`, where `here` is the start of the
+day the picture is in. That is a time of day and not an offset from a midnight
+that was never found, because every day's start comes from the same walk through
+the local clock - an hour at a time from *now*, so the walk lands on the same
+second of the hour every day, and the two errors cancel. A day that is 23 or 25
+hours long moves the walk and not the arithmetic.
+
+**The moment may not exist.** A camera that records on motion has holes, and
+"half past two yesterday" may be one of them; `nearest` takes the seek to the
+closest recorded moment, which is the rule a scrub landing in a hole already
+follows. A day with nothing recorded at all stays on the calendar and says so,
+rather than returning to a strip that would look like a press that missed.
+
+**And the width is not touched.** A date is a place, not a width: the strip that
+comes back is the strip that left, and the moment it goes to is centred in it.
+
+**The row is a row of buttons now**, not a band with marks: 38 points deep in the
+52-point row, three apart, filled where the camera recorded and `TRACK` where it
+did not, with the day the picture is on ringed in `FOCUS`. That ring is not
+decoration - a calendar with no mark for "where you are" cannot answer "which
+date am I on", and the same-date press depends on the answer being visible. The
+name sits inside the button rather than under it, which is what makes it read as
+something to press.
+
+**And a row that does not fit slides.** Twenty-one days at the plan's 44 points
+each is 924 points, and a phone's row is 360: eight days, and the other thirteen
+were not there at all. The days are laid out end to end now and the row is a
+window on them - `days_scroll` in points, clamped so it cannot go past either
+end, and the painter clipped to the row so a half-visible button is cut by its
+edge rather than drawn over what is beside it.
+
+Three things had to be decided with it:
+
+* **A press that moves is a slide, and one that does not is a pick.** The two
+  cannot be told apart until the finger lifts, so a press alone picks nothing and
+  the day is taken on release - with a slop of four points, which is a touch
+  screen's own.
+* **A finger that leaves the row keeps sliding it.** The row is a window on the
+  days and the finger is still pointing at a place in them; stopping at the edge
+  would make the last day reachable only by aiming at the very edge.
+* **The arrows slide it a day a press.** A remote has no finger, and a day it
+  cannot reach is a day that is not there. A day a press rather than a day a
+  frame, because twenty-one days is twenty-one presses and not a flood.
+
+**And it opens on the day the picture is on.** A calendar slid away from that day
+cannot answer "which date am I on", and the ring is the answer - so showing it
+brings that day into the middle, once, and then leaves the row wherever the
+viewer puts it. `days_follow` is the flag; it waits for the list if the days have
+not arrived yet.
+
+**A day that gains an hour put the pick an hour early.** Found on the box on
+11/03: picking 11/01 landed at 13:30 for a 14:30 moment, and every other date was
+right. The distance into the day was added as *seconds*, and 11/01 is twenty-five
+hours long - its clock goes back at two in the morning - so the same distance
+lands an hour early; picking *from* that date lands an hour late, which is the
+same fault seen the other way and was not noticed because nobody had tried it.
+
+`same_clock` reads the clock at the answer now and takes the difference out, once:
+an hour is all a day can be out by, because twenty-one days hold at most one
+transition, and a moment a clock skipped altogether has no moment of its own to be
+taken to - the correction puts it an hour before the gap, which is the nearest
+thing that exists. A platform with no clock falls back to the distance in seconds,
+which is what a day that is a day long wants anyway.
+
+The test walks a twenty-five-hour day: 14:30 on 10/31 is 15:30 past 11/01's start
+and reads 14:30 there, and carrying that back to 11/02 takes the hour off again.
