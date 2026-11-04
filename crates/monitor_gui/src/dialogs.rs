@@ -1376,8 +1376,13 @@ fn add_offer(config: &AppConfig, camera: &CameraSource) -> AddOffer {
 /// The fields an import writes, compared for [`add_offer`].
 ///
 /// The ones [`AppConfig::upsert_camera`] keeps from the camera already there -
-/// id, origin, enabled, transport - are left out: an import never touches
-/// them, so a difference there is no reason to offer a refresh.
+/// id, origin, enabled, transport, aspect, tags - are left out: an import never
+/// touches them, so a difference there is no reason to offer a refresh.
+///
+/// `frigate` is here for the opposite reason: only an import writes it, and a
+/// configuration from before 2.1 has none. Left out, re-importing an older
+/// Frigate camera reads as "already added", the button that would fill it in is
+/// greyed out, and that camera never gets its recordings button.
 fn same_settings(a: &CameraSource, b: &CameraSource) -> bool {
     a.name == b.name
         && a.rtsp_main == b.rtsp_main
@@ -1386,6 +1391,7 @@ fn same_settings(a: &CameraSource, b: &CameraSource) -> bool {
         && a.password == b.password
         && a.main_profile == b.main_profile
         && a.sub_profile == b.sub_profile
+        && a.frigate == b.frigate
 }
 
 fn synology_tab(
@@ -1954,4 +1960,32 @@ fn status_lines(ui: &mut egui::Ui, state: &DiscoveryUi, tab: Tab) {
 
 fn grid_spinner(ui: &mut egui::Ui) {
     ui.add(egui::Spinner::new().size(16.0));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A configuration from 1.x has no `frigate` on a camera a Frigate import
+    /// brought in. Every field `add_offer` used to compare is unchanged, so a
+    /// re-import was offered as `Added` - whose button is disabled - and the
+    /// information playback needs was never written.
+    #[test]
+    fn an_older_frigate_camera_is_offered_as_an_update() {
+        let old = CameraSource::new("front_door", "rtsp://192.168.17.88:8554/front_door");
+        let mut imported = old.clone();
+        imported.frigate = Some(FrigateOrigin {
+            base_url: "http://192.168.17.88:5000".into(),
+            camera: "front_door".into(),
+        });
+
+        let mut config = AppConfig::default();
+        config.cameras.push(old);
+        assert_eq!(add_offer(&config, &imported), AddOffer::Update);
+
+        // Once it has been refreshed, importing the same server again has
+        // nothing left to change: the button goes back to the disabled "Added".
+        config.cameras[0] = imported.clone();
+        assert_eq!(add_offer(&config, &imported), AddOffer::Added);
+    }
 }

@@ -3,6 +3,84 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 2.1.66
+
+Changes since 1.5.118. **Frigate recordings can be watched on the wall, and the
+timeline is a remote you can drive.** Live viewing is unchanged.
+
+### Watching a recording
+
+- **A Frigate camera can play back its recordings.** A tile that used to show
+  only the live picture can now open the camera's history at a chosen moment,
+  and go back to live when you are done.
+- **Cameras imported by 1.x need one re-import before playback appears.** Older
+  configurations do not say which Frigate camera an entry belongs to, so the
+  recordings button is not offered for them. Re-import the server once from the
+  Frigate page and press **Update**; the camera is refreshed in place, keeping
+  its name, aspect ratio and tags, with no duplicate added.
+- **The picture follows the timeline.** Hold the strip to stop the picture, drag
+  to the moment you want and let go to play from there. A short jump comes back
+  almost at once, and the picture stays on the screen while a far-off moment is
+  being fetched.
+- **A recording has its own bar**: play and pause, speed, jumps to the previous
+  and next event, ten seconds back or forward, timeline zoom, the calendar,
+  picture fit, sound and the way out. On a phone held upright the controls wrap
+  onto two rows.
+- **Playback carries on past a gap.** Where a camera stopped recording, the
+  picture picks up at the next stretch instead of stopping or reporting a broken
+  stream. Pressing play after the end means "keep going", not "back to today".
+- **A recording that breaks resumes at the picture it had reached**, rather than
+  jumping back to the beginning of the stretch.
+- **Speed is 1x, 2x, 4x or 8x**, and the number on the control is the speed the
+  picture is really playing at. Only 1x carries sound; faster playback is silent.
+- **The tile's corners describe a recording**: a triangle while it plays and
+  pause bars while it is still, the word `Playback`, the speed when it is not
+  1x, the server the recording comes from, and the moment the picture is of. A
+  rate that has not been measured yet is a dash instead of a zero.
+
+### The timeline and the calendar
+
+- **The strip slides under a cursor that stays in the middle.** Recorded
+  stretches draw as one band rather than a row of dashes, events are marked on
+  the same band, the times sit above the strip and the moment under the cursor
+  below it.
+- **The strip has six levels**, from two minutes to a whole day and then the
+  calendar. Zoom with the control, a right press on the strip or two fingers;
+  both sides of the strip keep filling in as it widens, so looking back is no
+  longer limited to the first hour.
+- **The calendar is a row of days you can go to**, with keys, mouse or remote.
+  Its days are counted in the viewer's own time zone: a recording made late on
+  the 31st is no longer missing from the list.
+- **Dragging into history the viewer has not read yet no longer leaves half the
+  strip blank** or shows a "stream failed" message over a working camera.
+- **Controls with nothing beyond them dim** - the zoom keys at either end of the
+  strip - and the keyboard focus skips a dimmed control instead of stopping on
+  it.
+
+### Keys, pointer and the wall
+
+- **Down puts the remote on the timeline**, Left and Right walk it, faster while
+  held, and Up hands the keys back to the button they came from. Mouse and touch
+  leave no focus ring behind; the ring the keys draw is the same one the rest of
+  the bar uses, and it returns to the button it left.
+- **Esc and Back close a panel without waking the chrome UI** that full screen
+  hides, and handing focus back up from the timeline does not bring it up
+  either.
+- **Double-clicking a tile to magnify it works again in full screen**, including
+  after returning to the grid.
+- **The date button's text turns with the picture** in portrait, and the date
+  strip can be driven by keys and mouse as well as a finger.
+
+### Fixed
+
+- **Going from 8x back to 1x no longer freezes the picture**, and dragging back
+  to replay after a fast playback really plays at the speed shown on the
+  control.
+- **The OSD marks line up with their text** on both Chinese and English lines,
+  and the play and pause marks are the same size as the live dot.
+- **A quick series of drags, a seek into a gap and a dropped connection no
+  longer leave the picture stuck**; playback picks up where it left off.
+
 ## 1.5.118
 
 Changes since 1.5.77. **Nothing on screen changes: this release is the code

@@ -15,6 +15,9 @@ paging beyond that. No cloud, no account, MIT licensed.
 - **One wall for every camera you have.** Import a whole server from Frigate,
   go2rtc or Synology Surveillance Station, or add ONVIF, RTSP, MJPEG and
   WebSocket streams directly.
+- **Look back, not just live.** Frigate recordings open on the wall: scrub a
+  timeline, pick a day, jump between events and play at up to 8x, with the
+  moment the picture is of shown in its corner.
 - **Cheap on the network and the CPU.** The grid pulls sub streams and
   suspends the pages you are not looking at - sockets and decoders alike; only
   a magnified tile pulls its main stream, or one pinned to it from the Cameras
@@ -25,12 +28,12 @@ paging beyond that. No cloud, no account, MIT licensed.
 
 **Download:** [latest release](../../releases/latest)
 
-| Platform                           | File                                                                                                                   |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Android / Android TV (arm64, 8.1+) | [`xgview-1.5.118-android-arm64-v8a.apk`](../../releases/download/xgview-v1.5.118/xgview-1.5.118-android-arm64-v8a.apk) |
-| Windows x64                        | [`xgview-1.5.118-windows-x86_64.zip`](../../releases/download/xgview-v1.5.118/xgview-1.5.118-windows-x86_64.zip)       |
-| Linux x64                          | [`xgview-1.5.118-linux-x86_64.tar.gz`](../../releases/download/xgview-v1.5.118/xgview-1.5.118-linux-x86_64.tar.gz)     |
-| macOS (universal)                  | [`xgview-1.5.118-macos-universal.zip`](../../releases/download/xgview-v1.5.118/xgview-1.5.118-macos-universal.zip)     |
+| Platform                           | File                                                                                                                |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Android / Android TV (arm64, 8.1+) | [`xgview-2.1.66-android-arm64-v8a.apk`](../../releases/download/xgview-v2.1.66/xgview-2.1.66-android-arm64-v8a.apk) |
+| Windows x64                        | [`xgview-2.1.66-windows-x86_64.zip`](../../releases/download/xgview-v2.1.66/xgview-2.1.66-windows-x86_64.zip)       |
+| Linux x64                          | [`xgview-2.1.66-linux-x86_64.tar.gz`](../../releases/download/xgview-v2.1.66/xgview-2.1.66-linux-x86_64.tar.gz)     |
+| macOS (universal)                  | [`xgview-2.1.66-macos-universal.zip`](../../releases/download/xgview-v2.1.66/xgview-2.1.66-macos-universal.zip)     |
 
 **Note: This is a personal project, shared as-is, with no warranty.** It was developed with **AI assistance** under my direction and testing; please review the code before using
 it in sensitive setups.
@@ -59,11 +62,13 @@ it in sensitive setups.
   - [Linux: a minimal kiosk machine](#linux-a-minimal-kiosk-machine)
   - [macOS: what the device needs](#macos-what-the-device-needs)
 - [Getting started](#getting-started)
+  - [Where the settings live](#where-the-settings-live)
 - [Usage](#usage)
   - [The wall at a glance](#the-wall-at-a-glance)
   - [Grid layouts and paging](#grid-layouts-and-paging)
   - [Portrait mode](#portrait-mode)
   - [Zooming a camera](#zooming-a-camera)
+  - [Watching recordings](#watching-recordings)
   - [Keyboard and remote control](#keyboard-and-remote-control)
     - [Remote control (DPAD)](#remote-control-dpad)
     - [Touch screen](#touch-screen)
@@ -132,6 +137,7 @@ it in sensitive setups.
 | Toolbar             | An on-screen bar for the layout, paging, full screen, settings and adding cameras, plus the orientation switch where the device can stand upright; usable with a mouse, touch or a remote                                                                                                                                                                                        |
 | Discovery           | ONVIF WS-Discovery multicast probe, cross-subnet unicast scan, and a TCP 554/80/8000 fallback probe, followed by `GetProfiles` / `GetStreamUri`                                                                                                                                                                                                                                  |
 | Server import       | Import every camera in one go from Synology Surveillance Station (`SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera`), Frigate (its API, each camera's main and sub stream paired by measured resolution) or a standalone go2rtc (`/api/streams`)                                                                                                                               |
+| Recording playback  | Frigate recordings play in the magnified viewport: a timeline with recorded stretches and events, six zoom levels down to a calendar of days, play / pause, 1x-8x speed, ten-second and event jumps, sound at 1x, and corners that describe the moment on screen; playback carries on past gaps in the recording |
 | Cameras             | Add, edit, reorder and remove cameras; a per-camera display aspect, held separately for landscape and portrait, a magnified-view fit of its own (set from that view's bar), a connection switch - `AUTO`/`RTSP`/`MSE` where a WebSocket address exists, `TCP`/`UDP` otherwise - and a stream switch that pins that camera's tile to its main stream |
 | Groups              | Named camera groups, each with its own cameras, a grid and paging of its own per orientation, switched from the settings; the same camera may sit in more than one                                                                                                                                                                                                               |
 | Start on boot       | A Windows `HKCU\...\Run` registry entry (or a scheduled task), an XDG autostart entry on Linux, a LaunchAgent on macOS, and an Android `BOOT_COMPLETED` receiver                                                                                                                                                                                                                 |
@@ -424,6 +430,52 @@ stays; turned, or in landscape, it is asked for. The quarter turn is its first
 control upright: the picture is drawn as the camera sends it - a landscape stream
 keeps its letterbox - until the turn fills the screen, and the choice is one for
 the whole configuration rather than per camera.
+
+### Watching recordings
+
+A camera imported from Frigate can show what it recorded, not only what it is
+seeing now. **Magnify its tile first** - a recording is played in the one
+viewport that fills the screen - and press the *recordings* button, the last
+control on that picture's bar. Cameras from other sources have nothing to play
+back, so the button is not shown for them; the *live* button at the other end of
+the recording's own bar brings the camera back, and `BACK` / `Esc` leaves both
+the recording and the magnified view.
+
+**Upgrading from 1.x.** Cameras imported by an older version do not carry the
+Frigate camera name that playback needs, so the recordings button is not shown
+for them. Re-import the server once from the *add devices* window's Frigate
+page and press **Update** on each of those cameras: the entry is refreshed in
+place, its name, aspect ratio and tags kept, and no duplicate is added. A later
+import of an unchanged server simply shows **Added** for them.
+
+The picture comes with a timeline and a bar of its own:
+
+- **The strip** draws the stretches that were recorded as one band, with events
+  marked on it, the times above and the moment under the cursor below. Hold a
+  finger or the mouse on it to stop the picture, drag to the moment you want and
+  let go to play from there. Two fingers over the strip, a right press, or the
+  two zoom controls widen and narrow what it covers, from two minutes to a whole
+  day and then to a calendar of days.
+- **The bar** holds play / pause, the speed (`1x`, `2x`, `4x`, `8x`), the
+  previous and next event, ten seconds back and forward, the calendar, the
+  picture fit, the sound switch and *live*. On a phone held upright the controls
+  wrap onto two rows. Only `1x` carries sound; faster playback is silent.
+- **The calendar** is the widest level: a row of days with recordings, counted
+  in the machine's own time zone, so an evening recording does not land on the
+  next day's list. Walk it with the arrows, a finger or the mouse, and press the
+  confirm key to go to that day.
+- **A gap is not the end.** Where a camera stopped recording, playback carries
+  on at the next stretch instead of stopping or reporting a failed stream; if
+  the picture stops at the end of the recording, play means "keep going" rather
+  than a jump back to today.
+
+The timeline takes the remote as well. `Down` puts the focus on the strip,
+`Left` and `Right` walk it (faster while held) and `Up` hands the keys back to
+the control they came from; greyed controls are skipped, and a mouse or a touch
+leaves no focus ring behind. While a recording plays, the tile's corners name
+it: a play or pause mark, `Playback` and the speed, the Frigate server it comes
+from, and the moment the picture is of rather than the wall clock. A rate that
+has not been measured yet reads `—` instead of `0`.
 
 ### Keyboard and remote control
 
