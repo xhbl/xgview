@@ -1025,12 +1025,17 @@ impl XgViewApp {
                 );
             }
             if each >= 34.0 {
-                painter.text(
+                // Turned with the picture, like the times above the strip: a
+                // calendar on a picture drawn sideways runs down the screen, and
+                // a label written across it would be the one thing on that side
+                // of the wall that is not.
+                turned_text(
+                    &painter,
                     band.center(),
-                    egui::Align2::CENTER_CENTER,
-                    &day.label,
-                    egui::FontId::proportional(DAY_SIZE),
+                    day.label.clone(),
+                    DAY_SIZE,
                     theme::TEXT_BRIGHT,
+                    !horizontal,
                 );
             }
         }

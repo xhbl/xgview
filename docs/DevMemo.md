@@ -4943,3 +4943,9 @@ know, and only the ladder's ends are a fact this side can read before the press.
 row and in the walk**: a bar whose controls moved about as a recording played
 would be a bar nobody could aim at, and a walk that skipped them would leave the
 focus with nothing to own it.
+
+**And the names turn with the picture.** A calendar on a picture drawn turned runs
+down the screen, and its days are buttons as wide as the row is deep - a name
+written across one was the last thing on that side of the wall that did not turn,
+while the times above the strip already did. The names are `turned_text` now, like
+everything else on a turned row.
