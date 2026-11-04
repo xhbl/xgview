@@ -1740,7 +1740,18 @@ impl XgViewApp {
                 continue;
             }
             let index = event.index();
+            // A recording that reached a hole ends its session, and the picture
+            // carries on at the next stretch: the box stops the playlist there
+            // rather than serving what is past it. See
+            // [`XgViewApp::recording_stopped`].
+            let stopped = matches!(
+                &event,
+                StreamEvent::State { state: ConnectionState::Finished, .. }
+            );
             self.channels.entry(index).or_default().apply(event);
+            if stopped {
+                self.recording_stopped(index);
+            }
         }
 
         while let Ok(event) = self.events_rx.try_recv() {

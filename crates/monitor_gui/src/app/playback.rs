@@ -144,6 +144,35 @@ pub(super) struct Playback {
     pub(super) events: Vec<(i64, i64)>,
     /// Whether the event list is being read.
     pub(super) reading_events: bool,
+    /// What came of looking past the hole a recording stopped at. See
+    /// [`AfterHole`].
+    pub(super) after_hole: Option<AfterHole>,
+    /// The stretches of time the box has been asked about, in order and merged.
+    ///
+    /// The segment list is what has been *read*, not what has been recorded: a
+    /// list holding the 31st and today says nothing about the days between them.
+    /// So "the next stretch after this moment" is only an answer when the box
+    /// was asked about the time between - which is what this remembers.
+    pub(super) covered: Vec<(i64, i64)>,
+}
+
+/// What a recording that stopped at a hole is doing about it.
+///
+/// The box serves a playlist up to the first hole and stops there - the
+/// `#EXT-X-ENDLIST` lands after the last fragment before it - so the session
+/// ending is not the recording ending. What comes next is the beginning of the
+/// next stretch, and finding it is a read: the segment list held for the strip
+/// may not reach past the hole at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AfterHole {
+    /// A range is being read for what comes after this moment.
+    ///
+    /// The range is part of it because a hole can be longer than the day one
+    /// read covers: the next day is asked about from where the last answer
+    /// stopped, and the answer has to be recognised as that read's.
+    Looking { stop: i64, window: (i64, i64) },
+    /// It was read, and the recording has nothing after it: this is the end.
+    Nothing(i64),
 }
 
 /// What the timeline is showing.
@@ -410,6 +439,8 @@ impl XgViewApp {
             paused: false,
             events: Vec::new(),
             reading_events: false,
+            after_hole: None,
+            covered: Vec::new(),
         });
         // The bar's row has changed under the focus: the camera's controls are
         // gone and the recording's are here, and the place the focus was on means
@@ -424,29 +455,50 @@ impl XgViewApp {
         self.read_events(index);
     }
 
-    /// Holds the picture, lets it go, or starts it again.
+    /// Holds the picture, lets it go, or keeps it going.
     ///
     /// A hold is the session's own pause: it stops reading, so nothing is
     /// decoded and nothing is published, and the clock owes no time for the
     /// wait. A range that ran out has no session left to hold, so the same
-    /// press - which the control draws as **play**, see [`Self::playback_still`]
-    /// - starts it again instead.
+    /// press - which the control draws as **play**, see
+    /// [`Self::playback_still`] - carries the recording on past the hole it
+    /// stopped at, and starts it again only when there is nothing past it.
     pub(super) fn toggle_play(&mut self) {
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
         // A range that ran out has nothing to hold, and the control that offers
-        // a press offers it as **play**: what the press does is start the
-        // recording again, from where this session opened. It is the seek a
-        // step back makes - the session that reached the end is gone, so it is
-        // another range - and the rate the viewer chose is put back on it.
+        // a press offers it as **play**. What the press means is "keep going":
+        // the recording carries on at the next stretch, past the hole it
+        // stopped at. Only a recording with nothing after it - a look past the
+        // hole that found nothing - starts again, from where the viewer was
+        // watching. See [`AfterHole`] and [`restart_from`].
         if self.recording_ended() {
+            let stop = self.centre_of(playback);
+            let next = next_stretch(&playback.segments, &playback.covered, stop);
+            let looked = playback.after_hole;
             let opened = playback.opened;
+            if let Some(next) = next {
+                self.move_to(next);
+                tracing::debug!(target: "xgview::app", at = next, "the recording carries on");
+                return;
+            }
+            match looked {
+                // An answer is on its way, and this press is that answer's.
+                Some(AfterHole::Looking { .. }) => return,
+                // Looked, and there is nothing: the recording is over.
+                Some(AfterHole::Nothing(seen)) if seen == stop => {}
+                _ => {
+                    self.look_past_hole(stop);
+                    return;
+                }
+            }
+            let restart = restart_from(&playback.segments, opened, stop);
             if let Some(playback) = self.playback.as_mut() {
                 playback.paused = false;
             }
-            self.move_to(opened);
-            tracing::debug!(target: "xgview::app", at = opened, "the recording starts again");
+            self.move_to(restart);
+            tracing::debug!(target: "xgview::app", at = restart, "the recording starts again");
             return;
         }
         let Some(playback) = self.playback.as_mut() else {
@@ -456,6 +508,75 @@ impl XgViewApp {
         let (index, paused) = (playback.index, playback.paused);
         self.manager.hold_clip(index, paused);
         tracing::debug!(target: "xgview::app", index, paused, "playback held or let go");
+    }
+
+    /// The recording on this channel reached a hole, and carries on past it if
+    /// there is anything there.
+    ///
+    /// The box serves a playlist up to the first hole and stops: `#EXT-X-ENDLIST`
+    /// lands after the last fragment before it. So a session that finished is
+    /// not a recording that ended - the picture stops at the edge of a stretch
+    /// and the viewer expects the next one, not a frozen frame.
+    pub(super) fn recording_stopped(&mut self, index: usize) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        if playback.index != index {
+            return;
+        }
+        // A finger on the timeline is choosing where the picture goes, and a
+        // continue would take it somewhere else under the hand.
+        if playback.scrubbing {
+            return;
+        }
+        let stop = self.centre_of(playback);
+        // Looked past this moment already: the recording is over, and nothing
+        // is asked of the box again.
+        if playback.after_hole == Some(AfterHole::Nothing(stop)) {
+            return;
+        }
+        // A look is in flight, and this stop is the one it was made for.
+        if matches!(playback.after_hole, Some(AfterHole::Looking { .. })) {
+            return;
+        }
+        if let Some(next) = next_stretch(&playback.segments, &playback.covered, stop) {
+            tracing::debug!(target: "xgview::app", at = next, "the recording carries on past a hole");
+            self.move_to(next);
+            return;
+        }
+        self.look_past_hole(stop);
+    }
+
+    /// Reads the segment list past a hole, looking for where the recording
+    /// carries on.
+    ///
+    /// The list held for the strip may end at the hole itself - it was read
+    /// around the moment being watched - so the answer that says whether there
+    /// is anything after it is a read of its own.
+    fn look_past_hole(&mut self, stop: i64) {
+        self.look_from(stop, stop, stop + HOLE_LOOK);
+    }
+
+    /// Reads one day's segment list, looking for what comes after `stop`.
+    ///
+    /// From `from`, which is the stop itself the first time and the end of the
+    /// last answer after that: a hole longer than a day is looked past a day at
+    /// a time. See [`HOLE_LIMIT`].
+    fn look_from(&mut self, stop: i64, from: i64, to: i64) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        let index = playback.index;
+        let source = playback.source.clone();
+        if let Some(playback) = self.playback.as_mut() {
+            playback.after_hole = Some(AfterHole::Looking { stop, window: (from, to) });
+        }
+        tracing::debug!(target: "xgview::app", stop, from, to, "looking past a hole");
+        // From the stop itself the first time: the segments the answer holds are
+        // the ones that begin after it, and a read that began a second later
+        // would leave a second of time nobody has asked about - which is what
+        // the next question tests for. See [`covered_between`].
+        start_segments(&self.handle, &self.events_tx, index, source, from, to);
     }
 
     /// Whether the picture on the strip is standing still - held, or out of
@@ -1918,8 +2039,19 @@ impl XgViewApp {
             // The camera could not be asked. Nothing is marked, so the next
             // width the viewer chooses asks again - and a failed read is not
             // read as a stretch with nothing in it.
+            //
+            // A look past a hole is not answered either: it is forgotten rather
+            // than read as "nothing after the hole", so the next stop - or the
+            // next press - asks again.
+            if look_past(&playback.after_hole, from, to).is_some() {
+                playback.after_hole = None;
+            }
             return;
         };
+        // The box answered for this range: whether it held anything or not, the
+        // time in it is now known - and "asked, nothing there" is exactly what a
+        // hole is. See [`covered_between`].
+        cover(&mut playback.covered, from, to);
         if segments.is_empty() {
             if picked.is_none() {
                 // Nothing was recorded that far back. That is where the
@@ -1941,6 +2073,18 @@ impl XgViewApp {
             // rather than the cursor waiting for a moment that will never come.
             playback.to_seek = None;
             playback.pending = None;
+            // A look past a hole that found nothing. A day that held nothing is
+            // a hole longer than a day: the next day is asked about the same
+            // way, up to the limit where "after the hole" stops meaning
+            // anything. Otherwise this is the end of the recording, and a press
+            // from here starts it again.
+            if let Some(stop) = look_past(&playback.after_hole, from, to) {
+                playback.after_hole = Some(AfterHole::Nothing(stop));
+                if keep_looking(stop, from, to) {
+                    self.look_from(stop, to, to + HOLE_LOOK);
+                    return;
+                }
+            }
             if picked.is_some() {
                 // A day with nothing on it: the calendar stays where it is and
                 // says so, rather than reading as a press that missed.
@@ -1962,6 +2106,17 @@ impl XgViewApp {
             if reached {
                 playback.to_seek = None;
                 self.seek(at);
+                return;
+            }
+        }
+        // A look past a hole was waiting for this list: it says where the
+        // recording carries on, if it does.
+        if let Some(stop) = look_past(&playback.after_hole, from, to) {
+            let next = next_stretch(&playback.segments, &playback.covered, stop);
+            playback.after_hole = next.is_none().then_some(AfterHole::Nothing(stop));
+            if let Some(next) = next {
+                tracing::debug!(target: "xgview::app", at = next, "the recording carries on past a hole");
+                self.move_to(next);
                 return;
             }
         }
@@ -2042,6 +2197,12 @@ impl XgViewApp {
     /// the answer "there is nothing there, here is the closest there is" is one
     /// they can act on.
     fn seek(&mut self, at: i64) {
+        // A look past a hole belonged to the moment the picture stopped at, and
+        // the picture is being taken somewhere else: whatever it would have said
+        // is about a place nobody is going.
+        if let Some(playback) = self.playback.as_mut() {
+            playback.after_hole = None;
+        }
         let Some(playback) = &self.playback else {
             return;
         };
@@ -2192,6 +2353,26 @@ const ZOOMS: [i64; 5] = [120, 600, 3600, 21600, 86400];
 
 /// How much of a recording the timeline shows when a recording is opened.
 const SPAN: i64 = 600;
+
+/// How far past a hole the segment list is read, looking for where the
+/// recording carries on.
+///
+/// A day. Most holes are a minute - a camera that dropped its stream and came
+/// back - and the ones that are not are usually a night, which is the length
+/// that has to be covered for "it stopped" to mean "the recording is over".
+/// The read only happens when the list already held does not reach past the
+/// hole, which is the list read around the moment being watched and reaches an
+/// hour or so; every small hole is answered from that, with no request at all.
+const HOLE_LOOK: i64 = 24 * 3600;
+
+/// How far past a hole the looking goes, a day at a time.
+///
+/// A month. Each day is one request, and a day that holds nothing is two bytes
+/// of answer - so a camera that was off for three weeks is twenty-odd small
+/// requests and then one that finds it, rather than one enormous one. Past this
+/// the recording is not "after a hole" any more, it is somewhere else in the
+/// archive, and the calendar is what finds it.
+const HOLE_LIMIT: i64 = 30 * 24 * 3600;
 
 /// How wide a range a playlist is asked for: the widest the box will serve,
 /// whatever the strip is showing.
@@ -2828,6 +3009,93 @@ fn begin_in(window: (i64, i64), at: i64) -> i64 {
     at.clamp(window.0, window.1 - 1)
 }
 
+/// Remembers that the box was asked about `from..to`, merging with what is
+/// already known.
+fn cover(covered: &mut Vec<(i64, i64)>, from: i64, to: i64) {
+    if from >= to {
+        return;
+    }
+    let mut from = from;
+    let mut to = to;
+    covered.retain(|(start, end)| {
+        // Overlapping or touching: this read fills the gap between them.
+        if *end < from || *start > to {
+            return true;
+        }
+        from = from.min(*start);
+        to = to.max(*end);
+        false
+    });
+    covered.push((from, to));
+    covered.sort_by_key(|(start, _)| *start);
+}
+
+/// Whether a day that held nothing is followed by another day of looking.
+///
+/// A day that held nothing is a hole longer than a day, and the next day is
+/// asked about from where the answer stopped. The chain ends at [`HOLE_LIMIT`],
+/// where the recording is somewhere else in the archive rather than after a
+/// hole.
+fn keep_looking(stop: i64, from: i64, to: i64) -> bool {
+    to - from >= HOLE_LOOK && to < stop + HOLE_LIMIT
+}
+
+/// Whether the box has been asked about all of `from..to`.
+///
+/// A stretch that begins after `stop` is the next recording only if the time
+/// between the two was asked about: a list that holds the 31st and today, with
+/// nothing read in between, would otherwise offer today as "what comes next".
+fn covered_between(covered: &[(i64, i64)], from: i64, to: i64) -> bool {
+    covered.iter().any(|(start, end)| *start <= from && to <= *end)
+}
+
+/// The moment a look past a hole was made from, when this answer is that look's.
+///
+/// A segment read is answered for the range it asked about, so the range is what
+/// tells one read from another - the same test the calendar's picked day uses.
+fn look_past(after_hole: &Option<AfterHole>, from: i64, to: i64) -> Option<i64> {
+    match *after_hole {
+        Some(AfterHole::Looking { stop, window }) if window == (from, to) => Some(stop),
+        _ => None,
+    }
+}
+
+/// Where a press at a stop starts the recording again.
+///
+/// The moment playback opened, while the picture is still in the same stretch of
+/// recording: a viewer who watched from there to the end wants it again from
+/// there. Once the viewer has walked to another stretch, that moment is a
+/// journey away - another day, as often as not - and "again" means the beginning
+/// of the stretch they are in rather than a jump back to where they started
+/// watching hours ago.
+fn restart_from(segments: &[Segment], opened: i64, stop: i64) -> i64 {
+    let stretch = stretches(segments)
+        .into_iter()
+        .find(|stretch| stretch.start <= stop && stop <= stretch.end);
+    match stretch {
+        Some(stretch) if stretch.start <= opened && opened <= stretch.end => opened,
+        Some(stretch) => stretch.start,
+        None => opened,
+    }
+}
+
+/// Where a recording carries on, after a hole the picture stopped at.
+///
+/// A stretch that begins at or before `stop` is the one the picture is at the
+/// end of; what comes next is the first that begins after it **and** whose
+/// distance from it has been asked about. The list is what has been read, not
+/// what was recorded, so a stretch further down it is not the next one until the
+/// box has said there is nothing in between - see [`covered_between`]. `None`
+/// otherwise, which is either the end of the recording or the end of what has
+/// been read, and only a read tells the two apart. See
+/// [`XgViewApp::look_past_hole`].
+fn next_stretch(segments: &[Segment], covered: &[(i64, i64)], stop: i64) -> Option<i64> {
+    stretches(segments)
+        .into_iter()
+        .map(|stretch| stretch.start)
+        .find(|start| *start > stop && covered_between(covered, stop, *start))
+}
+
 /// The moment closest to `at` that a stretch covers.
 fn nearest(stretches: &[Segment], at: i64) -> Option<i64> {
     stretches
@@ -3107,6 +3375,121 @@ fn epoch_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A recording that stopped at a hole carries on at the next stretch.
+    ///
+    /// The box ends the playlist at the hole rather than serving what is past
+    /// it, so the session finishing is not the recording ending: the moment
+    /// after the stop is inside a stretch the picture is at the end of, and what
+    /// comes next is the stretch after it.
+    #[test]
+    fn a_recording_carries_on_past_a_hole() {
+        let segments = [
+            Segment { start: 100, end: 110 },
+            // A second between files: one stretch.
+            Segment { start: 111, end: 120 },
+            // A hole, and another stretch.
+            Segment { start: 400, end: 410 },
+            Segment { start: 411, end: 420 },
+        ];
+        // The whole span has been asked about, so the hole in it is a hole.
+        let covered = [(90, 420)];
+        assert_eq!(next_stretch(&segments, &covered, 120), Some(400), "past the hole");
+        assert_eq!(next_stretch(&segments, &covered, 105), Some(400), "and from inside it");
+        assert_eq!(next_stretch(&segments, &covered, 420), None, "the last stretch is the last");
+        assert_eq!(next_stretch(&segments, &covered, 90), Some(100), "a stop before it all");
+        assert_eq!(next_stretch(&[], &covered, 90), None, "and no list at all");
+    }
+
+    /// A list that holds two far-apart stretches says nothing about the time
+    /// between them.
+    ///
+    /// The list is what has been *read*: a viewer who opened playback today and
+    /// scrubbed back to the 31st leaves a list with both, and nothing in between.
+    /// Offering today as "what comes next" is the bug this is for - the time
+    /// between the two has to be asked about first.
+    #[test]
+    fn a_sparse_list_does_not_say_what_comes_next() {
+        let segments = [
+            Segment { start: 100, end: 120 },
+            // Three days later, and nothing in the list between them.
+            Segment { start: 259_300, end: 259_320 },
+        ];
+        assert_eq!(
+            next_stretch(&segments, &[(100, 130)], 120),
+            None,
+            "the time between them was never asked about"
+        );
+        assert_eq!(
+            next_stretch(&segments, &[(100, 259_400)], 120),
+            Some(259_300),
+            "and once it has been, the answer is the far stretch"
+        );
+    }
+
+    /// A hole longer than a day is looked past a day at a time, and the chain
+    /// stops at the limit rather than walking the archive.
+    #[test]
+    fn a_hole_longer_than_a_day_is_looked_past_a_day_at_a_time() {
+        let day = HOLE_LOOK;
+        // The first day held nothing: the next one is asked about.
+        assert!(keep_looking(1_000, 1_000, 1_000 + day));
+        // The last day of the chain: no further.
+        assert!(!keep_looking(1_000, 1_000 + HOLE_LIMIT - day, 1_000 + HOLE_LIMIT));
+        // A read narrower than a day is the last of its chain, whatever it found.
+        assert!(!keep_looking(1_000, 1_000, 1_000 + 600));
+    }
+
+    /// A look's answer is recognised by the range it asked about, so a chain of
+    /// them - and the reads the strip makes at the same time - do not answer for
+    /// each other.
+    #[test]
+    fn a_look_is_recognised_by_its_range() {
+        let looking = Some(AfterHole::Looking { stop: 1_000, window: (1_000, 2_000) });
+        assert_eq!(look_past(&looking, 1_000, 2_000), Some(1_000));
+        assert_eq!(look_past(&looking, 2_000, 3_000), None, "another day's read");
+        assert_eq!(look_past(&looking, 900, 1_100), None, "a read around the cursor");
+        assert_eq!(look_past(&Some(AfterHole::Nothing(1_000)), 1_000, 2_000), None);
+    }
+
+    /// What has been asked about is kept merged and in order, so a gap between
+    /// two reads is a gap and a read that fills it is not.
+    #[test]
+    fn what_has_been_asked_about_is_merged() {
+        let mut covered: Vec<(i64, i64)> = Vec::new();
+        cover(&mut covered, 100, 200);
+        cover(&mut covered, 300, 400);
+        assert_eq!(covered, vec![(100, 200), (300, 400)]);
+        cover(&mut covered, 200, 300);
+        assert_eq!(covered, vec![(100, 400)], "a read that fills the gap joins them");
+        cover(&mut covered, 500, 600);
+        cover(&mut covered, 400, 500);
+        assert_eq!(covered, vec![(100, 600)]);
+        assert!(covered_between(&covered, 150, 550));
+        assert!(!covered_between(&covered, 150, 650), "past what was read");
+        assert!(!covered_between(&covered, 50, 550), "and before it");
+    }
+
+    /// A press at a stop starts again from where the viewer was watching.
+    ///
+    /// The moment playback opened is the answer while the picture is still in
+    /// the same stretch of recording. A viewer who walked to another stretch
+    /// would otherwise be carried back to where they opened - another day, when
+    /// the stretch they are in is one they scrubbed to - so the beginning of
+    /// that stretch is what "again" means there.
+    #[test]
+    fn a_press_at_a_stop_starts_again_where_the_viewer_is() {
+        let segments = [
+            Segment { start: 100, end: 200 },
+            Segment { start: 1000, end: 1100 },
+        ];
+        // Opened and stopped inside the same stretch: from where it opened.
+        assert_eq!(restart_from(&segments, 120, 195), 120);
+        // Opened far away, stopped in the second stretch: its beginning.
+        assert_eq!(restart_from(&segments, 150, 1095), 1000);
+        // A stop the list does not cover falls back to where it opened.
+        assert_eq!(restart_from(&segments, 150, 5000), 150);
+    }
 
     /// A recording that ran out of range is not moving, and the corner says so
     /// the same way it says a hold: the mark is about the picture, and the

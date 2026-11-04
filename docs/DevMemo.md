@@ -5213,3 +5213,67 @@ of edge on a calendar, against a day that was missing entirely.
 The `+` is escaped: a query string reads it as a space, and every zone west of
 Greenwich has one - `Etc/GMT+8` sent as it is arrives as `Etc/GMT 8`, which the
 box answers with UTC, the very answer the parameter exists to avoid.
+
+## 69. A hole is not an ending
+
+*Landed 2026-11-04, in 2.1.64.*
+
+Two reports, one cause. Playing into a gap stopped the picture and stayed stopped,
+and pressing play from there jumped to today's recording.
+
+**The box ends the playlist at the hole.** Asked for a range that spans a
+three-hour gap, this box answers with the fragments *before* it and then
+`#EXT-X-ENDLIST` - nothing of what is past it. So a session that reports `Finished`
+is saying "there is nothing at this moment", and the app was reading it as "the
+recording is over": the picture froze at the edge of a stretch, which is the first
+report.
+
+What comes next is the beginning of the next stretch, and the app already had the
+machinery for it - `stretches` closes the seams between segments and starts a new
+stretch at every hole, and `window_at` never builds a range across one. So
+`recording_stopped` carries the picture on: at the next stretch when the list held
+for the strip already reaches it, and otherwise after a read of the segment list
+past the hole, a day wide, which is the length a night-long gap needs. A look in
+flight is not repeated; a read that fails is forgotten rather than read as "nothing
+after the hole"; and nothing is done while a finger is on the timeline, because a
+continue would take the picture somewhere else under the hand.
+
+**And the press was aimed at the wrong place.** The rule from the last round -
+"play at a stop starts again from `opened`" - took `opened` to mean "where the
+viewer was watching". It is where the *session* opened, and a viewer who opened at
+today and scrubbed back to the 31st is carried back to today by it: the second
+report, exactly. The press means "keep going" now, the same as the automatic
+continue, and only a look that found nothing - a recording with nothing after the
+hole - starts again. It starts from the beginning of the stretch the picture
+stopped in, unless `opened` is inside that stretch too, in which case the session
+is what "again" means and `opened` is the answer.
+
+**And "the next stretch" was read off a list that is not a record.** The segment
+list is what has been *read*, and reading happens where the viewer has been: a
+session opened today and scrubbed back to the 31st leaves a list holding both and
+nothing between them. Taking the first stretch after the stop from that list put
+the picture at **today** - the second report, one round later: the 31st ends at
+23:22, the next stretch in the list is this morning's, and the ten hours of the
+1st that the list knows nothing about were never considered.
+
+So the app remembers what it has **asked about**: `covered`, a merged list of the
+ranges the box has answered for, empty answers included - "asked and there was
+nothing" is exactly what a hole is. A stretch counts as the next one only when the
+time between the stop and it is covered (`covered_between`); otherwise the answer
+is a read, and the read's own range becomes covered. Asked about the 31st and
+today and nothing else, the app now reads past the hole and finds the 1st at
+09:28, which is where the recording actually resumes.
+
+**A hole longer than a day** is looked past a day at a time. The first read covers
+the day the picture stopped in; a day that holds nothing is answered in two bytes,
+and the next day is asked about from where that answer stopped - so a camera that
+was off for three weeks is twenty-odd small requests and then one that finds it,
+rather than one enormous one. The chain stops at a month (`HOLE_LIMIT`), where the
+recording is not "after a hole" any more but somewhere else in the archive, and the
+calendar is what finds it. Each answer is recognised by the range it asked about,
+because a chain of reads and the strip's own reads are in flight together.
+
+`a_recording_carries_on_past_a_hole`, `a_sparse_list_does_not_say_what_comes_next`,
+`what_has_been_asked_about_is_merged`, `a_hole_longer_than_a_day_is_looked_past_a_day_at_a_time`
+and `a_look_is_recognised_by_its_range` hold the halves, and
+`a_press_at_a_stop_starts_again_where_the_viewer_is` the last.
