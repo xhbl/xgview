@@ -12,7 +12,9 @@ use std::sync::Arc;
 use egui::epaint::{Mesh, Shape, TextShape, Vertex};
 use egui::{Align2, Color32, CornerRadius, FontId, Id, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, vec2};
 
-use monitor_core::model::{CameraSource, ConnectionState, Osd, OsdItem, StreamKind, TileAspect};
+use monitor_core::model::{
+    CameraSource, ConnectionState, FrigateOrigin, Osd, OsdItem, StreamKind, TileAspect,
+};
 use monitor_core::GridLayout;
 
 use crate::app::ChannelUi;
@@ -138,12 +140,37 @@ pub struct Tile<'a> {
     ///
     /// Every other tile shows all of it. See [`PictureZoom`].
     pub picture_zoom: Option<PictureZoom>,
-    /// Whether this tile is showing a recording.
+    /// What this tile is showing of a recording, where it is showing one.
     ///
-    /// A recording that is being seeked reports a state a live stream reports
-    /// when it has nothing to show, and it has something: the window being left
-    /// is still on screen. See [`holds_last_picture`].
-    pub recording: bool,
+    /// `Some` is also the answer to "is this a recording": a recording that is
+    /// being seeked reports a state a live stream reports when it has nothing
+    /// to show, and it has something - the window being left is still on
+    /// screen. See [`holds_last_picture`].
+    pub recording: Option<Recording<'a>>,
+}
+
+/// What a tile's corners say about the recording it is showing.
+///
+/// Three facts, one of them a place and two of them what the picture is doing,
+/// and they are one value because they are one answer: a tile is showing a
+/// recording, and this is what there is to say about it. Held apart, `paused`
+/// could be set on a tile that is not a recording, which is a state that means
+/// nothing.
+#[derive(Clone, Copy)]
+pub struct Recording<'a> {
+    /// Where the segments are being read from.
+    ///
+    /// The camera's stream address is not it: a recording comes off the server
+    /// that holds it, and the two are different answers to the same corner.
+    pub origin: &'a FrigateOrigin,
+    /// The picture is not moving - held by the viewer, or out of range.
+    pub paused: bool,
+    /// The rate it is playing at, where it is not the normal one.
+    ///
+    /// `None` at `1x`: a corner that always says `1x` spends its width on the
+    /// default, and the corner next to it - the frame rate - only needs
+    /// explaining when it is multiplied.
+    pub speed: Option<&'static str>,
 }
 
 /// What the tile shows of its picture, where it is the magnified one.
@@ -306,7 +333,7 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
             painter.text(body.center(), Align2::CENTER_CENTER, monitor_i18n::tr("grid-suspended"), FontId::proportional(13.0), dim(theme::TEXT_DIM));
         }
         ConnectionState::Idle | ConnectionState::Connecting | ConnectionState::Reconnecting => {
-            if holds_last_picture(state, tile.recording, tile.video.is_some()) {
+            if holds_last_picture(state, tile.recording.is_some(), tile.video.is_some()) {
                 // A recording being seeked: the picture is the window being
                 // left, and the next one is a request away.
                 live_canvas(&painter, body, tile, tier);
@@ -437,9 +464,23 @@ impl OsdMetrics {
 
 /// One line of a tile's on-screen display.
 struct OsdLine {
-    /// A dot drawn before the text, in a colour of its own.
-    dot: Option<Color32>,
+    /// The mark drawn before the text, in a colour of its own.
+    mark: Option<OsdMark>,
     text: String,
+}
+
+/// The mark that leads a line of a tile's on-screen display.
+///
+/// One place, two questions. A dot is the channel's state - whether the picture
+/// is moving is the one thing a wall of still images cannot say about itself -
+/// and a triangle is a recording being played, which is not a state of the
+/// stream at all but a different kind of picture. The bars are that recording
+/// held still: the same picture, doing the other thing.
+#[derive(Clone, Copy)]
+enum OsdMark {
+    Dot(Color32),
+    Play(Color32),
+    Pause(Color32),
 }
 
 /// What one corner of a tile shows, in the order its lines are drawn.
@@ -453,20 +494,10 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
     } else {
         monitor_i18n::tr("decode-sw")
     };
-    let codec = || OsdLine {
-        dot: None,
-        text: format!(
-            "{} {:.0}kbps",
-            codec_name(channel),
-            channel.map(|channel| channel.bitrate_kbps).unwrap_or(0.0)
-        ),
-    };
-    let fps = || OsdLine {
-        dot: None,
-        text: format!("{} {:.2}fps", hardware, channel.map(|channel| channel.fps).unwrap_or(0.0)),
-    };
+    let codec = || OsdLine { mark: None, text: format!("{} {}", codec_name(channel), kbps_text(channel)) };
+    let fps = || OsdLine { mark: None, text: format!("{} {}", hardware, fps_text(channel)) };
     let format = || OsdLine {
-        dot: None,
+        mark: None,
         text: match channel.and_then(|channel| channel.width.zip(channel.height)) {
             Some((width, height)) => format!("{}x{} {}", width, height, monitor_i18n::tr(tile.aspect.label())),
             None => format!("?x? {}", monitor_i18n::tr(tile.aspect.label())),
@@ -476,40 +507,37 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
     // the mode the switch is on, and the url that follows it. The address is
     // masked the way the settings row masks it, so a password or a stream key
     // never reaches the picture, and shortened to the room a corner has.
+    //
+    // A recording is pulled from somewhere else, and this is the corner that
+    // says so: the transport is the web the server answers on - `https` reads
+    // `HTTPS`, because the port a viewer logged in against is not the same one
+    // as the open one - and the address is that server's api for this camera,
+    // without its scheme, since the word before it is already the scheme.
     let transport = || OsdLine {
-        dot: None,
-        text: format!(
-            "{} {}",
-            camera.connection_label(),
-            theme::truncate(
-                &camera.masked_uri(channel.and_then(|channel| channel.stream).unwrap_or(StreamKind::Main)),
-                34
-            )
-        ),
+        mark: None,
+        text: match tile.recording {
+            Some(recording) => recording_address(recording.origin),
+            None => format!(
+                "{} {}",
+                camera.connection_label(),
+                theme::truncate(
+                    &camera.masked_uri(channel.and_then(|channel| channel.stream).unwrap_or(StreamKind::Main)),
+                    34
+                )
+            ),
+        },
     };
     match item {
         OsdItem::Off => Vec::new(),
-        OsdItem::Name => vec![OsdLine { dot: None, text: camera.short_label(24) }],
+        OsdItem::Name => vec![OsdLine { mark: None, text: camera.short_label(24) }],
         OsdItem::NumberName => vec![OsdLine {
-            dot: None,
+            mark: None,
             text: match tile.index {
                 Some(index) => format!("{} {}", index + 1, camera.short_label(22)),
                 None => camera.short_label(24),
             },
         }],
-        OsdItem::Stream => vec![OsdLine {
-            // The dot is the picture moving - the one question a wall of still
-            // images cannot answer from the images themselves.
-            dot: Some(match channel.map(|channel| channel.state) {
-                Some(ConnectionState::Streaming) => theme::LIVE,
-                Some(ConnectionState::Stalled) => theme::WARN,
-                _ => theme::TEXT_DIM,
-            }),
-            text: channel
-                .and_then(|channel| channel.stream)
-                .map(|stream| monitor_i18n::tr(stream.tag()).to_string())
-                .unwrap_or_else(|| "—".to_string()),
-        }],
+        OsdItem::Stream => vec![stream_line(tile.recording.as_ref(), channel)],
         OsdItem::Codec => vec![codec()],
         OsdItem::Fps => vec![fps()],
         OsdItem::Format => vec![format()],
@@ -517,7 +545,9 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
         OsdItem::DateTime => {
             // A recording is drawn in the hours it happened in, not in these:
             // the corner says which moment the picture is, and for a live
-            // stream that is now.
+            // stream that is now. For a recording it is the moment its frame
+            // is of - or the moment being fetched, until a frame arrives, so
+            // that a seek does not read as "now" for the second it takes.
             let moment = match tile.clock {
                 Some(at) => monitor_core::blackout::local_at(at as i64),
                 None => monitor_core::blackout::local_now(),
@@ -526,7 +556,7 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
                 return Vec::new();
             };
             vec![OsdLine {
-                dot: None,
+                mark: None,
                 text: format!(
                     "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
                     now.year, now.month, now.day, now.hour, now.minute, now.second
@@ -547,6 +577,38 @@ fn osd_lines(item: OsdItem, tile: &Tile<'_>) -> Vec<OsdLine> {
     }
 }
 
+/// Whether a channel has measured a rate yet.
+///
+/// The first sample a session publishes names the codec and the size - they are
+/// in the init segment, before any picture - and its rate is zero, because there
+/// has been nothing to measure over. Printing that zero says the stream is not
+/// moving, which is a different thing from not knowing yet, and a fresh
+/// recording takes a while to get there: the login, the playlist and the first
+/// fragment are all read before a picture exists, and the window that measures
+/// the rate only closes two seconds after that.
+///
+/// So a rate is a dash until the channel has counted a frame, the way the codec
+/// is a dash until the stream has described itself.
+fn rate_measured(channel: Option<&ChannelUi>) -> bool {
+    channel.is_some_and(|channel| channel.total_frames > 0)
+}
+
+/// The rate the stream arrives at, or a dash while there is none to report.
+fn kbps_text(channel: Option<&ChannelUi>) -> String {
+    match rate_measured(channel) {
+        true => format!("{:.0}kbps", channel.map_or(0.0, |channel| channel.bitrate_kbps)),
+        false => "—kbps".to_string(),
+    }
+}
+
+/// The rate the pictures arrive at, or a dash while there is none to report.
+fn fps_text(channel: Option<&ChannelUi>) -> String {
+    match rate_measured(channel) {
+        true => format!("{:.2}fps", channel.map_or(0.0, |channel| channel.fps)),
+        false => "—fps".to_string(),
+    }
+}
+
 /// The codec a tile names, uppercased.
 ///
 /// The name is the camera's - it arrives in the stream's own description - and
@@ -559,6 +621,135 @@ fn codec_name(channel: Option<&ChannelUi>) -> String {
         .and_then(|channel| channel.codec.as_deref())
         .map(str::to_ascii_uppercase)
         .unwrap_or_else(|| "—".to_string())
+}
+
+/// The line the stream item draws.
+///
+/// A dot is the picture moving - the one question a wall of still images cannot
+/// answer from the images themselves - and it is coloured by the channel's
+/// state. A recording is the other kind of picture and is drawn as one: a
+/// triangle, the mark every player uses for "this is playing", and the word
+/// that says what is playing. Which stream it was pulled as is not a question a
+/// recording has an answer to - a recording is one stream, and it is the one
+/// that was written down.
+fn stream_line(recording: Option<&Recording<'_>>, channel: Option<&ChannelUi>) -> OsdLine {
+    if let Some(recording) = recording {
+        // The word does not change when the picture stops: it is still a
+        // recording, and the mark is what says which of the two things it is
+        // doing. The rate goes beside it, and only when it is not the normal
+        // one - a corner that always says `1x` spends its width on the default.
+        let mark = if recording.paused {
+            OsdMark::Pause(theme::ACCENT)
+        } else {
+            OsdMark::Play(theme::ACCENT)
+        };
+        let word = monitor_i18n::tr("osd-playback");
+        let text = match recording.speed {
+            Some(speed) => format!("{word} {speed}"),
+            None => word,
+        };
+        return OsdLine { mark: Some(mark), text };
+    }
+    OsdLine {
+        mark: Some(match channel.map(|channel| channel.state) {
+            Some(ConnectionState::Streaming) => OsdMark::Dot(theme::LIVE),
+            Some(ConnectionState::Stalled) => OsdMark::Dot(theme::WARN),
+            _ => OsdMark::Dot(theme::TEXT_DIM),
+        }),
+        text: channel
+            .and_then(|channel| channel.stream)
+            .map(|stream| monitor_i18n::tr(stream.tag()).to_string())
+            .unwrap_or_else(|| "—".to_string()),
+    }
+}
+
+/// The transport item's words for a recording: the web the server answers on,
+/// and the api this camera's segments are read from.
+///
+/// The scheme is left off the address because the first word already is it, and
+/// the room a corner has goes to the part that names the server instead.
+fn recording_address(origin: &FrigateOrigin) -> String {
+    format!(
+        "{} {}",
+        origin.transport_label(),
+        theme::truncate(strip_scheme(&origin.masked_api_base()), 34)
+    )
+}
+
+/// An address without the `scheme://` in front of it.
+///
+/// The transport word is drawn beside it and already names the scheme, so the
+/// room a corner has is better spent on the part that says *which* server.
+fn strip_scheme(url: &str) -> &str {
+    url.split_once("://").map_or(url, |(_, rest)| rest)
+}
+
+/// Draws the mark that leads a line, turned by `angle` with the text it leads.
+///
+/// A dot is a circle and does not care which way it is turned; a triangle and a
+/// pair of bars do, and on a picture drawn sideways they point along the line
+/// they begin rather than across it.
+///
+/// The three are the same size: the play triangle is as tall as the dot is wide
+/// and the pause bars are as tall as that too, so the mark does not change
+/// weight when a recording is paused. What differs is how much of that box they
+/// fill, which is the nature of the shapes - a circle fills all of it, a triangle
+/// and two bars rather less.
+fn draw_mark(painter: &egui::Painter, at: egui::Pos2, radius: f32, mark: OsdMark, angle: f32) {
+    let (sin, cos) = angle.sin_cos();
+    let turn = |offset: Vec2| vec2(offset.x * cos - offset.y * sin, offset.x * sin + offset.y * cos);
+    match mark {
+        OsdMark::Dot(colour) => {
+            painter.circle_filled(at, radius, colour);
+        }
+        OsdMark::Play(colour) => {
+            let r = radius;
+            let corners = [vec2(-r * 0.85, -r), vec2(r * 0.85, 0.0), vec2(-r * 0.85, r)];
+            painter.add(egui::Shape::convex_polygon(
+                corners.map(|offset| at + turn(offset)).to_vec(),
+                colour,
+                Stroke::NONE,
+            ));
+        }
+        OsdMark::Pause(colour) => {
+            // Two bars as tall as the dot is wide, a bar and a gap apart, with
+            // the pair centred on the same point the dot would be.
+            let r = radius;
+            let (bar, gap) = (r * 0.55, r * 0.4);
+            for side in [-1.0, 1.0] {
+                let centre = at + turn(vec2(side * (bar + gap) * 0.5, 0.0));
+                let rect = Rect::from_center_size(centre, vec2(bar, r * 2.0));
+                painter.rect_filled(rect, CornerRadius::same((bar * 0.25) as u8), colour);
+            }
+        }
+    }
+}
+
+/// Where the ink of a line sits, measured from the top of its galley.
+///
+/// Not the middle of the box. A line box is the font's ascent and descent, and
+/// the ink inside it is not centred in it: a hanzi fills the box, while
+/// `Playback` hangs from its capitals down to a descender. A mark placed at the
+/// box's middle therefore sits low beside Chinese and looks right beside
+/// English - a difference only one of the two languages ever sees, which is why
+/// it went unnoticed for so long.
+///
+/// Every glyph carries the rectangle its ink is drawn in (`uv_rect`), so this is
+/// the union of them. A space has no ink and is skipped; a line with nothing
+/// drawn at all has none, and the caller falls back to the middle of the box.
+fn ink_centre(galley: &egui::Galley) -> Option<f32> {
+    let mut ink: Option<Rect> = None;
+    for row in &galley.rows {
+        for glyph in &row.row.glyphs {
+            if glyph.uv_rect.is_nothing() {
+                continue;
+            }
+            let top_left = row.pos + glyph.pos.to_vec2() + glyph.uv_rect.offset;
+            let rect = Rect::from_min_size(top_left, glyph.uv_rect.size);
+            ink = Some(ink.map_or(rect, |ink| ink.union(rect)));
+        }
+    }
+    ink.map(|ink| ink.center().y)
 }
 
 /// Draws one corner's lines, growing away from the corner they belong to.
@@ -581,11 +772,14 @@ fn osd_corner(painter: &egui::Painter, body: Rect, align: Align2, dim: bool, lin
     // The backdrop has to be the size of the text it sits behind, and how wide
     // a line is only the font knows: every line is laid out once to measure it,
     // and the room a leading dot takes is added to whichever corner has one.
-    let dot_lead = if lines.iter().any(|line| line.dot.is_some()) { size * 1.15 } else { 0.0 };
-    let text_width = lines
+    // The same layout says where the ink of the line sits, which is where the
+    // mark goes - see [`ink_centre`].
+    let dot_lead = if lines.iter().any(|line| line.mark.is_some()) { size * 1.15 } else { 0.0 };
+    let galleys: Vec<_> = lines
         .iter()
-        .map(|line| painter.layout_no_wrap(line.text.clone(), font.clone(), color).size().x)
-        .fold(0.0_f32, f32::max);
+        .map(|line| painter.layout_no_wrap(line.text.clone(), font.clone(), color))
+        .collect();
+    let text_width = galleys.iter().map(|galley| galley.size().x).fold(0.0_f32, f32::max);
     let width = text_width + dot_lead;
     let height = lines.len() as f32 * line;
 
@@ -605,13 +799,11 @@ fn osd_corner(painter: &egui::Painter, body: Rect, align: Align2, dim: bool, lin
         // first one keeps the corner and the rest grow into the picture.
         let y = if top { corner.y + row as f32 * line } else { corner.y - (row as f32 + 1.0) * line };
         let mut x = corner.x;
-        if let Some(dot) = entry.dot {
+        if let Some(mark) = entry.mark {
             let lead = if left { dot_lead } else { -dot_lead };
-            painter.circle_filled(
-                egui::pos2(x + lead * 0.4, y + line * 0.5),
-                (size * 0.3).max(2.0),
-                dot,
-            );
+            let centre = ink_centre(&galleys[row]).unwrap_or(line * 0.5);
+            let at = egui::pos2(x + lead * 0.4, y + centre);
+            draw_mark(painter, at, (size * 0.3).max(2.0), mark, 0.0);
             x += lead;
         }
         outlined_text(painter, egui::pos2(x, y), anchor, &entry.text, font.clone(), color);
@@ -680,7 +872,7 @@ fn osd_corner_rotated(
         if top { body.top() + m.inset } else { body.bottom() - m.inset },
     );
 
-    let dot_lead = if lines.iter().any(|line| line.dot.is_some()) { size * 1.15 } else { 0.0 };
+    let dot_lead = if lines.iter().any(|line| line.mark.is_some()) { size * 1.15 } else { 0.0 };
     let galleys: Vec<_> = lines
         .iter()
         .map(|entry| painter.layout_no_wrap(entry.text.clone(), font.clone(), color))
@@ -715,15 +907,20 @@ fn osd_corner_rotated(
 
         // A leading dot sits between the corner and the text; the text shifts
         // away from the corner to make room for it.
-        let pos = if entry.dot.is_some() {
+        let pos = if entry.mark.is_some() {
             egui::pos2(pos.x, pos.y + if top { dot_lead } else { -dot_lead })
         } else {
             pos
         };
-        if let Some(dot) = entry.dot {
-            let dot_x = pos.x - text_h * 0.5;
+        if let Some(mark) = entry.mark {
+            // The line's own height runs across the screen here, so the mark is
+            // centred on the ink along x: `pos` is the text's top-left in its
+            // turned frame, and the ink sits that far left of it.
+            let centre = ink_centre(&galleys[row]).unwrap_or(text_h * 0.5);
+            let dot_x = pos.x - centre;
             let dot_y = if top { corner.y + dot_lead * 0.5 } else { corner.y - dot_lead * 0.5 };
-            painter.circle_filled(egui::pos2(dot_x, dot_y), (size * 0.3).max(2.0), dot);
+            let at = egui::pos2(dot_x, dot_y);
+            draw_mark(painter, at, (size * 0.3).max(2.0), mark, std::f32::consts::FRAC_PI_2);
         }
 
         outlined_rotated_text(painter, pos, angle, &entry.text, font.clone(), color);
@@ -1075,5 +1272,136 @@ mod tests {
         for state in [ConnectionState::Streaming, ConnectionState::Idle, ConnectionState::Failed] {
             assert!(!holds_last_picture(state, true, true), "{state:?}");
         }
+    }
+
+    /// A recording is the other kind of picture, and the corner that says
+    /// whether the picture is moving says so: a triangle and a word, not a dot
+    /// and a stream. Which stream a recording was written as is not a question
+    /// it can answer - there is one of them, and it is the one on the disk.
+    ///
+    /// Held still, it is the bars - and the word stays: the picture is still a
+    /// recording, and only what it is doing has changed.
+    #[test]
+    fn a_recording_is_drawn_as_playing_and_a_live_stream_as_moving() {
+        monitor_i18n::init("en", &[]);
+        let origin = FrigateOrigin {
+            base_url: "http://frigate.lan:5000".to_string(),
+            camera: "front_door".to_string(),
+        };
+        let at = |paused, speed| Recording { origin: &origin, paused, speed };
+
+        let playing = stream_line(Some(&at(false, None)), None);
+        assert!(matches!(playing.mark, Some(OsdMark::Play(_))), "a triangle, not a dot");
+        assert_eq!(playing.text, "Playback");
+
+        // Held still - by the viewer, or because the range ran out - the bars
+        // go up, and the word stays: it is still a recording.
+        let held = stream_line(Some(&at(true, None)), None);
+        assert!(matches!(held.mark, Some(OsdMark::Pause(_))), "bars where the triangle was");
+        assert_eq!(held.text, playing.text, "and the same word beside them");
+
+        // A rate that is not the normal one is written beside the word, because
+        // it is what explains the frame rate in the corner next door.
+        let fast = stream_line(Some(&at(false, Some("8×"))), None);
+        assert_eq!(fast.text, "Playback 8×");
+        assert!(matches!(fast.mark, Some(OsdMark::Play(_))), "still playing");
+
+        // A live channel keeps its dot, and its colour is its state.
+        let mut channel = ChannelUi::default();
+        channel.state = ConnectionState::Streaming;
+        channel.stream = Some(StreamKind::Sub);
+        let live = stream_line(None, Some(&channel));
+        assert!(matches!(live.mark, Some(OsdMark::Dot(colour)) if colour == theme::LIVE));
+        assert_eq!(live.text, monitor_i18n::tr("stream-tag-sub"));
+
+        // A channel with nothing to say is a grey dot and a dash, as before.
+        let idle = stream_line(None, None);
+        assert!(matches!(idle.mark, Some(OsdMark::Dot(colour)) if colour == theme::TEXT_DIM));
+        assert_eq!(idle.text, "—");
+    }
+
+    /// A rate nobody has measured is a dash, not a zero.
+    ///
+    /// The sample that names the codec is published before the first picture and
+    /// carries a rate of zero, because nothing has been counted yet. On screen
+    /// that zero is indistinguishable from a stream that has stopped - and a
+    /// recording that has just been opened spends its first seconds reading a
+    /// login, a playlist and a fragment before there is anything to count.
+    #[test]
+    fn a_rate_nobody_has_measured_is_a_dash() {
+        let mut channel = ChannelUi::default();
+        assert_eq!(kbps_text(Some(&channel)), "—kbps", "the codec is known, the rate is not");
+        assert_eq!(fps_text(Some(&channel)), "—fps");
+
+        // One frame counted and there is something to report.
+        channel.total_frames = 1;
+        channel.bitrate_kbps = 1800.0;
+        channel.fps = 25.0;
+        assert_eq!(kbps_text(Some(&channel)), "1800kbps");
+        assert_eq!(fps_text(Some(&channel)), "25.00fps");
+
+        // A held recording is not measured again, so the last number stands -
+        // it is a measurement, and the corner keeps it.
+        channel.fps = 0.0;
+        assert_eq!(fps_text(Some(&channel)), "0.00fps", "a measured zero is a zero");
+
+        assert_eq!(kbps_text(None), "—kbps", "and no channel at all is no measurement");
+    }
+
+    /// The mark is placed on the ink, not on the middle of the line box.
+    ///
+    /// The two are not the same place: a box is the font's ascent and descent,
+    /// and what is drawn inside it sits where the letters put it. A dot in the
+    /// middle of the box is what put the mark low beside Chinese and high
+    /// beside English, and it is the reason the corners looked misaligned.
+    #[test]
+    fn the_mark_sits_on_the_ink_and_not_in_the_middle_of_the_box() {
+        let ctx = egui::Context::default();
+        let mut measured = None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let lay = |text: &str| {
+                ctx.fonts(|fonts| {
+                    fonts.layout_no_wrap(text.to_owned(), FontId::monospace(40.0), Color32::WHITE)
+                })
+            };
+            measured = Some((lay("Playback"), lay("   ")));
+        });
+        let (text, spaces) = measured.expect("a frame is laid out");
+
+        let ink = ink_centre(&text).expect("a line of letters has ink");
+        assert!(
+            (ink - text.size().y * 0.5).abs() > 0.5,
+            "the ink centre {ink} is not the box's middle {}",
+            text.size().y * 0.5
+        );
+        // Nothing drawn is nothing to centre on, and the caller falls back to
+        // the box: a line of spaces is what a corner must not panic on.
+        assert_eq!(ink_centre(&spaces), None, "a space has no ink");
+    }
+
+    /// The transport corner names the server the segments come from, not the
+    /// camera's own address: the camera is not the thing being watched.
+    #[test]
+    fn a_recording_names_the_server_it_is_read_from() {
+        let plain = FrigateOrigin {
+            base_url: "http://192.168.17.88:5000/".to_string(),
+            camera: "front_door".to_string(),
+        };
+        assert_eq!(recording_address(&plain), "HTTP 192.168.17.88:5000/api/front_door");
+
+        // The scheme is the transport word, so it is not repeated in the address.
+        let secure = FrigateOrigin {
+            base_url: "https://frigate.lan:8971".to_string(),
+            camera: "gate".to_string(),
+        };
+        assert_eq!(recording_address(&secure), "HTTPS frigate.lan:8971/api/gate");
+        assert!(!recording_address(&secure).contains("://"), "one scheme, one word");
+
+        // And a password in the base url never reaches the picture.
+        let secret = FrigateOrigin {
+            base_url: "https://user:hunter2@frigate.lan:8971".to_string(),
+            camera: "gate".to_string(),
+        };
+        assert!(!recording_address(&secret).contains("hunter2"));
     }
 }

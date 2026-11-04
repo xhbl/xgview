@@ -411,6 +411,7 @@ stream-kind-main = Main stream
 stream-kind-sub = Sub stream
 stream-tag-main = Main
 stream-tag-sub = Sub
+osd-playback = Playback
 decode-hw = HW
 decode-sw = SW
 state-idle = Idle

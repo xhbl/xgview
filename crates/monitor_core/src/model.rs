@@ -469,6 +469,37 @@ pub struct FrigateOrigin {
     pub camera: String,
 }
 
+impl FrigateOrigin {
+    /// The address this camera's recordings are a suffix of - `…/api/<camera>`.
+    ///
+    /// One place for it because two read it: the session that fetches the
+    /// segments, and the corner of a tile that says what it is fetching them
+    /// from. A path built twice is a path that can be built two ways.
+    pub fn api_base(&self) -> String {
+        format!("{}/api/{}", self.base_url.trim_end_matches('/'), self.camera)
+    }
+
+    /// [`Self::api_base`] with its credentials and its query masked, for a
+    /// screen: a password written into the base url never reaches the picture.
+    pub fn masked_api_base(&self) -> String {
+        mask_stream_url(&self.api_base())
+    }
+
+    /// The word the transport goes by on a screen - `HTTP`, `HTTPS`.
+    ///
+    /// A recording is pulled over the web, and which web it is says something
+    /// about the server: the authenticated port answers `https`, and reading
+    /// `HTTP` over it would be a small lie about what the viewer is trusting.
+    pub fn transport_label(&self) -> String {
+        self.base_url
+            .split("://")
+            .next()
+            .filter(|scheme| !scheme.is_empty() && !scheme.contains('/'))
+            .unwrap_or("http")
+            .to_ascii_uppercase()
+    }
+}
+
 /// A single surveillance camera / NVR channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CameraSource {
@@ -1270,6 +1301,38 @@ mod tests {
         camera.advance_connection();
         assert_eq!(camera.connect, ConnectionMode::Auto);
         assert_eq!(camera.connection_label(), "AUTO");
+    }
+
+    /// The address a recording is read from is the server's api for that camera,
+    /// and it is the one the tile's transport corner names.
+    #[test]
+    fn an_origin_names_the_api_a_recording_is_read_from() {
+        let origin = FrigateOrigin {
+            base_url: "http://192.168.17.88:5000/".to_string(),
+            camera: "front_door".to_string(),
+        };
+        assert_eq!(origin.api_base(), "http://192.168.17.88:5000/api/front_door");
+        assert_eq!(origin.transport_label(), "HTTP");
+        // The authenticated port is a different answer, and the corner says so:
+        // a viewer reading `HTTP` over it would be trusting the wrong web.
+        let secure = FrigateOrigin {
+            base_url: "https://frigate.lan:8971".to_string(),
+            camera: "gate".to_string(),
+        };
+        assert_eq!(secure.transport_label(), "HTTPS");
+        assert_eq!(secure.masked_api_base(), "https://frigate.lan:8971/api/gate");
+    }
+
+    /// A password written into the base url never reaches the picture.
+    #[test]
+    fn a_masked_api_base_hides_its_credentials() {
+        let origin = FrigateOrigin {
+            base_url: "https://user:secret@frigate.lan:8971".to_string(),
+            camera: "gate".to_string(),
+        };
+        let masked = origin.masked_api_base();
+        assert!(!masked.contains("secret"), "{masked}");
+        assert!(masked.contains("***@frigate.lan:8971"), "{masked}");
     }
 
     /// Only the two importer's holdings are a restream; a camera carried

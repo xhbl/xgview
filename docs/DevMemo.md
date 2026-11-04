@@ -4972,3 +4972,154 @@ step, an event jump, a drag let go of - so that is where the read is asked for n
 and the strip is as long as the recording however it was walked. The obligation is
 the same one either way: the strip is drawn a whole width around the cursor, so the
 list has to reach half a width behind it.
+
+## 66. The corner says what kind of picture it is
+
+*Landed 2026-11-04, in 2.1.61.*
+
+Three corners of a tile are about the stream: whether it is moving, what moment the
+picture is of, and what it is being pulled over. A recording is not a stream, and
+each of the three had an answer that was true of the camera and false of what was
+on screen.
+
+**The stream corner** was a dot coloured by `ConnectionState`, and the word was the
+stream it was pulled as - `Main`, `Sub`. A recording has no state to report and no
+stream to name: it is one file, written down once. It is drawn as what it is now, a
+**triangle** in the accent colour and the word `Playback` (`osd-playback`), which is
+the mark every player uses for the same thing. `OsdLine.dot: Option<Color32>` became
+`mark: Option<OsdMark>` - a dot or a triangle - because the mark is a **question**
+now, not just a colour, and a triangle on a picture drawn sideways is turned with
+the line it leads (`draw_mark` takes the angle the text is drawn at).
+
+**The moment** was already the frame's own - `Tile::clock` is `frame.at`, which only
+a recording sets - but a seek replaces the channel and the first frame of the new one
+is a request away, and in that gap the corner fell back to `local_now()`. A
+recording saying "now" is the one thing it never means. `playback_clock` answers with
+the frame's moment when there is one and the **cursor's** until then, so a seek reads
+as the moment being fetched rather than as the moment it is being fetched at.
+
+**The transport corner** named the camera's connection mode and its rtsp or MSE url.
+A recording is not pulled from the camera: it is pulled from the server that holds
+it, over the web, from `…/api/<camera>`. `FrigateOrigin` names that address now
+(`api_base`), and the session that fetches the segments builds its requests from the
+same function - one path, built once. The transport word is the scheme the server
+answers on, `HTTP` or `HTTPS`, because the port a viewer logged in against is not the
+open one and reading `HTTP` over it would be a small lie about what they are trusting.
+The scheme is not repeated in the address beside it; the room a corner has goes to
+the part that names the server.
+
+What was **not** changed: the name, the codec, the frame rate and the format. Those
+are the picture's own and the recording's channel reports them, so they were already
+right - and a corner that reports the recording's codec is more use than one that
+reports the camera's.
+
+**The mark, a second time.** Three things were wrong with it on the screen, and one
+of them was not about the mark at all.
+
+*The triangle was too big.* It was drawn 30% larger than the dot "because a triangle
+covers less of its circle" - true of the area, wrong about the impression: the eye
+compares heights, and a mark 30% taller reads as a mark of another size. All three
+are the dot's diameter tall now, and what they fill of that box is the shape's own
+business.
+
+*It did not pause.* A recording held still was still drawn as a triangle, so the
+corner said "playing" for a picture that was not moving. It draws the bars now -
+`OsdMark::Pause` - and the word stays `Playback`: the picture is still a recording,
+and only what it is doing has changed. The corner answers the same question a
+player's own button does.
+
+*And it sat low beside the text.* The mark was placed at the middle of the **line
+box**, and the ink is not in the middle of the box. Measured on Windows at 20pt
+monospace: the box is 23.41 tall, its middle 11.7, while `Playback` puts its ink at
+0..19 - centre 9.5 - and `回放` at 2..22 - centre 12.0. So the mark was 2.2pt too low
+beside English and 0.3pt too high beside Chinese, and the same code could not be
+right for both. Every glyph carries the rectangle its ink is drawn in (`uv_rect`), so
+`ink_centre` is the union of those rectangles and the mark is centred on it. Spaces
+have no ink and are skipped; a line with nothing drawn falls back to the box.
+
+**The reason the corners looked misaligned was the font, not the drawing.** Laid out
+side by side, `1920x1080 填充` had its hanzi a quarter of the type size below its
+digits. Both are on the same baseline in epaint - `pos.y = font_impl_ascent` - so a
+difference there is a difference between two **faces**: the monospace face a machine
+has (Consolas: ascent 0.74em, and a deep descent to match) and the CJK face it falls
+back to (Microsoft YaHei: ascent 1.06em). At 20pt the baselines were 14.84 and 19.66.
+The proportional family was already aligned - Segoe UI and YaHei are 21.59 and 21.16 -
+which is why only the tiles' numbers ever looked wrong.
+
+The fix is a `FontTweak` on the monospace face: `baseline_offset_factor` moves a
+face's baseline without changing the row it defines. The value is **measured at
+install**, not written down: a scratch `egui::Context` is given the same definitions,
+`M` and `回` are laid out at 100pt, and the distance between their baselines is the
+answer, as a fraction of the size. Measured because the faces are the machine's -
+Consolas against YaHei here, Roboto Mono against Noto on Android - and because a
+number chosen on one platform is a wrong number on the next. A machine with no CJK
+face lays the character out in the monospace face itself, the gap is zero, and
+nothing is tweaked.
+
+Only the monospace family is touched, and the monospace family is only the OSD's own
+text (see `FontId::monospace` in the crate), so the interface is not moved. The
+side effect is the one that was wanted: the ink of a monospaced line now sits in the
+middle of its row instead of hanging from the top of it.
+
+`the_monospace_latin_sits_on_the_cjk_baseline` and
+`the_mark_sits_on_the_ink_and_not_in_the_middle_of_the_box` hold both halves.
+
+**The end of a range, and the rate beside the word.** Two more things the corner
+was saying that were not so.
+
+*A recording that ran out was drawn as playing.* It stops on its last frame and the
+session ends - `ConnectionState::Finished` - and the corner went on drawing the
+triangle, because `paused` only ever meant the viewer's own hold. The corner's
+question is whether the picture is moving, so `still(paused, state)` answers it for
+both: held, or out of range. Which of the two it is, the timeline says - the cursor
+is at the end of the range for one of them and wherever it was left for the other -
+and the corner has no room for the difference.
+
+That left the bar's play control saying "press to pause" over a picture that had
+already stopped, and pressing it did nothing: the session it would have held is gone.
+So the control draws **play** when the picture is still (`playback_still`, the same
+`still` the corner uses - one rule, so the two cannot disagree), and the press starts
+the recording again from `playback.opened`. That press is the seek a step back makes:
+the session that reached the end is gone, so the seek is another range, and
+`start_seek` puts the rate the viewer chose back on the new one.
+
+**Starting again rather than carrying on** is the choice that press makes. A range
+that ends before the recording does has more after it, and going on would be right
+there - but the corner cannot tell the two apart: `Finished` is the end of the range,
+and the range ends at the newest moment the box has just as often as it ends in the
+middle of the night. Carrying on would then have to be decided by comparing the
+cursor with the newest segment, which is a guess a few seconds wide, and a play that
+sometimes runs forward and sometimes replays is a play nobody can predict. Going on
+is what the forward step, the event jump and the drag are for; play at the end means
+play it again.
+
+*And the rate is written beside the word.* `Playback 8×` - only above `1×`, because
+the corner next door is the frame rate, and the frame rate is measured on the wall
+clock: at eight times it reads eight times the recording's own, and `Playback 8×` is
+what makes that number make sense. At `1×` there is nothing to explain and the corner
+keeps its width.
+
+**A rate is a measurement, and there is none yet.** Opening a recording showed
+`0.00fps` and `0kbps` for several seconds, which reads as a stream that has stopped
+and is really a stream nobody has measured. Two things make it: the sample published
+with the init segment names the codec and the size before any picture exists and
+carries a rate of zero by construction, and a window that closes before a frame has
+been counted measures nothing. Add the login, the playlist and the first fragment -
+all read before the first picture - and the zeros last as long as it takes to get
+going.
+
+The corner prints `—kbps` and `—fps` until the channel has counted a frame
+(`total_frames > 0`, which `apply_stats` already treats as "this stream delivered
+data"), the way the codec is a dash until the stream has described itself. A zero
+that was measured still prints as a zero: a recording held still keeps the last rate
+it had, and one paused before its first sample shows the dash until it is let go.
+
+**Live looks faster, and it is not the measurement that differs.** The window and
+the init sample are the same in every session - a live one publishes a rate of zero
+with its negotiation too. What differs is *when the channel started*: a camera's
+channel has been running since the page it belongs to was opened, so its numbers are
+already in the store by the time anyone looks at the tile, and magnifying it changes
+nothing about the channel. A recording's channel is created by the press, so its
+first window starts then - and its startup is the long one: a login, a playlist and a
+fragment the box has to cut. Watch a live channel that has just connected and the
+same zeros (now dashes) appear for the same two seconds.

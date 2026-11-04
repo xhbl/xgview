@@ -10,6 +10,7 @@ use super::*;
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::grid::Recording;
 use crate::tilebar;
 use monitor_core::blackout::{LocalTime, local_at};
 use monitor_core::config::FrigateConfig;
@@ -216,12 +217,12 @@ pub(super) struct Source {
 
 impl Source {
     /// The address a recording of this camera is a suffix of - `…/api/<camera>`.
+    ///
+    /// The origin spells it, because the corner of the tile that says what the
+    /// recording is being fetched from reads the same one. See
+    /// [`FrigateOrigin::api_base`].
     fn api_base(&self) -> String {
-        format!(
-            "{}/api/{}",
-            self.origin.base_url.trim_end_matches('/'),
-            self.origin.camera
-        )
+        self.origin.api_base()
     }
 }
 
@@ -294,6 +295,35 @@ impl XgViewApp {
     /// Whether a recording is playing on this slot.
     pub(super) fn is_playing_back(&self, slot: usize) -> bool {
         matches!(&self.playback, Some(playback) if playback.slot == slot)
+    }
+
+    /// What the corners of this slot's tile say about the recording it shows.
+    ///
+    /// One answer, because it is one question: the tile is showing a recording,
+    /// and this is what there is to say about it. The origin is the session's
+    /// own rather than the camera's - the same server, but the recording was
+    /// asked of the one that answered, and a corner naming the other would be
+    /// reporting something nobody checked.
+    pub(super) fn recording_mark(&self, slot: usize) -> Option<Recording<'_>> {
+        let playback = self.playback.as_ref().filter(|playback| playback.slot == slot)?;
+        let state = self.channels.get(&playback.index).map(|channel| channel.state);
+        Some(Recording {
+            origin: &playback.source.origin,
+            paused: still(playback.paused, state),
+            // Said only where it is not the normal rate: see [`Recording`].
+            speed: (playback.speed > 1.5).then(|| speed_label(playback.speed)),
+        })
+    }
+
+    /// The moment a recording's picture is of, for the corner that names it.
+    ///
+    /// The frame's own moment once one has arrived, and the cursor's until
+    /// then: a seek is a request away, and the corner saying "now" for the
+    /// second it takes would be the one thing a recording never means.
+    pub(super) fn playback_clock(&self, slot: usize) -> Option<f64> {
+        let playback = self.playback.as_ref().filter(|playback| playback.slot == slot)?;
+        let frame = self.view_texture(slot).and_then(|entry| entry.at);
+        frame.or_else(|| Some(self.centre_of(playback) as f64))
     }
 
     /// Asks a camera's server what there is to play, and plays it.
@@ -394,11 +424,31 @@ impl XgViewApp {
         self.read_events(index);
     }
 
-    /// Holds the picture, or lets it go.
+    /// Holds the picture, lets it go, or starts it again.
     ///
     /// A hold is the session's own pause: it stops reading, so nothing is
-    /// decoded and nothing is published, and the clock owes no time for the wait.
+    /// decoded and nothing is published, and the clock owes no time for the
+    /// wait. A range that ran out has no session left to hold, so the same
+    /// press - which the control draws as **play**, see [`Self::playback_still`]
+    /// - starts it again instead.
     pub(super) fn toggle_play(&mut self) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        // A range that ran out has nothing to hold, and the control that offers
+        // a press offers it as **play**: what the press does is start the
+        // recording again, from where this session opened. It is the seek a
+        // step back makes - the session that reached the end is gone, so it is
+        // another range - and the rate the viewer chose is put back on it.
+        if self.recording_ended() {
+            let opened = playback.opened;
+            if let Some(playback) = self.playback.as_mut() {
+                playback.paused = false;
+            }
+            self.move_to(opened);
+            tracing::debug!(target: "xgview::app", at = opened, "the recording starts again");
+            return;
+        }
         let Some(playback) = self.playback.as_mut() else {
             return;
         };
@@ -406,6 +456,28 @@ impl XgViewApp {
         let (index, paused) = (playback.index, playback.paused);
         self.manager.hold_clip(index, paused);
         tracing::debug!(target: "xgview::app", index, paused, "playback held or let go");
+    }
+
+    /// Whether the picture on the strip is standing still - held, or out of
+    /// range.
+    ///
+    /// The same answer the tile's corner gives (see [`still`]), for the control
+    /// that draws the mark on the bar: one rule, so the two cannot disagree
+    /// about whether the picture is moving.
+    pub(super) fn playback_still(&self) -> bool {
+        let Some(playback) = self.playback.as_ref() else {
+            return false;
+        };
+        still(playback.paused, self.channels.get(&playback.index).map(|channel| channel.state))
+    }
+
+    /// Whether the recording has played to the end of its range.
+    fn recording_ended(&self) -> bool {
+        let Some(playback) = self.playback.as_ref() else {
+            return false;
+        };
+        self.channels.get(&playback.index).map(|channel| channel.state)
+            == Some(ConnectionState::Finished)
     }
 
     /// Moves the picture by `by` seconds.
@@ -511,11 +583,6 @@ impl XgViewApp {
         let centre = self.centre_of(playback);
         let half = playback.zoom / 2;
         (centre - half, centre + half)
-    }
-
-    /// Whether the picture is held, for the bar's play control to draw.
-    pub(super) fn playback_paused(&self) -> bool {
-        self.playback.as_ref().is_some_and(|playback| playback.paused)
     }
 
     /// Reads the events of the stretch the timeline shows.
@@ -2201,6 +2268,16 @@ fn next_speed(speed: f32) -> f32 {
     }
 }
 
+/// Whether a recording's picture is standing still.
+///
+/// Two things stop it and the corner says one thing about both: the viewer held
+/// it, or the range ran out. Which of the two it is, the timeline says - the
+/// cursor is at the end for one of them and wherever it was left for the other -
+/// and the corner's question is only whether the picture is moving.
+fn still(paused: bool, state: Option<ConnectionState>) -> bool {
+    paused || state == Some(ConnectionState::Finished)
+}
+
 /// The word a rate is written as, on the control that carries it.
 ///
 /// A picture of a fast-forward cannot say how fast it is, so this one control
@@ -3023,6 +3100,24 @@ fn epoch_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A recording that ran out of range is not moving, and the corner says so
+    /// the same way it says a hold: the mark is about the picture, and the
+    /// timeline is where the reason lives.
+    #[test]
+    fn a_recording_that_ran_out_is_still() {
+        assert!(!still(false, Some(ConnectionState::Streaming)), "playing");
+        assert!(still(true, Some(ConnectionState::Streaming)), "held by the viewer");
+        assert!(still(false, Some(ConnectionState::Finished)), "or out of range");
+        assert!(still(true, Some(ConnectionState::Finished)));
+        // A channel that has not reported yet is not the end of anything, and
+        // one that is connecting is a seek on its way.
+        assert!(!still(false, None));
+        assert!(!still(false, Some(ConnectionState::Connecting)));
+        // A failed read is a picture that stopped for a reason the tile names
+        // elsewhere - it is not the range ending.
+        assert!(!still(false, Some(ConnectionState::Failed)));
+    }
 
     /// The strip is the width it is showing, centred on the cursor - and the
     /// cursor is the middle of it, which is the one thing that does not move.

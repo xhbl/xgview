@@ -168,7 +168,13 @@ impl XgViewApp {
                     &self.config.combined_info[3],
                 ],
                 time: self.time,
-                clock: index.and_then(|index| self.view_texture(index)).and_then(|entry| entry.at),
+                // The moment the picture is of. A recording's frame carries its
+                // own; before the first one has arrived the cursor's is the
+                // moment being fetched, and "now" is the one thing it is not.
+                clock: index
+                    .and_then(|index| self.view_texture(index))
+                    .and_then(|entry| entry.at)
+                    .or_else(|| index.and_then(|index| self.playback_clock(index))),
                 aspect: index
                     .and_then(|index| cameras.get(index))
                     .map(|camera| self.tile_aspect(camera))
@@ -182,7 +188,10 @@ impl XgViewApp {
                     .then_some(self.picture_zoom),
                 // A recording keeps its picture through a seek, which reports
                 // the state a live stream reports when it has nothing to show.
-                recording: index.is_some_and(|slot| self.is_playing_back(slot)),
+                // Everything the corners say about one comes with it: where it
+                // is being read from, and what the picture is doing - moving,
+                // held, or out of range. See [`grid::Recording`].
+                recording: index.and_then(|slot| self.recording_mark(slot)),
             };
             let response = grid::paint(ui, rect, &tile);
             if interactive {
@@ -718,7 +727,7 @@ impl XgViewApp {
         // a viewer watching the past wants is the picture held and moved, not
         // the microphone and the way in.
         if playing {
-            let play = if self.playback_paused() { Icon::Play } else { Icon::Pause };
+            let play = if self.playback_still() { Icon::Play } else { Icon::Pause };
             let speed = tilebar::Control::Label(self.playback_speed_label());
             let sound = tilebar::SOUND && self.magnified_has_audio();
             let sound_icon = if self.sound_on { Icon::Sound } else { Icon::Mute };

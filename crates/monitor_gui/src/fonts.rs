@@ -172,7 +172,7 @@ pub fn install_for(ctx: &egui::Context, language: &str) {
     // has no notion of width, so a proportional font put here would simply
     // break the setting.
     if let Some(face) = load(MONO_FACES) {
-        let name = register(&mut fonts, "system-mono", face);
+        let name = register(&mut fonts, MONO_NAME, face);
         fonts.families.entry(FontFamily::Monospace).or_default().insert(0, name);
         any = true;
     }
@@ -188,10 +188,67 @@ pub fn install_for(ctx: &egui::Context, language: &str) {
     }
 
     if any {
+        // The two faces were chosen for different things and their metrics are
+        // their own: a monospace face is designed to hold a line of code, and
+        // its baseline sits high in the row it defines, while a CJK face fills
+        // its row. Put side by side they do not share a baseline - the hanzi of
+        // `1920x1080 填充` sits a quarter of the type size below the digits -
+        // and that is what "the text does not line up" is. See
+        // [`monospace_baseline_gap`].
+        if let Some(gap) = monospace_baseline_gap(&fonts) {
+            if let Some(entry) = fonts.font_data.get_mut(MONO_NAME) {
+                Arc::make_mut(entry).tweak.baseline_offset_factor = gap;
+                tracing::info!(gap, "the monospace face moved onto the cjk baseline");
+            }
+        }
         ctx.set_fonts(fonts);
     } else {
         tracing::warn!("no system font found: the interface keeps egui's own, and non-Latin text renders as boxes");
     }
+}
+
+/// The name the fixed-width face is registered under.
+const MONO_NAME: &str = "system-mono";
+
+/// How far the monospace face has to move, as a fraction of the type size, for
+/// its baseline to sit on the CJK face's.
+///
+/// Measured rather than assumed. The gap is a property of the two files a
+/// machine happens to have - Consolas against Microsoft YaHei on Windows,
+/// Roboto Mono against Noto on Android - and it is not a number anybody can
+/// write down once: the faces are the platform's, and the same code meets
+/// different ones on every system. So the two are laid out here, at one size,
+/// and the distance between their baselines is the answer. It is a fraction of
+/// the size because both baselines scale with it.
+///
+/// `None` when there is nothing to align: no CJK face was installed, so the
+/// characters came from the monospace face itself and the baselines are already
+/// the same one.
+fn monospace_baseline_gap(fonts: &FontDefinitions) -> Option<f32> {
+    // One size, and a size big enough for the rounding to be noise.
+    const PROBE: f32 = 100.0;
+    // A move beyond this is not a baseline difference but two faces that do not
+    // belong in one row; leaving them alone is better than pushing one through
+    // the other.
+    const LIMIT: f32 = 0.35;
+
+    let probe = egui::Context::default();
+    probe.set_fonts(fonts.clone());
+    let mut found: Option<(f32, f32)> = None;
+    let _ = probe.run(egui::RawInput::default(), |ctx| {
+        let baseline = |text: &str| {
+            let galley = ctx.fonts(|fonts| {
+                fonts.layout_no_wrap(text.to_owned(), egui::FontId::monospace(PROBE), egui::Color32::WHITE)
+            });
+            galley.rows.first().and_then(|row| row.row.glyphs.first().map(|glyph| glyph.pos.y))
+        };
+        found = baseline("M").zip(baseline("\u{56de}"));
+    });
+    let (latin, cjk) = found?;
+    let gap = (cjk - latin) / PROBE;
+    // A gap of nothing is the answer when the CJK face never came into it: the
+    // glyph was drawn by the monospace face, and it is already on its baseline.
+    (gap.abs() > 0.01 && gap.abs() <= LIMIT).then_some(gap)
 }
 
 /// The CJK faces to try for `language`, best first, with the platform's default
@@ -281,4 +338,42 @@ fn looks_like_font(bytes: &[u8]) -> bool {
         | [b't', b'r', b'u', b'e', ..]  // Apple TrueType
         | [b't', b't', b'c', b'f', ..] // font collection
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The baseline of the first glyph of `text` in the monospace family.
+    fn baseline(ctx: &egui::Context, text: &str) -> Option<f32> {
+        let mut at = None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let galley = ctx.fonts(|fonts| {
+                fonts.layout_no_wrap(text.to_owned(), egui::FontId::monospace(100.0), egui::Color32::WHITE)
+            });
+            at = galley.rows.first().and_then(|row| row.row.glyphs.first().map(|glyph| glyph.pos.y));
+        });
+        at
+    }
+
+    /// Latin and Chinese share one baseline in the monospace family.
+    ///
+    /// They do not out of the box: the two faces are designed for different
+    /// jobs and their ascents differ by a quarter of the type size, which is
+    /// what a row of `1920x1080 填充` shows. The tweak is measured from the
+    /// faces the machine actually has, so this holds on every platform - and on
+    /// a machine with no CJK face at all there is nothing to align and the two
+    /// numbers are the same one anyway.
+    #[test]
+    fn the_monospace_latin_sits_on_the_cjk_baseline() {
+        let ctx = egui::Context::default();
+        install_for(&ctx, "zh-CN");
+        let (Some(latin), Some(cjk)) = (baseline(&ctx, "M"), baseline(&ctx, "\u{56de}")) else {
+            return;
+        };
+        assert!(
+            (latin - cjk).abs() <= 1.0,
+            "the latin baseline is at {latin} and the hanzi at {cjk}"
+        );
+    }
 }

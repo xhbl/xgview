@@ -378,6 +378,7 @@ stream-kind-main = 主码流
 stream-kind-sub = 辅码流
 stream-tag-main = 主
 stream-tag-sub = 辅
+osd-playback = 回放
 decode-hw = HW
 decode-sw = SW
 state-idle = 空闲
