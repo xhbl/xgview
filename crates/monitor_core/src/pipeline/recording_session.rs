@@ -36,6 +36,8 @@
 //! swallows it - the pictures after it play without waiting until they are back
 //! on the pace they were recorded at.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -84,6 +86,16 @@ const MAX_LAG: Duration = Duration::from_millis(250);
 /// over cannot leave the picture playing on instead of held.
 const LANDING_MISSES: u8 = 4;
 
+/// How long an init segment may be handed to another range of the same camera.
+///
+/// Every range's init names the same configuration: the ranges differ only in
+/// header times, and the parameter sets are byte-identical. Asking the box for
+/// it again on every range change costs 60-350 ms before the first fragment can
+/// even be asked for. The window is there because a camera that has been
+/// reconfigured encodes with new parameter sets, and a decoder configured from
+/// the old ones shows nothing it can use: past this, the box is asked again.
+const INIT_FRESH: Duration = Duration::from_secs(600);
+
 /// Plays a recording on one channel.
 ///
 /// Returns when the recording reaches its last frame - the response ends, or the
@@ -107,7 +119,7 @@ pub(super) async fn run_recording_session(
     };
 
     let mut source = match vod {
-        Some(playlist) => Recording::vod(playlist, credentials.clone(), begin),
+        Some(playlist) => Recording::vod(playlist, credentials.clone(), begin, camera_id_str),
         None => Recording::clip(&uri, credentials.as_ref()).await?,
     };
 
@@ -610,6 +622,26 @@ fn complete_groups(buf: &[u8]) -> usize {
     end
 }
 
+/// The init segment a range is read with: where it is, whether it has been
+/// read, the key it is kept under, and the bytes an earlier range of the same
+/// camera handed over.
+///
+/// One boxed field rather than four, so [`Recording`]'s two variants stay close
+/// in size - a playlist carries the whole fragment list, a window carries one
+/// response, and the enum is as large as its largest variant.
+struct InitReuse {
+    /// Where the init segment is, resolved once.
+    uri: String,
+    /// Whether it has been read, or there was none.
+    read: bool,
+    /// What [`init_in_hand`] knows it by. `None` when the address names nothing
+    /// a cache can be keyed by.
+    key: Option<String>,
+    /// The segment an earlier range handed over, given to the session before
+    /// anything is asked for.
+    bytes: Option<Bytes>,
+}
+
 /// Where a recording's bytes come from.
 ///
 /// A window is one request for one `clip.mp4`. A range is a playlist: an init
@@ -626,11 +658,9 @@ enum Recording {
     /// moves to is worked out from the playlist every time.
     Vod {
         playlist: VodPlaylist,
-        /// Where the init segment is, resolved once. Every fragment is read
-        /// through it, and it is fetched once per session.
-        init: Option<String>,
-        /// Whether the init segment has been read, or there was none.
-        init_read: bool,
+        /// The init segment this range is read with, or `None` when the playlist
+        /// names none. See [`Recording::vod`].
+        init_reuse: Option<Box<InitReuse>>,
         /// The fragment being read. It is the one the session began at, and the
         /// one a jump moves.
         next: usize,
@@ -673,17 +703,26 @@ impl Recording {
     /// A playlist, whose first request is made when its first bytes are asked
     /// for. A moment asked for part-way in begins at the fragment it falls in:
     /// the ones before it are a stretch nothing is going to play.
+    ///
+    /// `camera` names the configuration the init segment carries. Another range
+    /// of the same camera has the same one - only the header times differ - so
+    /// the segment last read for it is handed over rather than asked for again.
+    /// See [`INIT_FRESH`].
     fn vod(
         playlist: VodPlaylist,
         credentials: Option<(String, String)>,
         begin: Option<i64>,
+        camera: &str,
     ) -> Self {
         let next = begin.map_or(0, |at| fragment_at(&playlist, at));
-        let init = playlist.init_uri();
+        let init_reuse = playlist.init_uri().map(|uri| {
+            let key = api_base(&playlist.base).map(|base| format!("{base}|{camera}"));
+            let bytes = key.as_deref().and_then(init_in_hand);
+            Box::new(InitReuse { uri, read: bytes.is_some(), key, bytes })
+        });
         Self::Vod {
             playlist,
-            init,
-            init_read: false,
+            init_reuse,
             next,
             ahead: None,
             credentials,
@@ -754,12 +793,19 @@ impl Recording {
     /// the recording going on, and it is fetched here so that the session above
     /// sees one stream from first picture to last.
     async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
+        // An init segment read for another range of this camera is the same
+        // configuration, and is handed over before anything is asked for: it is
+        // what the box spent 60-350 ms making for the range before this one.
+        if let Self::Vod { init_reuse, .. } = self {
+            if let Some(bytes) = init_reuse.as_mut().and_then(|reuse| reuse.bytes.take()) {
+                return Ok(Some(bytes));
+            }
+        }
         match self {
             Self::Clip { response } => read(response).await,
             Self::Vod {
                 playlist,
-                init,
-                init_read,
+                init_reuse,
                 next,
                 ahead,
                 credentials,
@@ -771,14 +817,25 @@ impl Recording {
                     // use to a decoder that has not been given the parameters
                     // it was encoded with, and a fragment fetched for a seek is
                     // no different.
-                    if let Some(uri) = init.as_ref().filter(|_| !*init_read) {
-                        let uri = uri.clone();
-                        *init_read = true;
-                        let (body, fresh) =
+                    if let Some(reuse) = init_reuse.as_mut().filter(|reuse| !reuse.read) {
+                        reuse.read = true;
+                        let uri = reuse.uri.clone();
+                        let key = reuse.key.clone();
+                        let (mut body, fresh) =
                             open_request(&uri, credentials.as_ref(), token.as_deref()).await?;
-                        *response = Some(body);
                         *token = fresh;
-                        continue;
+                        // A kilobyte and a half, read whole: it is the
+                        // configuration every fragment after it is decoded with,
+                        // and it is what the next range of this camera is owed.
+                        let mut bytes = Vec::new();
+                        while let Some(chunk) = read(&mut body).await? {
+                            bytes.extend_from_slice(&chunk);
+                        }
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        remember_init(key.as_deref(), &bytes);
+                        return Ok(Some(bytes.into()));
                     }
                     // A fragment fetched while the finger was on the timeline is
                     // the one this reading wants: it is taken rather than asked
@@ -1133,6 +1190,34 @@ fn api_base(uri: &str) -> Option<&str> {
     Some(&uri[..scheme.len() + 3 + authority.len()])
 }
 
+/// The init segment last read from each camera's recording.
+///
+/// Keyed by the address it came from and the camera, and kept for the process: a
+/// range change makes another session for the same camera, and the segment it
+/// would wait 60-350 ms for is the configuration the one in hand already names.
+/// See [`INIT_FRESH`].
+fn init_cache() -> &'static Mutex<HashMap<String, (Instant, Bytes)>> {
+    static INITS: OnceLock<Mutex<HashMap<String, (Instant, Bytes)>>> = OnceLock::new();
+    INITS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The init segment this camera's last range was read with, while it is fresh.
+fn init_in_hand(key: &str) -> Option<Bytes> {
+    let inits = init_cache().lock().ok()?;
+    let (read, bytes) = inits.get(key)?;
+    (read.elapsed() < INIT_FRESH).then(|| bytes.clone())
+}
+
+/// Keeps an init segment for the next range of the same camera.
+fn remember_init(key: Option<&str>, bytes: &[u8]) {
+    let Some(key) = key else {
+        return;
+    };
+    if let Ok(mut inits) = init_cache().lock() {
+        inits.insert(key.to_string(), (Instant::now(), Bytes::copy_from_slice(bytes)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1166,18 +1251,48 @@ mod tests {
     /// moment.
     #[test]
     fn a_playlist_begins_at_its_init_segment_and_its_first_fragment() {
-        let source = Recording::vod(three_fragments(), None, None);
-        let Recording::Vod { playlist, init, init_read, next, .. } = &source else {
+        let source = Recording::vod(three_fragments(), None, None, "cam-a-playlist-open");
+        let Recording::Vod { playlist, init_reuse, next, .. } = &source else {
             panic!("a playlist is a playlist");
         };
         assert_eq!(playlist.start, 100);
+        let reuse = init_reuse.as_ref().expect("a playlist with an init segment");
         assert_eq!(
-            init.as_deref(),
-            Some("https://box/vod/cam/start/100/end/200/init.mp4"),
+            reuse.uri,
+            "https://box/vod/cam/start/100/end/200/init.mp4",
             "resolved once, and fetched before anything else"
         );
-        assert!(!init_read);
+        assert!(!reuse.read);
         assert_eq!(*next, 0, "the first fragment");
+    }
+
+    /// An init segment already read for a camera is handed to the next range of
+    /// it rather than asked for again: a range change is another session, and
+    /// the segment it would wait for is the same configuration under a
+    /// different name.
+    #[test]
+    fn an_init_segment_already_read_is_handed_to_the_next_range() {
+        let camera = "cam-init-in-hand";
+        let first = Recording::vod(three_fragments(), None, None, camera);
+        let Recording::Vod { init_reuse, .. } = &first else {
+            panic!("a playlist is a playlist");
+        };
+        let key = init_reuse
+            .as_ref()
+            .and_then(|reuse| reuse.key.clone())
+            .expect("a range with an init segment is keyed");
+        assert!(init_in_hand(&key).is_none(), "nothing has been read yet");
+
+        let bytes = b"\x00\x00\x00\x08ftypisom";
+        remember_init(Some(&key), bytes);
+
+        let next = Recording::vod(three_fragments(), None, None, camera);
+        let Recording::Vod { init_reuse, .. } = &next else {
+            panic!("a playlist is a playlist");
+        };
+        let reuse = init_reuse.as_ref().expect("a playlist with an init segment");
+        assert!(reuse.read, "the init is in hand, so the box is not asked");
+        assert_eq!(reuse.bytes.as_deref(), Some(&bytes[..]));
     }
 
     /// A jump backwards lands on a fragment whose moments are behind the one
@@ -1247,7 +1362,7 @@ mod tests {
         assert_eq!(fragment_at(&playlist, 900), 2, "past the end is the last one");
         assert_eq!(fragment_at(&playlist, 50), 0, "before the range is the first");
 
-        let source = Recording::vod(playlist, None, Some(125));
+        let source = Recording::vod(playlist, None, Some(125), "cam-a-moment-in-range");
         let Recording::Vod { playlist, next, .. } = &source else {
             panic!("a playlist is a playlist");
         };
@@ -1260,26 +1375,32 @@ mod tests {
     /// not fetched twice.
     #[test]
     fn a_jump_moves_the_reading_and_never_skips_the_init_segment() {
-        let mut source = Recording::vod(three_fragments(), None, None);
+        let mut source = Recording::vod(three_fragments(), None, None, "cam-a-jump-before-read");
         assert!(source.jump_to(135), "a playlist can jump");
-        let Recording::Vod { next, init_read, .. } = &source else {
+        let Recording::Vod { next, init_reuse, .. } = &source else {
             panic!("a playlist is a playlist");
         };
         assert_eq!(*next, 2, "the fragment that holds 135");
-        assert!(!*init_read, "a jump before the first read still fetches it");
+        assert!(
+            !init_reuse.as_ref().is_some_and(|reuse| reuse.read),
+            "a jump before the first read still fetches it"
+        );
 
         // And the reading the session has already done is not undone: the init
         // segment stays read, and only the fragment moves.
-        let mut source = Recording::vod(three_fragments(), None, None);
-        if let Recording::Vod { init_read, .. } = &mut source {
-            *init_read = true;
+        let mut source = Recording::vod(three_fragments(), None, None, "cam-a-jump-after-read");
+        if let Recording::Vod { init_reuse: Some(reuse), .. } = &mut source {
+            reuse.read = true;
         }
         assert!(source.jump_to(101));
-        let Recording::Vod { next, init_read, .. } = &source else {
+        let Recording::Vod { next, init_reuse, .. } = &source else {
             panic!("a playlist is a playlist");
         };
         assert_eq!(*next, 0, "backwards is the same move");
-        assert!(*init_read, "and the init segment is not fetched again");
+        assert!(
+            init_reuse.as_ref().is_some_and(|reuse| reuse.read),
+            "and the init segment is not fetched again"
+        );
     }
 
     /// A window's pictures are dated from the moment it was asked for; a
