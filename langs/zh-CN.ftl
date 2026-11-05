@@ -305,6 +305,27 @@ toolbar-orientation-portrait-tip = 切换到竖屏
 toolbar-orientation-landscape = 横屏
 toolbar-orientation-landscape-tip = 切换到横屏
 
+## 放大画面的工具栏
+tilebar-rotate-tip = 画面旋转四分之一圈
+tilebar-fit-tip = 切换画面适配方式
+tilebar-sound-on-tip = 打开声音
+tilebar-sound-off-tip = 关闭声音
+tilebar-mic-tip = 对这台摄像头通话
+tilebar-hangup-tip = 结束通话
+tilebar-playback-tip = 查看这台摄像头的录像
+tilebar-step-back-tip = 后退十秒
+tilebar-step-forward-tip = 前进十秒
+tilebar-play-tip = 播放
+tilebar-pause-tip = 暂停
+tilebar-prev-event-tip = 退到上一事件
+tilebar-next-event-tip = 前进到下一事件
+tilebar-zoom-in-tip = 时间轴放大，看更细
+tilebar-zoom-out-tip = 时间轴缩小，一次看更多
+tilebar-speed-tip = 倍速，按一次换下一档
+tilebar-date-tip = 选择这台摄像头录过像的日期
+tilebar-date-back-tip = 回到某一天的时间轴
+tilebar-live-tip = 回到实时画面
+
 ## 状态栏
 status-live = { $live }/{ $total } 在线
 status-page = { $layout } · 第 { $page }/{ $count } 页

@@ -311,6 +311,27 @@ toolbar-orientation-portrait-tip = switch to portrait
 toolbar-orientation-landscape = landscape
 toolbar-orientation-landscape-tip = switch to landscape
 
+## Magnified viewport's bar
+tilebar-rotate-tip = Turn the picture a quarter
+tilebar-fit-tip = Change how the picture is fitted
+tilebar-sound-on-tip = Turn the sound on
+tilebar-sound-off-tip = Turn the sound off
+tilebar-mic-tip = Talk through this camera
+tilebar-hangup-tip = End the call
+tilebar-playback-tip = Watch this camera's recordings
+tilebar-step-back-tip = Back ten seconds
+tilebar-step-forward-tip = Forward ten seconds
+tilebar-play-tip = Play
+tilebar-pause-tip = Pause
+tilebar-prev-event-tip = Step back to the event before this moment
+tilebar-next-event-tip = Step on to the event after this moment
+tilebar-zoom-in-tip = More detail on the timeline
+tilebar-zoom-out-tip = More of the timeline at once
+tilebar-speed-tip = Playback speed - the next one on a press
+tilebar-date-tip = The days this camera recorded on
+tilebar-date-back-tip = Back to the stretch of one day
+tilebar-live-tip = Back to the live picture
+
 ## Status bar
 status-live = { $live }/{ $total } live
 status-page = { $layout } · page { $page }/{ $count }

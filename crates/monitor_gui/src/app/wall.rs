@@ -594,8 +594,12 @@ impl XgViewApp {
                 .iter()
                 .map(|(_, action)| !self.tile_bar_available(*action))
                 .collect();
+            // What each control will do, for a pointer resting on it. The bar's
+            // shapes are read by a viewer who knows them; the words are here for
+            // the one who does not, the way the toolbars carry theirs.
+            let tips = self.tile_bar_tips(&entries);
             if let Some(index) =
-                tilebar::draw(ui, &mut self.nav, &layout, rotated, &controls, &muted)
+                tilebar::draw(ui, &mut self.nav, &layout, rotated, &controls, &muted, &tips)
             {
                 if !self.tile_bar.ignoring(now) {
                     // Was the ring on a control, or still on the seat? The
@@ -849,6 +853,52 @@ impl XgViewApp {
     /// The controls alone, which is what the layout and the paint need.
     pub(super) fn tile_bar_controls(&self) -> Vec<tilebar::Control> {
         self.tile_bar_entries().0.into_iter().map(|(control, _)| control).collect()
+    }
+
+    /// The word under each control of the magnified bar, for a pointer resting
+    /// on it.
+    ///
+    /// The bar is a row of shapes, and a shape is only a word to a viewer who
+    /// already knows it - which is what the toolbars' bubbles are for. Each says
+    /// what the press will do from where the picture is now, so a triangle that
+    /// will pause says "pause" and a calendar that will go back says so.
+    pub(super) fn tile_bar_tips(
+        &self,
+        entries: &[(tilebar::Control, TileBarAction)],
+    ) -> Vec<String> {
+        entries.iter().map(|(_, action)| self.tile_bar_tip(*action)).collect()
+    }
+
+    fn tile_bar_tip(&self, action: TileBarAction) -> String {
+        use monitor_i18n::tr;
+        match action {
+            TileBarAction::Rotate => tr("tilebar-rotate-tip"),
+            TileBarAction::Fit => tr("tilebar-fit-tip"),
+            TileBarAction::Sound => {
+                tr(if self.sound_on { "tilebar-sound-off-tip" } else { "tilebar-sound-on-tip" })
+            }
+            TileBarAction::Mic => tr("tilebar-mic-tip"),
+            TileBarAction::Hangup => tr("tilebar-hangup-tip"),
+            TileBarAction::Playback => tr("tilebar-playback-tip"),
+            TileBarAction::StepBack => tr("tilebar-step-back-tip"),
+            TileBarAction::StepForward => tr("tilebar-step-forward-tip"),
+            TileBarAction::PlayPause => {
+                tr(if self.playback_still() { "tilebar-play-tip" } else { "tilebar-pause-tip" })
+            }
+            TileBarAction::PrevEvent => tr("tilebar-prev-event-tip"),
+            TileBarAction::NextEvent => tr("tilebar-next-event-tip"),
+            TileBarAction::ZoomIn => tr("tilebar-zoom-in-tip"),
+            TileBarAction::ZoomOut => tr("tilebar-zoom-out-tip"),
+            TileBarAction::Speed => tr("tilebar-speed-tip"),
+            TileBarAction::Date => {
+                let days = self
+                    .playback
+                    .as_ref()
+                    .is_some_and(|playback| playback.timeline == playback::Timeline::Days);
+                tr(if days { "tilebar-date-back-tip" } else { "tilebar-date-tip" })
+            }
+            TileBarAction::Live => tr("tilebar-live-tip"),
+        }
     }
 
     /// Answers a control of the magnified bar: the handset that ends a call, the

@@ -581,6 +581,7 @@ pub fn draw(
     rotated: bool,
     controls: &[Control],
     muted: &[bool],
+    tips: &[String],
 ) -> Option<usize> {
     let painter = ui.painter();
     painter.rect_filled(layout.bar, CornerRadius::same(RADIUS), Color32::from_black_alpha(190));
@@ -657,15 +658,20 @@ pub fn draw(
         // would stop for good. See `XgViewApp::end_frame`, which hands a focus on a
         // control that has just gone grey to the next one that is still live.
         let muted = muted.get(index).copied().unwrap_or(false);
+        // The word a viewer who does not know the shape reads on hover. It is
+        // the caller's, because what the control does is the caller's to know -
+        // a play button that will pause is a word the bar cannot read off a
+        // picture of a triangle.
+        let tip = tips.get(index).map(String::as_str).unwrap_or("");
         let response = match control {
             Control::Icon(icon) => {
-                icons::button_in(ui, *rect, self::control(index), *icon, false, muted, "", rotated)
+                icons::button_in(ui, *rect, self::control(index), *icon, false, muted, tip, rotated)
             }
             Control::Label(text) => {
-                icons::label_in(ui, *rect, self::control(index), text, "", rotated)
+                icons::label_in(ui, *rect, self::control(index), text, tip, rotated)
             }
             Control::Hangup => {
-                icons::danger_in(ui, *rect, self::control(index), Icon::Hangup, "", rotated)
+                icons::danger_in(ui, *rect, self::control(index), Icon::Hangup, tip, rotated)
             }
         };
         if !muted {
