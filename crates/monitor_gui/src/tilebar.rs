@@ -584,7 +584,7 @@ pub fn draw(
     tips: &[String],
 ) -> Option<usize> {
     let painter = ui.painter();
-    painter.rect_filled(layout.bar, CornerRadius::same(RADIUS), Color32::from_black_alpha(190));
+    painter.rect_filled(layout.bar, CornerRadius::same(RADIUS), Color32::from_black_alpha(153));
     painter.rect_stroke(
         layout.bar,
         CornerRadius::same(RADIUS),
