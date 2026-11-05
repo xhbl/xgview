@@ -90,6 +90,13 @@ pub(super) struct Playback {
     /// it stops, so the range is read while it is still there and the answer is
     /// waiting when it lifts. See [`XgViewApp::read_ahead`].
     pub(super) ahead: Option<Ahead>,
+    /// How many seeks have been made since the recording opened.
+    ///
+    /// A range is read in the background, and a drag can ask for more than one:
+    /// the answer that lands last is not necessarily the seek that was made
+    /// last. Each read carries the number of the seek that asked for it, and an
+    /// answer older than the newest one is dropped rather than played.
+    pub(super) seek_gen: u64,
     /// What the strip is showing. See [`Timeline`].
     pub(super) timeline: Timeline,
     /// The days the calendar shows, oldest first, once the box has answered.
@@ -439,6 +446,7 @@ impl XgViewApp {
             reading_days: false,
             to_day: None,
             ahead: None,
+            seek_gen: 0,
             awaiting: None,
             to_seek: None,
             to_jump: None,
@@ -850,6 +858,15 @@ impl XgViewApp {
             // wait for a moment this playlist never reaches.
             playback.pending = Some(begin.unwrap_or(window.0));
         }
+    }
+
+    /// Whether an answer to a range read belongs to the newest seek.
+    ///
+    /// A seek made while another range is still being read is the one that
+    /// counts: playing the older answer would put the picture at a moment the
+    /// viewer has already left.
+    pub(super) fn seek_is_current(&self, gen: u64) -> bool {
+        self.playback.as_ref().is_some_and(|playback| playback.seek_gen == gen)
     }
 
     /// Takes the answer to a range read while the finger was down.
@@ -2214,7 +2231,10 @@ impl XgViewApp {
                 .any(|segment| segment.start <= at && at < segment.end);
             if reached {
                 playback.to_seek = None;
-                self.seek(at);
+                // Through `move_to`, so a picture the viewer had held is held
+                // again: a seek made while paused shows the frame it lands on
+                // rather than the pause being let go of with it.
+                self.move_to(at);
                 return;
             }
             // The moment was asked about and there is nothing at it: a hole. The
@@ -2310,7 +2330,7 @@ impl XgViewApp {
             to = window.1,
             "reading a range under the finger"
         );
-        start_playlist(&self.handle, &self.events_tx, index, source, window, at, true);
+        start_playlist(&self.handle, &self.events_tx, index, source, window, at, None);
         if let Some(playback) = self.playback.as_mut() {
             playback.ahead = Some(Ahead { window, answer: None });
         }
@@ -2325,10 +2345,25 @@ impl XgViewApp {
     fn seek(&mut self, at: i64) {
         // A look past a hole belonged to the moment the picture stopped at, and
         // the picture is being taken somewhere else: whatever it would have said
-        // is about a place nobody is going.
-        if let Some(playback) = self.playback.as_mut() {
-            playback.after_hole = None;
-        }
+        // is about a place nobody is going. And the seek is numbered: the range
+        // it may need is read in the background, and a second seek can be made
+        // while the first is still being answered - only the newest one may
+        // start a session, or a slower answer for an older moment would replace
+        // the picture with where the viewer was.
+        let gen = match self.playback.as_mut() {
+            Some(playback) => {
+                playback.after_hole = None;
+                // Whatever the last seek left waiting is about a place this one
+                // is leaving: an answer that lands on it would pull the picture
+                // back to where the viewer was.
+                playback.to_seek = None;
+                playback.awaiting = None;
+                playback.pending = None;
+                playback.seek_gen += 1;
+                playback.seek_gen
+            }
+            None => return,
+        };
         let Some(playback) = &self.playback else {
             return;
         };
@@ -2461,7 +2496,7 @@ impl XgViewApp {
             playback.pending = Some(target);
         }
         tracing::debug!(target: "xgview::app", index, at = target, "another stretch for a scrub");
-        start_playlist(&self.handle, &self.events_tx, index, source, window, target, false);
+        start_playlist(&self.handle, &self.events_tx, index, source, window, target, Some(gen));
     }
 
     /// Lets the cursor follow the picture again, once the picture has reached
@@ -3398,7 +3433,7 @@ fn start_playlist(
     source: Source,
     window: (i64, i64),
     at: i64,
-    ahead: bool,
+    gen: Option<u64>,
 ) {
     let sender = events.clone();
     handle.spawn(async move {
@@ -3414,7 +3449,7 @@ fn start_playlist(
             window,
             at,
             playlist,
-            ahead,
+            gen,
         });
     });
 }

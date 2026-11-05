@@ -74,6 +74,16 @@ const LONGEST_WAIT: Duration = Duration::from_secs(2);
 /// clock where it is.
 const MAX_LAG: Duration = Duration::from_millis(250);
 
+/// How many samples a held seek lets past before the picture is taken back
+/// without a landing frame.
+///
+/// A software decoder hands its picture over with the sample it was given, but
+/// `AMediaCodec` hands it over a frame or so later, so the sample the seek
+/// lands on can decode to nothing. Feeding the samples after it is what makes
+/// the picture appear; the limit is there so a decoder that never hands one
+/// over cannot leave the picture playing on instead of held.
+const LANDING_MISSES: u8 = 4;
+
 /// Plays a recording on one channel.
 ///
 /// Returns when the recording reaches its last frame - the response ends, or the
@@ -150,12 +160,30 @@ pub(super) async fn run_recording_session(
     // The last jump acted on. A jump is taken as it is seen, and the count is
     // what tells one from the next.
     let mut jumped: u64 = 0;
+    // Whether the next picture is one the hold is owed rather than one it
+    // stops. A session opened part-way in is a seek: the viewer asked for that
+    // moment, so the frame it lands on is published even if the picture is
+    // held - a hold that stopped the pre-roll would leave a paused step showing
+    // the moment it was already on. And a jump taken out of a hold is the same
+    // promise for a session that was already playing.
+    let mut landing = begin.is_some();
+    // How many samples have gone by with the landing picture still not handed
+    // over, so a decoder that never does cannot keep the picture unheld.
+    let mut landing_missed: u8 = 0;
 
     loop {
         // A jump the viewer asked for is taken before the next read: what is
         // open is the fragment being left, and its bytes are the stretch being
         // left with it. The decoder, the parser and the login are untouched.
-        take_jump(&mut jumps, &mut jumped, &mut source, &mut begin, &mut pending);
+        if take_jump(&mut jumps, &mut jumped, &mut source, &mut begin, &mut pending) {
+            // A jump is a moment the viewer asked to see, so the frame it lands
+            // on is published even if the picture is held. Read off the pause
+            // flag this would miss every seek made from a hold: the viewer's
+            // seek lets the hold go before it asks for the jump, so the flag is
+            // already off by the time the jump is taken.
+            landing = true;
+            landing_missed = 0;
+        }
         let chunk = match tokio::time::timeout(STALL_TIMEOUT, source.next_chunk()).await {
             Ok(Ok(Some(chunk))) => chunk,
             // The end of the recording: the response ended, or the playlist had
@@ -282,6 +310,10 @@ pub(super) async fn run_recording_session(
             // is not going to wait for them. What is left of the chunk belongs
             // to the stretch being left.
             if take_jump(&mut jumps, &mut jumped, &mut source, &mut begin, &mut pending) {
+                // This jump is the frame the viewer asked to see: it is
+                // published before the hold takes the picture back.
+                landing = true;
+                landing_missed = 0;
                 break;
             }
             let base = *first.get_or_insert(pts);
@@ -300,7 +332,7 @@ pub(super) async fn run_recording_session(
             // own pause, so nothing is decoded and nothing is published while
             // the viewer has a finger on the timeline.
             if let Some(paused) = held.as_mut() {
-                if *paused.borrow() {
+                if *paused.borrow() && !landing {
                     let since = Instant::now();
                     // The pause is let go of, or the finger says where it is -
                     // whichever comes first. A hold is the one moment there is
@@ -361,6 +393,10 @@ pub(super) async fn run_recording_session(
                     // picture was stopped on first - the moment the drag began
                     // from, arriving after the place the viewer pointed at.
                     if take_jump(&mut jumps, &mut jumped, &mut source, &mut begin, &mut pending) {
+                        // The hold is still on, so this frame is the landing
+                        // one: published once, then the picture is held again.
+                        landing = true;
+                        landing_missed = 0;
                         break;
                     }
                 }
@@ -437,11 +473,30 @@ pub(super) async fn run_recording_session(
                                 // not shown: it is there for the pictures after
                                 // it to be predicted from.
                                 if begin.is_none() {
-                                    if let Some((w, h)) =
-                                        publish_frames(frames, index, &mut sequence, decoded, Some(at))
-                                    {
+                                    let published = publish_frames(
+                                        frames,
+                                        index,
+                                        &mut sequence,
+                                        decoded,
+                                        Some(at),
+                                    );
+                                    if let Some((w, h)) = published {
                                         width = Some(w);
                                         height = Some(h);
+                                    }
+                                    // The landing frame is the one the seek is
+                                    // owed, and a hardware decoder hands it over
+                                    // a sample or two after the one it was given.
+                                    // The picture is only taken back once it has
+                                    // arrived, or once it is clear it never will.
+                                    if landing {
+                                        if published.is_some() || landing_missed >= LANDING_MISSES
+                                        {
+                                            landing = false;
+                                            landing_missed = 0;
+                                        } else {
+                                            landing_missed += 1;
+                                        }
                                     }
                                 }
                             }

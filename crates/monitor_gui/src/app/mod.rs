@@ -1839,11 +1839,18 @@ impl XgViewApp {
                         ),
                     }
                 }
-                BackgroundEvent::PlaylistReady { index, camera_id, window, at, playlist, ahead } => {
-                    if *ahead {
-                        self.range_arrived(*index, camera_id.clone(), *window, playlist.clone());
-                    } else {
-                        self.start_seek(*index, camera_id.clone(), *window, *at, playlist.clone());
+                BackgroundEvent::PlaylistReady { index, camera_id, window, at, playlist, gen } => {
+                    match *gen {
+                        // Read ahead of the finger: kept until a seek wants it.
+                        None => {
+                            self.range_arrived(*index, camera_id.clone(), *window, playlist.clone());
+                        }
+                        // A seek's own answer, and only the newest seek's is
+                        // played: an older one is a moment already left behind.
+                        Some(gen) if self.seek_is_current(gen) => {
+                            self.start_seek(*index, camera_id.clone(), *window, *at, playlist.clone());
+                        }
+                        Some(_) => {}
                     }
                 }
                 BackgroundEvent::EventsReady { index, camera_id, events } => {

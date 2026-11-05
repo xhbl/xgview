@@ -151,10 +151,14 @@ pub enum BackgroundEvent {
         /// The moment asked for, which the stretch is played from.
         at: i64,
         playlist: Option<VodPlaylist>,
-        /// Whether it was read before it was asked for, while a finger was
-        /// still on the timeline. Such an answer moves nothing by itself: it is
-        /// kept until the seek that wants it.
-        ahead: bool,
+        /// The seek that asked for it, as `Playback::seek_gen` numbered it.
+        ///
+        /// `None` when it was read before it was asked for, while a finger was
+        /// still on the timeline: such an answer moves nothing by itself, and is
+        /// kept until the seek that wants it. An answer that names a seek is
+        /// only played if it is still the newest one - answers arrive in
+        /// whatever order the box gives them.
+        gen: Option<u64>,
     },
     /// When the camera's events began and ended, in the stretch asked for.
     /// `None` when the box could not be asked at all, which is a timeline with
