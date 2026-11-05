@@ -473,6 +473,14 @@ impl XgViewApp {
         // The events of the stretch the timeline shows, so that the two marks
         // either side of the cursor are known before anyone asks to step to one.
         self.read_events(index);
+        // And the days the camera recorded on, which the calendar draws from.
+        // Read here rather than when the calendar is first shown: until the
+        // answer arrives the date row has nothing to draw, so a viewer who
+        // presses the date control would watch an empty row for as long as the
+        // box takes over `/api/recordings/summary`. Reading it while the
+        // picture is already playing costs nothing anyone can see, and the
+        // answer is in hand long before the press. See [`Self::read_days`].
+        self.read_days(index);
     }
 
     /// Holds the picture, lets it go, or keeps it going.
@@ -1936,9 +1944,13 @@ impl XgViewApp {
         }
     }
 
-    /// Asks the box which days it recorded on, the first time the calendar is
-    /// shown. One answer per recording: a day does not appear or disappear while
-    /// the viewer is looking at it.
+    /// Asks the box which days it recorded on, once per recording: a day does not
+    /// appear or disappear while the viewer is looking at it.
+    ///
+    /// Read when playback opens rather than when the calendar is first shown -
+    /// see [`Self::start_playback`] - and again from [`Self::toggle_calendar`]
+    /// only if that first read has not answered: a box that was slow enough for
+    /// the viewer to reach the date control first still gets asked.
     fn read_days(&mut self, index: usize) {
         let Some(playback) = self.playback.as_ref() else {
             return;
@@ -3486,6 +3498,7 @@ fn start_events(
 fn start_days(handle: &Handle, events: &Sender<BackgroundEvent>, index: usize, source: Source) {
     let sender = events.clone();
     handle.spawn(async move {
+        let started = std::time::Instant::now();
         let (user, pass) = source.credentials.clone().unwrap_or_default();
         let config = FrigateConfig::at(&source.origin.base_url, &user, &pass);
         // The days are counted in the viewer's zone: the box answers in UTC
@@ -3493,12 +3506,37 @@ fn start_days(handle: &Handle, events: &Sender<BackgroundEvent>, index: usize, s
         // day to a UTC box - so the calendar starts a day late. See
         // `blackout::zone_name`.
         let zone = monitor_core::blackout::zone_name();
+        // A read that fails is a calendar with nothing to draw rather than a
+        // camera that recorded nothing, and the two look the same on screen -
+        // so it is said here, where a run that keeps missing its days can be
+        // told apart from a box that has none.
         let days = match FrigateClient::new(config) {
-            Ok(mut client) => {
-                client.recorded_days(&source.origin.camera, zone.as_deref()).await.ok()
-            }
+            Ok(mut client) => match client.recorded_days(&source.origin.camera, zone.as_deref()).await
+            {
+                Ok(days) => Some(days),
+                Err(err) => {
+                    tracing::debug!(
+                        target: "xgview::app",
+                        index,
+                        %err,
+                        "the recorded days could not be read"
+                    );
+                    None
+                }
+            },
             Err(_) => None,
         };
+        // What the date row costs before it can be drawn. It is normally tens of
+        // milliseconds, and a box that takes a second or more over it is the one
+        // thing that can make the calendar feel slow even though it is read
+        // before the control is pressed. See [`XgViewApp::start_playback`].
+        tracing::debug!(
+            target: "xgview::app",
+            index,
+            ms = started.elapsed().as_millis() as u64,
+            days = days.as_ref().map(|days| days.len()).unwrap_or(0),
+            "the recorded days were read"
+        );
         let _ = sender.send(BackgroundEvent::DaysReady {
             index,
             camera_id: source.camera,
