@@ -2744,27 +2744,30 @@ const SPAN: i64 = 600;
 /// while a finger is on it.
 ///
 /// The edge is uncovered the moment the finger moves it, and an edge with
-/// nothing drawn in it reads as "not recorded" until the answer lands. A whole
-/// day of segments is a megabyte and seconds of blank edge; a couple of hours
-/// of it comes back in a tenth of a second, and what the whole strip costs is
-/// the number of requests rather than their size: each one is a round trip, and
-/// the box's answer barely grows between one hour and four. Two hours fills the
-/// strip in a few steps the viewer can follow, in a quarter of the round trips
-/// a day would take. Each slice is taken against the band already drawn, so the
-/// band grows out towards the edge rather than being joined from both ends.
-/// See [`read_slice`] and [`read_slice_back`].
-const READ_CHUNK: i64 = 7200;
+/// nothing drawn in it reads as "not recorded" until the answer lands, so the
+/// band grows towards the edge in steps rather than waiting for the whole
+/// stretch. What a step costs is mostly its round trip: measured against the
+/// box on 2026-11-06, one hour came back in 57 ms, six in 66 and twelve in 82,
+/// while the answer itself grows with the width - 90, 432 and 866 kilobytes.
+/// Six hours is therefore the step that fills the widest strip in two requests
+/// a side instead of six, at a quarter of the bytes a day would carry. Each
+/// slice is taken against the band already drawn, so the band grows out towards
+/// the edge rather than being joined from both ends. See [`read_slice`] and
+/// [`read_slice_back`].
+const READ_CHUNK: i64 = 21_600;
 
 /// How much of a strip's missing segment list is asked for in one request once
 /// the finger is lifted.
 ///
 /// Nothing is following the edge then, so the slices are only requests standing
-/// between the viewer and a filled strip: the box answers six hours in about
-/// the time it answers one - 123 ms against 66 - so the stretch the drag left
-/// is asked for whole. Six hours rather than a day because the answer does grow
-/// with the width, and this is a phone on a link of unknown speed; a day-wide
-/// strip then costs two requests either side, not twelve.
-const READ_WHOLE: i64 = 21_600;
+/// between the viewer and a filled strip, and the box answers a wide one in
+/// barely more time than a narrow one: six hours in 66 ms, twelve in 82. Twelve
+/// hours is half of the widest strip - [`ZOOMS`] ends at a day - so each side
+/// of it is one request rather than two, carrying the same bytes a pair of six
+/// hour slices would, sixteen milliseconds later. No wider is any use:
+/// [`read_slice`] stops at the window's edge, so the rest would never be asked
+/// for.
+const READ_WHOLE: i64 = 43_200;
 
 /// How long a read the box could not answer waits before it is asked again.
 ///
@@ -4634,7 +4637,7 @@ mod tests {
             Some((-600 - READ_CHUNK, -600))
         );
         // With the finger up, the stretch that is left is one read, not a
-        // chain of slices: six hours of it are asked for at once.
+        // chain of slices: twelve hours of it are asked for at once.
         assert_eq!(
             read_slice_back(&[(-600, 0)], -600 - READ_WHOLE, 0, READ_WHOLE),
             Some((-600 - READ_WHOLE, -600))
