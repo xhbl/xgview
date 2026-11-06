@@ -144,13 +144,18 @@ pub(super) struct Playback {
     /// because a strip can be short on both sides at once and one slot would
     /// starve one of them. See [`XgViewApp::read_newer`].
     pub(super) reading_newer: Option<(i64, i64)>,
-    /// The moment a read the box could not answer may be asked for again.
+    /// The moment a read the box could not answer may be asked for again, on
+    /// each side of the strip.
     ///
     /// A failed read leaves the stretch it was for unread, and a stretch with
     /// nothing drawn in it reads as "not recorded". Asked again the next frame
     /// would be a request every frame to a box that keeps failing, so the retry
-    /// waits a few seconds. See [`XgViewApp::read_strip`].
-    pub(super) retry_at: i64,
+    /// waits a few seconds. One per side, because a box that failed one read has
+    /// not failed the other, and holding both back kept a side that was working
+    /// from filling until the other side's retry came round. See
+    /// [`XgViewApp::read_strip`].
+    pub(super) retry_older: i64,
+    pub(super) retry_newer: i64,
     /// The earliest moment the camera answered "nothing recorded" for, once a
     /// strip has been drawn that far back. The strip stops there.
     pub(super) oldest: Option<i64>,
@@ -160,8 +165,20 @@ pub(super) struct Playback {
     /// When the camera's events began and ended, in the stretch that was read.
     /// Empty until the box has answered, and empty for a camera with none.
     pub(super) events: Vec<(i64, i64)>,
-    /// Whether the event list is being read.
+    /// Whether the event list is being read, and which window it was asked for.
+    /// An answer for another window is not this list: a jump or a widened strip
+    /// that asked while this read was in flight must not take it as its own.
     pub(super) reading_events: bool,
+    pub(super) events_ask: Option<(i64, i64)>,
+    /// A window the events had to be read for while another read was in flight.
+    ///
+    /// The read is one at a time, and a second ask used to be dropped: a strip
+    /// widened while its events were being read cleared the old marks and was
+    /// never asked again, so the half it had just uncovered had none. The ask is
+    /// remembered here and made when the answer lands.
+    pub(super) events_wanted: Option<(i64, i64)>,
+    /// The window a waiting jump needs. See [`XgViewApp::events_arrived`].
+    pub(super) jump_ask: Option<(i64, i64)>,
     /// What came of looking past the hole a recording stopped at. See
     /// [`AfterHole`].
     pub(super) after_hole: Option<AfterHole>,
@@ -459,11 +476,15 @@ impl XgViewApp {
             to_jump: None,
             reading_older: None,
             reading_newer: None,
-            retry_at: 0,
+            retry_older: 0,
+            retry_newer: 0,
             oldest: None,
             paused: false,
             events: Vec::new(),
             reading_events: false,
+            events_ask: None,
+            events_wanted: None,
+            jump_ask: None,
             after_hole: None,
             // What opening asked the box about: without it the first drag would
             // read the strip it is already holding, and wait for the answer
@@ -724,6 +745,9 @@ impl XgViewApp {
         tracing::debug!(target: "xgview::app", forward, "reading the events for a jump");
         if let Some(playback) = self.playback.as_mut() {
             playback.to_jump = Some(forward);
+            // Which list the jump is waiting for, so that an answer for another
+            // window is not mistaken for it. See [`Self::events_arrived`].
+            playback.jump_ask = Some((from, to));
         }
         self.read_events_between(index, from, to);
     }
@@ -770,18 +794,26 @@ impl XgViewApp {
     }
 
     /// Reads the events of a stretch. One at a time: a second ask while the
-    /// first is in flight would be two answers for one list.
+    /// first is in flight would be two answers for one list - so it is
+    /// remembered instead, and made when the answer lands. Dropping it left a
+    /// strip widened while a read was in flight with no marks on the half that
+    /// was just uncovered.
     fn read_events_between(&mut self, index: usize, from: i64, to: i64) {
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
         if playback.reading_events {
+            if let Some(playback) = self.playback.as_mut() {
+                playback.events_wanted = Some((from, to));
+            }
             return;
         }
         let source = playback.source.clone();
         tracing::debug!(target: "xgview::app", index, from, to, "reading the events");
         if let Some(playback) = self.playback.as_mut() {
             playback.reading_events = true;
+            playback.events_ask = Some((from, to));
+            playback.events_wanted = None;
         }
         start_events(&self.handle, &self.events_tx, index, source, from, to);
     }
@@ -792,6 +824,8 @@ impl XgViewApp {
         &mut self,
         index: usize,
         camera_id: String,
+        from: i64,
+        to: i64,
         events: Option<Vec<(i64, i64)>>,
     ) {
         let Some(playback) = self.playback.as_mut() else {
@@ -800,17 +834,41 @@ impl XgViewApp {
         if playback.index != index || playback.source.camera != camera_id {
             return;
         }
+        // The answer is the list only when it answers the read that is in
+        // flight. Another window's answer is dropped rather than drawn: the
+        // list is for one window, and the strip it is drawn on has moved on.
+        if playback.events_ask != Some((from, to)) {
+            tracing::debug!(target: "xgview::app", from, to, "dropping an answer for another window");
+            return;
+        }
+        playback.events_ask = None;
         playback.reading_events = false;
         if let Some(events) = events {
             playback.events = events;
         }
-        // A jump was waiting for this list: it is made now, and it does not ask
-        // for the list again - `to_jump` is cleared first, so a second answer
-        // that still holds nothing says so instead of reading on.
-        if let Some(forward) = playback.to_jump.take() {
-            if !playback.events.is_empty() {
-                self.jump_event(forward);
+        // A jump was waiting for this list: it is made now, but only when this
+        // is the list it asked for. A press that had to be remembered while
+        // another read was in flight is not spent on that one - its own read
+        // comes after. `to_jump` is cleared first, so a second answer that still
+        // holds nothing says so instead of reading on.
+        let mut jumped = None;
+        if playback.jump_ask == Some((from, to)) {
+            let forward = playback.to_jump.take();
+            playback.jump_ask = None;
+            if let Some(forward) = forward.filter(|_| !playback.events.is_empty()) {
+                jumped = Some(forward);
             }
+        }
+        // What was asked for while this read was in flight - a widened strip, or
+        // the jump above - is asked for now.
+        let wanted = playback.events_wanted.take();
+        let jump_next = playback.to_jump.and(playback.jump_ask);
+        let next = wanted.or(jump_next);
+        if let Some(forward) = jumped {
+            self.jump_event(forward);
+        }
+        if let Some((from, to)) = next {
+            self.read_events_between(index, from, to);
         }
     }
 
@@ -2132,7 +2190,8 @@ impl XgViewApp {
         }
         let (_, end) = self.window_of(playback);
         let centre = self.centre_of(playback);
-        let to = end.min(epoch_now());
+        let now = epoch_now();
+        let to = end.min(now);
         let Some((from, to)) = read_slice(&playback.covered, centre.min(to), to) else {
             return;
         };
@@ -2140,8 +2199,10 @@ impl XgViewApp {
         // it is the sliver at the edge of the strip's right half - which is
         // drawn to the moment the picture is on anyway. Asked for as it comes,
         // that sliver is a request every second for one second of recording; it
-        // waits until a few seconds of it have accumulated. See [`LIVE_SLICE`].
-        if to - from < LIVE_SLICE {
+        // waits until a few seconds of it have accumulated. Only at that edge:
+        // a short stretch further back is a hole to fill, not the live tip.
+        // See [`LIVE_SLICE`].
+        if to >= now && to - from < LIVE_SLICE {
             return;
         }
         let source = playback.source.clone();
@@ -2172,16 +2233,31 @@ impl XgViewApp {
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
-        if epoch_now() < playback.retry_at {
+        // The calendar is another picture of the recording rather than a width
+        // of the strip, and the window it would be read for is not what is on
+        // screen: nothing is asked for while it is shown.
+        if playback.timeline == Timeline::Days {
+            return;
+        }
+        let index = playback.index;
+        // Each side has its own retry: a box that could not answer one read has
+        // not failed the other, and holding both back kept a side that was
+        // working from filling until the other side's retry came round.
+        let now = epoch_now();
+        let wait_older = now < playback.retry_older;
+        let wait_newer = now < playback.retry_newer;
+        if !wait_older {
+            self.read_older(index);
+        }
+        if !wait_newer {
+            self.read_newer(index);
+        }
+        if wait_older || wait_newer {
             // The strip is short and the box is not to be asked yet. A held
             // picture draws no frames of its own, so one is asked for, or the
             // blank stays for as long as the viewer leaves the picture held.
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
-            return;
         }
-        let index = playback.index;
-        self.read_older(index);
-        self.read_newer(index);
     }
 
     /// Takes the segment list read for a wider strip.
@@ -2208,10 +2284,14 @@ impl XgViewApp {
         // on both sides, and clearing both let the side that was still waiting
         // be asked for again - the same megabyte of segments, once per side that
         // answered. See [`Self::read_older`] and [`Self::read_newer`].
-        if playback.reading_older == Some((from, to)) {
+        // Which side this answer is for, before the slots are cleared: a failed
+        // read is remembered on its own side only.
+        let was_older = playback.reading_older == Some((from, to));
+        let was_newer = playback.reading_newer == Some((from, to));
+        if was_older {
             playback.reading_older = None;
         }
-        if playback.reading_newer == Some((from, to)) {
+        if was_newer {
             playback.reading_newer = None;
         }
         // The read a picked day asked for, if this is it: whether it found
@@ -2240,7 +2320,13 @@ impl XgViewApp {
             // drawn as nothing until it is answered, and a band of nothing in
             // the middle of the recording is what the marks - read separately
             // and answered - were drawn across. See [`Self::read_strip`].
-            playback.retry_at = epoch_now() + READ_RETRY;
+            let retry_at = epoch_now() + READ_RETRY;
+            if was_older {
+                playback.retry_older = retry_at;
+            }
+            if was_newer {
+                playback.retry_newer = retry_at;
+            }
             // A hold taken for a seek that this read was to answer is let go of
             // too: a read that could not be made must not leave the picture
             // held for ever.
@@ -3597,6 +3683,8 @@ fn start_events(
         let _ = sender.send(BackgroundEvent::EventsReady {
             index,
             camera_id: source.camera,
+            from,
+            to,
             events: times,
         });
     });

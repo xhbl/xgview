@@ -1853,8 +1853,8 @@ impl XgViewApp {
                         Some(_) => {}
                     }
                 }
-                BackgroundEvent::EventsReady { index, camera_id, events } => {
-                    self.events_arrived(*index, camera_id.clone(), events.clone());
+                BackgroundEvent::EventsReady { index, camera_id, from, to, events } => {
+                    self.events_arrived(*index, camera_id.clone(), *from, *to, events.clone());
                 }
                 BackgroundEvent::DaysReady { index, camera_id, days } => {
                     self.days_arrived(*index, camera_id.clone(), days.clone());

@@ -166,6 +166,10 @@ pub enum BackgroundEvent {
     EventsReady {
         index: usize,
         camera_id: String,
+        /// The stretch the answer is for: the list is one window, and a jump or
+        /// a widened strip must not read an answer for another as its own.
+        from: i64,
+        to: i64,
         events: Option<Vec<(i64, i64)>>,
     },
     /// The days the camera recorded on, as the box names them - `2026-10-31`.
