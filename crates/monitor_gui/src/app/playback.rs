@@ -79,6 +79,16 @@ pub(super) struct Playback {
     /// where the drag started, and it would only reach the place the viewer
     /// pointed at a request later.
     pub(super) pending: Option<i64>,
+    /// The moment the picture was on when the seek was made, which its own
+    /// frame is of.
+    ///
+    /// A seek backwards leaves the session stopped on the frame it was holding,
+    /// and that frame is published before the landing one - it is later than the
+    /// moment asked for, so it looks like the seek has arrived and the cursor
+    /// goes back to where it started from. The frame at this moment is the one
+    /// being left, and it does not count as arriving. `None` when the picture
+    /// has no moment yet, or when the seek goes nowhere.
+    pub(super) pending_from: Option<i64>,
     /// Whether a finger is on the timeline, and where it has got to.
     ///
     /// Kept here rather than read from egui's drag state: what the viewer is
@@ -210,6 +220,10 @@ pub(super) enum AfterHole {
     /// read covers: the next day is asked about from where the last answer
     /// stopped, and the answer has to be recognised as that read's.
     Looking { stop: i64, window: (i64, i64) },
+    /// It was read, and the box has nothing past the stop **yet**: the stop is
+    /// the live edge, where the recorder is still cutting its next file. The
+    /// question is asked again shortly rather than answered as the end.
+    Waiting { stop: i64, at: i64 },
     /// It was read, and the recording has nothing after it: this is the end.
     Nothing(i64),
 }
@@ -466,6 +480,9 @@ impl XgViewApp {
             // back before where playback begins, so it is where the picture
             // starts - not the range's - that the cursor waits for.
             pending: Some(begin.unwrap_or(from)),
+            // Nothing is on screen from this recording yet: the slot shows the
+            // camera's own picture, which has no moment to be left behind.
+            pending_from: None,
             scrubbing: false,
             timeline: Timeline::Span,
             days: Vec::new(),
@@ -625,7 +642,31 @@ impl XgViewApp {
             self.move_to(next);
             return;
         }
-        self.look_past_hole(stop);
+        // The stretch the picture stopped in already runs past the stop: the
+        // recorder wrote on while the picture played, and the list was read
+        // ahead of it. That is not a hole, and there is nothing to look for.
+        if carries_on(&playback.stretches, stop) {
+            tracing::debug!(target: "xgview::app", at = stop, "the recording carries on at the live edge");
+            self.move_to(stop);
+            return;
+        }
+        // A stop at the edge of what has been cut is asked about again shortly:
+        // the next file is being written, and "nothing yet" is not the end. See
+        // [`AfterHole::Waiting`].
+        if stop >= epoch_now() - LIVE_EDGE {
+            self.look_live(stop);
+        } else {
+            self.look_past_hole(stop);
+        }
+    }
+
+    /// Reads the segment list just past the live edge.
+    ///
+    /// A few minutes' worth, not a day: the question is whether the recorder
+    /// has cut the next file, and the first few seconds after the stop answer
+    /// it. See [`LIVE_SPAN`].
+    fn look_live(&mut self, stop: i64) {
+        self.look_from(stop, stop, stop + LIVE_SPAN);
     }
 
     /// Reads the segment list past a hole, looking for where the recording
@@ -772,14 +813,21 @@ impl XgViewApp {
         playback
             .scrub
             .or(playback.pending)
-            .or_else(|| {
-                self.manager
-                    .frames()
-                    .latest(playback.index)
-                    .and_then(|frame| frame.at)
-                    .map(|at| at as i64)
-            })
+            .or_else(|| self.pictured(playback.index))
             .unwrap_or(playback.opened)
+    }
+
+    /// The moment the picture is actually on, ignoring the cursor.
+    ///
+    /// What a seek leaves behind is the frame on screen, not where the cursor
+    /// is showing: a finger on the strip or a seek still on its way puts the
+    /// cursor somewhere else. See [`Playback::pending_from`].
+    fn pictured(&self, index: usize) -> Option<i64> {
+        self.manager
+            .frames()
+            .latest(index)
+            .and_then(|frame| frame.at)
+            .map(|at| at as i64)
     }
 
     /// The stretch the strip is drawn across: the width it is showing, centred
@@ -1945,7 +1993,14 @@ impl XgViewApp {
             return;
         };
         let (step, repeat) = hold_step(base, now.saturating_duration_since(held.since));
-        if !fresh && now.saturating_duration_since(held.stepped) < repeat {
+        // A key that is down is the same key every frame, so the repeat cannot
+        // begin until the key has been held longer than a finger holds one: a
+        // press of 160 ms read as two steps, which is a step that looks like it
+        // went twice as far. Nothing repeats before [`REPEAT_DELAY`].
+        if !fresh
+            && (now.saturating_duration_since(held.since) < REPEAT_DELAY
+                || now.saturating_duration_since(held.stepped) < repeat)
+        {
             return;
         }
         if let Some(playback) = self.playback.as_mut() {
@@ -2271,6 +2326,20 @@ impl XgViewApp {
             // blank stays for as long as the viewer leaves the picture held.
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
+        // A stop at the live edge is asked about again once the recorder has had
+        // time to cut its next file: "nothing yet" is not the recording being
+        // over, and nothing else will ask. See [`AfterHole::Waiting`].
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        let Some(AfterHole::Waiting { stop, at }) = playback.after_hole else {
+            return;
+        };
+        if now >= at {
+            self.look_live(stop);
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs((at - now) as u64));
+        }
     }
 
     /// Takes the segment list read for a wider strip.
@@ -2352,8 +2421,14 @@ impl XgViewApp {
         };
         // The box answered for this range: whether it held anything or not, the
         // time in it is now known - and "asked, nothing there" is exactly what a
-        // hole is. See [`covered_between`].
-        cover(&mut playback.covered, from, to);
+        // hole is. See [`covered_between`]. Only up to the present, though: a
+        // look at the live edge reaches a stretch ahead that has not happened
+        // yet, and marking that known would draw the future as a hole and keep
+        // the strip from ever asking about it again as it became the present.
+        let now = epoch_now();
+        if from < now {
+            cover(&mut playback.covered, from, to.min(now));
+        }
         if segments.is_empty() {
             if picked.is_none() {
                 // Nothing was recorded that far back. That is where the
@@ -2384,7 +2459,11 @@ impl XgViewApp {
             // anything. Otherwise this is the end of the recording, and a press
             // from here starts it again.
             if let Some(stop) = look_past(&playback.after_hole, from, to) {
-                playback.after_hole = Some(AfterHole::Nothing(stop));
+                // A look that found nothing - or could not be answered - is the
+                // end only when the stop is well behind the clock: at the live
+                // edge it is a file that has not been cut yet. See
+                // [`AfterHole::Waiting`].
+                playback.after_hole = Some(after_stop(stop, epoch_now()));
                 if keep_looking(stop, from, to) {
                     self.look_from(stop, to, to + HOLE_LOOK);
                     return;
@@ -2470,10 +2549,22 @@ impl XgViewApp {
         // recording carries on, if it does.
         if let Some(stop) = look_past(&playback.after_hole, from, to) {
             let next = next_stretch(&playback.segments, &playback.covered, stop);
-            playback.after_hole = next.is_none().then_some(AfterHole::Nothing(stop));
+            // The same stretch reaching past the stop is the recorder having
+            // written on while the picture played: at the live edge the answer
+            // is not "what comes next", it is "more of what was already playing".
+            let carries = carries_on(&playback.stretches, stop);
+            playback.after_hole = match (next, carries) {
+                (Some(_), _) | (None, true) => None,
+                (None, false) => Some(after_stop(stop, epoch_now())),
+            };
             if let Some(next) = next {
                 tracing::debug!(target: "xgview::app", at = next, "the recording carries on past a hole");
                 self.move_to(next);
+                return;
+            }
+            if carries {
+                tracing::debug!(target: "xgview::app", at = stop, "the recording carries on at the live edge");
+                self.move_to(stop);
                 return;
             }
         }
@@ -2590,6 +2681,11 @@ impl XgViewApp {
             .first()
             .zip(playback.segments.last())
             .map(|(first, last)| (first.start, last.end));
+        // The frame the picture is on is what this seek is leaving. The session
+        // publishes it once more before the landing frame, and it is later than
+        // the moment asked for - taken as arriving, it is the cursor going back
+        // to where it started. See [`Playback::pending_from`].
+        let from = self.pictured(index);
         if reach.is_some_and(|(first, last)| at < first || at > last) {
             self.read_around(index, at);
             if let Some(playback) = self.playback.as_mut() {
@@ -2598,6 +2694,7 @@ impl XgViewApp {
                 // seek whose playlist is on its way: what is on screen is still
                 // the stretch being left.
                 playback.pending = Some(at);
+                playback.pending_from = from.filter(|from| *from != at);
             }
             return;
         }
@@ -2611,6 +2708,7 @@ impl XgViewApp {
             if let Some(playback) = self.playback.as_mut() {
                 playback.to_seek = Some(at);
                 playback.pending = Some(at);
+                playback.pending_from = from.filter(|from| *from != at);
             }
             return;
         }
@@ -2644,6 +2742,7 @@ impl XgViewApp {
                 playback.scrub = None;
                 playback.scrubbing = false;
                 playback.pending = Some(target);
+                playback.pending_from = from.filter(|from| *from != target);
                 playback.paused = false;
             }
             return;
@@ -2671,6 +2770,7 @@ impl XgViewApp {
                         playback.scrub = None;
                         playback.scrubbing = false;
                         playback.pending = Some(target);
+                        playback.pending_from = from.filter(|from| *from != target);
                     }
                 }
             }
@@ -2706,6 +2806,7 @@ impl XgViewApp {
             playback.scrub = None;
             playback.scrubbing = false;
             playback.pending = Some(target);
+            playback.pending_from = from.filter(|from| *from != target);
         }
         tracing::debug!(target: "xgview::app", index, at = target, "another stretch for a scrub");
         start_playlist(&self.handle, &self.events_tx, index, source, window, target, Some(gen));
@@ -2721,8 +2822,18 @@ impl XgViewApp {
         let Some(playback) = self.playback.as_mut() else {
             return;
         };
-        if playback.index == index && playback.pending.is_some_and(|pending| caught_up(at, pending)) {
-            playback.pending = None;
+        if playback.index == index {
+            if let Some(pending) = playback.pending {
+                // The one frame that is not an arrival: the picture the seek
+                // left behind, published once while the session takes the jump.
+                let left_behind = playback
+                    .pending_from
+                    .is_some_and(|from| at.is_some_and(|at| at as i64 == from));
+                if !left_behind && caught_up(at, pending) {
+                    playback.pending = None;
+                    playback.pending_from = None;
+                }
+            }
         }
     }
 }
@@ -2796,6 +2907,30 @@ const LIVE_SLICE: i64 = 10;
 /// hole, which is the list read around the moment being watched and reaches an
 /// hour or so; every small hole is answered from that, with no request at all.
 const HOLE_LOOK: i64 = 24 * 3600;
+
+/// How near the present a stop has to be to be the live edge.
+///
+/// A playlist ends at the last fragment the box had when its range was read,
+/// and the recorder cuts a file about every ten seconds: a stop a minute or two
+/// behind the clock is the edge of what has been written, not the end of the
+/// recording. The window is loose because the device's clock and the server's
+/// are not the same clock.
+const LIVE_EDGE: i64 = 300;
+
+/// How long the picture waits at the live edge before asking again.
+///
+/// Asking the moment it stops is answered "nothing" - the next file is still
+/// being written, and a cut is about every ten seconds. Five is short enough
+/// that a picture resumes within a cut of the one before, and long enough not
+/// to ask every frame.
+const LIVE_LOOK: i64 = 5;
+
+/// How far past the live edge one ask reaches.
+///
+/// A few minutes, enough for the files cut since the stop and the strip's right
+/// half at the closer widths. A day's worth is a lot of segments for a
+/// question the first few seconds answer.
+const LIVE_SPAN: i64 = WINDOW;
 
 /// How far past a hole the looking goes, a day at a time.
 ///
@@ -3002,6 +3137,13 @@ fn hold_step(base: i64, held: std::time::Duration) -> (i64, std::time::Duration)
     }
 }
 
+/// How long a key must be down before it repeats at all.
+///
+/// A press is read as "down" on every frame until it is released, and a finger
+/// holds a key for 130-175 ms - long enough to cross [`REPEAT_SLOW`] and be
+/// taken for a second step. The delay is what separates a press from a hold:
+/// below it, one press is one step however long the finger takes to lift.
+const REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 /// How often a held arrow steps: at first, after half a second, and after one
 /// and a half.
 const REPEAT_SLOW: std::time::Duration = std::time::Duration::from_millis(160);
@@ -3568,6 +3710,32 @@ fn next_stretch(segments: &[Segment], covered: &[(i64, i64)], stop: i64) -> Opti
         .find(|start| *start > stop && covered_between(covered, stop, *start))
 }
 
+/// Whether the recording runs past `stop` inside the stretch the stop is in.
+///
+/// A stop at the live edge is not one the list knows nothing after: the recorder
+/// wrote on while the picture played, and the same stretch now reaches beyond
+/// it. A stretch that still ends at the stop is the end of what has been cut,
+/// and a stop in a gap is a hole - both of which a read answers.
+fn carries_on(stretches: &[Segment], stop: i64) -> bool {
+    stretches
+        .iter()
+        .any(|stretch| stretch.start <= stop && stop < stretch.end)
+}
+
+/// What a stop is, once its list has been read and reaches no further.
+///
+/// A stop near the clock is the live edge, where the recorder is cutting the
+/// next file: asking again shortly is what keeps the picture going. A stop well
+/// behind the clock is the end of the recording, and there is nothing to wait
+/// for. See [`AfterHole::Waiting`].
+fn after_stop(stop: i64, now: i64) -> AfterHole {
+    if stop >= now - LIVE_EDGE {
+        AfterHole::Waiting { stop, at: now + LIVE_LOOK }
+    } else {
+        AfterHole::Nothing(stop)
+    }
+}
+
 /// The moment closest to `at` that a stretch covers.
 fn nearest(stretches: &[Segment], at: i64) -> Option<i64> {
     stretches
@@ -3939,6 +4107,37 @@ mod tests {
             Some(259_300),
             "and once it has been, the answer is the far stretch"
         );
+    }
+
+    /// A stop at the edge of the recording carries on in the same stretch once
+    /// the recorder has written past it - and a stop with nothing after it does
+    /// not.
+    #[test]
+    fn a_stretch_carries_on_at_the_live_edge() {
+        // The answer of a look that found only what was already held.
+        let stretches = [Segment { start: 100, end: 120 }];
+        assert!(!carries_on(&stretches, 120), "nothing was cut after the stop");
+        // The same stretch, rewritten while the picture played.
+        let stretched = [Segment { start: 100, end: 140 }];
+        assert!(carries_on(&stretched, 120), "the stretch now reaches past it");
+        assert!(carries_on(&stretched, 100), "and from inside it");
+        // A stop in a gap is a hole, which a read answers.
+        assert!(!carries_on(&[Segment { start: 200, end: 240 }], 120));
+        assert!(!carries_on(&[], 120));
+    }
+
+    /// A stop the list reaches no further than is waited on at the live edge,
+    /// and taken for the end of the recording when it is well behind the clock.
+    #[test]
+    fn a_stop_near_the_clock_is_waited_on() {
+        let now = 10_000;
+        let stop = now - 60;
+        assert_eq!(
+            after_stop(stop, now),
+            AfterHole::Waiting { stop, at: now + LIVE_LOOK }
+        );
+        let old = now - LIVE_EDGE - 1;
+        assert_eq!(after_stop(old, now), AfterHole::Nothing(old));
     }
 
     /// A hole longer than a day is looked past a day at a time, and the chain
