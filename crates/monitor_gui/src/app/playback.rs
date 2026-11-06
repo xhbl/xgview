@@ -550,33 +550,44 @@ impl XgViewApp {
         // A range that ran out has nothing to hold, and the control that offers
         // a press offers it as **play**. What the press means is "keep going":
         // the recording carries on at the next stretch, past the hole it
-        // stopped at. Only a recording with nothing after it - a look past the
-        // hole that found nothing - starts again, from where the viewer was
-        // watching. See [`AfterHole`] and [`restart_from`].
+        // stopped at, or at the file the recorder has just cut when the stop is
+        // the live edge. With nothing there it plays again from where the viewer
+        // was watching. It never waits for an answer: a press that returns
+        // without the picture moving is a press that did nothing. See
+        // [`AfterHole`] and [`restart_from`].
         if self.recording_ended() {
             let stop = self.centre_of(playback);
             let next = next_stretch(&playback.segments, &playback.covered, stop);
-            let looked = playback.after_hole;
+            let carries = carries_on(&playback.segments, stop);
             let opened = playback.opened;
+            let restart = restart_from(&playback.segments, opened, stop);
+            // The press is "keep going" whether the picture was held or not, and
+            // whatever the answer turns out to be it is played: a stop is the
+            // last frame there was, not a moment the viewer chose to hold. A
+            // press that left the hold on found nothing to let go of, and the
+            // recording it carried on into started held - which is a press that
+            // does nothing at all. See [`AfterHole`].
+            if let Some(playback) = self.playback.as_mut() {
+                playback.paused = false;
+            }
             if let Some(next) = next {
                 self.move_to(next);
                 tracing::debug!(target: "xgview::app", at = next, "the recording carries on");
                 return;
             }
-            match looked {
-                // An answer is on its way, and this press is that answer's.
-                Some(AfterHole::Looking { .. }) => return,
-                // Looked, and there is nothing: the recording is over.
-                Some(AfterHole::Nothing(seen)) if seen == stop => {}
-                _ => {
-                    self.look_past_hole(stop);
-                    return;
-                }
+            if let Some(carries) = carries {
+                self.move_to(carries);
+                tracing::debug!(target: "xgview::app", at = carries, "the recording carries on at the live edge");
+                return;
             }
-            let restart = restart_from(&playback.segments, opened, stop);
-            if let Some(playback) = self.playback.as_mut() {
-                playback.paused = false;
-            }
+            // Nothing in the list carries on from the stop, so the press plays
+            // the recording again. Waiting for a look past the stop is what a
+            // press must *not* do: an answer still on its way, or a stop the
+            // recorder has not cut its next file past yet, leaves the picture
+            // exactly where it was, and a press that does nothing looks broken.
+            // A stop that really is the live edge carries on by itself, when the
+            // next file is cut - see [`Self::look_live`] - and a viewer who
+            // presses play before that has asked to watch, not to wait.
             self.move_to(restart);
             tracing::debug!(target: "xgview::app", at = restart, "the recording starts again");
             return;
@@ -637,17 +648,22 @@ impl XgViewApp {
         if matches!(playback.after_hole, Some(AfterHole::Looking { .. })) {
             return;
         }
-        if let Some(next) = next_stretch(&playback.segments, &playback.covered, stop) {
+        let next = next_stretch(&playback.segments, &playback.covered, stop);
+        let carries = carries_on(&playback.segments, stop);
+        if let Some(next) = next {
             tracing::debug!(target: "xgview::app", at = next, "the recording carries on past a hole");
             self.move_to(next);
             return;
         }
-        // The stretch the picture stopped in already runs past the stop: the
-        // recorder wrote on while the picture played, and the list was read
-        // ahead of it. That is not a hole, and there is nothing to look for.
-        if carries_on(&playback.stretches, stop) {
-            tracing::debug!(target: "xgview::app", at = stop, "the recording carries on at the live edge");
-            self.move_to(stop);
+        // The list already holds the file that carries the recording on from
+        // here: the recorder wrote it while the picture played, and the playlist
+        // ended at the last file it was asked for. Resuming at that file's own
+        // start - not at the stop - is what keeps the seek from landing in the
+        // second between two files, where a playlist holds nothing and the
+        // session ends where it began. See [`carries_on`].
+        if let Some(next) = carries {
+            tracing::debug!(target: "xgview::app", at = next, "the recording carries on at the live edge");
+            self.move_to(next);
             return;
         }
         // A stop at the edge of what has been cut is asked about again shortly:
@@ -2575,22 +2591,22 @@ impl XgViewApp {
         // recording carries on, if it does.
         if let Some(stop) = look_past(&playback.after_hole, from, to) {
             let next = next_stretch(&playback.segments, &playback.covered, stop);
-            // The same stretch reaching past the stop is the recorder having
-            // written on while the picture played: at the live edge the answer
-            // is not "what comes next", it is "more of what was already playing".
-            let carries = carries_on(&playback.stretches, stop);
+            // The file after the stop is listed: the recorder wrote on while the
+            // picture played, and at the live edge the answer is not "what comes
+            // next", it is "more of what was already playing". See [`carries_on`].
+            let carries = carries_on(&playback.segments, stop);
             playback.after_hole = match (next, carries) {
-                (Some(_), _) | (None, true) => None,
-                (None, false) => Some(after_stop(stop, epoch_now())),
+                (Some(_), _) | (None, Some(_)) => None,
+                (None, None) => Some(after_stop(stop, epoch_now())),
             };
             if let Some(next) = next {
                 tracing::debug!(target: "xgview::app", at = next, "the recording carries on past a hole");
                 self.move_to(next);
                 return;
             }
-            if carries {
-                tracing::debug!(target: "xgview::app", at = stop, "the recording carries on at the live edge");
-                self.move_to(stop);
+            if let Some(carries) = carries {
+                tracing::debug!(target: "xgview::app", at = carries, "the recording carries on at the live edge");
+                self.move_to(carries);
                 return;
             }
         }
@@ -2729,7 +2745,19 @@ impl XgViewApp {
         // nearest stretch in it is a jump nobody asked for. A moment the box has
         // not been asked about is read around first, and comes back through
         // `to_seek` like any other. See [`covered_between`].
-        if !covered_between(&playback.covered, at, at + 1) {
+        //
+        // A moment a file in the list covers is the exception: the list is what
+        // the recording holds, so that moment has been answered already. The
+        // very end of a file counts - the band reaches it, and it is where a
+        // seek to the end of the strip lands. Asked about instead, it is a read
+        // that can never say yes: at the live edge a read only marks what the
+        // box listed, which ends exactly there, so every answer asks again and
+        // the seek never arrives. See [`Self::segments_arrived`].
+        let recorded = playback
+            .segments
+            .iter()
+            .any(|segment| segment.start <= at && at <= segment.end);
+        if !recorded && !covered_between(&playback.covered, at, at + 1) {
             self.read_around(index, at);
             if let Some(playback) = self.playback.as_mut() {
                 playback.to_seek = Some(at);
@@ -2950,6 +2978,16 @@ const LIVE_EDGE: i64 = 300;
 /// that a picture resumes within a cut of the one before, and long enough not
 /// to ask every frame.
 const LIVE_LOOK: i64 = 5;
+
+/// The seam between two files the recorder cut one after the other.
+///
+/// The box dates a file's end and the next file's start a second apart even
+/// when nothing was missed, and the strip merges that to draw one band. A stop
+/// this close to the file after it is where a playlist ran out of what it was
+/// asked for rather than where the recording has a hole, so the picture carries
+/// on there. Anything wider is a stretch the recording really does not have,
+/// which a read past the hole answers. See [`carries_on`].
+const SEAM: i64 = 3;
 
 /// How far past the live edge one ask reaches.
 ///
@@ -3713,7 +3751,12 @@ fn restart_from(segments: &[Segment], opened: i64, stop: i64) -> i64 {
         .into_iter()
         .find(|stretch| stretch.start <= stop && stop <= stretch.end);
     match stretch {
-        Some(stretch) if stretch.start <= opened && opened <= stretch.end => opened,
+        // Where it opened, while that is a moment the recording still has ahead
+        // of it. Opening at the very stop - which is where a recording that has
+        // just stopped is opened, see [`entry_moment`] - would start the picture
+        // again on the last moment there is, and the press would run out again
+        // before it was seen to have played at all.
+        Some(stretch) if stretch.start <= opened && opened < stop => opened,
         Some(stretch) => stretch.start,
         None => opened,
     }
@@ -3736,16 +3779,23 @@ fn next_stretch(segments: &[Segment], covered: &[(i64, i64)], stop: i64) -> Opti
         .find(|start| *start > stop && covered_between(covered, stop, *start))
 }
 
-/// Whether the recording runs past `stop` inside the stretch the stop is in.
+/// The moment the recording carries on from a stop, when the list holds the file
+/// that follows it.
 ///
 /// A stop at the live edge is not one the list knows nothing after: the recorder
-/// wrote on while the picture played, and the same stretch now reaches beyond
-/// it. A stretch that still ends at the stop is the end of what has been cut,
-/// and a stop in a gap is a hole - both of which a read answers.
-fn carries_on(stretches: &[Segment], stop: i64) -> bool {
-    stretches
+/// wrote on while the picture played, and the file after it is now listed. That
+/// file usually begins exactly where the one before ended - the recorder cuts
+/// the next one as soon as it closes the last - so a start at the stop counts.
+/// Only the seam between two such files counts. A
+/// wider stretch is a hole the recording really has - the strip merges it with
+/// its neighbours to draw one band, but a playlist still ends there, and a seek
+/// into it ends where it began. See [`SEAM`] and [`Self::look_live`].
+fn carries_on(segments: &[Segment], stop: i64) -> Option<i64> {
+    segments
         .iter()
-        .any(|stretch| stretch.start <= stop && stop < stretch.end)
+        .find(|segment| segment.start >= stop)
+        .map(|segment| segment.start)
+        .filter(|start| start - stop <= SEAM)
 }
 
 /// What a stop is, once its list has been read and reaches no further.
@@ -4135,21 +4185,33 @@ mod tests {
         );
     }
 
-    /// A stop at the edge of the recording carries on in the same stretch once
-    /// the recorder has written past it - and a stop with nothing after it does
-    /// not.
+    /// A stop carries on when the list holds the file that follows it, and only
+    /// across the seam between two files cut one after the other - never across
+    /// a hole that the strip merely draws as one band.
     #[test]
-    fn a_stretch_carries_on_at_the_live_edge() {
-        // The answer of a look that found only what was already held.
-        let stretches = [Segment { start: 100, end: 120 }];
-        assert!(!carries_on(&stretches, 120), "nothing was cut after the stop");
-        // The same stretch, rewritten while the picture played.
-        let stretched = [Segment { start: 100, end: 140 }];
-        assert!(carries_on(&stretched, 120), "the stretch now reaches past it");
-        assert!(carries_on(&stretched, 100), "and from inside it");
-        // A stop in a gap is a hole, which a read answers.
-        assert!(!carries_on(&[Segment { start: 200, end: 240 }], 120));
-        assert!(!carries_on(&[], 120));
+    fn the_file_after_a_stop_carries_the_recording_on() {
+        // Nothing was cut after the stop.
+        assert_eq!(carries_on(&[Segment { start: 100, end: 120 }], 120), None);
+        // The next file, cut where the one before ended.
+        let seam = [
+            Segment { start: 100, end: 120 },
+            Segment { start: 121, end: 140 },
+        ];
+        assert_eq!(carries_on(&seam, 120), Some(121));
+        // The file cut where the one before ended begins at the stop itself.
+        let flush = [
+            Segment { start: 100, end: 120 },
+            Segment { start: 120, end: 140 },
+        ];
+        assert_eq!(carries_on(&flush, 120), Some(120));
+        // A hole wider than a seam is not a carry-on: a playlist ends there, and
+        // a seek into it would end where it began. See [`SEAM`].
+        let hole = [
+            Segment { start: 100, end: 120 },
+            Segment { start: 140, end: 160 },
+        ];
+        assert_eq!(carries_on(&hole, 120), None, "a hole is not a seam");
+        assert_eq!(carries_on(&[], 120), None);
     }
 
     /// A stop the list reaches no further than is waited on at the live edge,
