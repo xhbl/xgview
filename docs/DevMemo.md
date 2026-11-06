@@ -5455,3 +5455,18 @@ probe and left armed by the session it started, the wait had the strip ask for t
 same fragments again - a playlist, a session and a stop, one after another. Every
 path that starts a session has to end the wait, the same way every way out of a seek
 has to release the hold.
+
+### A step past the segment list was a request storm
+
+`segments_arrived` re-asked `read_around` for a `to_seek` the answer had not reached,
+with no throttle at all - `read_around`'s only guard is `reading_older`, which that
+same answer had just cleared. At the live edge the file the moment falls in is still
+open, so every answer said the same thing: one two-hour segment list, about 150 KB,
+57 ms apart - seventeen a second for as long as the file stayed open. An arrow press
+at the edge was enough, and so was a drag to the right edge.
+
+Two things close it. A moment the playlist already holds is a jump inside the running
+session (`jump_inside`): no request, no decoder, and the segment list's end is not
+the playlist's end - the file being written is served before it is listed. And a
+moment past both is waited on rather than asked again, which is where the playlist
+probe takes over.

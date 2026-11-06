@@ -2723,6 +2723,21 @@ impl XgViewApp {
             // Nobody has asked about it yet - the read that has just landed was
             // another's. Asked now, or a seek whose read was turned away for
             // being one too many waits for an answer that is never coming.
+            //
+            // Not at the live edge, though. There the file the moment falls in
+            // is still being written, so every answer says the same thing, and
+            // asking the moment each one lands is a two-hour segment list -
+            // seventeen of them a second, for as long as the file stays open.
+            // The wait asks again in a couple of seconds instead, and it asks
+            // the playlist rather than the file list, which is where the
+            // fragments of that file already are. See [`AfterHole::Waiting`] and
+            // [`XgViewApp::look_at_edge`].
+            let now = epoch_now();
+            if at >= now - LIVE_EDGE {
+                playback.to_seek = None;
+                playback.after_hole = Some(after_stop(at, now));
+                return;
+            }
             self.read_around(index, at);
             return;
         }
@@ -2820,6 +2835,43 @@ impl XgViewApp {
         }
     }
 
+    /// Plays a moment the running session's own playlist holds, as another
+    /// fragment of that session.
+    ///
+    /// The decoder, the parser and the login carry on, and the fragments in
+    /// between are never asked for - which is what makes a step across a
+    /// recording one request rather than another stream. The playlist reaches
+    /// past the files the box has listed: the file being written is served while
+    /// it is being written and listed only when it is closed, so at the live edge
+    /// a moment the segment list calls past its end is still inside the session.
+    /// See [`covered`].
+    ///
+    /// A session that reached the end of its range has nothing left to jump in -
+    /// its task is gone - so that seek is another range. See [`Self::has_session`].
+    fn jump_inside(&mut self, index: usize, target: i64, from: Option<i64>) -> bool {
+        let Some(playback) = self.playback.as_ref() else {
+            return false;
+        };
+        if !covered(playback.vod, target) || !self.has_session(index) {
+            return false;
+        }
+        tracing::debug!(target: "xgview::app", index, at = target, "playing another fragment");
+        // Asked for before the hold is let go of, so that the session wakes to
+        // the jump rather than to the frame it was stopped on: a resumed session
+        // publishes the sample it was waiting for, and that sample is the moment
+        // the drag began from.
+        self.manager.seek_fragment(index, target);
+        self.manager.hold_clip(index, false);
+        if let Some(playback) = self.playback.as_mut() {
+            playback.scrub = None;
+            playback.scrubbing = false;
+            playback.pending = Some(target);
+            playback.pending_from = from.filter(|from| *from != target);
+            playback.paused = false;
+        }
+        true
+    }
+
     /// Plays from the nearest moment that has a recording.
     ///
     /// A scrub that lands in a hole is taken to the edge of the nearest stretch
@@ -2851,7 +2903,7 @@ impl XgViewApp {
         let Some(playback) = &self.playback else {
             return;
         };
-        let (index, vod) = (playback.index, playback.vod);
+        let index = playback.index;
         // A moment the list does not reach is not a refusal, it is a read: a
         // drag or a jump goes anywhere the recording does, and the list is what
         // has been asked for so far. Asking for the stretch around it and coming
@@ -2868,6 +2920,16 @@ impl XgViewApp {
         // to where it started. See [`Playback::pending_from`].
         let from = self.pictured(index);
         if reach.is_some_and(|(first, last)| at < first || at > last) {
+            // A moment the playlist already holds is a jump inside the session
+            // that is running, even though the list says it is past the end:
+            // the box serves the file it is still writing and lists it only when
+            // it closes it, so a step forward at the live edge lands in that
+            // file. Read as "past the end" it became a segment read, then
+            // another, for as long as the file was open. See
+            // [`Self::jump_inside`].
+            if self.jump_inside(index, at, from) {
+                return;
+            }
             self.read_around(index, at);
             if let Some(playback) = self.playback.as_mut() {
                 playback.to_seek = Some(at);
@@ -2922,24 +2984,14 @@ impl XgViewApp {
         // is already running: the decoder, the parser and the login carry on,
         // and the fragments in between are never asked for. A session that
         // reached the end of its range has nothing left to jump in - its task is
-        // gone - so that seek is another range too.
-        if covered(vod, target) && self.has_session(index) {
-            tracing::debug!(target: "xgview::app", index, at = target, "playing another fragment");
-            // Asked for before the hold is let go of, so that the session wakes
-            // to the jump rather than to the frame it was stopped on: a resumed
-            // session publishes the sample it was waiting for, and that sample
-            // is the moment the drag began from.
-            self.manager.seek_fragment(index, target);
-            self.manager.hold_clip(index, false);
-            if let Some(playback) = self.playback.as_mut() {
-                playback.scrub = None;
-                playback.scrubbing = false;
-                playback.pending = Some(target);
-                playback.pending_from = from.filter(|from| *from != target);
-                playback.paused = false;
-            }
+        // gone - so that seek is another range too. See [`Self::jump_inside`].
+        if self.jump_inside(index, target, from) {
             return;
         }
+        // Read again: a jump ends the borrow the answer above was taken from.
+        let Some(playback) = &self.playback else {
+            return;
+        };
 
         // A range read while the finger was down is this seek's own request:
         // the answer is used rather than asked for again, and one still being
