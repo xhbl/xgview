@@ -53,6 +53,10 @@ pub(super) struct Playback {
     /// kept: the timeline draws the stretches that exist, and asking again for
     /// every repaint would be a request a frame.
     pub(super) segments: Vec<Segment>,
+    /// [`stretches`] of `segments`: the runs the strip is drawn as one band for.
+    /// Kept because the strip draws it every frame, and merging a day of ten
+    /// second files per frame is work that changes only when the list does.
+    pub(super) stretches: Vec<Segment>,
     /// The stretch the playlist on this channel covers, when it plays one.
     ///
     /// A moment inside it is another fragment of the session already running -
@@ -440,6 +444,7 @@ impl XgViewApp {
         let from = window.0;
         let begin = begin.map(|at| begin_in(window, at));
         let vod = self.play_recording(index, &source, window, playlist, begin);
+        let merged = stretches(&segments);
         self.playback = Some(Playback {
             slot: channel,
             index,
@@ -452,6 +457,7 @@ impl XgViewApp {
             from_control: None,
             zoom: SPAN,
             segments,
+            stretches: merged,
             vod,
             scrub: None,
             // The first frame is the moment the cursor starts from, and it is a
@@ -1162,10 +1168,11 @@ impl XgViewApp {
         // and so does the time before the first recording and after the last,
         // where the strip runs off the ends of what exists.
         painter.rect_filled(band(along(start), along(end), BAND), CornerRadius::same(2), theme::TRACK);
-        // The stretches that were recorded. Merged first: the recorder's own file
-        // boundaries are fractions of a second apart, and drawing them would put
-        // a notch every ten seconds along a recording that is continuous.
-        for segment in &stretches(&playback.segments) {
+        // The stretches that were recorded, merged when the list last changed:
+        // the recorder's own file boundaries are fractions of a second apart,
+        // and drawing them would put a notch every ten seconds along a recording
+        // that is continuous.
+        for segment in &playback.stretches {
             if segment.end <= start || segment.start >= end {
                 continue;
             }
@@ -2152,7 +2159,12 @@ impl XgViewApp {
         let centre = self.centre_of(playback);
         // Back no further than the moment the camera answered "nothing" for.
         let from = playback.oldest.map_or(start, |oldest| start.max(oldest));
-        let Some((from, to)) = read_slice_back(&playback.covered, from, centre) else {
+        // A finger on the strip asks for a slice at a time, so the band follows
+        // it; with the finger up the stretch it left behind is read in one
+        // request, which the box answers in about as long as a slice. See
+        // [`READ_CHUNK`] and [`READ_WHOLE`].
+        let width = if playback.scrubbing { READ_CHUNK } else { READ_WHOLE };
+        let Some((from, to)) = read_slice_back(&playback.covered, from, centre, width) else {
             return;
         };
         let source = playback.source.clone();
@@ -2192,7 +2204,8 @@ impl XgViewApp {
         let centre = self.centre_of(playback);
         let now = epoch_now();
         let to = end.min(now);
-        let Some((from, to)) = read_slice(&playback.covered, centre.min(to), to) else {
+        let width = if playback.scrubbing { READ_CHUNK } else { READ_WHOLE };
+        let Some((from, to)) = read_slice(&playback.covered, centre.min(to), to, width) else {
             return;
         };
         // The newest recording arrives a second at a time, and what is left of
@@ -2387,9 +2400,39 @@ impl XgViewApp {
             }
             return;
         }
-        playback.segments.extend(segments);
-        playback.segments.sort_by_key(|segment| segment.start);
+        // An answer runs on from where the list ends: a newer one after the last
+        // file, an older one before the first. Each is put where it belongs
+        // rather than sorted in - and the older half is the direction a drag
+        // into history fills - so a day of files is not re-sorted for every
+        // slice that lands. Only an answer that overlaps what is held, the same
+        // stretch read twice, is sorted.
+        //
+        // The answer's own order is checked rather than assumed: the list is
+        // searched and drawn in order, and one answer out of order would leave
+        // it that way.
+        let in_order = segments.windows(2).all(|pair| pair[0].start <= pair[1].start);
+        let joins_before = in_order
+            && playback
+                .segments
+                .first()
+                .zip(segments.last())
+                .is_some_and(|(first, last)| last.start < first.start);
+        if joins_before {
+            playback.segments.splice(..0, segments);
+        } else {
+            let ordered = in_order
+                && playback
+                    .segments
+                    .last()
+                    .zip(segments.first())
+                    .map_or(true, |(last, first)| last.start < first.start);
+            playback.segments.extend(segments);
+            if !ordered {
+                playback.segments.sort_by_key(|segment| segment.start);
+            }
+        }
         playback.segments.dedup_by_key(|segment| segment.start);
+        playback.stretches = stretches(&playback.segments);
         // A seek was waiting for the list to reach it: the picture goes there
         // now, which is the same path a drag takes when the list already holds
         // it.
@@ -2441,7 +2484,7 @@ impl XgViewApp {
             // at the width it had, and the picture to that moment - or to the
             // nearest recorded one, when the recording has a hole where that
             // time of day used to be.
-            if let Some(target) = nearest(&stretches(&playback.segments), at) {
+            if let Some(target) = nearest(&playback.stretches, at) {
                 playback.timeline = Timeline::Span;
                 self.seek(target);
                 // The marks are the new day's, and the strip is centred on the
@@ -2575,7 +2618,7 @@ impl XgViewApp {
         // built from - and if it does, saying so is better than a picture that
         // silently carries on where it was, which reads as a drag that was
         // refused.
-        let Some(target) = nearest(&stretches(&playback.segments), at) else {
+        let Some(target) = nearest(&playback.stretches, at) else {
             self.manager.hold_clip(index, false);
             if let Some(playback) = self.playback.as_mut() {
                 playback.paused = false;
@@ -2697,7 +2740,8 @@ const ZOOMS: [i64; 5] = [120, 600, 3600, 21600, 86400];
 /// How much of a recording the timeline shows when a recording is opened.
 const SPAN: i64 = 600;
 
-/// How much of a strip's missing segment list is asked for in one request.
+/// How much of a strip's missing segment list is asked for in one request
+/// while a finger is on it.
 ///
 /// The edge is uncovered the moment the finger moves it, and an edge with
 /// nothing drawn in it reads as "not recorded" until the answer lands. A whole
@@ -2710,6 +2754,17 @@ const SPAN: i64 = 600;
 /// band grows out towards the edge rather than being joined from both ends.
 /// See [`read_slice`] and [`read_slice_back`].
 const READ_CHUNK: i64 = 7200;
+
+/// How much of a strip's missing segment list is asked for in one request once
+/// the finger is lifted.
+///
+/// Nothing is following the edge then, so the slices are only requests standing
+/// between the viewer and a filled strip: the box answers six hours in about
+/// the time it answers one - 123 ms against 66 - so the stretch the drag left
+/// is asked for whole. Six hours rather than a day because the answer does grow
+/// with the width, and this is a phone on a link of unknown speed; a day-wide
+/// strip then costs two requests either side, not twelve.
+const READ_WHOLE: i64 = 21_600;
 
 /// How long a read the box could not answer waits before it is asked again.
 ///
@@ -3398,7 +3453,7 @@ fn covered_between(covered: &[(i64, i64)], from: i64, to: i64) -> bool {
 }
 
 /// The next slice of `from..to` the box has not been asked about, and no wider
-/// than [`READ_CHUNK`].
+/// than `width`.
 ///
 /// Read from `from` outwards: that is the band already drawn - the cursor, for
 /// the strip's right half - so the strip grows from it towards the edge rather
@@ -3407,7 +3462,7 @@ fn covered_between(covered: &[(i64, i64)], from: i64, to: i64) -> bool {
 /// Stepping over what has been asked about is what lets a stretch with a hole
 /// in the middle be read at all: the read walks along the gap rather than
 /// stopping at the first recording it meets.
-fn read_slice(covered: &[(i64, i64)], from: i64, to: i64) -> Option<(i64, i64)> {
+fn read_slice(covered: &[(i64, i64)], from: i64, to: i64, width: i64) -> Option<(i64, i64)> {
     let mut at = from;
     while at < to {
         // Step over a stretch the box has already answered for, whole: a hole
@@ -3424,42 +3479,43 @@ fn read_slice(covered: &[(i64, i64)], from: i64, to: i64) -> Option<(i64, i64)> 
             .min()
             .unwrap_or(to)
             .min(to);
-        return Some((at, (at + READ_CHUNK).min(next)));
+        return Some((at, (at + width).min(next)));
     }
     None
 }
 
 /// The next slice of `from..to` the box has not been asked about, taken from
-/// `to` back towards `from`, and no wider than [`READ_CHUNK`].
+/// `to` back towards `from`, and no wider than `width`.
 ///
 /// The mirror of [`read_slice`] for the strip's left side, where the band
 /// already drawn is on the `to` side: the slice is the one *next to that band*,
 /// so the band grows out towards the edge the drag uncovered rather than a new
 /// band appearing at the edge and the two meeting in the middle. Meeting in the
 /// middle is what reads as two strips rather than one.
-fn read_slice_back(covered: &[(i64, i64)], from: i64, to: i64) -> Option<(i64, i64)> {
-    let mut at = from;
-    let mut last = None;
-    while at < to {
-        // Step over what has been answered for, the way [`read_slice`] does:
-        // the gap behind a stretch that was read earlier is read too.
-        if let Some((_, end)) = covered.iter().find(|(start, end)| *start <= at && at < *end) {
-            at = *end;
+///
+/// Walked from `to` back, so what is answered for is stepped over on the way:
+/// a stretch read earlier is a boundary of the gap behind it, not something to
+/// be discovered by walking the whole span again.
+fn read_slice_back(covered: &[(i64, i64)], from: i64, to: i64, width: i64) -> Option<(i64, i64)> {
+    let mut end = to;
+    while end > from {
+        // The band already drawn: walk back to where it begins, and the gap
+        // beyond it is the one to read. A band that ends exactly at `end` is
+        // the same case - there is no gap against it.
+        if let Some((start, _)) = covered.iter().find(|(start, stop)| *start < end && end <= *stop) {
+            end = (*start).max(from);
             continue;
         }
-        let next = covered
+        let gap_start = covered
             .iter()
-            .filter(|(start, _)| *start > at)
-            .map(|(start, _)| *start)
-            .min()
-            .unwrap_or(to)
-            .min(to);
-        // The last gap is the one against the band already drawn.
-        last = Some((at, next));
-        at = next;
+            .filter(|(_, stop)| *stop <= end)
+            .map(|(_, stop)| *stop)
+            .max()
+            .unwrap_or(from)
+            .max(from);
+        return Some(((end - width).max(gap_start), end));
     }
-    let (start, end) = last?;
-    Some(((end - READ_CHUNK).max(start), end))
+    None
 }
 
 /// The moment a look past a hole was made from, when this answer is that look's.
@@ -4528,18 +4584,18 @@ mod tests {
     fn a_missing_stretch_is_read_a_slice_at_a_time() {
         // Nothing read: the slice starts where the band is, at `from`.
         assert_eq!(
-            read_slice(&[], -86_400, 0),
+            read_slice(&[], -86_400, 0, READ_CHUNK),
             Some((-86_400, -86_400 + READ_CHUNK)),
             "the read begins at the band, not at the edge"
         );
         // A stretch no wider than a slice is one request, not two.
-        assert_eq!(read_slice(&[], -600, 0), Some((-600, 0)));
+        assert_eq!(read_slice(&[], -600, 0, READ_CHUNK), Some((-600, 0)));
         // Asked about: nothing to read, and nothing asked for again.
-        assert_eq!(read_slice(&[(-600, 0)], -600, 0), None);
+        assert_eq!(read_slice(&[(-600, 0)], -600, 0, READ_CHUNK), None);
         // A hole in the middle is stepped over rather than stopping the read:
         // what has been answered for is skipped, and the read goes on past it.
         assert_eq!(
-            read_slice(&[(-86_400, -80_000)], -86_400, 0),
+            read_slice(&[(-86_400, -80_000)], -86_400, 0, READ_CHUNK),
             Some((-80_000, -80_000 + READ_CHUNK))
         );
     }
@@ -4552,30 +4608,42 @@ mod tests {
         // Nothing read: the slice still ends against the cursor, where the band
         // is, and runs left from it.
         assert_eq!(
-            read_slice_back(&[], -86_400, 0),
+            read_slice_back(&[], -86_400, 0, READ_CHUNK),
             Some((-READ_CHUNK, 0)),
             "the read starts at the band, not at the edge"
         );
         // A stretch no wider than a slice is one request, not two.
-        assert_eq!(read_slice_back(&[], -600, 0), Some((-600, 0)));
+        assert_eq!(read_slice_back(&[], -600, 0, READ_CHUNK), Some((-600, 0)));
         // Asked about: nothing to read, and nothing asked for again.
-        assert_eq!(read_slice_back(&[(-600, 0)], -600, 0), None);
+        assert_eq!(read_slice_back(&[(-600, 0)], -600, 0, READ_CHUNK), None);
         // The slice is taken beside the band already drawn, however much unread
         // time lies beyond it.
         assert_eq!(
-            read_slice_back(&[(-600, 0)], -86_400, 0),
+            read_slice_back(&[(-600, 0)], -86_400, 0, READ_CHUNK),
             Some((-600 - READ_CHUNK, -600)),
             "the band grows outwards from what is drawn"
         );
         // Once that has landed, the next slice is the one further out.
         assert_eq!(
-            read_slice_back(&[(-600 - READ_CHUNK, 0)], -86_400, 0),
+            read_slice_back(&[(-600 - READ_CHUNK, 0)], -86_400, 0, READ_CHUNK),
             Some((-600 - 2 * READ_CHUNK, -600 - READ_CHUNK))
         );
         // A stretch read earlier is stepped over: the gap behind it is read too.
         assert_eq!(
-            read_slice_back(&[(-86_400, -80_000), (-600, 0)], -86_400, 0),
+            read_slice_back(&[(-86_400, -80_000), (-600, 0)], -86_400, 0, READ_CHUNK),
             Some((-600 - READ_CHUNK, -600))
+        );
+        // With the finger up, the stretch that is left is one read, not a
+        // chain of slices: six hours of it are asked for at once.
+        assert_eq!(
+            read_slice_back(&[(-600, 0)], -600 - READ_WHOLE, 0, READ_WHOLE),
+            Some((-600 - READ_WHOLE, -600))
+        );
+        // And a gap wider than that is still a bounded request, not the whole
+        // of it: the answer grows with the width.
+        assert_eq!(
+            read_slice_back(&[(-600, 0)], -86_400, 0, READ_WHOLE),
+            Some((-600 - READ_WHOLE, -600))
         );
     }
 
