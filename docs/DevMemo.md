@@ -5486,3 +5486,99 @@ cursor, which reads as "nothing recorded here" while it plays, and 17% of the st
 at the two-minute level. The last band reaches the picture now, and only while the
 two are within `LIVE_EDGE`: a picture a day away from the last stretch is another
 day, and a band drawn across the hole between them would be a lie.
+
+### A wait that could not end
+
+`after_stop` decided "the live edge" by comparing the stop with the clock, and the
+clock alone cannot tell a recorder that is between fragments from one that stopped an
+hour ago. A seek to "now" on a camera that is no longer recording is near the clock by
+construction, so the wait armed - and asked for a playlist every couple of seconds for
+as long as the picture was left there: a picture that never moved, and a bar that
+offered **play** over it.
+
+Both facts are needed now (`at_live_edge`): the stop is near the clock, and the newest
+moment the box has listed is near it too. A camera that stopped leaves its newest file
+behind, and the stop is then past the end of the recording rather than at the edge of
+it - the conclusion a stop well behind the clock already got, reached by looking at the
+box instead of the clock. A cursor dragged past everything goes back to the picture
+(`to_seek` concludes rather than reading around), and a press there starts the
+recording again rather than doing nothing.
+
+### The cursor stops where the band ends
+
+`clamp_centre` bounded the cursor by `now`, which is a moment the recording may not
+have reached: at the live edge the band stops at the last file the box listed - or at
+the end of the playlist being served - and `now` is a fragment past it. A drag could
+therefore leave the cursor standing on empty track, which is the one thing a timeline
+must not do: what the hand does and what the picture shows have to be the same.
+
+The bound is the band's own right edge now (`recorded_to`), and the band is drawn from
+that same answer, so the two cannot disagree. It is the newest of three things, each
+counted only while it is within `LIVE_EDGE` of the listed one: the last file the box
+has listed, the end of the playlist being served (how far the box has cut the file it
+is writing), and the moment the picture is on. In the history the band reaches the
+strip's own right edge - the reads keep it there - so the bound there is half a strip
+ahead of the cursor, further than a drag or a held arrow reaches: nothing that could be
+pointed at before is out of reach now.
+
+### An answer under a finger
+
+`start_seek` cleared the drag's cursor and its `scrubbing` flag whenever a playlist
+arrived - and a playlist can arrive at any time, because the live-edge wait probes every
+couple of seconds and a probe armed before the finger came down answers after it. The
+drag then lost its cursor: the strip jumped back to the frame the picture was on, and
+the finger, still down, began a new drag from there. A flash and a jump back of a second
+or two, and always where the wait is armed most often - the end of the recording.
+
+A seek that lands under a finger is not the finger's, and is dropped now. The drag's own
+seek is made when the finger is lifted, and that one numbers itself, so the answer it
+waits for is the one it gets.
+
+### A second of it was the range's end
+
+Dragging to the very end of the band put the picture a second behind the finger: a jump
+back, and then the picture going on from there. `begin_in` held the moment to the
+*range's* end - `window.1 - 1` - and at the live edge the range ends exactly where the
+band does, because `window_at` stops at the last file the box has listed. The playlist
+serves the file being written before it is listed, so the moment was inside the playlist
+all along and only the segment list said otherwise.
+
+The moment is held to the playlist now, and a moment it does not reach is
+`stops_short`'s business - a wait, not a session that starts early. The same drag through
+the live-edge wait never showed it, because that window is `stop + LIVE_SPAN` and not the
+segment list's end: which is why it only happened on some drags.
+
+### A guess that was wrong: `nearest` and the tail
+
+For a while the few seconds of that jump looked like `nearest` pulling a moment in the
+band's tail back to the last stretch's end, and a fix for it was written. It was dead
+code: `seek` asks `reach` first - "is this moment outside the segment list" - and a
+moment in the tail always is, so it is taken there and `nearest` never sees it. `nearest`
+is reached only for a moment inside the list, which is a hole or a stretch, and it does
+the right thing with both.
+
+Worth remembering as a shape: a clamp that never runs looks exactly like a clamp that
+runs and is wrong, until the order of the checks is written down. The real cause was the
+empty answer below.
+
+### Forty reads a second under a finger
+
+`read_older` and `read_newer` are called by the strip's own frame, which respects the
+retry a short answer sets; a drag calls them once per cursor position and did not. At the
+live edge that was the same ten seconds of segment list asked for on every frame - forty
+reads a second at a box on the same desk, which is a box too busy to cut the fragment the
+picture is waiting for. The retry is checked inside the two reads now, so every caller
+gets it.
+
+### An empty answer that was not the seek's
+
+`segments_arrived`'s empty branch cleared `pending` for *any* read that came back with
+nothing, and at the live edge the strip's own read comes back with nothing every couple
+of seconds - the box has not cut the next file yet. So a seek waiting for its playlist had
+its cursor taken away by an answer to a different question: the strip jumped back to the
+picture (ten seconds, in the log: `centre=1794000079` against a `pending` of
+`1794000089`) and forward again when the playlist it was actually waiting for arrived.
+
+Only the seek's own read clears it now (`to_seek`). The strip's empty answer says the box
+has nothing **new**, which is not the same as nothing **there** - and the cursor is the
+one thing a viewer is watching while they wait.
