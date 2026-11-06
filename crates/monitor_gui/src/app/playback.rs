@@ -2421,13 +2421,39 @@ impl XgViewApp {
         };
         // The box answered for this range: whether it held anything or not, the
         // time in it is now known - and "asked, nothing there" is exactly what a
-        // hole is. See [`covered_between`]. Only up to the present, though: a
-        // look at the live edge reaches a stretch ahead that has not happened
-        // yet, and marking that known would draw the future as a hole and keep
-        // the strip from ever asking about it again as it became the present.
+        // hole is. See [`covered_between`]. Not at the live edge, though: there
+        // the box lists the files it has closed, and the one it is writing is
+        // still to come. An answer that stops short of the request there - one
+        // file behind, or nothing at all - is the recording not being cut yet.
+        // Marking that tail known draws a gap beside the cursor that nothing
+        // ever asks about again, and asking again the next frame is a request
+        // every frame to a box already behind: the strip waits a few seconds
+        // instead. See [`LIVE_EDGE`] and [`READ_RETRY`].
+        let answered_to = segments
+            .iter()
+            .map(|segment| segment.end)
+            .max()
+            .unwrap_or(from);
         let now = epoch_now();
+        let at_edge = to >= now - LIVE_EDGE;
+        let short = answered_to < to;
         if from < now {
-            cover(&mut playback.covered, from, to.min(now));
+            let asked_to = to.min(now);
+            let mark_to = if at_edge {
+                answered_to.min(asked_to).max(from)
+            } else {
+                asked_to
+            };
+            cover(&mut playback.covered, from, mark_to);
+            if short && at_edge {
+                let retry_at = now + READ_RETRY;
+                if was_older {
+                    playback.retry_older = retry_at;
+                }
+                if was_newer {
+                    playback.retry_newer = retry_at;
+                }
+            }
         }
         if segments.is_empty() {
             if picked.is_none() {
