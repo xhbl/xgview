@@ -3,19 +3,6 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 2.1.72
-
-Changes since 2.1.66. Fixes and polish rather than new features.
-
-- **A seek made while the picture is held lands on the frame it was sent to**,
-  and an answer older than the newest seek is dropped.
-- **A camera's init segment is kept for ten minutes**, so a range change no
-  longer pays for it.
-- **Recorded days are read when playback opens**, so the calendar is full on
-  the first press of the date control.
-- **The magnified bar names each control on hover**, and the word follows what
-  the press will do; its plate is 40% transparent.
-
 ## 2.1.66
 
 Changes since 1.5.118. **Frigate recordings can be watched on the wall, and the

@@ -288,6 +288,31 @@ pub(crate) fn forget_login(base: &str, user: &str) {
     }
 }
 
+/// The client every request to the box goes out on.
+///
+/// One for the process rather than one per request. A strip of recordings is
+/// read a slice at a time, and a client built per slice starts from nothing: no
+/// pooled connection and no TLS session to resume, so every slice paid a
+/// handshake to the box before it could even ask - which, over the LAN or a
+/// NAS's tunnel, is most of the time a slice takes. The certificate is the
+/// box's own (its port serves a self-signed one), and that is the same answer
+/// for every request, which is why it can be decided once, here.
+///
+/// The deadline is the one each request is meant to keep: a segment list is
+/// small, and a read that has not come back in fifteen seconds is a box that is
+/// not going to answer.
+fn http() -> &'static reqwest::Client {
+    static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+    HTTP.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            // 8971 serves a self-signed certificate.
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("a client built from constants")
+    })
+}
+
 /// Client for Frigate's API.
 #[derive(Debug, Clone)]
 pub struct FrigateClient {
@@ -301,12 +326,11 @@ impl FrigateClient {
         if !config.is_configured() {
             return Err(CoreError::config("Frigate host must be configured"));
         }
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            // 8971 serves a self-signed certificate.
-            .danger_accept_invalid_certs(true)
-            .build()?;
-        Ok(Self { config, http, token: None })
+        Ok(Self {
+            config,
+            http: http().clone(),
+            token: None,
+        })
     }
 
     pub fn config(&self) -> &FrigateConfig {

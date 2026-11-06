@@ -2113,6 +2113,11 @@ impl eframe::App for XgViewApp {
         let start = self.begin_frame(ctx);
         self.pump_background(ctx);
         self.collect_events(ctx);
+        // The strip a recording draws is kept as wide as it is drawn here,
+        // rather than only where the viewer moves it: a read that ended in
+        // nothing or in a failure left it short until the next drag. See
+        // `XgViewApp::read_strip`.
+        self.read_strip(ctx);
         let focus_before = self.route_keys(ctx);
         self.draw_chrome(ctx);
         self.draw_wall(ctx);
