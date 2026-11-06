@@ -459,6 +459,22 @@ impl XgViewApp {
         let begin = begin.map(|at| begin_in(window, at));
         let vod = self.play_recording(index, &source, window, playlist, begin);
         let merged = stretches(&segments);
+        // What opening actually heard back: without it the first drag would
+        // read the strip it is already holding, and wait for the answer before
+        // moving. Only what the answer holds, though - the recorder lists a
+        // file a moment after closing it, so an answer at the live edge stops
+        // short of the request, and the seconds it did not reach would be a
+        // hole nothing asks about again. See [`answered`].
+        let covered: Vec<(i64, i64)> = answered(read, &segments).into_iter().collect();
+        tracing::debug!(
+            target: "xgview::app",
+            index,
+            asked_from = read.0,
+            asked_to = read.1,
+            known_to = covered.last().map(|run| run.1).unwrap_or(read.0),
+            files = segments.len(),
+            "the recording opened"
+        );
         self.playback = Some(Playback {
             slot: channel,
             index,
@@ -509,10 +525,9 @@ impl XgViewApp {
             events_wanted: None,
             jump_ask: None,
             after_hole: None,
-            // What opening asked the box about: without it the first drag would
-            // read the strip it is already holding, and wait for the answer
-            // before moving. See [`covered_between`].
-            covered: vec![read],
+            // What opening actually heard back, so that the first drag does not
+            // read the strip it is already holding. See [`answered`].
+            covered,
         });
         // The bar's row has changed under the focus: the camera's controls are
         // gone and the recording's are here, and the place the focus was on means
@@ -3621,6 +3636,24 @@ fn begin_in(window: (i64, i64), at: i64) -> i64 {
     at.clamp(window.0, window.1 - 1)
 }
 
+/// What an answer to `read` lets the strip mark as asked about.
+///
+/// Only what the box listed, and never past the range asked for. The recorder
+/// lists a file a moment after it closes it, so an answer at the live edge
+/// stops short of the request - and marking the whole request instead would
+/// draw the seconds it did not reach as a hole nothing asks about again: the
+/// next read begins at that mark, and a file that starts before it is behind
+/// it for good. See [`XgViewApp::start_playback`] and [`LIVE_EDGE`].
+fn answered(read: (i64, i64), segments: &[Segment]) -> Option<(i64, i64)> {
+    let to = segments
+        .iter()
+        .map(|segment| segment.end)
+        .max()
+        .unwrap_or(read.0)
+        .min(read.1);
+    (to > read.0).then_some((read.0, to))
+}
+
 /// Remembers that the box was asked about `from..to`, merging with what is
 /// already known.
 fn cover(covered: &mut Vec<(i64, i64)>, from: i64, to: i64) {
@@ -3790,12 +3823,23 @@ fn next_stretch(segments: &[Segment], covered: &[(i64, i64)], stop: i64) -> Opti
 /// wider stretch is a hole the recording really has - the strip merges it with
 /// its neighbours to draw one band, but a playlist still ends there, and a seek
 /// into it ends where it began. See [`SEAM`] and [`Self::look_live`].
+///
+/// A stop can also land *inside* a file. The box serves a playlist only as far
+/// as it has fragments when the range is read, and the last of them ends partway
+/// through the file that is being written: the picture plays to it and the
+/// session ends while the recording goes on. The file after it is listed, and
+/// the picture resumes at its start - the rest of the file it stopped in is
+/// behind it, and asking for it again would end where it began.
 fn carries_on(segments: &[Segment], stop: i64) -> Option<i64> {
-    segments
+    let next = segments.iter().find(|segment| segment.start >= stop)?.start;
+    // A stop at a seam: the file after it begins within the seam of it.
+    if next - stop <= SEAM {
+        return Some(next);
+    }
+    let inside = segments
         .iter()
-        .find(|segment| segment.start >= stop)
-        .map(|segment| segment.start)
-        .filter(|start| start - stop <= SEAM)
+        .find(|segment| segment.start <= stop && stop < segment.end)?;
+    (next <= inside.end + SEAM).then_some(next)
 }
 
 /// What a stop is, once its list has been read and reaches no further.
@@ -4214,6 +4258,37 @@ mod tests {
         assert_eq!(carries_on(&[], 120), None);
     }
 
+    /// A stop *inside* a file carries on at the file after it.
+    ///
+    /// The playlist is served as far as the box has fragments when its range is
+    /// read, and the last of them ends partway through the file still being
+    /// written: the picture plays to it and the session ends with the recording
+    /// continuing. The file after it is listed, so the picture resumes there
+    /// rather than waiting for footage the list already holds.
+    #[test]
+    fn a_stop_inside_a_file_carries_on_at_the_next_one() {
+        let continuous = [
+            Segment { start: 100, end: 120 },
+            Segment { start: 121, end: 140 },
+        ];
+        assert_eq!(carries_on(&continuous, 115), Some(121), "the file after it");
+        // The file after it, cut where the one before ended.
+        let flush = [
+            Segment { start: 100, end: 119 },
+            Segment { start: 119, end: 140 },
+        ];
+        assert_eq!(carries_on(&flush, 112), Some(119), "at the file's own end");
+        // A file the list holds nothing after carries nothing on: the recorder
+        // has not cut the next one yet. See [`AfterHole::Waiting`].
+        assert_eq!(carries_on(&[Segment { start: 100, end: 120 }], 115), None);
+        // A hole after the file stopped in is a hole, not a seam.
+        let hole = [
+            Segment { start: 100, end: 120 },
+            Segment { start: 140, end: 160 },
+        ];
+        assert_eq!(carries_on(&hole, 115), None, "a hole is not a seam");
+    }
+
     /// A stop the list reaches no further than is waited on at the live edge,
     /// and taken for the end of the recording when it is well behind the clock.
     #[test]
@@ -4269,6 +4344,34 @@ mod tests {
         assert!(covered_between(&covered, 150, 550));
         assert!(!covered_between(&covered, 150, 650), "past what was read");
         assert!(!covered_between(&covered, 50, 550), "and before it");
+    }
+
+    /// Opening marks the stretch the box answered for, not the hour it asked
+    /// about.
+    ///
+    /// The last file a recorder cut is listed a moment after it closes, so a
+    /// read at the live edge can come back without it. Marking the whole
+    /// request as asked draws that file as a hole that no later read asks
+    /// about again, because the next read begins at the mark.
+    #[test]
+    fn opening_marks_what_the_box_listed_and_no_more() {
+        let read = (1000, 4600);
+        let listed = [
+            Segment { start: 4300, end: 4360 },
+            Segment { start: 4370, end: 4400 },
+        ];
+        assert_eq!(answered(read, &listed), Some((1000, 4400)), "up to the last file listed");
+        assert_eq!(
+            answered((1000, 4405), &listed),
+            Some((1000, 4400)),
+            "and the file that closed too late to be listed stays unasked"
+        );
+        assert_eq!(answered(read, &[]), None, "nothing listed, nothing known");
+        assert_eq!(
+            answered(read, &[Segment { start: 4550, end: 4610 }]),
+            Some((1000, 4600)),
+            "never past the range asked for"
+        );
     }
 
     /// A press at a stop starts again from where the viewer was watching.
