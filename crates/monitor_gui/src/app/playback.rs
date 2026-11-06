@@ -2274,7 +2274,7 @@ impl XgViewApp {
             return;
         };
         let (index, paused) = (playback.index, playback.paused);
-        let at = self.clamp_centre(at);
+        let at = self.clamp_move(at);
         self.seek(at);
         // The strip is drawn a whole width around the cursor, so the list has to
         // reach half a width behind it - and it is the same obligation whether the
@@ -2311,12 +2311,35 @@ impl XgViewApp {
     /// end of it would be a strip that could not be pushed back into a history
     /// nobody had read yet. Until a read has said where the beginning is, there
     /// is no bound at all, and the reads follow the finger.
+    ///
+    /// This is the **finger's** bound. A step, a jump to an event and the recording
+    /// carrying on past a hole are [`Self::clamp_move`]'s, which is `now`: what a
+    /// hand points at should play at once, but what the viewer asks for by name may
+    /// be a moment the box is about to serve.
     fn clamp_centre(&self, at: i64) -> i64 {
         let Some(playback) = self.playback.as_ref() else {
             return at;
         };
         let newest = self.recorded_to(playback).unwrap_or_else(epoch_now);
         clamp_to(at, playback.oldest, newest)
+    }
+
+    /// A moment kept inside the recording, for a move no finger made: a step, a jump
+    /// to an event, or the recording carrying on past a hole.
+    ///
+    /// The far end is **now** - a recording has nothing in the future - and not the
+    /// band's own edge, which is what a drag is held to. Those two are different
+    /// questions: a hand on the strip should not be able to point at a moment that
+    /// cannot be played, but a step or a jump is a decision about where the picture
+    /// goes, and a moment the box has not cut yet is a wait, not a refusal. Held to
+    /// the band, the picture could not cross a hole at all: the recording carried on
+    /// past one, the moment it was carried on to was pulled back to where it had
+    /// stopped, and a session restarted there every half second.
+    fn clamp_move(&self, at: i64) -> i64 {
+        let Some(playback) = self.playback.as_ref() else {
+            return at;
+        };
+        clamp_to(at, playback.oldest, epoch_now())
     }
 
     /// The newest moment a drag can be taken to without asking the box for
