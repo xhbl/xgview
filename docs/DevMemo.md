@@ -5477,3 +5477,12 @@ probe takes over.
 and nothing left to ask - the sixth of these, and the same shape as the others: a
 slot cleared by an answer that was not an answer. `Looking` carries `at` now, and the
 strip asks the same range again after `READ_RETRY`.
+
+### The band stopped a file short of the picture
+
+The band is drawn from the segment list, so at the live edge it ended at the last
+closed file while the cursor sat on the picture - up to a file of empty track at the
+cursor, which reads as "nothing recorded here" while it plays, and 17% of the strip
+at the two-minute level. The last band reaches the picture now, and only while the
+two are within `LIVE_EDGE`: a picture a day away from the last stretch is another
+day, and a band drawn across the hole between them would be a lie.

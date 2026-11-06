@@ -1392,6 +1392,25 @@ impl XgViewApp {
             let to = along(segment.end.min(end));
             painter.rect_filled(band(from, to, BAND), CornerRadius::same(2), theme::ACCENT.gamma_multiply(0.55));
         }
+        // The file the recorder is writing is listed only once it is closed, so
+        // at the live edge the band stops a file short of the picture and the
+        // cursor sits on empty track - which reads as "nothing recorded here"
+        // while it plays. What has been seen is recorded, so the last band
+        // reaches the picture. Only while the two are that close: a picture a day
+        // away from the last stretch is another day, and a band drawn across the
+        // hole between them would be a lie. See [`LIVE_EDGE`].
+        if let Some(pictured) = self.pictured(playback.index) {
+            if let Some(last) = playback.stretches.last() {
+                let gap = pictured - last.end;
+                if gap > 0 && gap <= LIVE_EDGE && pictured > start {
+                    painter.rect_filled(
+                        band(along(last.end.max(start)), along(pictured.min(end)), BAND),
+                        CornerRadius::same(2),
+                        theme::ACCENT.gamma_multiply(0.55),
+                    );
+                }
+            }
+        }
         // Where the camera noticed something: the same band in the colour the
         // wall uses for a warning, so the strip reads as "recorded, and here is
         // what happened in it" rather than as two rows of marks.
