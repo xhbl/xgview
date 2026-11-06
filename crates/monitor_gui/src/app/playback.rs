@@ -1055,19 +1055,38 @@ impl XgViewApp {
         }
         playback.events_ask = None;
         playback.reading_events = false;
+        // A read for a jump reaches past the strip - a day either way, from the
+        // moment on screen - and what it finds is added to the events the strip is
+        // drawing rather than replacing them. Replaced, a press at the last event
+        // emptied the strip: the answer for the day ahead held nothing, so the
+        // marks of the stretch being watched went with it. A read of the strip's
+        // own is still the list, because it is asked for the window it draws. See
+        // [`Self::jump_event`].
+        let jumping = playback.jump_ask == Some((from, to));
+        let found = events.as_ref().is_some_and(|events| !events.is_empty());
         if let Some(events) = events {
-            playback.events = events;
+            if jumping {
+                playback.events.extend(events);
+                playback.events.sort_by_key(|event| event.0);
+                playback.events.dedup_by_key(|event| event.0);
+            } else {
+                playback.events = events;
+            }
         }
         // A jump was waiting for this list: it is made now, but only when this
         // is the list it asked for. A press that had to be remembered while
         // another read was in flight is not spent on that one - its own read
         // comes after. `to_jump` is cleared first, so a second answer that still
         // holds nothing says so instead of reading on.
+        //
+        // Whether it is made is what *this answer* held, not what the strip holds:
+        // the strip's own marks are always there, and a press with nothing ahead
+        // would otherwise jump to the event it is already on, for ever.
         let mut jumped = None;
         if playback.jump_ask == Some((from, to)) {
             let forward = playback.to_jump.take();
             playback.jump_ask = None;
-            if let Some(forward) = forward.filter(|_| !playback.events.is_empty()) {
+            if let Some(forward) = forward.filter(|_| found) {
                 jumped = Some(forward);
             }
         }

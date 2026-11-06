@@ -5600,6 +5600,20 @@ Only the seek's own read clears it now (`to_seek`). The strip's empty answer say
 has nothing **new**, which is not the same as nothing **there** - and the cursor is the
 one thing a viewer is watching while they wait.
 
+### The marks went with a press that found nothing
+
+`events_arrived` made the answer *the* list - one window, one list - which is right for a
+read of the strip's own. But a jump reads a day *past* the strip, from the moment on
+screen, and at the last event that day holds nothing: the press emptied the strip's marks
+and left it bare until the next drag read them again.
+
+A jump's answer is merged into the list now, and the strip's own read still replaces it.
+The jump itself had to be told apart from the list for the same reason: it was gated on
+`events` being non-empty, which after a merge is always true (the strip's own marks are in
+it), so a press with nothing ahead would have jumped to the event it was already on, for
+ever. What decides is the answer's own emptiness - `found` - and what decides merge from
+replace is which read this was (`jump_ask`).
+
 ### What is left at the live edge, and why it is left
 
 Four things are known and deliberately not changed. Each has a reason that cost more than
