@@ -5470,3 +5470,10 @@ session (`jump_inside`): no request, no decoder, and the segment list's end is n
 the playlist's end - the file being written is served before it is listed. And a
 moment past both is waited on rather than asked again, which is where the playlist
 probe takes over.
+
+### A look the box could not answer was forgotten
+
+`after_hole = None` on a failed read left the picture stopped with nothing on its way
+and nothing left to ask - the sixth of these, and the same shape as the others: a
+slot cleared by an answer that was not an answer. `Looking` carries `at` now, and the
+strip asks the same range again after `READ_RETRY`.

@@ -232,7 +232,12 @@ pub(super) enum AfterHole {
     /// The range is part of it because a hole can be longer than the day one
     /// read covers: the next day is asked about from where the last answer
     /// stopped, and the answer has to be recognised as that read's.
-    Looking { stop: i64, window: (i64, i64) },
+    ///
+    /// `at` is when to ask again if nothing comes back at all: a read the box
+    /// could not answer is not "nothing after the hole", and a look that was
+    /// forgotten left the picture stopped with nothing on its way. See
+    /// [`XgViewApp::read_strip`].
+    Looking { stop: i64, window: (i64, i64), at: i64 },
     /// It was read, and the box has nothing past the stop **yet**: the stop is
     /// the live edge, where the recorder is still cutting its next fragment. The
     /// question is asked again shortly rather than answered as the end.
@@ -799,7 +804,11 @@ impl XgViewApp {
         let index = playback.index;
         let source = playback.source.clone();
         if let Some(playback) = self.playback.as_mut() {
-            playback.after_hole = Some(AfterHole::Looking { stop, window: (from, to) });
+            playback.after_hole = Some(AfterHole::Looking {
+                stop,
+                window: (from, to),
+                at: epoch_now() + READ_RETRY,
+            });
         }
         tracing::debug!(target: "xgview::app", stop, from, to, "looking past a hole");
         // From the stop itself the first time: the segments the answer holds are
@@ -2483,17 +2492,26 @@ impl XgViewApp {
         }
         // A stop at the live edge is asked about again once the recorder has had
         // time to cut its next fragment: "nothing yet" is not the recording
-        // being over, and nothing else will ask. See [`AfterHole::Waiting`].
+        // being over, and nothing else will ask. A look past a hole that the box
+        // could not answer is asked for again the same way - forgotten, it left
+        // the picture stopped with nothing on its way and no way to ask. See
+        // [`AfterHole`].
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
-        let Some(AfterHole::Waiting { stop, at }) = playback.after_hole else {
-            return;
+        let after = playback.after_hole;
+        let due = match after {
+            Some(AfterHole::Waiting { at, .. } | AfterHole::Looking { at, .. }) => at,
+            _ => return,
         };
-        if now >= at {
-            self.look_at_edge(stop);
-        } else {
-            ctx.request_repaint_after(std::time::Duration::from_secs((at - now) as u64));
+        if now < due {
+            ctx.request_repaint_after(std::time::Duration::from_secs((due - now) as u64));
+            return;
+        }
+        match after {
+            Some(AfterHole::Waiting { stop, .. }) => self.look_at_edge(stop),
+            Some(AfterHole::Looking { stop, window, .. }) => self.look_from(stop, window.0, window.1),
+            _ => {}
         }
     }
 
@@ -2546,11 +2564,17 @@ impl XgViewApp {
             // width the viewer chooses asks again - and a failed read is not
             // read as a stretch with nothing in it.
             //
-            // A look past a hole is not answered either: it is forgotten rather
-            // than read as "nothing after the hole", so the next stop - or the
-            // next press - asks again.
-            if look_past(&playback.after_hole, from, to).is_some() {
-                playback.after_hole = None;
+            // A look past a hole is not answered either: it is asked for again
+            // once the retry has waited, rather than read as "nothing after the
+            // hole" - and rather than forgotten, which left the picture stopped
+            // with nothing on its way and nothing left to ask. See
+            // [`AfterHole::Looking`] and [`Self::read_strip`].
+            if let Some(stop) = look_past(&playback.after_hole, from, to) {
+                playback.after_hole = Some(AfterHole::Looking {
+                    stop,
+                    window: (from, to),
+                    at: epoch_now() + READ_RETRY,
+                });
             }
             // Asked again once the retry has waited, rather than only when the
             // viewer happens to move the strip: the stretch this was for is
@@ -3989,7 +4013,7 @@ fn read_slice_back(covered: &[(i64, i64)], from: i64, to: i64, width: i64) -> Op
 /// tells one read from another - the same test the calendar's picked day uses.
 fn look_past(after_hole: &Option<AfterHole>, from: i64, to: i64) -> Option<i64> {
     match *after_hole {
-        Some(AfterHole::Looking { stop, window }) if window == (from, to) => Some(stop),
+        Some(AfterHole::Looking { stop, window, .. }) if window == (from, to) => Some(stop),
         _ => None,
     }
 }
@@ -4608,7 +4632,7 @@ mod tests {
     /// each other.
     #[test]
     fn a_look_is_recognised_by_its_range() {
-        let looking = Some(AfterHole::Looking { stop: 1_000, window: (1_000, 2_000) });
+        let looking = Some(AfterHole::Looking { stop: 1_000, window: (1_000, 2_000), at: 0 });
         assert_eq!(look_past(&looking, 1_000, 2_000), Some(1_000));
         assert_eq!(look_past(&looking, 2_000, 3_000), None, "another day's read");
         assert_eq!(look_past(&looking, 900, 1_100), None, "a read around the cursor");
