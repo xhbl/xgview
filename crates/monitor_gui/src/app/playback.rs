@@ -1470,19 +1470,29 @@ impl XgViewApp {
         // the recorder's own file boundaries are fractions of a second apart,
         // and drawing them would put a notch every ten seconds along a recording
         // that is continuous.
-        //
-        // Each ends at [`Self::recorded_to`], which is also where a drag stops: a
-        // moment the box has recorded but not yet cut into fragments cannot be
-        // played from, and drawing it would be a band a viewer can point at and
-        // then wait on. One answer for the drawing and the dragging.
-        let recorded = self.recorded_to(playback).unwrap_or(i64::MAX);
         for segment in &playback.stretches {
-            if segment.end <= start || segment.start >= end || segment.start >= recorded {
+            if segment.end <= start || segment.start >= end {
                 continue;
             }
             let from = along(segment.start.max(start));
-            let to = along(segment.end.min(end).min(recorded));
+            let to = along(segment.end.min(end));
             painter.rect_filled(band(from, to, BAND), CornerRadius::same(2), theme::ACCENT.gamma_multiply(0.55));
+        }
+        // The band reaches the newest moment the recording is known to hold, and
+        // that is also where a drag stops - one answer for the drawing and the
+        // dragging, so the cursor cannot stand on empty track. The file the
+        // recorder is writing is listed only once it is closed, so without it the
+        // band would stop a file short of the picture. See [`Self::recorded_to`].
+        if let Some(to) = self.recorded_to(playback) {
+            if let Some(last) = playback.stretches.last() {
+                if to > last.end && to > start {
+                    painter.rect_filled(
+                        band(along(last.end.max(start)), along(to.min(end)), BAND),
+                        CornerRadius::same(2),
+                        theme::ACCENT.gamma_multiply(0.55),
+                    );
+                }
+            }
         }
         // Where the camera noticed something: the same band in the colour the
         // wall uses for a warning, so the strip reads as "recorded, and here is
@@ -2342,19 +2352,22 @@ impl XgViewApp {
         clamp_to(at, playback.oldest, epoch_now())
     }
 
-    /// The newest moment a drag can be taken to without asking the box for
-    /// anything new - and therefore where the band ends.
+    /// The newest moment the strip draws as recorded - and therefore where a drag
+    /// stops.
     ///
-    /// Two ends bound it and the smaller one wins: the last file the box has
-    /// listed, and how far it has cut that file into fragments. A moment past
-    /// either cannot be played from - one is recorded and not yet served, the other
-    /// is not recorded at all - and a drag there is a wait for the box rather than
-    /// a picture. [`EDGE_PLAY`] is kept off the end so that the fragment a moment
-    /// lands in has a picture in it, which is the same rule [`stops_short`] applies
-    /// to a playlist.
+    /// Three things say it, and the newest of them wins: the last file the box has
+    /// listed, the end of the playlist being played, and the moment the picture is
+    /// on. Each is counted only while it is within [`LIVE_EDGE`] of the listed one -
+    /// a picture a day away from the last stretch is another day, and a band drawn
+    /// across the hole between them would be a lie.
     ///
-    /// The picture is never behind either: it is what the viewer is watching, and a
-    /// session that has just ended left it at the newest moment there was.
+    /// It is the **recorded** end and not the end that can be played from at once.
+    /// That was tried (`min` of the listed file and the served end) and it is a wall:
+    /// when the picture reaches the end of its playlist - which is every time the
+    /// recording is about to carry on - the two are the same moment, and the cursor
+    /// cannot be dragged forward at all. The wait a drag to the recorded end costs is
+    /// the box cutting the fragment, and a wait the viewer can point at is better
+    /// than a stretch they cannot.
     ///
     /// `None` when the list holds nothing: there is no band, and a bound taken from
     /// it would pin the cursor to a strip that has not been read.
@@ -2362,7 +2375,8 @@ impl XgViewApp {
         let listed = playback.stretches.last()?.end;
         let served = playback.vod.map_or(listed, |(_, end)| end);
         let pictured = self.pictured(playback.index).unwrap_or(listed);
-        Some(pictured.max(listed.min(served) - EDGE_PLAY))
+        let newest = listed.max(served).max(pictured);
+        Some(if newest - listed <= LIVE_EDGE { newest } else { listed })
     }
 
     /// Fetches what a seek to `at` will need, while there is time to fetch it.

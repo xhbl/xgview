@@ -5518,25 +5518,35 @@ own right edge - the reads keep it there - so the bound there is half a strip ah
 cursor, further than a drag or a held arrow reaches: nothing that could be pointed at
 before is out of reach now.
 
-### What that edge is: the newest moment a fragment can be reached at
+### The edge is the recorded end, and that is the end of it
 
-First it was the newest of three things - the listed file, the served end, the picture -
-and a drag to it landed on a moment the box had recorded but not yet cut. That drag is
-the wait: `stops_short` sees a playlist that stops at the moment, and the picture waits
-for the box to cut past it, a couple of seconds on a good day and eight in the log.
+A drag to the band's edge landed on a moment the box had recorded but not yet cut, and
+that drag was a wait: `stops_short` saw a playlist that stopped at the moment, and the
+picture waited for the box to cut past it - a couple of seconds on a good day, eight in the
+log. So the edge was moved to the *playable* end: the smaller of the listed file and one
+second inside the served end, so that a drag there is a fragment jump inside the session -
+one request, no decoder, 190 ms, and no wait at all. It worked, and it was a dead end.
 
-So the edge is the *playable* end: the smaller of the listed file and the served end, less
-`EDGE_PLAY`, and never behind the picture. Two ends, both upper bounds - one is recorded
-and not yet served, the other is not recorded - so the smaller is the one that can be
-played from, and the two seconds are the same rule `stops_short` applies, so the fragment
-a drag lands in has a picture in it. A drag to the end is a fragment jump inside the
-session now: one request, no decoder, 190 ms, and no wait at all.
+**The playable end and the wait are the same thing.** A moment past the box's cut is either
+waited on or not reachable, and taking it out of the band's reach only moves the wall: when
+the picture reaches the end of its playlist - which is every time the recording is about to
+carry on - the served end *is* where the picture is, so the band's edge was where the finger
+went down and the cursor could not be dragged forward at all. Held to the picture as well
+(`max(pictured, …)`), it was worse in the same way: a drag holds the picture, so a bound of
+"at least the picture" is a bound of "where the finger went down".
 
-What it costs is a band that stops where the box's cut stops: up to a file short of the
-last thing recorded, growing a step at a time as the box cuts and as sessions are
-re-read. That is the trade this whole thread was about, taken the other way round - the
-band shows what can be watched rather than what has been written, and the two are only a
-few seconds apart.
+So the edge is the newest moment *recorded* - the listed file, the served end and the
+picture, within `LIVE_EDGE` of each other - and a drag to it may wait for the box. A wait a
+viewer can point at is better than a stretch they cannot reach. What the band shows is what
+has been written, which is what it says.
+
+**And a step or a jump is not held to it at all.** `move_to` clamps to `now` (`clamp_move`):
+the recording carrying on past a hole, an arrow, a jump to an event are decisions about
+where the picture goes, and a moment the box has not cut yet is a wait, not a refusal. Held
+to the band, the picture could not cross a hole - `next_stretch` carried it past one, the
+moment was pulled back to where it had stopped, and a session restarted there every half
+second. What a viewer sees is a strip that will not move and a picture that will not leave a
+gap.
 
 ### An answer under a finger
 
