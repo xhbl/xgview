@@ -5513,13 +5513,30 @@ therefore leave the cursor standing on empty track, which is the one thing a tim
 must not do: what the hand does and what the picture shows have to be the same.
 
 The bound is the band's own right edge now (`recorded_to`), and the band is drawn from
-that same answer, so the two cannot disagree. It is the newest of three things, each
-counted only while it is within `LIVE_EDGE` of the listed one: the last file the box
-has listed, the end of the playlist being served (how far the box has cut the file it
-is writing), and the moment the picture is on. In the history the band reaches the
-strip's own right edge - the reads keep it there - so the bound there is half a strip
-ahead of the cursor, further than a drag or a held arrow reaches: nothing that could be
-pointed at before is out of reach now.
+that same answer, so the two cannot disagree. In the history the band reaches the strip's
+own right edge - the reads keep it there - so the bound there is half a strip ahead of the
+cursor, further than a drag or a held arrow reaches: nothing that could be pointed at
+before is out of reach now.
+
+### What that edge is: the newest moment a fragment can be reached at
+
+First it was the newest of three things - the listed file, the served end, the picture -
+and a drag to it landed on a moment the box had recorded but not yet cut. That drag is
+the wait: `stops_short` sees a playlist that stops at the moment, and the picture waits
+for the box to cut past it, a couple of seconds on a good day and eight in the log.
+
+So the edge is the *playable* end: the smaller of the listed file and the served end, less
+`EDGE_PLAY`, and never behind the picture. Two ends, both upper bounds - one is recorded
+and not yet served, the other is not recorded - so the smaller is the one that can be
+played from, and the two seconds are the same rule `stops_short` applies, so the fragment
+a drag lands in has a picture in it. A drag to the end is a fragment jump inside the
+session now: one request, no decoder, 190 ms, and no wait at all.
+
+What it costs is a band that stops where the box's cut stops: up to a file short of the
+last thing recorded, growing a step at a time as the box cuts and as sessions are
+re-read. That is the trade this whole thread was about, taken the other way round - the
+band shows what can be watched rather than what has been written, and the two are only a
+few seconds apart.
 
 ### An answer under a finger
 
@@ -5582,3 +5599,34 @@ picture (ten seconds, in the log: `centre=1794000079` against a `pending` of
 Only the seek's own read clears it now (`to_seek`). The strip's empty answer says the box
 has nothing **new**, which is not the same as nothing **there** - and the cursor is the
 one thing a viewer is watching while they wait.
+
+### What is left at the live edge, and why it is left
+
+Four things are known and deliberately not changed. Each has a reason that cost more than
+the symptom.
+
+**A step can be swallowed.** `recording_stopped` clears `pending`, because the moment a
+seek was waiting for is not coming. A *step* - an arrow, which takes no hold, so the old
+session keeps playing - can have its playlist a request out when that session reaches its
+end: the stop clears the pending moment, the continuation seeks from the picture's moment
+and numbers itself, and the step's answer is dropped. Fixing it needs a "a playlist read
+is on its way" flag, and a flag that outlives its answer stops the live-edge continuation
+for good - which is worse than losing one arrow press.
+
+**The last two seconds of the band cannot be played from.** `EDGE_PLAY` is two seconds:
+the band stops two seconds before the end of what the box has served, because a moment at
+the very end is a fragment with no picture after it - a session started there ends where it
+began. Those two seconds are the price of the edge being a moment that plays at once, and
+they are the same two seconds `stops_short` asks of a playlist. Lowering it to one gives
+one more second of reach and makes the last session shorter; it is a knob, not a bug.
+
+**A playlist that could not be read looks like a box without `/vod`.** `read_playlist`
+answers `None` for both, and `start_seek` falls back to a `clip.mp4` for the range.
+Telling them apart needs the error's shape carried through, and the fallback is not wrong -
+it plays - only expensive: the box cuts the whole range for it.
+
+**`starts_at` truncates, on purpose.** `start + sum as i64` can be a second short of the
+playlist's real end while `fragment_at` walks f64, so the two disagree by up to a second.
+Rounding would make the end overshoot, and `covered` would then claim a moment the playlist
+does not hold - a session that ends where it began. Short is the safe direction: a moment
+past the end is a new range, which is a request, not a stall.

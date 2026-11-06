@@ -187,6 +187,11 @@ impl VodPlaylist {
     }
 
     /// The moment a fragment begins, in seconds since the epoch.
+    ///
+    /// The sum is truncated rather than rounded, on purpose: it is the playlist's own
+    /// end, and what a session may reach is everything before it. A second short is a
+    /// range asked for twice; a second over would claim a moment the playlist does not
+    /// hold, and a session asked for one of those ends where it began.
     pub fn starts_at(&self, index: usize) -> i64 {
         self.start + self.fragments.iter().take(index).map(|f| f.duration).sum::<f64>() as i64
     }
