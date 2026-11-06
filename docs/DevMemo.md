@@ -5436,11 +5436,22 @@ thing `still` is told about now (`recording_mark`, `playback_still`), and
 The last branch would have taken the picture back to where playback opened - a
 minute, or another day - because a wait is not a range that ran out.
 
-**What the wait costs, and where the next saving is.** While the box has not cut the
-next fragment the picture asks every `LIVE_LOOK` seconds. The question is a segment
-read of the stop's own stretch; when the answer holds the file the stop is in, the
-picture is moved to the stop, which reads a playlist of the moment's range - up to
-`RANGE_CAP`, two hours and 16-21 KB. So the loop is two requests every two seconds
-while nothing is being cut, and a camera that has stopped recording altogether is
-asked for as long as the picture is left there. The probe should be the playlist
-itself: it is what `stops_short` reads, and one request instead of two.
+### The wait was a wait for a close
+
+**A segment list is the wrong question at the live edge.** The box lists a file only
+when it closes it, and serves the fragments of the file it is still writing. So
+`look_live` - a segment read for the stop's own stretch - could not answer until the
+recorder closed a file: ten seconds at the shortest, a minute on a box configured for
+long files, with the fragments the picture needed already being served the whole
+time. The wait asks the playlist now (`look_at_edge`), and its answer is a seek's
+own: `start_seek` plays it when it reaches the stop and arms the wait again when it
+does not. One request a poll, and the poll is bounded by the next cut rather than by
+the next close. The range begins at the last listed file's start (`edge_from`),
+because a range that begins anywhere else is cut - every fragment of it, 671-1034 ms
+a time - and a stop is a fragment's end and rarely a segment's.
+
+**A session started is a wait over.** `start_seek` clears `after_hole`: armed by a
+probe and left armed by the session it started, the wait had the strip ask for the
+same fragments again - a playlist, a session and a stop, one after another. Every
+path that starts a session has to end the wait, the same way every way out of a seek
+has to release the hold.

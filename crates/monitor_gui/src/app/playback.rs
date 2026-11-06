@@ -234,7 +234,7 @@ pub(super) enum AfterHole {
     /// stopped, and the answer has to be recognised as that read's.
     Looking { stop: i64, window: (i64, i64) },
     /// It was read, and the box has nothing past the stop **yet**: the stop is
-    /// the live edge, where the recorder is still cutting its next file. The
+    /// the live edge, where the recorder is still cutting its next fragment. The
     /// question is asked again shortly rather than answered as the end.
     Waiting { stop: i64, at: i64 },
     /// It was read, and the recording has nothing after it: this is the end.
@@ -594,7 +594,12 @@ impl XgViewApp {
             if let Some(playback) = self.playback.as_mut() {
                 playback.paused = false;
             }
-            self.move_to(at);
+            // Asked of the playlist rather than through a seek: the stop is
+            // where the picture already is, and a seek to it is a segment list
+            // read that the last answer has already given. One request, and the
+            // picture plays as soon as the fragments are there. See
+            // [`Self::look_at_edge`].
+            self.look_at_edge(at);
             tracing::debug!(target: "xgview::app", at, "the recording is asked for again");
             return;
         }
@@ -634,11 +639,11 @@ impl XgViewApp {
             // Nothing in the list carries on from the stop, so the press plays
             // the recording again. Waiting for a look past the stop is what a
             // press must *not* do: an answer still on its way, or a stop the
-            // recorder has not cut its next file past yet, leaves the picture
+            // recorder has not cut its next fragment past yet, leaves the picture
             // exactly where it was, and a press that does nothing looks broken.
             // A stop that really is the live edge carries on by itself, when the
-            // next file is cut - see [`Self::look_live`] - and a viewer who
-            // presses play before that has asked to watch, not to wait.
+            // next fragment is cut - see [`Self::look_at_edge`] - and a viewer
+            // who presses play before that has asked to watch, not to wait.
             self.move_to(restart);
             tracing::debug!(target: "xgview::app", at = restart, "the recording starts again");
             return;
@@ -716,22 +721,60 @@ impl XgViewApp {
             return;
         }
         // A stop at the edge of what has been cut is asked about again shortly:
-        // the next file is being written, and "nothing yet" is not the end. See
-        // [`AfterHole::Waiting`].
+        // the next fragment is being written, and "nothing yet" is not the end.
+        // The question goes to the playlist rather than to the file list, because
+        // the fragments of the file being written are already being served while
+        // that file is listed only when it is closed. See [`AfterHole::Waiting`].
         if stop >= epoch_now() - LIVE_EDGE {
-            self.look_live(stop);
+            self.look_at_edge(stop);
         } else {
             self.look_past_hole(stop);
         }
     }
 
-    /// Reads the segment list just past the live edge.
+    /// Asks the box for the fragments past a stop, and plays them if they are
+    /// there.
     ///
-    /// A few minutes' worth, not a day: the question is whether the recorder
-    /// has cut the next file, and the first few seconds after the stop answer
-    /// it. See [`LIVE_SPAN`].
-    fn look_live(&mut self, stop: i64) {
-        self.look_from(stop, stop, stop + LIVE_SPAN);
+    /// A playlist rather than a segment list: what the picture needs is the next
+    /// fragment, and the box serves fragments of the file it is still writing
+    /// while listing that file only when it closes it - so a wait on the list is
+    /// a wait for a close, ten seconds at the shortest and a minute on a box
+    /// configured for long files, while the fragments are already there.
+    ///
+    /// The answer comes back as a seek's own: [`Self::start_seek`] plays it when
+    /// it reaches the stop, and waits again when it does not, so one wait costs
+    /// one playlist a poll. See [`stops_short`].
+    fn look_at_edge(&mut self, stop: i64) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        let index = playback.index;
+        let source = playback.source.clone();
+        let gen = playback.seek_gen;
+        let from = edge_from(&playback.segments, stop);
+        // Armed before the request: an answer that never arrives - a box that
+        // could not be asked - is asked for again rather than leaving the picture
+        // stopped with nothing on its way. A start clears it. See
+        // [`Self::start_seek`] and [`Self::read_strip`].
+        if let Some(playback) = self.playback.as_mut() {
+            playback.after_hole = Some(AfterHole::Waiting { stop, at: epoch_now() + LIVE_LOOK });
+        }
+        tracing::debug!(
+            target: "xgview::app",
+            index,
+            stop,
+            from,
+            "asking for the fragments past the stop"
+        );
+        start_playlist(
+            &self.handle,
+            &self.events_tx,
+            index,
+            source,
+            (from, stop + LIVE_SPAN),
+            stop,
+            Some(gen),
+        );
     }
 
     /// Reads the segment list past a hole, looking for where the recording
@@ -1088,6 +1131,11 @@ impl XgViewApp {
             // The seek this drag was going to make has been made.
             playback.ahead = None;
             playback.awaiting = None;
+            // And whatever the picture was waiting for is this: a session started
+            // is a wait over, and one left armed would have the strip ask for the
+            // same fragments again - a playlist, a session and a stop, one after
+            // another. See [`AfterHole`].
+            playback.after_hole = None;
             // The moment the picture begins at, held to the stretch that will
             // play: a scrub taken to the edge of the nearest recording does not
             // wait for a moment this playlist never reaches.
@@ -2434,8 +2482,8 @@ impl XgViewApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
         // A stop at the live edge is asked about again once the recorder has had
-        // time to cut its next file: "nothing yet" is not the recording being
-        // over, and nothing else will ask. See [`AfterHole::Waiting`].
+        // time to cut its next fragment: "nothing yet" is not the recording
+        // being over, and nothing else will ask. See [`AfterHole::Waiting`].
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
@@ -2443,7 +2491,7 @@ impl XgViewApp {
             return;
         };
         if now >= at {
-            self.look_live(stop);
+            self.look_at_edge(stop);
         } else {
             ctx.request_repaint_after(std::time::Duration::from_secs((at - now) as u64));
         }
@@ -3064,10 +3112,10 @@ const LIVE_EDGE: i64 = 300;
 
 /// How long the picture waits at the live edge before asking again.
 ///
-/// Asking the moment it stops is answered "nothing" - the next file is still
-/// being written, and a cut is about every ten seconds. Two is short enough
-/// that a picture resumes within a cut of the one before without the viewer
-/// noticing it had stopped, and long enough not to ask every frame.
+/// Asking the moment it stops is answered "nothing" - the next fragment is still
+/// being cut, and a cut is about every ten seconds. Two is short enough that a
+/// picture resumes within a cut of the one before without the viewer noticing it
+/// had stopped, and long enough not to ask every frame.
 const LIVE_LOOK: i64 = 2;
 
 /// How much of a playlist has to be ahead of the moment playback begins at, in
@@ -3091,9 +3139,11 @@ const SEAM: i64 = 3;
 
 /// How far past the live edge one ask reaches.
 ///
-/// A few minutes, enough for the files cut since the stop and the strip's right
-/// half at the closer widths. A day's worth is a lot of segments for a
-/// question the first few seconds answer.
+/// The width of the playlist asked for when the picture waits for the fragments
+/// past a stop: a few minutes, which is the strip's own width at the closer
+/// levels and far more than the next fragment needs. It is also the furthest back
+/// a range at the edge may begin, so that the range still holds the stop - see
+/// [`edge_from`].
 const LIVE_SPAN: i64 = WINDOW;
 
 /// How far past a hole the looking goes, a day at a time.
@@ -3710,6 +3760,25 @@ fn range_start(segments: &[Segment], at: i64, lead: i64) -> i64 {
     range_from(segments, at - lead, at)
 }
 
+/// Where a range asked for at the live edge begins.
+///
+/// A range that begins on a segment's own boundary is served straight out of the
+/// files the box has; one that begins anywhere else is cut, every fragment of it,
+/// at 671-1034 ms a time. A stop is a fragment's end and rarely a segment's, and
+/// past the last file listed there is no segment to fall back into - so the range
+/// begins at that file's own start, which is a boundary.
+///
+/// It never begins so far back that the range stops reaching the stop: a playlist
+/// read for a range that ends before the moment is a wait that never ends. See
+/// [`range_from`] and [`XgViewApp::look_at_edge`].
+fn edge_from(segments: &[Segment], stop: i64) -> i64 {
+    let from = segments
+        .last()
+        .filter(|last| last.end <= stop)
+        .map_or_else(|| range_from(segments, stop, stop), |last| last.start);
+    from.max(stop - LIVE_SPAN)
+}
+
 /// Where playback begins inside a range.
 ///
 /// The moment asked for, held to a moment the range holds. A scrub can land on
@@ -3931,7 +4000,7 @@ fn next_stretch(segments: &[Segment], covered: &[(i64, i64)], stop: i64) -> Opti
 /// of one: [`Segment`] rounds an end up, so a picture on the last frame reads as
 /// a second short of it. There the next file's own start is the moment. A stop
 /// with nothing within [`SEAM`] of it is a hole the recording really has, and
-/// a read past the hole is what answers that. See [`Self::look_live`].
+/// a read past the hole is what answers that. See [`XgViewApp::look_at_edge`].
 fn carries_on(segments: &[Segment], stop: i64) -> Option<i64> {
     if let Some(inside) = segments
         .iter()
@@ -4427,6 +4496,32 @@ mod tests {
         assert!(!stops_short(&playlist, 1018), "two seconds of it are ahead");
         let empty = VodPlaylist { start: 1000, ..VodPlaylist::default() };
         assert!(stops_short(&empty, 1000), "nothing served at all");
+    }
+
+    /// A range asked for at the live edge begins on a file's own boundary, and
+    /// never so far back that it stops reaching the stop.
+    ///
+    /// The box cuts every fragment of a range that does not begin on a boundary,
+    /// at 671-1034 ms a time; a stop is a fragment's end and rarely a segment's,
+    /// and past the last file listed there is no segment to fall back into. See
+    /// [`edge_from`].
+    #[test]
+    fn a_range_at_the_edge_begins_on_a_file_boundary() {
+        let segments = [
+            Segment { start: 100, end: 110 },
+            Segment { start: 111, end: 120 },
+            Segment { start: 121, end: 130 },
+        ];
+        // Inside the list: the start of the file the stop falls in.
+        assert_eq!(edge_from(&segments, 125), 121, "the file the stop is in");
+        // Past the list: the last file's own start, which is a boundary.
+        assert_eq!(edge_from(&segments, 140), 121, "the last file listed");
+        // Never further back than the range reaches, or the playlist would end
+        // before the moment asked for and the wait would never end.
+        let far = 121 + LIVE_SPAN + 60;
+        assert_eq!(edge_from(&segments, far), far - LIVE_SPAN, "a range wide enough");
+        // Nothing listed at all: the stop is the only moment there is.
+        assert_eq!(edge_from(&[], 500), 500);
     }
 
     /// A stop the list reaches no further than is waited on at the live edge,
