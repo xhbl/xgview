@@ -5400,3 +5400,47 @@ that edge and could not be moved further: the strip stopped exactly where the
 reading stopped. The bound is **now** instead - a recording has nothing in the
 future - and the reads follow the cursor, so the list catches up. What the drag can
 reach is what the camera could have recorded, not what this session has asked about.
+
+### The live edge, and a hold that is not the viewer's pause
+
+**A picture that stopped inside a file was leaping over the rest of it.** The box
+serves a playlist only as far as it had fragments when the range was read, so the
+last fragment of a range ends partway through the file the recorder is writing. The
+stop was carried on at the *next* file's own start, which is nearer the live edge
+than the box can serve: the playlist there ends where it begins, the session ends
+where it began, and the stop asks for the same moment again - a playlist, a session
+and a stop, one after another, for as long as the fragments are not cut. On screen
+that is playback freezing for good, which is what it was reported as. It carries on
+at the stop now (`carries_on`): the rest of that file is exactly what is being cut.
+
+**A playlist that stops within two seconds of the moment holds nothing worth a
+session** (`EDGE_PLAY`, `stops_short`). A moment is a whole second and a fragment is
+not, so a playlist whose last fragment ends on the moment still holds the frame the
+picture stopped on, and starting a session on it is that same stop again - the loop
+above, one second longer. Two seconds is the least that is a picture rather than a
+frame.
+
+**`LIVE_LOOK` 5 → 2.** The wait is a poll, so it is a compromise between latency and
+requests. A cut is worth about ten seconds, so at five a picture could stand still
+for five seconds *after* the fragment it was waiting for had been cut - the viewer
+sees a recording that has stopped, not one that is about to carry on. Two is under
+the time it takes to notice.
+
+**The wait is a hold the viewer did not ask for.** `hold_clip(index, true)` keeps
+the picture from running on into a stretch the session cannot serve, but `paused`
+stayed false and `still()` reads only `paused` and the channel state - so the corner
+drew the *playing* mark over a picture that was not moving, and the bar offered
+**pause** for a picture that was already stopped. `Playback::waiting()` is the third
+thing `still` is told about now (`recording_mark`, `playback_still`), and
+`toggle_play` reads it first: a press there is "ask again now", not "start over".
+The last branch would have taken the picture back to where playback opened - a
+minute, or another day - because a wait is not a range that ran out.
+
+**What the wait costs, and where the next saving is.** While the box has not cut the
+next fragment the picture asks every `LIVE_LOOK` seconds. The question is a segment
+read of the stop's own stretch; when the answer holds the file the stop is in, the
+picture is moved to the stop, which reads a playlist of the moment's range - up to
+`RANGE_CAP`, two hours and 16-21 KB. So the loop is two requests every two seconds
+while nothing is being cut, and a camera that has stopped recording altogether is
+asked for as long as the picture is left there. The probe should be the playlist
+itself: it is what `stops_short` reads, and one request instead of two.

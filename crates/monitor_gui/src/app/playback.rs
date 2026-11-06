@@ -205,6 +205,19 @@ pub(super) struct Playback {
     pub(super) covered: Vec<(i64, i64)>,
 }
 
+impl Playback {
+    /// Whether the picture is standing still because the box has not cut what
+    /// comes next yet, rather than because the viewer held it.
+    ///
+    /// A wait holds the session so the picture does not run on into a stretch
+    /// it cannot serve, and the hold is not the viewer's pause: nothing is
+    /// drawn differently for it except that the picture is not moving, which
+    /// is what the corner and the play control say. See [`AfterHole::Waiting`].
+    fn waiting(&self) -> bool {
+        matches!(self.after_hole, Some(AfterHole::Waiting { .. }))
+    }
+}
+
 /// What a recording that stopped at a hole is doing about it.
 ///
 /// The box serves a playlist up to the first hole and stops there - the
@@ -391,7 +404,10 @@ impl XgViewApp {
         let state = self.channels.get(&playback.index).map(|channel| channel.state);
         Some(Recording {
             origin: &playback.source.origin,
-            paused: still(playback.paused, state),
+            // A wait is not a hold, but it is a picture that is not moving, and
+            // the corner's question is only whether it is. See
+            // [`Playback::waiting`].
+            paused: still(playback.paused, state) || playback.waiting(),
             // Said only where it is not the normal rate: see [`Recording`].
             speed: (playback.speed > 1.5).then(|| speed_label(playback.speed)),
         })
@@ -557,11 +573,31 @@ impl XgViewApp {
     /// wait. A range that ran out has no session left to hold, so the same
     /// press - which the control draws as **play**, see
     /// [`Self::playback_still`] - carries the recording on past the hole it
-    /// stopped at, and starts it again only when there is nothing past it.
+    /// stopped at, and starts it again only when there is nothing past it. A
+    /// picture waiting for the recorder to cut its next fragment is the third
+    /// case: the press asks the box again rather than starting anything over.
     pub(super) fn toggle_play(&mut self) {
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
+        // A press while the box has not cut what comes next is "try again now",
+        // not "start over": the moment on screen is the one the playlist does
+        // not reach yet, and the branch below would take the picture back to
+        // where playback opened - a minute, or another day. Asked again at the
+        // same moment, which either finds the fragment that has been cut since
+        // or waits for it again. See [`Playback::waiting`].
+        if playback.waiting() {
+            let at = self.centre_of(playback);
+            // The press is "keep going": whatever the viewer had held is let go
+            // of, so the session the retry starts plays rather than starting
+            // held.
+            if let Some(playback) = self.playback.as_mut() {
+                playback.paused = false;
+            }
+            self.move_to(at);
+            tracing::debug!(target: "xgview::app", at, "the recording is asked for again");
+            return;
+        }
         // A range that ran out has nothing to hold, and the control that offers
         // a press offers it as **play**. What the press means is "keep going":
         // the recording carries on at the next stretch, past the hole it
@@ -670,12 +706,10 @@ impl XgViewApp {
             self.move_to(next);
             return;
         }
-        // The list already holds the file that carries the recording on from
-        // here: the recorder wrote it while the picture played, and the playlist
-        // ended at the last file it was asked for. Resuming at that file's own
-        // start - not at the stop - is what keeps the seek from landing in the
-        // second between two files, where a playlist holds nothing and the
-        // session ends where it began. See [`carries_on`].
+        // The recording goes on from here: the recorder wrote while the picture
+        // played, and the playlist ended at the last fragment it had served.
+        // The rest of the file it stopped in is what comes next, so the picture
+        // resumes at the stop itself. See [`carries_on`].
         if let Some(next) = carries {
             tracing::debug!(target: "xgview::app", at = next, "the recording carries on at the live edge");
             self.move_to(next);
@@ -743,6 +777,7 @@ impl XgViewApp {
             return false;
         };
         still(playback.paused, self.channels.get(&playback.index).map(|channel| channel.state))
+            || playback.waiting()
     }
 
     /// Whether the recording has played to the end of its range.
@@ -996,6 +1031,47 @@ impl XgViewApp {
         };
         let source = playback.source.clone();
         let (speed, paused) = (playback.speed, playback.paused);
+        // A playlist holds only the fragments the box has served when its range
+        // is read, and one asked for across the live edge can stop before the
+        // moment the seek wants to begin at. Starting a session on it would end
+        // where it began, and the stop would ask for the same moment again -
+        // one request after another. The fragments after it are still being
+        // written; the picture waits for them. See [`stops_short`].
+        if let (Some(playlist), Some(begin)) = (&playlist, begin) {
+            if stops_short(playlist, begin) {
+                let wait = after_stop(begin, epoch_now());
+                // A stop near the clock is the recorder having not cut the next
+                // fragment yet, and is asked about again shortly. Well behind it
+                // is the edge of the recording the seek landed on, where there
+                // is nothing to wait for: the fragments that are there are
+                // played, and the stop carries the picture past the hole. See
+                // [`AfterHole::Waiting`].
+                if let AfterHole::Waiting { .. } = wait {
+                    tracing::debug!(
+                        target: "xgview::app",
+                        index,
+                        at = begin,
+                        served = playlist.starts_at(playlist.fragments.len()),
+                        "the playlist stops where it starts"
+                    );
+                    // The picture the seek is leaving is held while the box
+                    // cuts what comes next, rather than carried on with: the
+                    // viewer is watching a moment this session cannot reach.
+                    if self.has_session(index) {
+                        self.manager.hold_clip(index, true);
+                    }
+                    if let Some(playback) = self.playback.as_mut() {
+                        playback.ahead = None;
+                        playback.awaiting = None;
+                        playback.scrub = None;
+                        playback.scrubbing = false;
+                        playback.pending = Some(begin);
+                        playback.after_hole = Some(wait);
+                    }
+                    return;
+                }
+            }
+        }
         let vod = self.play_recording(index, &source, window, playlist, begin);
         // A new session starts at normal speed, so the rate the viewer chose is
         // put back on it: the control says "2x" and the picture has to agree.
@@ -2989,10 +3065,19 @@ const LIVE_EDGE: i64 = 300;
 /// How long the picture waits at the live edge before asking again.
 ///
 /// Asking the moment it stops is answered "nothing" - the next file is still
-/// being written, and a cut is about every ten seconds. Five is short enough
-/// that a picture resumes within a cut of the one before, and long enough not
-/// to ask every frame.
-const LIVE_LOOK: i64 = 5;
+/// being written, and a cut is about every ten seconds. Two is short enough
+/// that a picture resumes within a cut of the one before without the viewer
+/// noticing it had stopped, and long enough not to ask every frame.
+const LIVE_LOOK: i64 = 2;
+
+/// How much of a playlist has to be ahead of the moment playback begins at, in
+/// seconds, for a session to be started there.
+///
+/// A moment is a whole second and a fragment is not, so a playlist that ends
+/// within a second of the moment still holds the frame the picture stopped on.
+/// Playing that frame again is a stop asking for the same moment, one request
+/// after another. See [`stops_short`].
+const EDGE_PLAY: i64 = 2;
 
 /// The seam between two files the recorder cut one after the other.
 ///
@@ -3636,6 +3721,23 @@ fn begin_in(window: (i64, i64), at: i64) -> i64 {
     at.clamp(window.0, window.1 - 1)
 }
 
+/// Whether a playlist stops before the moment playback would begin at, or so
+/// little after it that starting a session there is a replay and not a play.
+///
+/// The box serves a playlist only as far as it has fragments when the range is
+/// read, so one asked for across the live edge can end at - or before - the
+/// moment the seek wants. A session started on it ends where it began, and the
+/// stop then asks for that same moment again: a playlist, a session and a stop,
+/// one after another, for as long as the fragments are not cut. The moment is
+/// counted in whole seconds and the fragments in fractions, so the last frame
+/// of a playlist reads as a moment it still holds - which is the same loop a
+/// second longer. A couple of seconds is the least that is worth a session. The
+/// fragments after it are on their way, so the picture waits for them instead.
+/// See [`AfterHole::Waiting`].
+fn stops_short(playlist: &VodPlaylist, begin: i64) -> bool {
+    playlist.starts_at(playlist.fragments.len()) < begin + EDGE_PLAY
+}
+
 /// What an answer to `read` lets the strip mark as asked about.
 ///
 /// Only what the box listed, and never past the range asked for. The recorder
@@ -3812,34 +3914,38 @@ fn next_stretch(segments: &[Segment], covered: &[(i64, i64)], stop: i64) -> Opti
         .find(|start| *start > stop && covered_between(covered, stop, *start))
 }
 
-/// The moment the recording carries on from a stop, when the list holds the file
-/// that follows it.
+/// The moment the recording carries on from a stop, when the recording goes on
+/// there.
 ///
 /// A stop at the live edge is not one the list knows nothing after: the recorder
-/// wrote on while the picture played, and the file after it is now listed. That
-/// file usually begins exactly where the one before ended - the recorder cuts
-/// the next one as soon as it closes the last - so a start at the stop counts.
-/// Only the seam between two such files counts. A
-/// wider stretch is a hole the recording really has - the strip merges it with
-/// its neighbours to draw one band, but a playlist still ends there, and a seek
-/// into it ends where it began. See [`SEAM`] and [`Self::look_live`].
+/// wrote on while the picture played, and the file it is writing is still
+/// listed. The box serves a playlist only as far as it had fragments when the
+/// range was read, and the last of them ends partway through that file - so the
+/// stop is *inside* a file that is not over, and what comes next is the rest of
+/// it. The picture therefore carries on at the stop itself rather than at the
+/// file after it: leaping to the next file's start would skip the part of this
+/// one that is still being cut, and would put the picture nearer the live edge
+/// than the box can serve, where the next session ends where it began.
 ///
-/// A stop can also land *inside* a file. The box serves a playlist only as far
-/// as it has fragments when the range is read, and the last of them ends partway
-/// through the file that is being written: the picture plays to it and the
-/// session ends while the recording goes on. The file after it is listed, and
-/// the picture resumes at its start - the rest of the file it stopped in is
-/// behind it, and asking for it again would end where it began.
+/// A stop on a file's last second is the seam between two files, not a remainder
+/// of one: [`Segment`] rounds an end up, so a picture on the last frame reads as
+/// a second short of it. There the next file's own start is the moment. A stop
+/// with nothing within [`SEAM`] of it is a hole the recording really has, and
+/// a read past the hole is what answers that. See [`Self::look_live`].
 fn carries_on(segments: &[Segment], stop: i64) -> Option<i64> {
-    let next = segments.iter().find(|segment| segment.start >= stop)?.start;
-    // A stop at a seam: the file after it begins within the seam of it.
-    if next - stop <= SEAM {
-        return Some(next);
-    }
-    let inside = segments
+    if let Some(inside) = segments
         .iter()
-        .find(|segment| segment.start <= stop && stop < segment.end)?;
-    (next <= inside.end + SEAM).then_some(next)
+        .find(|segment| segment.start <= stop && stop < segment.end)
+    {
+        if inside.end - stop > 1 {
+            return Some(stop);
+        }
+    }
+    segments
+        .iter()
+        .find(|segment| segment.start >= stop)
+        .map(|segment| segment.start)
+        .filter(|start| start - stop <= SEAM)
 }
 
 /// What a stop is, once its list has been read and reaches no further.
@@ -4177,6 +4283,7 @@ fn epoch_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use monitor_core::discovery::frigate::Fragment;
 
     /// A recording that stopped at a hole carries on at the next stretch.
     ///
@@ -4258,35 +4365,68 @@ mod tests {
         assert_eq!(carries_on(&[], 120), None);
     }
 
-    /// A stop *inside* a file carries on at the file after it.
+    /// A stop *inside* a file carries on at the stop itself.
     ///
     /// The playlist is served as far as the box has fragments when its range is
     /// read, and the last of them ends partway through the file still being
     /// written: the picture plays to it and the session ends with the recording
-    /// continuing. The file after it is listed, so the picture resumes there
-    /// rather than waiting for footage the list already holds.
+    /// continuing. The rest of that file is what is being cut, so the picture
+    /// resumes at the stop rather than at the file after it - leaping on would
+    /// skip the part of this file that is still coming, and would put the
+    /// picture nearer the live edge than the box can serve.
     #[test]
-    fn a_stop_inside_a_file_carries_on_at_the_next_one() {
+    fn a_stop_inside_a_file_carries_on_at_the_stop() {
         let continuous = [
             Segment { start: 100, end: 120 },
             Segment { start: 121, end: 140 },
         ];
-        assert_eq!(carries_on(&continuous, 115), Some(121), "the file after it");
-        // The file after it, cut where the one before ended.
+        assert_eq!(carries_on(&continuous, 115), Some(115), "the rest of the file");
+        // A file's last second is its seam, not a remainder: the end is rounded
+        // up, so a picture on the last frame reads as a second short of it.
         let flush = [
             Segment { start: 100, end: 119 },
             Segment { start: 119, end: 140 },
         ];
-        assert_eq!(carries_on(&flush, 112), Some(119), "at the file's own end");
-        // A file the list holds nothing after carries nothing on: the recorder
-        // has not cut the next one yet. See [`AfterHole::Waiting`].
-        assert_eq!(carries_on(&[Segment { start: 100, end: 120 }], 115), None);
+        assert_eq!(carries_on(&flush, 118), Some(119), "at the file's own end");
+        // The file is not over: waiting for the next one would throw away the
+        // part of this one the box has already listed. See [`AfterHole::Waiting`].
+        assert_eq!(carries_on(&[Segment { start: 100, end: 120 }], 115), Some(115));
         // A hole after the file stopped in is a hole, not a seam.
         let hole = [
             Segment { start: 100, end: 120 },
             Segment { start: 140, end: 160 },
         ];
-        assert_eq!(carries_on(&hole, 115), None, "a hole is not a seam");
+        assert_eq!(carries_on(&hole, 118), Some(118), "the rest of the file");
+        assert_eq!(carries_on(&hole, 119), None, "the last second is its end");
+        assert_eq!(carries_on(&hole, 120), None, "a hole is not a seam");
+    }
+
+    /// A playlist that stops before the moment asked for - or less than a
+    /// second past it - holds nothing worth playing.
+    ///
+    /// The box serves fragments only as far as it has cut them, so a playlist
+    /// read across the live edge can end at the moment a seek wants to begin at.
+    /// A session started on it ends where it began and asks for that moment
+    /// again, one request after another. See [`stops_short`].
+    #[test]
+    fn a_playlist_that_stops_short_holds_nothing_to_play() {
+        let playlist = VodPlaylist {
+            start: 1000,
+            fragments: vec![
+                Fragment { name: "a".into(), duration: 10.0 },
+                Fragment { name: "b".into(), duration: 10.0 },
+            ],
+            ..VodPlaylist::default()
+        };
+        // It is served through 1020.
+        assert!(stops_short(&playlist, 1020), "it ends where playback begins");
+        assert!(stops_short(&playlist, 1030), "it stops before it");
+        // The last second of it is the frame the picture stopped on, counted in
+        // whole seconds: playing it is the same stop again.
+        assert!(stops_short(&playlist, 1019), "a second of it is not a play");
+        assert!(!stops_short(&playlist, 1018), "two seconds of it are ahead");
+        let empty = VodPlaylist { start: 1000, ..VodPlaylist::default() };
+        assert!(stops_short(&empty, 1000), "nothing served at all");
     }
 
     /// A stop the list reaches no further than is waited on at the live edge,
