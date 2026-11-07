@@ -919,11 +919,15 @@ impl XgViewApp {
     fn step_by(&mut self, by: i64) {
         match self.step_landing(by) {
             Some(at) => self.move_to(at),
-            None => {
+            // Only a step back has nowhere to go: a step forward is never
+            // clamped to where it started, because what is past the last file is
+            // a recording the box has not listed yet. See [`Self::step_landing`].
+            None if by < 0 => {
                 if let Some(index) = self.playback.as_ref().map(|playback| playback.index) {
                     self.read_before_the_list(index);
                 }
             }
+            None => {}
         }
     }
 
@@ -1203,9 +1207,16 @@ impl XgViewApp {
             None => match window_at(&playback.segments, at, WINDOW) {
                 Some(window) => (window, None),
                 // Nothing to play there and no session started: the hold a
-                // press took has to be let go of, or the picture stops for ever.
+                // press took has to be let go of, or the picture stops for ever -
+                // and so does the moment it was waiting for, or the cursor waits
+                // for a picture that is not coming. The list has no file ending
+                // after the moment, which is a moment past everything it holds.
                 None => {
                     self.release_hold(index);
+                    if let Some(playback) = self.playback.as_mut() {
+                        playback.to_seek = None;
+                        playback.pending = None;
+                    }
                     return;
                 }
             },
@@ -2678,28 +2689,23 @@ impl XgViewApp {
         if epoch_now() < playback.retry_older {
             return;
         }
-        let to = first - 1;
-        // Where the walk has got to: the furthest back anything has been asked
-        // about, and the list's own edge while nothing has. One day further back
-        // each time, so the walk is a day a request rather than a request that
-        // grows with the history behind it.
-        let frontier = playback
-            .covered
-            .iter()
-            .map(|(start, _)| *start)
-            .min()
-            .unwrap_or(to)
-            .min(to);
-        // How far a step will look. A hole wider than this is not crossed by an
-        // arrow - the calendar is for days - and without a bound the walk keeps
-        // asking for days the camera never had, for as long as the key is held.
-        // `oldest` is left alone either way: this is where a *step* stops, not
-        // where the recording begins, and a read from anywhere else can still go
-        // further back.
-        if frontier <= first - STEP_HISTORY {
+        // One day of it, and only the day next to what has been asked about: the
+        // slice is the one *beside* the band, so the request is a day wide however
+        // far the walk has gone. Asking from the list's edge every time - which is
+        // what this did - is a request that grows with the walk, and by its end
+        // eight days of files in one answer. See [`read_slice_back`].
+        //
+        // The floor is how far a step will look. A hole wider than a week is not
+        // crossed by an arrow - the calendar is for days - and without a bound the
+        // walk keeps asking for days the camera never had, for as long as the key
+        // is held. `oldest` is left alone either way: this is where a *step*
+        // stops, not where the recording begins, and a read from anywhere else can
+        // still go further back.
+        let floor = first - STEP_HISTORY - READ_BEFORE;
+        let Some((from, to)) = read_slice_back(&playback.covered, floor, first - 1, READ_BEFORE)
+        else {
             return;
-        }
-        let from = frontier - READ_BEFORE;
+        };
         let source = playback.source.clone();
         tracing::debug!(target: "xgview::app", index, from, to, "reading the stretch before the list");
         // Marked before the task is spawned: an answer that arrives before the

@@ -5715,8 +5715,9 @@ refused, which reads as the cursor springing back to where it came from.
 
 The two finishes are told apart by the reason the pipeline already carries: a clean finish
 has an empty `detail`, a hole has the box's answer in it. A hole-finish now clears the
-moment asked for and leaves the picture where it is, which is the same "there is nothing
-there" the segment read's own hole path says. Only a clean finish carries the picture on.
+moment asked for and leaves the picture where it is - the seek is refused, and the cursor
+goes back to the picture rather than being carried seventeen hours forward. Only a clean
+finish carries the picture on.
 
 ### The frames of the session being left
 
@@ -5752,10 +5753,9 @@ Held to that alone, the first file became a wall in the other sense: the list is
 been *read*, so on a recording opened a day back its first file is not the recording's
 first file, and the key stopped there with three days of history behind it and nothing
 asking for it. The edge is provisional, and a step that stops on it is answered with a read
-(`step_by`): `read_older` asks the box for what is behind the strip's left edge, the list
-grows when there is more, and the next press walks into it. When there is nothing behind it
-the answer is empty, `oldest` is set from it, and `read_older` stops asking - so the read
-that proves the beginning is also the one that ends the reading.
+of its own - `step_by` calls `read_before_the_list`, and the section below is about why it
+cannot be `read_older`. That walk leaves `oldest` alone: it is where a *step* stops, not
+where the recording begins, and a read from anywhere else may still find more behind it.
 
 ### The window has to move before the read can
 
@@ -5773,6 +5773,15 @@ read as "the recording begins here" and the strip would declare its left edge to
 beginning of history. And the walk is bounded at a week (`STEP_HISTORY`): a hole wider than
 that is a day the calendar is for, and an unbounded walk is a request every few hundred
 milliseconds for as long as the key is held.
+
+The first version of that walk asked for `[frontier - a day, first - 1]` and called it "a
+day a request". It is not: `first - 1` is the list's edge, so every request spans everything
+already asked about *plus* the new day, and the log shows it - 97k seconds wide at the first
+press, 304k by the sixth, eight days at the bound. Nothing breaks, because `cover` merges
+what it is told and `dedup_by_key` drops the files that come back twice, but the box is
+serialising forty thousand rows to answer a question it answered before. `read_slice_back`
+is the helper that already means "the uncovered slice beside the band", and with it the
+request is a day wide however far the walk has gone.
 
 ### A drag to the last second of a stretch
 
