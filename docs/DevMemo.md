@@ -5827,3 +5827,34 @@ The last stretch is drawn as far as `recorded_to` in one rectangle now. It is wo
 remembering that this is not a rounding error or a gap in the data: it is two adjacent
 rounded rectangles, and any drawing that adds a piece to a band has to merge it rather than
 butt it against the end.
+
+### The marks were the window's, and nothing kept them the window's
+
+The event list was read when the recording opened, when a drag was let go of, when the
+width changed and when a day was picked - four deliberate moments - and the strip was
+drawn from it every frame. But the window is not still between those moments: the strip
+slides under a cursor that does not move, so playing forward uncovers new time on the
+right continuously, and a picture that carries on past a hole lands on a window a night
+away. `read_strip` kept the *segment* list as wide as the strip every frame and had no
+event read at all, so the band grew and the marks did not: the marks of the stretch being
+watched slid off the left edge and nothing appeared behind them.
+
+What the event list is now is the marks of one window, and the window it is the marks of
+is asked for every frame - the same read the four deliberate moments make, with a wait on
+it. Three things make that safe rather than a request a frame.
+
+The ask is always the window *and a window either side*, never just what is uncovered.
+That is what lets an answer replace the list: a list that is its own window's marks
+cannot lose one that is still on screen, which the union of the obvious fix would have
+had to be pruned to avoid - and pruning the list without pruning the cover is a mark that
+disappears while the cover still says it was asked for.
+
+The wait is on the widest *uncovered gap*, not on "is the window covered": a window held
+to the clock is never covered, because the clock moves, so the second test is a request a
+frame at the live edge and a request a key repeat while a finger slides the strip.
+
+And the wait scales with the window. Ten seconds is a twelfth of the narrowest strip and a
+hundredth of a pixel of the widest, where asking for two days of events every ten seconds
+is a box asked for nothing: at a day's width the wait is a fifth of an hour. A mark that
+arrives that late is a mark nobody could have seen arriving, and a deliberate read - a
+drag, a width, a day - has no wait at all.

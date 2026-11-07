@@ -179,6 +179,18 @@ pub(super) struct Playback {
     /// When the camera's events began and ended, in the stretch that was read.
     /// Empty until the box has answered, and empty for a camera with none.
     pub(super) events: Vec<(i64, i64)>,
+    /// The stretches the event list has been answered for, in order and merged.
+    ///
+    /// Apart from the segment list's own [`Self::covered`], which is not the same
+    /// question: a strip can hold the marks of a stretch whose segments were read
+    /// for another width, and the other way round. What this holds is what the
+    /// box has been asked about *for events*, so a window that has already been
+    /// answered for is not asked again every frame as it slides. See
+    /// [`events_to_ask`].
+    pub(super) events_cover: Vec<(i64, i64)>,
+    /// When the box may be asked for events again after an answer it could not
+    /// give. See [`READ_RETRY`].
+    pub(super) retry_events: i64,
     /// Whether the event list is being read, and which window it was asked for.
     /// An answer for another window is not this list: a jump or a widened strip
     /// that asked while this read was in flight must not take it as its own.
@@ -541,6 +553,8 @@ impl XgViewApp {
             oldest: None,
             paused: false,
             events: Vec::new(),
+            events_cover: Vec::new(),
+            retry_events: 0,
             reading_events: false,
             events_ask: None,
             events_wanted: None,
@@ -1033,12 +1047,44 @@ impl XgViewApp {
     }
 
     /// Reads the events of the stretch the timeline shows.
+    ///
+    /// A deliberate read - a recording opened, a width chosen, a day picked - so
+    /// it is not held back by [`LIVE_SLICE`]: whatever is uncovered is asked for
+    /// at once. What the box has already answered for is not asked again, so the
+    /// press that lands on the window the strip is already showing costs nothing.
+    /// See [`Self::read_strip`], which is the same read every frame with the wait
+    /// on it, and [`Self::read_events_at`] for a moment the cursor is not on yet.
     fn read_events(&mut self, index: usize) {
+        let Some(centre) = self
+            .playback
+            .as_ref()
+            .map(|playback| self.centre_of(playback))
+        else {
+            return;
+        };
+        self.read_events_at(index, centre, 1);
+    }
+
+    /// The same read, for a moment the cursor is not on yet.
+    ///
+    /// A drag's end is the case: the strip is about to be centred on the moment
+    /// the finger left, and the picture has not moved there yet - so `centre_of`
+    /// still answers with the old one, and the marks read for it would be the
+    /// marks of the stretch being left.
+    fn read_events_at(&mut self, index: usize, centre: i64, least: i64) {
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
-        let (from, to) = self.window_of(playback);
-        self.read_events_between(index, from, to);
+        let ask = events_to_ask(
+            &playback.events_cover,
+            centre,
+            playback.zoom,
+            epoch_now(),
+            least,
+        );
+        if let Some((from, to)) = ask {
+            self.read_events_between(index, from, to);
+        }
     }
 
     /// Reads the events of a stretch. One at a time: a second ask while the
@@ -1108,6 +1154,16 @@ impl XgViewApp {
             } else {
                 playback.events = events;
             }
+            // What the box has now been asked about. Every ask covers the window
+            // the strip draws and a window either side of it, so a list that
+            // replaces the last one still holds everything on screen - which is
+            // what makes replacing safe here and what the cover is for.
+            cover(&mut playback.events_cover, from, to);
+        } else {
+            // The box could not answer: the marks are the ones that were there,
+            // and the read is not made again on the next frame. See
+            // [`READ_RETRY`].
+            playback.retry_events = epoch_now() + READ_RETRY;
         }
         // A jump was waiting for this list: it is made now, but only when this
         // is the list it asked for. A press that had to be remembered while
@@ -1130,7 +1186,13 @@ impl XgViewApp {
         // the jump above - is asked for now.
         let wanted = playback.events_wanted.take();
         let jump_next = playback.to_jump.and(playback.jump_ask);
-        let next = wanted.or(jump_next);
+        // What was asked for while this read was in flight may already be
+        // answered by it: the strip asks every frame, so the window it remembered
+        // is often the window this answer covered. Asking again for a range the
+        // cover now holds is a request for marks already on screen.
+        let next = wanted
+            .or(jump_next)
+            .filter(|(from, to)| uncovered_width(&playback.events_cover, *from, *to) > 0);
         if let Some(forward) = jumped {
             self.jump_event(forward);
         }
@@ -2143,17 +2205,8 @@ impl XgViewApp {
         // reach reads the events there: the marks on the strip and the two
         // buttons that step between them are the same list. The stretch asked
         // for is the one the strip will show once the cursor is there - not the
-        // one it shows now, which is what `read_events` would ask for, the
-        // picture not having moved yet.
-        let zoom = self.playback.as_ref().map_or(SPAN, |playback| playback.zoom);
-        let covered = self
-            .playback
-            .as_ref()
-            .and_then(|playback| playback.events.first().zip(playback.events.last()))
-            .is_some_and(|(first, last)| first.0 <= at && at <= last.1);
-        if !covered {
-            self.read_events_between(index, at - zoom / 2, at + zoom / 2);
-        }
+        // one it shows now, the picture not having moved yet.
+        self.read_events_at(index, at, 1);
         // The hold is not let go of first: a session resumed for a moment
         // publishes a frame of the window that is being left, and that frame is
         // the one that would put the picture back where it was. A seek either
@@ -2221,8 +2274,10 @@ impl XgViewApp {
             return;
         }
         playback.zoom = zoom;
-        // A strip of a different width holds events the old list does not.
-        playback.events.clear();
+        // The marks are kept: an event is a stretch of time, and a strip of
+        // another width draws the same ones - wider, or fewer of them, but not
+        // different. Cleared, every change of width blanked the strip until the
+        // answer landed. What the wider window reaches beyond them is read below.
         let index = playback.index;
         tracing::debug!(target: "xgview::app", zoom, "the timeline changed width");
         self.read_events(index);
@@ -2816,13 +2871,29 @@ impl XgViewApp {
         let now = epoch_now();
         let wait_older = now < playback.retry_older;
         let wait_newer = now < playback.retry_newer;
+        let wait_events = now < playback.retry_events;
+        let (centre, zoom) = (self.centre_of(playback), playback.zoom);
         if !wait_older {
             self.read_older(index);
         }
         if !wait_newer {
             self.read_newer(index);
         }
-        if wait_older || wait_newer {
+        // The marks of the window, and this is the one place that keeps them up:
+        // the strip slides under a cursor that does not move, so playing forward
+        // uncovers new time on the right without anything the viewer did - and a
+        // stretch the picture carries on into after a hole is a window that
+        // moved a night. Neither asks for events, and neither used to get any:
+        // the list was the one read when the recording was opened, so the band
+        // grew and the marks did not. See [`events_to_ask`].
+        if !wait_events {
+            // How much new time is worth a request: a second at the clock, and a
+            // fifth of an hour on a strip a day wide - where a second is a
+            // hundredth of a pixel and a mark on it is not there to be seen. A
+            // deliberate read has no such wait. See [`Self::read_events_at`].
+            self.read_events_at(index, centre, LIVE_SLICE.max(zoom / 64));
+        }
+        if wait_older || wait_newer || wait_events {
             // The strip is short and the box is not to be asked yet. A held
             // picture draws no frames of its own, so one is asked for, or the
             // blank stays for as long as the viewer leaves the picture held.
@@ -4383,6 +4454,60 @@ fn covered_between(covered: &[(i64, i64)], from: i64, to: i64) -> bool {
     covered.iter().any(|(start, end)| *start <= from && to <= *end)
 }
 
+/// How much of `from..to` the cover does not hold, at its widest gap.
+///
+/// The runs are sorted and merged, so the gaps are walked in one pass: the one
+/// before the first run, the ones between runs, and the one after the last.
+fn uncovered_width(covered: &[(i64, i64)], from: i64, to: i64) -> i64 {
+    let mut widest = 0;
+    let mut at = from;
+    for (start, stop) in covered {
+        if *stop <= at {
+            continue;
+        }
+        if *start >= to {
+            break;
+        }
+        if *start > at {
+            widest = widest.max((*start).min(to) - at);
+        }
+        at = at.max(*stop);
+    }
+    widest.max(to - at)
+}
+
+/// What the event list should be asked for, or `None` when it already holds it.
+///
+/// A window either side of the one drawn, and never past the clock: the strip
+/// slides under a cursor that does not move, so a read that covered only what is
+/// drawn would be asked again a second later. Every ask covers the whole drawn
+/// window, and that is what lets an answer *replace* the list rather than add to
+/// it: a list that is its own window's marks cannot lose one that is still on
+/// screen.
+///
+/// `least` is how much new time is worth a request. A deliberate read passes 1 -
+/// anything uncovered at all - and the read made every frame passes
+/// [`LIVE_SLICE`], so a window sliding a second at a time is not a request a
+/// frame. That wait scales with the window on a wide strip, where a second is a
+/// hundredth of a pixel: a mark that arrives a quarter of an hour late at a day's
+/// width is a mark nobody could have seen arriving, and asking for two days of
+/// events every ten seconds is a box asked for nothing. See
+/// [`XgViewApp::read_strip`].
+fn events_to_ask(
+    covered: &[(i64, i64)],
+    centre: i64,
+    zoom: i64,
+    now: i64,
+    least: i64,
+) -> Option<(i64, i64)> {
+    let from = centre - zoom;
+    let to = (centre + zoom).min(now);
+    if from >= to {
+        return None;
+    }
+    (uncovered_width(covered, from, to) >= least).then_some((from, to))
+}
+
 /// The next slice of `from..to` the box has not been asked about, and no wider
 /// than `width`.
 ///
@@ -5221,6 +5346,58 @@ mod tests {
         assert!(covered_between(&covered, 150, 550));
         assert!(!covered_between(&covered, 150, 650), "past what was read");
         assert!(!covered_between(&covered, 50, 550), "and before it");
+    }
+
+    /// The widest stretch of a window nothing has been asked about.
+    ///
+    /// It is what decides whether a window that has slid is worth a request, so
+    /// the ends and the hole in the middle all count. See [`uncovered_width`].
+    #[test]
+    fn the_uncovered_part_of_a_window_is_what_is_left_of_it() {
+        assert_eq!(uncovered_width(&[], 0, 100), 100);
+        assert_eq!(uncovered_width(&[(0, 100)], 0, 100), 0);
+        assert_eq!(uncovered_width(&[(0, 60)], 0, 100), 40, "after it");
+        assert_eq!(uncovered_width(&[(40, 100)], 0, 100), 40, "before it");
+        assert_eq!(uncovered_width(&[(0, 40), (60, 100)], 0, 100), 20, "between");
+        assert_eq!(uncovered_width(&[(-50, -10), (10, 50)], -100, 100), 50);
+        assert_eq!(uncovered_width(&[(-500, -400)], 0, 100), 100, "none of it in the window");
+        // Runs are merged and sorted, so one that begins before the window is
+        // still the one that covers its start.
+        assert_eq!(uncovered_width(&[(-100, 30), (30, 80)], 0, 100), 20);
+    }
+
+    /// What the event list is asked for, and when it is not asked for at all.
+    ///
+    /// The strip slides under a cursor that does not move, so the window is
+    /// always partly new. Every ask is the window and a window either side of it,
+    /// which is what makes an answer that replaces the list safe; a window that
+    /// has slid by a second is a sliver rather than a request, and one held to
+    /// the clock is never asked past it. See [`events_to_ask`].
+    #[test]
+    fn the_events_of_a_window_are_asked_for_a_window_either_side() {
+        let now = 100_000;
+        assert_eq!(events_to_ask(&[], 10_000, 600, now, 1), Some((9_400, 10_600)));
+        assert_eq!(
+            events_to_ask(&[], now - 60, 600, now, 1),
+            Some((now - 660, now)),
+            "held to the clock, not past it"
+        );
+        // Answered for: nothing to ask, whatever the wait.
+        let covered = [(9_400, 10_600)];
+        assert_eq!(events_to_ask(&covered, 10_000, 600, now, 1), None);
+        assert_eq!(events_to_ask(&covered, 10_000, 600, now, LIVE_SLICE), None);
+        // A window that has slid by a second is a sliver, not a request - and a
+        // deliberate read takes the sliver anyway.
+        assert_eq!(events_to_ask(&covered, 10_001, 600, now, LIVE_SLICE), None);
+        assert_eq!(
+            events_to_ask(&covered, 10_001, 600, now, 1),
+            Some((9_401, 10_601))
+        );
+        // Slid by more than the wait, it is worth one.
+        assert_eq!(
+            events_to_ask(&covered, 10_020, 600, now, LIVE_SLICE),
+            Some((9_420, 10_620))
+        );
     }
 
     /// Opening marks the stretch the box answered for, not the hour it asked
