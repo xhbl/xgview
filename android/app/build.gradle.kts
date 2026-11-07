@@ -5,7 +5,9 @@ import java.util.Properties
 // The module holds no sources of its own: it compiles the `BootReceiver` the
 // repository carries, packages the manifest and resources next to it, and drops
 // the `libmonitor_android.so` cargo-ndk writes into `android-build/jniLibs`
-// under `lib/arm64-v8a/`. The library name must keep matching
+// under `lib/<abi>/`. Whatever ABI directories are there are what the APK
+// carries, so a package is one ABI because the tree held one when it was built
+// (see `scripts/build-android.ps1`). The library name must keep matching
 // `android.app.lib_name` in the manifest.
 plugins {
     id("com.android.application")

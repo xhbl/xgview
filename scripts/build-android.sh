@@ -4,19 +4,25 @@
 #
 # Prerequisites
 # -------------
-#   rustup target add aarch64-linux-android
+#   rustup target add aarch64-linux-android armv7-linux-androideabi
 #   cargo install cargo-ndk
 #   ANDROID_NDK_HOME (or ANDROID_NDK_ROOT) must point at an NDK r25+.
 #
-# The command below targets 64 bit ARM (the Amlogic S905X5M / Nvidia Shield TV
-# class of devices) and API level 27, the `minSdk` the manifest declares. The
-# resulting shared library is written to android-build/jniLibs/<abi>/.
+# This writes the shared libraries only - it is the library half of the build,
+# for a machine where Gradle is driven by hand. `build-android.ps1` is the
+# release path: it runs this per ABI and packages one APK each.
+#
+# Both ARM ABIs exist and the release is one package per ABI; this script builds
+# the one it is asked for, at API level 27 - the `minSdk` the manifest declares -
+# and writes it to android-build/jniLibs/<abi>/. A box whose chip is 64-bit but
+# whose Android is 32-bit takes the `armeabi-v7a` one; see the README.
 #
 # Usage
 # -----
-#   scripts/build-android.sh                 # release, arm64-v8a, API 27
-#   API=30 scripts/build-android.sh          # override the API level
-#   PROFILE=debug scripts/build-android.sh   # debug build
+#   scripts/build-android.sh                      # release, arm64-v8a, API 27
+#   ABIS=armeabi-v7a scripts/build-android.sh     # the other ARM ABI
+#   API=30 scripts/build-android.sh               # override the API level
+#   PROFILE=debug scripts/build-android.sh        # debug build
 #
 set -euo pipefail
 
@@ -46,9 +52,9 @@ fi
 
 echo "==> building monitor_android (${PROFILE}) for ${ABIS} at API ${API}"
 # A library an earlier build left here for another ABI is packaged into the APK
-# too - the Android project takes the whole jniLibs tree - while the APK's own
-# name mentions only the ABIs of this run. Empty the tree so what is packaged is
-# what was built.
+# too - the Android project takes the whole jniLibs tree - so the tree is emptied
+# and then holds exactly the ABIs asked for. For a package per ABI, ask for one
+# at a time; see the next steps below.
 rm -rf "${OUT_DIR}"
 # `-P` is cargo-ndk's own platform flag. The lowercase `-p` is passed through to
 # cargo as `--package`, so it takes a crate name and not an API level.
@@ -99,13 +105,23 @@ cat <<'EOF'
 
 Next steps
 ----------
-Copy the generated jniLibs folder into the Android project, e.g.:
+The Gradle project at android/ already reads this tree
+(android-build/jniLibs), so:
 
-    app/src/main/jniLibs/arm64-v8a/libmonitor_android.so
+    gradle -p android assembleRelease
 
-and copy crates/monitor_android/android/AndroidManifest.xml plus
-crates/monitor_android/android/java and crates/monitor_android/android/res
-into app/src/main/. Then deploy with scripts/deploy-android.sh.
+packs whatever is here into one APK, so with one ABI in the tree that is one
+package for it. The release is one package per ARM ABI, which is this script and
+the Gradle step run once per ABI:
+
+    ABIS=arm64-v8a   scripts/build-android.sh && gradle -p android assembleRelease
+    ABIS=armeabi-v7a scripts/build-android.sh && gradle -p android assembleRelease
+
+and copy target/xgview-<version>-android-<abi>.apk between the two. Asking for
+both in one run (`ABIS='arm64-v8a armeabi-v7a'`) is a single APK carrying both,
+which is not what the release ships.
+
+Then deploy with scripts/deploy-android.sh.
 
 Start on boot (Android 10+)
 ---------------------------

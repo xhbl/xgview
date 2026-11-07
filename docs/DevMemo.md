@@ -5858,3 +5858,28 @@ hundredth of a pixel of the widest, where asking for two days of events every te
 is a box asked for nothing: at a day's width the wait is a fifth of an hour. A mark that
 arrives that late is a mark nobody could have seen arriving, and a deliberate read - a
 drag, a width, a day - has no wait at all.
+
+### The 32-bit package, and what a "universal" APK would have cost
+
+A box can have a 64-bit chip and a 32-bit Android, and most cheap TV boxes do. The ABI
+was the only thing keeping the viewer off those: nothing in the code is 64-bit-specific,
+and `cargo ndk -t armeabi-v7a` built the library first time in three and a half minutes,
+OpenH264 and `ring` and wgpu included. The library is 11.1 MB against 15.4 MB for arm64,
+and the package 12.2 MB against 16.8.
+
+Two packages rather than one carrying both. One file with two `lib/<abi>/` trees is
+what AGP calls "universal", and it is 28.7 MB - every download carrying a library the
+device cannot load, under a word that reads as "works anywhere" while the app ships two
+of Android's four ABIs. Two files, each named for the ABI it holds, is what the existing
+`build-android.ps1 -Abis` naming already did: it only needed to loop.
+
+Measured on the Shield-class box, which is arm64: the `armeabi-v7a` package **installs
+and runs there**, as a 32-bit process (`primaryCpuAbi=armeabi-v7a`), nine channels
+decoding in hardware with `errors=0`. So the ABI mismatch is only refused in one
+direction - a 32-bit system cannot run the arm64 package (`INSTALL_FAILED_NO_MATCHING_ABIS`)
+- and a 64-bit system running the 32-bit one is not an error, just a 32-bit address
+space. That is worth knowing before writing "pick the right one or it will not install"
+in the notes: half of that sentence is true.
+
+The graphics floor does not move with the ABI. The Mali-450 boxes that most need a
+32-bit build are the ones with OpenGL ES 2.0 only, and no package makes them draw.

@@ -18,7 +18,7 @@ behind the decoder and the cameras, see [DevMemo.md](DevMemo.md).
 | Linux package (`scripts/build-linux.sh`) | gcc / make, `pkg-config`, `nasm` (the x86 SIMD paths) and **libclang**; the FFmpeg source is fetched and built by the script itself, or by the container image with `--docker` |
 | macOS package (`scripts/build-macos.sh`) | the Xcode Command Line Tools (for `clang`, and for `install_name_tool`, `lipo`, `codesign`, `otool` and `ditto`), a Rust toolchain with the targets being built, and FFmpeg found through `pkg-config` - Homebrew's, or one built from source |
 | Windows / Linux / macOS desktop (runtime) | the matching FFmpeg libraries beside the executable or on `PATH`; the Linux package and the macOS bundle carry their own |
-| Android | the Android NDK (r25+), the `aarch64-linux-android` target and `cargo-ndk`; a JDK, Gradle and the Android SDK for the APK |
+| Android | the Android NDK (r25+), the `aarch64-linux-android` and `armv7-linux-androideabi` targets and `cargo-ndk`; a JDK, Gradle and the Android SDK for the APK |
 
 Neither FFmpeg nor OpenH264 is used on Android - decoding is `AMediaCodec`.
 
@@ -243,15 +243,25 @@ which this does not do.
 
 ## 7. Android build and deployment
 
-### Windows: one script, library and APK
+### Windows: one script, library and one APK per ABI
 
 ```powershell
+# The release is these two lines: one package per ARM ABI.
 powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1
 # -> target\xgview-<version>-android-arm64-v8a.apk
+powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1 -Abis armeabi-v7a
+# -> target\xgview-<version>-android-armeabi-v7a.apk
 
 # The debug variant, and another API level.
 powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1 -DebugBuild -Api 30
 ```
+
+`-Abis` defaults to `arm64-v8a`. The two packages are two runs, because a box
+whose chip is 64-bit but whose Android is 32-bit needs the `armeabi-v7a` one, and
+a single file carrying both would be one download with a library the device
+cannot load in it. A list - `-Abis 'arm64-v8a armeabi-v7a'` - is built one at a
+time as well, emptying `android-build/jniLibs` between them, so it is the same
+two packages in one invocation.
 
 The toolchain (NDK, JDK, Gradle, SDK) is looked up under `XGVIEW_ANDROID_ROOT`,
 or `C:\Android` by default.
@@ -288,13 +298,26 @@ launching once clears that marker and returns to the gate, so the sequence
 ### Linux / macOS: library, then Gradle
 
 ```bash
-rustup target add aarch64-linux-android
+rustup target add aarch64-linux-android armv7-linux-androideabi
 cargo install cargo-ndk
 
-scripts/build-android.sh                       # -> android-build/jniLibs/<abi>/libmonitor_android.so
+scripts/build-android.sh                       # -> android-build/jniLibs/arm64-v8a/libmonitor_android.so
+ABIS=armeabi-v7a scripts/build-android.sh      # the other ARM ABI
 API=30 scripts/build-android.sh                # another API level
 gradle -p android assembleRelease
 ```
+
+The script writes the libraries for the ABIs it is asked for; Gradle packs
+whatever is in `android-build/jniLibs` into **one** APK, so a tree holding both
+ABIs is a single APK carrying both - which is not what the release ships. One
+package per ABI is the pair run once per ABI:
+
+```bash
+ABIS=arm64-v8a   scripts/build-android.sh && gradle -p android assembleRelease
+ABIS=armeabi-v7a scripts/build-android.sh && gradle -p android assembleRelease
+```
+
+`scripts/build-android.ps1` does the same and names the two outputs.
 
 ### How the APK is assembled
 
@@ -302,7 +325,9 @@ The Gradle project lives at `android/` and holds no sources of its own:
 `sourceSets` take the manifest, the `java/` sources and the `res/` folder from
 `crates/monitor_android/android/`, the native library from
 `android-build/jniLibs/`, and the language packs from `langs/` as APK assets -
-nothing is copied by hand. `minSdk` is 27, and the manifest declares
+nothing is copied by hand. Whatever is in `jniLibs` is packed, so a package is
+one ABI because the tree holds one ABI when it is built. `minSdk` is 27, and the
+manifest declares
 `INTERNET`, `RECEIVE_BOOT_COMPLETED` and three activities: a transparent
 `LauncherActivity` that is the entry point, and the `MainActivity` /
 `MainActivityPortrait` pair it starts - the same native activity under a

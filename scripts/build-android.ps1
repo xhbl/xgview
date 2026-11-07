@@ -7,10 +7,17 @@
     The Windows counterpart of build-android.sh when the toolchain lives on
     this machine rather than in WSL: cross compiles the native library with
     cargo-ndk, assembles the APK with Gradle, and leaves it in `target` named
-    after the version and the ABI(s) it carries:
+    after the version and the ABI it carries:
 
         target\xgview-<version>-android-<abi>.apk          release (the default)
         target\xgview-<version>-android-<abi>-debug.apk    with -DebugBuild
+
+    One APK per ABI, built in turn. The default is `arm64-v8a`, and the release
+    is two runs of this script - one per ABI - because a box whose chip is 64-bit
+    but whose Android is 32-bit (most cheap TV boxes) installs the `armeabi-v7a`
+    one and is refused the `arm64-v8a` one with `INSTALL_FAILED_NO_MATCHING_ABIS`.
+    Two files rather than one carrying both, so a name says what the package runs
+    on and neither download carries a library the device cannot load.
 
     The release APK is signed with the project's own keystore, kept under
     `android\` and created the first time a release build runs; see the signing
@@ -25,13 +32,17 @@
     powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1
 
 .EXAMPLE
+    # The other ARM ABI - the release is this and the line above.
+    powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1 -Abis armeabi-v7a
+
+.EXAMPLE
     # The debug variant and another API level (cargo-ndk flags).
     powershell -ExecutionPolicy Bypass -File scripts\build-android.ps1 -DebugBuild -Api 30
 #>
 [CmdletBinding()]
 param(
     # Android ABI(s) to cross compile for, exactly as cargo-ndk -t takes them
-    # (space separated for several).
+    # (space separated for several). One APK is built per ABI.
     [string]$Abis = 'arm64-v8a',
 
     # Android API level (cargo-ndk -P). Kept equal to `minSdk` in
@@ -113,29 +124,34 @@ if (-not $DebugBuild) {
 
 Push-Location $repoRoot
 try {
-    Write-Host "==> native library ($Abis, API $Api, release)" -ForegroundColor Cyan
-    # A library an earlier build left here for another ABI is packaged into this
-    # APK too - Gradle takes the whole jniLibs tree - while the APK's own name
-    # mentions only the ABIs of this run. A stale 32 bit .so once rode along in
-    # a package called `-arm64-v8a` that way, carrying code from before every
-    # fix since. Empty the tree so what is packaged is what was built.
-    Remove-Item -Recurse -Force 'android-build/jniLibs' -ErrorAction SilentlyContinue
-    & cargo ndk -t $Abis -P $Api -o android-build/jniLibs build --release -p monitor_android
-    if ($LASTEXITCODE -ne 0) { throw "cargo ndk failed (exit $LASTEXITCODE)" }
-
-    # OpenH264 is C++, and `cc` links Android's C++ runtime for it. The platform
-    # hands a program its system libraries but not a C++ runtime to a library of
-    # ours, so `libc++_shared.so` has to travel in the APK beside the one Gradle
-    # packages. It comes from the NDK, matched to the ABI.
-    #
-    # The static runtime is the other way to do this and the one that looks
-    # tidier - a single `.so`, nothing to copy - but Android keeps it in two
-    # archives, and linking `c++_static` without `c++abi` beside it leaves the
-    # library loading with its RTTI undefined: "cannot locate symbol
-    # _ZTVN10__cxxabiv117__class_type_infoE", on the device, at launch.
+    $version = Get-AppVersion -Manifest (Join-Path $repoRoot 'Cargo.toml')
+    # The debug variant carries a suffix of its own, so building it cannot
+    # replace the release APK a previous run left under the plain name.
+    $suffix = if ($DebugBuild) { '-debug' } else { '' }
     $sysrootLib = (Get-ChildItem (Join-Path $ndk 'toolchains\llvm\prebuilt\*\sysroot\usr\lib') -Directory |
         Select-Object -First 1).FullName
+
+    # One ABI at a time, and one APK each. `jniLibs` is emptied before each so
+    # the package holds only what was just built for it: Gradle takes the whole
+    # tree, and a library left there for another ABI would ride along in a file
+    # whose name does not mention it - a stale 32 bit `.so` once did, in a
+    # package called `-arm64-v8a`, carrying code from before every fix since.
     foreach ($abi in ($Abis -split '\s+')) {
+        Write-Host "==> native library ($abi, API $Api, release)" -ForegroundColor Cyan
+        Remove-Item -Recurse -Force 'android-build/jniLibs' -ErrorAction SilentlyContinue
+        & cargo ndk -t $abi -P $Api -o android-build/jniLibs build --release -p monitor_android
+        if ($LASTEXITCODE -ne 0) { throw "cargo ndk failed for $abi (exit $LASTEXITCODE)" }
+
+        # OpenH264 is C++, and `cc` links Android's C++ runtime for it. The
+        # platform hands a program its system libraries but not a C++ runtime to
+        # a library of ours, so `libc++_shared.so` has to travel in the APK beside
+        # the one Gradle packages. It comes from the NDK, matched to the ABI.
+        #
+        # The static runtime is the other way to do this and the one that looks
+        # tidier - a single `.so`, nothing to copy - but Android keeps it in two
+        # archives, and linking `c++_static` without `c++abi` beside it leaves the
+        # library loading with its RTTI undefined: "cannot locate symbol
+        # _ZTVN10__cxxabiv117__class_type_infoE", on the device, at launch.
         $triple = @{
             'arm64-v8a'   = 'aarch64-linux-android'
             'armeabi-v7a' = 'arm-linux-androideabi'
@@ -147,35 +163,30 @@ try {
         if (-not (Test-Path $shared)) { throw "libc++_shared.so missing for $abi ($shared)" }
         Copy-Item $shared (Join-Path (Join-Path 'android-build/jniLibs' $abi) 'libc++_shared.so') -Force
         Write-Host "    libc++_shared.so ($abi)"
+
+        # `--no-daemon` is here for the console, not for the build. With a daemon,
+        # the build runs in a process that outlives the launcher and keeps the
+        # console handle it inherited, so anything reading this script's output
+        # through a pipe - `| Select-Object`, `| Tee-Object`, a CI log collector -
+        # waits for a handle that is never closed: the APK is written, the script
+        # sits there, and the run has to be killed. Without the daemon the launcher
+        # is the build, and it exits when it is done. The cost is one Gradle
+        # start-up per ABI, which a per-release script can afford.
+        Write-Host "==> APK ($abi, gradle $task)" -ForegroundColor Cyan
+        & $gradle -p android $task --console=plain --no-daemon
+        if ($LASTEXITCODE -ne 0) { throw "gradle failed for $abi (exit $LASTEXITCODE)" }
+
+        $built = Join-Path $repoRoot "android\app\build\outputs\apk\$variant\app-$variant.apk"
+        if (-not (Test-Path $built)) { throw "APK not found: $built" }
+
+        # The platform the APK is named for is the ABI it carries, so a build for
+        # another target is a differently named file rather than an overwrite.
+        $apk = Join-Path $repoRoot "target\xgview-$version-android-$abi$suffix.apk"
+        Copy-Item $built $apk -Force
+        Write-Host "    $apk" -ForegroundColor Cyan
     }
 
-    # `--no-daemon` is here for the console, not for the build. With a daemon,
-    # the build runs in a process that outlives the launcher and keeps the
-    # console handle it inherited, so anything reading this script's output
-    # through a pipe - `| Select-Object`, `| Tee-Object`, a CI log collector -
-    # waits for a handle that is never closed: the APK is written, the script
-    # sits there, and the run has to be killed. Without the daemon the launcher
-    # is the build, and it exits when it is done. The cost is one Gradle start-up
-    # per build, which a per-release script can afford.
-    Write-Host "==> APK (gradle $task)" -ForegroundColor Cyan
-    & $gradle -p android $task --console=plain --no-daemon
-    if ($LASTEXITCODE -ne 0) { throw "gradle failed (exit $LASTEXITCODE)" }
-
-    $built = Join-Path $repoRoot "android\app\build\outputs\apk\$variant\app-$variant.apk"
-    if (-not (Test-Path $built)) { throw "APK not found: $built" }
-
-    $version = Get-AppVersion -Manifest (Join-Path $repoRoot 'Cargo.toml')
-    # The platform the APK is named for is the ABI it carries, so a build for
-    # another target is a differently named file rather than an overwrite. The
-    # debug variant carries a suffix of its own, so building it cannot replace
-    # the release APK a previous run left under the plain name.
-    $platform = ($Abis -split '\s+') -join '-'
-    $suffix = if ($DebugBuild) { '-debug' } else { '' }
-    $apk = Join-Path $repoRoot "target\xgview-$version-android-$platform$suffix.apk"
-    Copy-Item $built $apk -Force
-
     Write-Host ''
-    Write-Host "==> $apk" -ForegroundColor Cyan
 }
 finally {
     Pop-Location

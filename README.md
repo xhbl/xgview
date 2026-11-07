@@ -28,12 +28,13 @@ paging beyond that. No cloud, no account, MIT licensed.
 
 **Download:** [latest release](../../releases/latest)
 
-| Platform                           | File                                                                                                                |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Android / Android TV (arm64, 8.1+) | [`xgview-2.1.88-android-arm64-v8a.apk`](../../releases/download/xgview-v2.1.88/xgview-2.1.88-android-arm64-v8a.apk) |
-| Windows x64                        | [`xgview-2.1.88-windows-x86_64.zip`](../../releases/download/xgview-v2.1.88/xgview-2.1.88-windows-x86_64.zip)       |
-| Linux x64                          | [`xgview-2.1.88-linux-x86_64.tar.gz`](../../releases/download/xgview-v2.1.88/xgview-2.1.88-linux-x86_64.tar.gz)     |
-| macOS (universal)                  | [`xgview-2.1.88-macos-universal.zip`](../../releases/download/xgview-v2.1.88/xgview-2.1.88-macos-universal.zip)     |
+| Platform                            | File                                                                                                                    |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Android / Android TV (arm64, 8.1+)  | [`xgview-2.1.88-android-arm64-v8a.apk`](../../releases/download/xgview-v2.1.88/xgview-2.1.88-android-arm64-v8a.apk)     |
+| Android / Android TV (32-bit, 8.1+) | [`xgview-2.1.88-android-armeabi-v7a.apk`](../../releases/download/xgview-v2.1.88/xgview-2.1.88-android-armeabi-v7a.apk) |
+| Windows x64                         | [`xgview-2.1.88-windows-x86_64.zip`](../../releases/download/xgview-v2.1.88/xgview-2.1.88-windows-x86_64.zip)           |
+| Linux x64                           | [`xgview-2.1.88-linux-x86_64.tar.gz`](../../releases/download/xgview-v2.1.88/xgview-2.1.88-linux-x86_64.tar.gz)         |
+| macOS (universal)                   | [`xgview-2.1.88-macos-universal.zip`](../../releases/download/xgview-v2.1.88/xgview-2.1.88-macos-universal.zip)         |
 
 **Note: This is a personal project, shared as-is, with no warranty.** It was developed with **AI assistance** under my direction and testing; please review the code before using
 it in sensitive setups.
@@ -145,11 +146,11 @@ it in sensitive setups.
 
 ## Supported platforms
 
-| Platform                | Typical device          | Decoding                                                     |
-| ----------------------- | ----------------------- | ------------------------------------------------------------ |
-| **Android** (arm64-v8a) | TV box, phone, tablet   | `AMediaCodec` - hardware, falling back to OpenH264 for H.264 |
-| **Windows** x64         | mini PC, kiosk, desktop | Direct3D 11 Video or CUDA - hardware, with a CPU fallback    |
-| **Linux** x64           | desktop, mini PC        | VAAPI or CUDA - hardware, with a CPU fallback                |
+| Platform                   | Typical device          | Decoding                                                     |
+| -------------------------- | ----------------------- | ------------------------------------------------------------ |
+| **Android** (both ABIs)    | TV box, phone, tablet   | `AMediaCodec` - hardware, falling back to OpenH264 for H.264 |
+| **Windows** x64            | mini PC, kiosk, desktop | Direct3D 11 Video or CUDA - hardware, with a CPU fallback    |
+| **Linux** x64              | desktop, mini PC        | VAAPI or CUDA - hardware, with a CPU fallback                |
 | **macOS** (universal)   | desktop, laptop         | VideoToolbox - hardware, with a CPU fallback                 |
 
 Hardware decoding covers H.264 and H.265; MJPEG is always decoded on the CPU. It
@@ -167,7 +168,14 @@ camera is on.
 
 ### Android: what the device needs
 
-- **A 64-bit ARM device** (`arm64-v8a`) - the only ABI the APK is built for.
+- **An ARM device, 32- or 64-bit.** Two packages are built, one per ABI:
+  `arm64-v8a` for a 64-bit Android, `armeabi-v7a` for a 32-bit one. A box whose
+  chip is 64-bit but whose Android is 32-bit - most cheap TV boxes are - takes
+  the **32-bit** package; the 64-bit one is refused with
+  `INSTALL_FAILED_NO_MATCHING_ABIS` rather than installing and failing to load.
+  `adb shell getprop ro.product.cpu.abi` answers which one a device needs. The
+  other way round is not an error: a 64-bit Android installs and runs the 32-bit
+  package, as a 32-bit process.
 - **Android 8.1 or newer.** The APK declares `minSdkVersion 27`, so an older
   device refuses it with "there was a problem parsing the package" instead of
   installing it.
@@ -186,7 +194,9 @@ Two kinds of device fall below that floor and are refused rather than half run: 
 box that offers only **OpenGL ES 2.0** - an Amlogic S905 / Mali-450 on its stock
 Android 9, for instance - has no adapter to draw with, and one whose OpenGL ES
 3.x driver lacks `GL_KHR_debug` cannot be given the resource labels the GL
-backend asks for. In both cases the viewer says so in its log and closes.
+backend asks for. In both cases the viewer says so in its log and closes. The
+floor is the same for both ABIs: a 32-bit package does not make a device with
+OpenGL ES 2.0 draw, it only lets a 32-bit system install the viewer at all.
 
 If a launch does fail before the renderer comes up, the failure is written to the
 log and the app brings itself back on the GL backend a few seconds later - no

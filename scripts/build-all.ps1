@@ -6,7 +6,14 @@
 .DESCRIPTION
     Raises the last component of the version declared in `[workspace.package]`
     (1.1.6 -> 1.1.7), then runs `build-windows.ps1` and `build-android.ps1` in
-    turn, so both packages come out under the same, freshly bumped version.
+    turn, so every package comes out under the same, freshly bumped version.
+
+    Android is built once per ARM ABI - two runs, two packages - because a box
+    whose chip is 64-bit but whose Android is 32-bit needs the `armeabi-v7a` one,
+    and one APK carrying both would be a download with a library the device
+    cannot load in it. `build-android.ps1` builds one ABI per run by default, so
+    forgetting the second run would quietly ship a 64-bit-only release: the list
+    is here, where a release is made.
 
     The bump lives here on purpose: the individual build scripts only read the
     version, they never bump it.
@@ -57,7 +64,12 @@ Write-Step "Version bumped to $newVersion"
 Write-Step 'Building the Windows package'
 & (Join-Path $PSScriptRoot 'build-windows.ps1')
 
-Write-Step 'Building the Android package'
-& (Join-Path $PSScriptRoot 'build-android.ps1')
+# One run per ABI, so a release carries both ARM packages and neither carries a
+# library the other device cannot load. The order is the order they are listed
+# in the README's download table.
+foreach ($abi in @('arm64-v8a', 'armeabi-v7a')) {
+    Write-Step "Building the Android package ($abi)"
+    & (Join-Path $PSScriptRoot 'build-android.ps1') -Abis $abi
+}
 
-Write-Step "Done - target\xgview-$newVersion-*.zip and target\xgview-$newVersion-*.apk"
+Write-Step "Done - target\xgview-$newVersion-windows-*.zip, target\xgview-$newVersion-android-arm64-v8a.apk and target\xgview-$newVersion-android-armeabi-v7a.apk"
