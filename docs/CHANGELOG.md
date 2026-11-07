@@ -3,6 +3,57 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 2.1.88
+
+Changes since 2.1.66. **The timeline's arrows walk the whole recording now -
+across the gaps where a camera was off, and all the way to either end - and a
+drag to the end of the band plays the moment it was dropped on.**
+
+### Walking a recording with the keys
+
+- **Left and Right cross a gap instead of stopping at it.** A camera that was off
+  for a night left a wall in the strip: every press landed back where it started.
+  The arrow goes to the next stretch in that direction now, and holding it walks
+  through the night rather than bouncing off it.
+- **The arrows reach the ends of the recording.** Holding Left used to stop at
+  the left edge of what had been read and stay there for as long as the key was
+  held. It reads what is behind that edge and carries on, and comes to rest at
+  the first moment the camera recorded. The far end behaves the same way.
+- **Holding a key walks the strip evenly.** It used to jitter between two
+  moments, or spring back to where the press started.
+- **The bar's step buttons and the keys are one walk.** They were two, and only
+  one of them knew about the gaps.
+- **A step onto the last second of a stretch is played rather than refused.**
+
+### The end of the band
+
+- **Dragging to the end of the band plays from where it was let go.** It used to
+  land up to a minute earlier and then play forward through it, or spring back to
+  where the drag had started.
+- **The band ends in one piece.** A small separate piece was drawn at its end,
+  which read as a gap where there is none.
+- **A moment the box has nothing for no longer moves the picture somewhere
+  else.** It could take it to the next recording after the picture - hours away -
+  the instant a seek was refused.
+- **A drag into a gap goes to the nearest picture**, rather than back to where it
+  started.
+- **The band reaches the picture at the live edge**, instead of stopping a file
+  short of it, and a recording that reaches the edge keeps playing instead of
+  waiting there.
+- **Pressing play at the end of a recording plays it again.**
+- **The event marks stay on the strip** after jumping to the last event and
+  pressing the button again.
+
+### Faster, and the bar over the picture
+
+- **Dragging back through history fills the strip in sooner**, and asks the
+  server about less of it.
+- **Moving within a recording starts sooner**, and a recording's days are read as
+  it opens rather than when the calendar is first pressed.
+- **The bar over the magnified picture names its controls on hover**, and its
+  plate is 40% transparent.
+- **A seek made while the picture is held shows the frame it lands on.**
+
 ## 2.1.66
 
 Changes since 1.5.118. **Frigate recordings can be watched on the wall, and the
