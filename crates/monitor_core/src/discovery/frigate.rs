@@ -536,20 +536,32 @@ impl FrigateClient {
             )));
         }
         let text = response.text().await.unwrap_or_default();
-        let events: Vec<serde_json::Value> = serde_json::from_str(&text)
+        Self::spans_of(&text, before)
+    }
+
+    /// The spans a `/api/events` answer holds, oldest first.
+    ///
+    /// `before` is the question's own upper bound, and it is where an event with
+    /// no end yet is taken to end. Frigate writes `end_time` when an event is
+    /// over and leaves it null while it is still going, so an event that is
+    /// happening *now* - which is every event a viewer makes by walking in front
+    /// of the camera at the live edge - used to be one second wide. A second is a
+    /// pixel on a strip a minute across and nothing at all on one a day across:
+    /// the band stayed empty until the event ended. Drawn to the moment it was
+    /// asked about, the mark grows with each read instead.
+    fn spans_of(body: &str, before: i64) -> Result<Vec<(i64, i64)>> {
+        let events: Vec<serde_json::Value> = serde_json::from_str(body)
             .map_err(|err| CoreError::parse(format!("the event list is not JSON: {err}")))?;
         let mut spans: Vec<(i64, i64)> = events
             .iter()
             .filter_map(|event| {
                 let start = event.get("start_time")?.as_f64()? as i64;
-                // An event still going has no end yet: it is a moment, and a
-                // moment is a second wide on the strip.
                 let end = event
                     .get("end_time")
                     .and_then(|end| end.as_f64())
                     .map(|end| end as i64)
-                    .unwrap_or(start + 1);
-                Some((start, end))
+                    .unwrap_or(before);
+                Some((start, end.max(start + 1)))
             })
             .collect();
         spans.sort_unstable();
@@ -997,6 +1009,34 @@ mod tests {
         assert_eq!(in_a_query("Etc/GMT+8"), "Etc%2FGMT%2B8");
         assert_eq!(in_a_query("Etc/GMT-8"), "Etc%2FGMT-8");
         assert_eq!(in_a_query("Etc/GMT"), "Etc%2FGMT");
+    }
+
+    /// An event that has not ended yet is drawn up to the moment it was asked
+    /// about, not as the single second it used to be.
+    ///
+    /// Frigate leaves `end_time` null while an event is still going, and at the
+    /// live edge every event a viewer makes by walking in front of the camera is
+    /// still going: a one-second mark is a pixel on a strip a minute across and
+    /// nothing at all on one a day across, so the band stayed empty until the
+    /// event was over. See [`FrigateClient::spans_of`].
+    #[test]
+    fn an_event_that_has_not_ended_ends_where_the_question_did() {
+        let body = r#"[
+            {"start_time": 1000.0, "end_time": 1040.0},
+            {"start_time": 2000.0, "end_time": null},
+            {"start_time": 1500.0, "end_time": 1500.4},
+            {"end_time": 1600.0}
+        ]"#;
+        assert_eq!(
+            FrigateClient::spans_of(body, 2030).unwrap(),
+            vec![(1000, 1040), (1500, 1501), (2000, 2030)],
+            "closed, rounded up to a second, and up to the question for the one still going"
+        );
+        // Asked about a moment inside the ongoing event, the mark is that moment.
+        assert_eq!(
+            FrigateClient::spans_of(r#"[{"start_time": 2000.0, "end_time": null}]"#, 2000).unwrap(),
+            vec![(2000, 2001)]
+        );
     }
 
     /// A login is kept for the requests that follow it, and dropped when the box

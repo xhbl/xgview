@@ -5883,3 +5883,26 @@ in the notes: half of that sentence is true.
 
 The graphics floor does not move with the ABI. The Mali-450 boxes that most need a
 32-bit build are the ones with OpenGL ES 2.0 only, and no package makes them draw.
+
+### An event that is still happening is not a second wide
+
+The report was the live edge of a recording: walk in front of the camera and the band that
+grows on the right has no event colour on it. The guess was that the box had not written
+the event yet, so the band was drawn before the event existed and the event was lost.
+
+Half of that is right, and it is not the half that matters. Frigate leaves `end_time` null
+while an event is *going*, and the parse collapsed such an event to `(start, start + 1)` -
+"it is a moment, and a moment is a second wide on the strip". At the default width a second
+is a pixel; at a day's width it is a hundredth of one. Every event a viewer makes by
+walking in front of the camera is going while they make it, so the band stayed empty until
+the event was over - and then drew a mark they had stopped looking for.
+
+Nothing was lost: each read asks for the window and a window either side, so the next one
+covers the event's start again and the answer replaces the list with the event's real
+span. The delay is the wait between reads (`LIVE_SLICE`, or a 64th of the window on a wide
+strip), not for ever. See [`events_to_ask`] in `monitor_gui`.
+
+What was wrong was the span. An event with no end ends where the *question* did - the
+upper bound of the read, which is the moment the strip was asked about - so the mark grows
+with each read instead of being a second. It grows in steps of the wait between reads,
+which is what a mark on a live edge is: a second's worth of colour arriving every ten.
