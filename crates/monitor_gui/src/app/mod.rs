@@ -1744,13 +1744,22 @@ impl XgViewApp {
             // carries on at the next stretch: the box stops the playlist there
             // rather than serving what is past it. See
             // [`XgViewApp::recording_stopped`].
-            let stopped = matches!(
-                &event,
-                StreamEvent::State { state: ConnectionState::Finished, .. }
-            );
+            //
+            // A session that ends *with a reason* is the other kind of stop: the
+            // box answered "nothing recorded at that moment", and no picture was
+            // ever shown. The pipeline reports it as a finish so that a hole is
+            // not drawn as a broken camera (see `pipeline::channel`), and the
+            // reason is the only thing that tells the two apart - a clean finish
+            // carries none.
+            let (stopped, nothing_there) = match &event {
+                StreamEvent::State { state: ConnectionState::Finished, detail, .. } => {
+                    (true, !detail.is_empty())
+                }
+                _ => (false, false),
+            };
             self.channels.entry(index).or_default().apply(event);
             if stopped {
-                self.recording_stopped(index);
+                self.recording_stopped(index, nothing_there);
             }
         }
 

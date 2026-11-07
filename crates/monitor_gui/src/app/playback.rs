@@ -684,7 +684,15 @@ impl XgViewApp {
     /// lands after the last fragment before it. So a session that finished is
     /// not a recording that ended - the picture stops at the edge of a stretch
     /// and the viewer expects the next one, not a frozen frame.
-    pub(super) fn recording_stopped(&mut self, index: usize) {
+    ///
+    /// `nothing_there` is the one stop that is not that: the box answered
+    /// "nothing recorded at that moment", so the session never showed a picture
+    /// at all. What is on screen belongs to an older session and its stretch is
+    /// not the one that stopped, so there is no hole to carry on past - carrying
+    /// on from the picture's own moment is a jump to the next recording *after
+    /// it*, which was seventeen hours in the report that found this, and it
+    /// happened the instant the seek was refused. See [`Self::seek`].
+    pub(super) fn recording_stopped(&mut self, index: usize, nothing_there: bool) {
         let Some(playback) = self.playback.as_ref() else {
             return;
         };
@@ -710,6 +718,9 @@ impl XgViewApp {
         // is the one the picture is of.
         if let Some(playback) = self.playback.as_mut() {
             playback.pending = None;
+        }
+        if nothing_there {
+            return;
         }
         let Some(playback) = self.playback.as_ref() else {
             return;
@@ -888,11 +899,32 @@ impl XgViewApp {
     /// sample it lands on and goes back to holding. Playing, it is a jump and
     /// the recording carries on from there.
     pub(super) fn step_playback(&mut self, by: i64) {
-        let Some(playback) = self.playback.as_ref() else {
-            return;
-        };
-        let at = self.centre_of(playback) + by;
-        self.move_to(at);
+        self.step_by(by);
+    }
+
+    /// Takes the step `by` seconds, or reads for one when there is nowhere to step.
+    ///
+    /// The two arrows that walk the recording come here: the strip's own keys
+    /// ([`Self::walk_timeline`]) and the bar's step buttons. A step is a walk,
+    /// and a hole is a stretch the recording does not have: the next picture in
+    /// the direction of the step is what a press asks for. A drag is the other
+    /// way round - a finger over a hole means the nearest picture - and that is
+    /// [`nearest`], which is why this cannot live there.
+    ///
+    /// A step back that is already at the oldest picture the list holds is not a
+    /// step: what is behind it has not been read yet, and the answer to the press
+    /// is a read of its own ([`Self::read_before_the_list`]). Without it the
+    /// strip's left edge was the end of the recording as far as a key could tell,
+    /// and holding the key there did nothing at all.
+    fn step_by(&mut self, by: i64) {
+        match self.step_landing(by) {
+            Some(at) => self.move_to(at),
+            None => {
+                if let Some(index) = self.playback.as_ref().map(|playback| playback.index) {
+                    self.read_before_the_list(index);
+                }
+            }
+        }
     }
 
     /// Steps to the event before or after the moment on screen.
@@ -1125,6 +1157,12 @@ impl XgViewApp {
         if playback.index != index || playback.source.camera != camera_id {
             return;
         }
+        // The picture this seek is leaving, read before the session is replaced:
+        // the frames of the one being left are what it publishes until the new
+        // one has something to show, and they are told apart from its own by
+        // being nearer this moment than the one asked for. See
+        // [`Self::picture_arrived`].
+        let from = self.pictured(index);
         // A finger on the timeline is choosing a moment, and an answer that lands
         // under it is not the finger's: taking the drag's cursor away is a strip
         // that jumps back under the hand - which is what a probe answering
@@ -1153,8 +1191,15 @@ impl XgViewApp {
         // and then went on, which is the jump this fixed. A moment the playlist
         // does not reach is what [`stops_short`] is for, and it waits there rather
         // than starting a session.
+        //
+        // The playlist's own end, and not the list's: the segment list ceils a
+        // file's end, so the last second it names can be a second the box has no
+        // fragment for. Beginning there is a session that never shows a picture -
+        // the box answers "nothing recorded at that moment" - which is a drag that
+        // springs back to where it started rather than the nearest picture. A
+        // drag to the last second of a stretch is exactly that moment.
         let (window, begin) = match &playlist {
-            Some(_) => (window, Some(at.max(window.0))),
+            Some(playlist) => (window, Some(served_begin(playlist, window, at))),
             None => match window_at(&playback.segments, at, WINDOW) {
                 Some(window) => (window, None),
                 // Nothing to play there and no session started: the hold a
@@ -1204,6 +1249,9 @@ impl XgViewApp {
                         playback.scrub = None;
                         playback.scrubbing = false;
                         playback.pending = Some(begin);
+                        // The picture the wait is leaving is what it keeps
+                        // showing, so its frames are not an arrival either.
+                        playback.pending_from = from.filter(|from| *from != begin);
                         playback.after_hole = Some(wait);
                     }
                     return;
@@ -1234,7 +1282,9 @@ impl XgViewApp {
             // The moment the picture begins at, held to the stretch that will
             // play: a scrub taken to the edge of the nearest recording does not
             // wait for a moment this playlist never reaches.
-            playback.pending = Some(begin.unwrap_or(window.0));
+            let begin = begin.unwrap_or(window.0);
+            playback.pending = Some(begin);
+            playback.pending_from = from.filter(|from| *from != begin);
         }
     }
 
@@ -2274,8 +2324,43 @@ impl XgViewApp {
                 held.stepped = now;
             }
         }
-        let at = self.playback.as_ref().map_or(0, |playback| self.centre_of(playback));
-        self.move_to(at + if forward { step } else { -step });
+        self.step_by(if forward { step } else { -step });
+    }
+
+    /// Where a step of `by` seconds lands, taken across a hole.
+    ///
+    /// The landing [`Self::step_by`] takes, once the list has said where the
+    /// recording goes and where it stops. A hole is a stretch the recording does not
+    /// have, and what a step asks for is the next picture in the direction it
+    /// went - not the edge it came from, which is what [`nearest`] answers and
+    /// what a finger wants. See [`across_hole`].
+    ///
+    /// `None` when there is nothing to do: no recording open, or a step back that
+    /// is already as far back as the list goes. The second is not the same as a
+    /// step of nothing - a held key repeats, and a landing where the picture
+    /// already is would be a seek to the same fragment ten times a second.
+    fn step_landing(&self, by: i64) -> Option<i64> {
+        let playback = self.playback.as_ref()?;
+        let centre = self.centre_of(playback);
+        let at = across_hole(&playback.segments, centre + by, by > 0);
+        // A step back stops at the oldest picture the list holds. A moment before
+        // it is a read that can only answer "nothing there" - the box has said so,
+        // or the strip's left edge has not been read yet - and the cursor would
+        // come back to where it started, so the same press would do it again for
+        // as long as the key was held. A step forward is not held this way: what
+        // is past the last file is a recording the box has not listed yet, and
+        // the read is the right answer.
+        //
+        // The list's first file is a provisional edge, not the recording's: it is
+        // where what has been read begins. A step that stops here is answered with
+        // a read by [`Self::step_by`], and the edge moves back when one finds
+        // more.
+        let at = if by < 0 {
+            playback.segments.first().map_or(at, |first| at.max(first.start))
+        } else {
+            at
+        };
+        (at != centre).then_some(at)
     }
 
     /// Takes the picture to a moment, keeping the hold it was under.
@@ -2557,6 +2642,74 @@ impl XgViewApp {
         start_segments(&self.handle, &self.events_tx, index, source, from, to);
     }
 
+    /// Reads the stretch before the oldest file the list holds.
+    ///
+    /// What a step that has nowhere to go is answered with, and not something
+    /// [`Self::read_older`] can do: that one works inside the strip's window, and
+    /// the window is centred on the cursor - which is exactly where a step back
+    /// has got stuck. The window has to move before `read_older` can reach
+    /// further, and the window moves with the cursor, so nothing moves. At the
+    /// second-narrowest width the window reaches five minutes back and the band
+    /// never grows again.
+    ///
+    /// Asked from the list's own edge instead, a day at a time, and never
+    /// *including* that edge: an answer that held the list's first file would be
+    /// read as "the recording begins here" by [`Self::segments_arrived`], which is
+    /// how a strip declares its left edge to be the beginning of history. What is
+    /// behind the list is unknown, and an empty answer for a day of it says only
+    /// that this day held nothing.
+    fn read_before_the_list(&mut self, index: usize) {
+        let Some(playback) = self.playback.as_ref() else {
+            return;
+        };
+        // One at a time: the answer extends the strip, which may then want more.
+        if playback.reading_older.is_some() {
+            return;
+        }
+        let Some(first) = playback.segments.first().map(|segment| segment.start) else {
+            return;
+        };
+        // Where the camera answered "nothing" for, there is nothing to ask about.
+        if playback.oldest.is_some_and(|oldest| oldest >= first) {
+            return;
+        }
+        // The walk is over ground already asked about, so the wait a *failed*
+        // read takes is not for this one: an empty day here is progress.
+        if epoch_now() < playback.retry_older {
+            return;
+        }
+        let to = first - 1;
+        // Where the walk has got to: the furthest back anything has been asked
+        // about, and the list's own edge while nothing has. One day further back
+        // each time, so the walk is a day a request rather than a request that
+        // grows with the history behind it.
+        let frontier = playback
+            .covered
+            .iter()
+            .map(|(start, _)| *start)
+            .min()
+            .unwrap_or(to)
+            .min(to);
+        // How far a step will look. A hole wider than this is not crossed by an
+        // arrow - the calendar is for days - and without a bound the walk keeps
+        // asking for days the camera never had, for as long as the key is held.
+        // `oldest` is left alone either way: this is where a *step* stops, not
+        // where the recording begins, and a read from anywhere else can still go
+        // further back.
+        if frontier <= first - STEP_HISTORY {
+            return;
+        }
+        let from = frontier - READ_BEFORE;
+        let source = playback.source.clone();
+        tracing::debug!(target: "xgview::app", index, from, to, "reading the stretch before the list");
+        // Marked before the task is spawned: an answer that arrives before the
+        // mark would clear a field that had not been set yet.
+        if let Some(playback) = self.playback.as_mut() {
+            playback.reading_older = Some((from, to));
+        }
+        start_segments(&self.handle, &self.events_tx, index, source, from, to);
+    }
+
     /// Reads the strip's window from the cursor to its right edge.
     ///
     /// The strip is drawn a whole width around the cursor, so the list has to
@@ -2750,8 +2903,16 @@ impl XgViewApp {
             // drawn as nothing until it is answered, and a band of nothing in
             // the middle of the recording is what the marks - read separately
             // and answered - were drawn across. See [`Self::read_strip`].
+            //
+            // A read asked for *before* the list is the exception: it is walking
+            // back through history a day at a time, and an empty day is progress,
+            // not a box that is behind - the next day is a different question.
+            // Waited on, five seconds a day is a strip that crawls back through a
+            // night. See [`Self::read_before_the_list`].
             let retry_at = epoch_now() + READ_RETRY;
-            if was_older {
+            let before_the_list =
+                playback.segments.first().is_some_and(|first| to < first.start);
+            if was_older && !before_the_list {
                 playback.retry_older = retry_at;
             }
             if was_newer {
@@ -2913,15 +3074,24 @@ impl XgViewApp {
                 self.move_to(at);
                 return;
             }
-            // The moment was asked about and there is nothing at it: a hole. The
-            // picture stays where it is and the cursor goes back to it, rather
-            // than waiting for a sample nobody has.
+            // The moment was asked about and there is nothing at it: a hole. A
+            // drag over one means "the closest picture", which is what
+            // [`nearest`] answers and what the finger expects - the cursor going
+            // back to where it started instead reads as a drag that was refused.
+            // A step never lands in one (see [`across_hole`]), so this is a
+            // finger's answer or a jump's.
             if covered_between(&playback.covered, at, at + 1) {
                 playback.to_seek = None;
                 playback.pending = None;
+                let closest = nearest(&playback.stretches, at).filter(|target| *target != at);
                 // The hold a press took is let go of, or the picture stays
-                // stopped for ever.
-                self.release_hold(index);
+                // stopped for ever - unless the picture is being taken somewhere,
+                // which holds it again by itself.
+                if let Some(target) = closest {
+                    self.move_to(target);
+                } else {
+                    self.release_hold(index);
+                }
                 return;
             }
             // Nobody has asked about it yet - the read that has just landed was
@@ -3289,11 +3459,23 @@ impl XgViewApp {
         };
         if playback.index == index {
             if let Some(pending) = playback.pending {
-                // The one frame that is not an arrival: the picture the seek
-                // left behind, published once while the session takes the jump.
-                let left_behind = playback
-                    .pending_from
-                    .is_some_and(|from| at.is_some_and(|at| at as i64 == from));
+                // The frames that are not an arrival: the picture the seek left
+                // behind, and the ones the session it is leaving publishes while
+                // the new one is being read. A seek out of a range leaves the
+                // old session running until the answer lands, and its frames
+                // keep coming - and `caught_up` alone counts every one of them
+                // as an arrival when the seek went *backwards*, because they are
+                // all later than the moment asked for. The cursor then went to
+                // the old picture and the step was made again from there: a
+                // strip that jittered between two days while a key was held.
+                //
+                // Which picture a frame belongs to is not something a frame
+                // says, but it is where the frame is: the old session's are at
+                // the moment the seek left, the new one's at the moment it asked
+                // for. Nearer the former is not an arrival.
+                let left_behind = playback.pending_from.is_some_and(|from| {
+                    at.is_some_and(|at| belongs_to_the_old_picture(from, pending, at))
+                });
                 if !left_behind && caught_up(at, pending) {
                     playback.pending = None;
                     playback.pending_from = None;
@@ -3344,6 +3526,25 @@ const READ_CHUNK: i64 = 21_600;
 /// [`read_slice`] stops at the window's edge, so the rest would never be asked
 /// for.
 const READ_WHOLE: i64 = 43_200;
+
+/// How far back one read reaches when it is walking back through history.
+///
+/// The strip's own widths stop at a day, and a read asked for from the list's
+/// edge is not filling a strip - it is looking for where the recording goes on,
+/// and the answer may be days away. A day at a time is the same request the
+/// widest strip makes, and a day of files is a few thousand rows: the box
+/// answered a day of this camera's history in 100-200 ms.
+const READ_BEFORE: i64 = 86_400;
+
+/// How far back a step will walk looking for where the recording goes on.
+///
+/// A step back that reaches the list's edge asks for the day before it, and keeps
+/// asking a day at a time while there is nothing there - a camera off for a night
+/// is a hole an arrow should cross. A week is as far as that is worth doing: a
+/// hole wider than a week is a day the calendar is for, and an unbounded walk is
+/// a request every few hundred milliseconds for as long as a key is held, at a
+/// camera that has already said no.
+const STEP_HISTORY: i64 = 7 * 86_400;
 
 /// How long a read the box could not answer waits before it is asked again.
 ///
@@ -4051,6 +4252,23 @@ fn edge_from(segments: &[Segment], stop: i64) -> i64 {
     from.max(stop - LIVE_SPAN)
 }
 
+/// Where a session on `playlist` begins, held to what the box will actually serve.
+///
+/// The moment asked for, and no later than the last second the playlist holds: a
+/// playlist's fragments end a fraction of a second before the moment the segment
+/// list ceils the file's end to, so the second the list names can be one the box
+/// has no fragment for. Beginning there is a session that shows nothing at all -
+/// the box answers "nothing recorded at that moment" - which is a drag to the end
+/// of a stretch springing back to where it started.
+///
+/// Never before the range's own start: a playlist asked for from `window.0` holds
+/// nothing earlier, and a begin outside it is a wait for a picture it never
+/// reaches.
+fn served_begin(playlist: &VodPlaylist, window: (i64, i64), at: i64) -> i64 {
+    let served = playlist.starts_at(playlist.fragments.len()) - 1;
+    at.min(served).max(window.0)
+}
+
 /// Where playback begins inside a range.
 ///
 /// The moment asked for, held to a moment the range holds. A scrub can land on
@@ -4335,6 +4553,41 @@ fn nearest(stretches: &[Segment], at: i64) -> Option<i64> {
         .min_by_key(|moment| (*moment - at).abs())
 }
 
+/// A moment a step landed on, taken across a hole rather than back to the edge it is
+/// nearest.
+///
+/// A step is a walk through the recording, and a hole is a stretch it does not have:
+/// the next picture in the direction of the step is what a press asks for. The
+/// nearest edge is the one the step came from, so a hole - a camera off for a night,
+/// the last file of one day to the first of the next - is a wall the arrows cannot
+/// walk over: every press landed back where it started, and the same press again
+/// started from there. A drag is the other way round, and keeps [`nearest`]: a finger
+/// over a hole means "the closest picture".
+///
+/// A moment past the end of the list is left alone, and so is one before its start:
+/// that is not a hole but a stretch nobody has read, and the read a step waits for is
+/// the right answer - jumping to the far side of it would skip a recording that is
+/// there. Only a moment the list reaches past is a hole, and the list is the merged
+/// record of everything the box has said.
+///
+/// [`Segment::end`] is where a file stops, not a moment inside it: the list floors a file's
+/// start and ceils its end, so `end` can be up to a second past the last fragment the box
+/// will serve - and a seek to it comes back "nothing recorded at that moment", which the
+/// interface reads as a hole. A step back therefore lands on `end - 1`, which is inside
+/// the file by construction. A step forward is safe already: `start` is floored, so it is
+/// a moment the file holds.
+fn across_hole(segments: &[Segment], at: i64, forward: bool) -> i64 {
+    if segments.iter().any(|segment| segment.start <= at && at <= segment.end) {
+        return at;
+    }
+    let side = if forward {
+        segments.iter().filter(|segment| segment.start > at).map(|segment| segment.start).min()
+    } else {
+        segments.iter().filter(|segment| segment.end < at).map(|segment| segment.end - 1).max()
+    };
+    side.unwrap_or(at)
+}
+
 /// What the cursor shows: the moment under the finger while there is one, then
 /// the moment asked for, and only then the picture's own.
 ///
@@ -4346,6 +4599,21 @@ fn nearest(stretches: &[Segment], at: i64) -> Option<i64> {
 /// there rather than stepping back the moment they arrive.
 fn caught_up(picture: Option<f64>, pending: i64) -> bool {
     picture.is_some_and(|at| at >= pending as f64)
+}
+
+/// Whether a frame is one the session being left is still publishing, rather than
+/// the picture the seek went to.
+///
+/// A seek out of a range leaves the old session running until the answer lands,
+/// and a frame is the only thing that says where the picture has got to - but a
+/// frame carries no name. Where it is says it instead: the old session's frames
+/// are at the moment the seek left, the new one's at the moment it asked for.
+///
+/// `caught_up` alone is not enough, and that is what made a held arrow jitter
+/// between two days: a seek *backwards* is caught up by every frame of the
+/// session it is leaving, because they are all later than the moment asked for.
+fn belongs_to_the_old_picture(from: i64, pending: i64, at: f64) -> bool {
+    (at - from as f64).abs() < (at - pending as f64).abs()
 }
 
 /// How far back the segment list is read when a playback channel is opened.
@@ -4792,6 +5060,34 @@ mod tests {
         assert!(!stops_short(&playlist, 1018), "two seconds of it are ahead");
         let empty = VodPlaylist { start: 1000, ..VodPlaylist::default() };
         assert!(stops_short(&empty, 1000), "nothing served at all");
+    }
+
+    /// A session begins at the moment asked for, and never at a second the
+    /// playlist has no fragment for.
+    ///
+    /// The segment list ceils a file's end and the playlist's fragments do not
+    /// reach it: a drag to the last second of a stretch began a session at that
+    /// second, the box answered "nothing recorded at that moment", and the cursor
+    /// sprang back to where the drag started instead of landing on the nearest
+    /// picture. See [`served_begin`].
+    #[test]
+    fn a_session_begins_where_the_playlist_reaches() {
+        let playlist = VodPlaylist {
+            start: 1000,
+            fragments: vec![
+                Fragment { name: "a".into(), duration: 10.0 },
+                Fragment { name: "b".into(), duration: 10.0 },
+            ],
+            ..VodPlaylist::default()
+        };
+        let window = (1000, 1020);
+        // Inside it, the moment asked for is the moment played.
+        assert_eq!(served_begin(&playlist, window, 1005), 1005);
+        // Its last second is the one the fragments do not reach.
+        assert_eq!(served_begin(&playlist, window, 1020), 1019);
+        assert_eq!(served_begin(&playlist, window, 1030), 1019, "past the end");
+        // Never before the range.
+        assert_eq!(served_begin(&playlist, window, 900), 1000);
     }
 
     /// A range asked for at the live edge begins on a file's own boundary, and
@@ -5585,6 +5881,57 @@ mod tests {
             read_slice_back(&[(-600, 0)], -86_400, 0, READ_WHOLE),
             Some((-600 - READ_WHOLE, -600))
         );
+    }
+
+    /// A step that lands in a hole crosses it, both ways.
+    ///
+    /// The nearest edge is the one the step came from, so a hole was a wall the
+    /// arrows could not walk over: the last file of one day to the first of the next
+    /// is a night wide, and every press landed back where it started. A moment past
+    /// the end of the list is not a hole, though - it is a stretch nobody has read,
+    /// and the step waits for the read. See [`across_hole`].
+    #[test]
+    fn a_step_crosses_a_hole() {
+        let segments = [
+            Segment { start: 100, end: 200 },
+            Segment { start: 20_000, end: 20_100 },
+        ];
+        // Inside a stretch, the step is the step - the very end of one included.
+        assert_eq!(across_hole(&segments, 150, true), 150);
+        assert_eq!(across_hole(&segments, 20_050, false), 20_050);
+        assert_eq!(across_hole(&segments, 200, false), 200, "the end of a file");
+        assert_eq!(across_hole(&segments, 20_000, true), 20_000, "the start of one");
+        // In the hole: the next picture that way, not the edge it came from. Back
+        // is a second inside the file, because its listed end is ceiled and the
+        // box will not serve that second. See [`across_hole`].
+        assert_eq!(across_hole(&segments, 1_000, true), 20_000, "forward");
+        assert_eq!(across_hole(&segments, 1_000, false), 199, "back");
+        // Nothing that way: where the step landed, and the read is what answers it.
+        assert_eq!(across_hole(&segments, 50, false), 50, "before the first");
+        assert_eq!(across_hole(&segments, 20_200, true), 20_200, "after the last");
+    }
+
+    /// The frames of the session a seek is leaving are not the arrival it waits
+    /// for, and only where they are tells them apart.
+    ///
+    /// A seek backwards is "caught up" by every one of them, because they are
+    /// all later than the moment asked for: the cursor went to the old picture
+    /// and the step was made again from there, which a held arrow showed as a
+    /// strip jittering between two days. See [`belongs_to_the_old_picture`].
+    #[test]
+    fn a_frame_of_the_session_being_left_is_not_an_arrival() {
+        // Stepping back from 11/4 to 11/2, with the old session still playing.
+        let (from, pending) = (1793805072, 1793599973);
+        assert!(belongs_to_the_old_picture(from, pending, 1793805072.4));
+        assert!(belongs_to_the_old_picture(from, pending, 1793805073.0), "it plays on");
+        // The new session's own first frame, a fragment before the moment asked
+        // for, is the arrival.
+        assert!(!belongs_to_the_old_picture(from, pending, 1793599960.0));
+        assert!(!belongs_to_the_old_picture(from, pending, 1793599973.0));
+        // A step of a second is still told apart.
+        let (from, pending) = (1_000, 999);
+        assert!(belongs_to_the_old_picture(from, pending, 1_000.0));
+        assert!(!belongs_to_the_old_picture(from, pending, 998.5));
     }
 
     /// A drag stops where the recording begins, not where the list does: what

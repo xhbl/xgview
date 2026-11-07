@@ -5654,3 +5654,143 @@ playlist's real end while `fragment_at` walks f64, so the two disagree by up to 
 Rounding would make the end overshoot, and `covered` would then claim a moment the playlist
 does not hold - a session that ends where it began. Short is the safe direction: a moment
 past the end is a new range, which is a request, not a stall.
+
+### A step crosses a hole, a finger does not
+
+An arrow walks the recording, and a hole is a stretch it does not have: the next
+picture in the direction of the step is what a press asks for. `nearest` - which a drag
+gets, and should - takes a moment in a hole to the closest recorded edge, and that edge is
+the one the step came from. So a hole was a wall: between the last file of one day and the
+first of the next, every press landed back where it started, and the arrows could not
+walk over a night.
+
+`across_hole` decides it for a step only, and takes the moment to the next file that way.
+The first attempt asked `covered` first - "only a moment the box has been asked about" -
+and that made the wall one-sided: a read marks what it asked for from where it began
+*forwards*, so the second before the first file of the new day was never covered, and the
+left arrow kept landing back on it while the right one crossed. The guard was the wrong
+instrument: what it was protecting - a stretch nobody has read - is the moment past either
+end of the list, and that is already left alone. A moment *between* two files the list
+holds is a hole by the list's own account, and the list is the merged record of everything
+the box has said.
+
+A step back lands on a file's end rather than a second before it: `Segment::end` is a
+moment the recording holds - `seek` counts it as recorded, and a range asked for around it
+begins inside the same stretch - so `end - 1` would be a second of the recording given up
+for nothing.
+
+That last paragraph was wrong, and a step back onto the very end of a stretch is what
+proved it. The list floors a file's start and ceils its end (`rounded` in
+`discovery/frigate.rs`), so `end` can be up to a second past the last fragment the box
+will serve. A seek to it is answered "nothing recorded at that moment" - which the
+interface reads as a hole, not a refusal - and the picture never moves. `start` is floored
+and so is safe to land on; `end - 1` is inside the file by construction and is what a step
+back takes now.
+
+### There were two arrows, and only one of them crossed
+
+The first fix went in at `step_playback`, which is the bar's step buttons, and the report
+that came back was that the keyboard arrows still could not cross. They are not the same
+code: the strip's own keys are read in the strip's `ui` block - it is a slider for a
+remote, so it takes Left and Right itself - and go to `walk_timeline`, which stepped the
+cursor with a `move_to` of its own and had never heard of a hole. The step buttons and the
+arrow keys now both land through `step_landing`, so there is one answer to "where does a
+step go" rather than two.
+
+What hid it: the forward direction crosses a hole even without any of this, because
+`window_at` takes a moment in a hole to the beginning of the next stretch. So the right
+arrow looked fixed - and the left one, whose `window_at` takes it *forward* to the same
+stretch it started on, looked like a different bug in a different place.
+
+### A refused seek is not the recording reaching its end
+
+The box answering "nothing recorded at that moment" is reported as a *finish*, deliberately:
+a hole must not be drawn as a broken camera. But `recording_stopped` read every finish as
+"the picture reached the end of its stretch, carry it on past the hole", and that is a
+different thing. A session that never showed a picture is not the session the picture is
+from: what is on screen belongs to an older one, and its stretch is not the one that
+stopped. So the carry-on started from the *picture's* moment and went to the next recording
+after it - seventeen hours, in the report that found this - the instant the seek was
+refused, which reads as the cursor springing back to where it came from.
+
+The two finishes are told apart by the reason the pipeline already carries: a clean finish
+has an empty `detail`, a hole has the box's answer in it. A hole-finish now clears the
+moment asked for and leaves the picture where it is, which is the same "there is nothing
+there" the segment read's own hole path says. Only a clean finish carries the picture on.
+
+### The frames of the session being left
+
+`caught_up` asks one question - has the picture reached the moment asked for - and a frame
+from the session a seek is *leaving* answers yes whenever the seek went backwards, because
+every one of them is later than the moment asked for. `start_seek` sets the moment asked
+for and did not set the picture being left, so the guard that exists for exactly this
+(`pending_from`, one frame) was not even armed on the path a new range takes. With a key
+held down and a step of nearly five hours, the cursor went to the old picture, the next
+step was made from there, and the strip jittered between two days for as long as the key
+was down.
+
+A frame carries no name, but it carries a place: the old session's frames are at the moment
+the seek left, the new one's at the moment it asked for. A frame nearer the former is not
+an arrival. That also covers the frames the old session publishes *after* the one the seek
+left - the equality test caught one of them and let the rest through.
+
+### A step back stops at the oldest picture
+
+Holding the left arrow at the widest width - a step of nearly five hours - walked the
+cursor to within an hour of the first file and then stopped, pressing and pressing: the
+step landed before the list's first file, the seek asked about that moment, the box
+answered nothing, and the cursor went back to the picture it had started from, so the same
+press did the same thing again. The far left of the band was unreachable.
+
+A step back is now held to `segments.first().start`, and a landing that is already where
+the picture is is no step at all (`step_landing` answers `None`): a held key would
+otherwise seek the same fragment ten times a second. A step *forward* is not held this way
+- past the last file is a recording the box has not listed yet, and the read is the right
+answer.
+
+Held to that alone, the first file became a wall in the other sense: the list is what has
+been *read*, so on a recording opened a day back its first file is not the recording's
+first file, and the key stopped there with three days of history behind it and nothing
+asking for it. The edge is provisional, and a step that stops on it is answered with a read
+(`step_by`): `read_older` asks the box for what is behind the strip's left edge, the list
+grows when there is more, and the next press walks into it. When there is nothing behind it
+the answer is empty, `oldest` is set from it, and `read_older` stops asking - so the read
+that proves the beginning is also the one that ends the reading.
+
+### The window has to move before the read can
+
+The read that answers a step at the list's edge cannot be `read_older`: that one fills
+the strip's window, and the window is centred on the cursor - which is exactly where the
+step has stopped. The window only moves when the cursor does, and the cursor only moves
+when there is something to step to. At the second-narrowest width the window reaches five
+minutes back, the five minutes are already covered, `read_slice_back` answers `None`, and
+the strip's left edge is permanent.
+
+`read_before_the_list` asks from the list's own edge instead: the day before it, then the
+day before that, walking back over ground already asked about. Two details make it safe.
+The range never *includes* the list's first file, because an answer that held it would be
+read as "the recording begins here" and the strip would declare its left edge to be the
+beginning of history. And the walk is bounded at a week (`STEP_HISTORY`): a hole wider than
+that is a day the calendar is for, and an unbounded walk is a request every few hundred
+milliseconds for as long as the key is held.
+
+### A drag to the last second of a stretch
+
+`start_seek` began a session at the moment asked for, held only to the range's own
+start - deliberately, because at the live edge the playlist reaches past the range and a
+clamp to the range's end brought the picture back a second. But the *segment list* ceils a
+file's end while the playlist's fragments stop a fraction of a second short of it, so the
+last second the list names can be a second with no fragment behind it. A drag that landed
+there - `nearest` takes a drag to the end of a stretch to exactly that second - began a
+session at it, and the box answered "nothing recorded at that moment". With the picture
+never moving, the cursor went back to where the drag had started: a drag that looked
+refused.
+
+The bound is the playlist's own end, not the range's: `served_begin` holds the moment to
+`starts_at(fragments.len()) - 1` and to the range's start, and neither is in the way at the
+live edge, where the playlist is the thing that reaches further.
+
+The same answer now comes from the other side of a drag into a hole: `segments_arrived`
+used to drop the seek and leave the cursor on the picture, which is right for a step - a
+step never lands in a hole now, see [`across_hole`] - and wrong for a finger, which means
+"the closest picture". It goes to [`nearest`] instead.
