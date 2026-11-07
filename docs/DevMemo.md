@@ -5799,7 +5799,31 @@ The bound is the playlist's own end, not the range's: `served_begin` holds the m
 `starts_at(fragments.len()) - 1` and to the range's start, and neither is in the way at the
 live edge, where the playlist is the thing that reaches further.
 
+That last claim was wrong in the way that matters. At the live edge a playlist is short of
+the segment list by however long it has been since the recorder cut - fifty seconds, in the
+report - and it is short because the fragments are *still to come*, not because they do not
+exist. Clamped to the playlist's end, a drag to the end of the band landed fifty seconds
+earlier and then played forward through them: the band's end was unreachable, and the
+picture took half a minute to arrive at the place the finger had already pointed at.
+`served_begin` now takes the moment as it is when the moment is at the live edge
+(`at_live_edge`), and the clamp is only for a stretch whose file the box has closed.
+
 The same answer now comes from the other side of a drag into a hole: `segments_arrived`
 used to drop the seek and leave the cursor on the picture, which is right for a step - a
 step never lands in a hole now, see [`across_hole`] - and wrong for a finger, which means
 "the closest picture". It goes to [`nearest`] instead.
+
+### Two rounded ends meeting are two caps
+
+The band's last stretch was drawn as itself and then a second rectangle from its end to
+`recorded_to`, and the two of them meet at exactly the same place - so there is no gap, and
+the picture still read as a band in two pieces with a gap between them. `CornerRadius::same(2)`
+rounds all four corners of both, and two caps curving away from the join leave a notch
+between them that is wider than the band is thick when the piece added is only a few seconds
+wide. At the live edge that piece is a few seconds wide, and it is at the end of the
+recording - where the viewer is looking.
+
+The last stretch is drawn as far as `recorded_to` in one rectangle now. It is worth
+remembering that this is not a rounding error or a gap in the data: it is two adjacent
+rounded rectangles, and any drawing that adds a piece to a band has to merge it rather than
+butt it against the end.

@@ -1202,8 +1202,17 @@ impl XgViewApp {
         // the box answers "nothing recorded at that moment" - which is a drag that
         // springs back to where it started rather than the nearest picture. A
         // drag to the last second of a stretch is exactly that moment.
+        //
+        // Not at the live edge, though. There the playlist stops short because the
+        // recorder has not cut the next fragment yet, and clamping the moment to it
+        // is a drag to the end of the band that lands half a minute earlier - the
+        // fragments behind the finger are still to come, and the wait below is the
+        // answer. See [`at_live_edge`].
+        let now = epoch_now();
+        let newest = listed_to(&playback.segments, now);
+        let live = at_live_edge(at, now, newest);
         let (window, begin) = match &playlist {
-            Some(playlist) => (window, Some(served_begin(playlist, window, at))),
+            Some(playlist) => (window, Some(served_begin(playlist, window, at, live))),
             None => match window_at(&playback.segments, at, WINDOW) {
                 Some(window) => (window, None),
                 // Nothing to play there and no session started: the hold a
@@ -1223,8 +1232,6 @@ impl XgViewApp {
         };
         let source = playback.source.clone();
         let (speed, paused) = (playback.speed, playback.paused);
-        let now = epoch_now();
-        let newest = listed_to(&playback.segments, now);
         // A playlist holds only the fragments the box has served when its range
         // is read, and one asked for across the live edge can stop before the
         // moment the seek wants to begin at. Starting a session on it would end
@@ -1531,29 +1538,34 @@ impl XgViewApp {
         // the recorder's own file boundaries are fractions of a second apart,
         // and drawing them would put a notch every ten seconds along a recording
         // that is continuous.
-        for segment in &playback.stretches {
-            if segment.end <= start || segment.start >= end {
+        //
+        // The last of them is drawn as far as the newest moment the recording is
+        // known to hold, which is also where a drag stops - one answer for the
+        // drawing and the dragging, so the cursor cannot stand on empty track. The
+        // file the recorder is writing is listed only once it is closed, so without
+        // it the band would stop a file short of the picture. See
+        // [`Self::recorded_to`].
+        //
+        // One rectangle and not the stretch plus a piece stuck on its end, which is
+        // what this was: two rounded ends meeting are two caps, and a cap is a
+        // quarter of a circle curving away from the join - so a band that is one
+        // stretch with a few seconds added to it reads as two pieces with a gap
+        // between them, at exactly the place the viewer is looking (the end of the
+        // recording).
+        let newest = self.recorded_to(playback);
+        let stretches = &playback.stretches;
+        for (index, segment) in stretches.iter().enumerate() {
+            let stop = if index + 1 == stretches.len() {
+                segment.end.max(newest.unwrap_or(segment.end))
+            } else {
+                segment.end
+            };
+            if stop <= start || segment.start >= end {
                 continue;
             }
             let from = along(segment.start.max(start));
-            let to = along(segment.end.min(end));
+            let to = along(stop.min(end));
             painter.rect_filled(band(from, to, BAND), CornerRadius::same(2), theme::ACCENT.gamma_multiply(0.55));
-        }
-        // The band reaches the newest moment the recording is known to hold, and
-        // that is also where a drag stops - one answer for the drawing and the
-        // dragging, so the cursor cannot stand on empty track. The file the
-        // recorder is writing is listed only once it is closed, so without it the
-        // band would stop a file short of the picture. See [`Self::recorded_to`].
-        if let Some(to) = self.recorded_to(playback) {
-            if let Some(last) = playback.stretches.last() {
-                if to > last.end && to > start {
-                    painter.rect_filled(
-                        band(along(last.end.max(start)), along(to.min(end)), BAND),
-                        CornerRadius::same(2),
-                        theme::ACCENT.gamma_multiply(0.55),
-                    );
-                }
-            }
         }
         // Where the camera noticed something: the same band in the colour the
         // wall uses for a warning, so the strip reads as "recorded, and here is
@@ -4267,10 +4279,20 @@ fn edge_from(segments: &[Segment], stop: i64) -> i64 {
 /// the box answers "nothing recorded at that moment" - which is a drag to the end
 /// of a stretch springing back to where it started.
 ///
+/// `live` is the exception, and it is why this cannot be a plain clamp: at the live
+/// edge a playlist stops short because the recorder has not cut the next fragment
+/// yet, and the fragments behind the moment are still to come. Held back to the
+/// playlist's end there, a drag to the end of the band lands half a minute earlier,
+/// and then plays forward through the half minute it was denied. The wait
+/// [`stops_short`] arms is the answer there, not a shorter request.
+///
 /// Never before the range's own start: a playlist asked for from `window.0` holds
 /// nothing earlier, and a begin outside it is a wait for a picture it never
 /// reaches.
-fn served_begin(playlist: &VodPlaylist, window: (i64, i64), at: i64) -> i64 {
+fn served_begin(playlist: &VodPlaylist, window: (i64, i64), at: i64, live: bool) -> i64 {
+    if live {
+        return at.max(window.0);
+    }
     let served = playlist.starts_at(playlist.fragments.len()) - 1;
     at.min(served).max(window.0)
 }
@@ -5088,12 +5110,18 @@ mod tests {
         };
         let window = (1000, 1020);
         // Inside it, the moment asked for is the moment played.
-        assert_eq!(served_begin(&playlist, window, 1005), 1005);
+        assert_eq!(served_begin(&playlist, window, 1005, false), 1005);
         // Its last second is the one the fragments do not reach.
-        assert_eq!(served_begin(&playlist, window, 1020), 1019);
-        assert_eq!(served_begin(&playlist, window, 1030), 1019, "past the end");
+        assert_eq!(served_begin(&playlist, window, 1020, false), 1019);
+        assert_eq!(served_begin(&playlist, window, 1030, false), 1019, "past the end");
         // Never before the range.
-        assert_eq!(served_begin(&playlist, window, 900), 1000);
+        assert_eq!(served_begin(&playlist, window, 900, false), 1000);
+        // At the live edge the playlist is short because the fragments are still
+        // being cut: the moment asked for is played, and `stops_short` arms the
+        // wait. Held back to the playlist's end, a drag to the end of the band
+        // landed half a minute earlier and then played forward through it.
+        assert_eq!(served_begin(&playlist, window, 1030, true), 1030);
+        assert_eq!(served_begin(&playlist, window, 900, true), 1000, "still inside");
     }
 
     /// A range asked for at the live edge begins on a file's own boundary, and
