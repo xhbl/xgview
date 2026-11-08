@@ -1,5 +1,6 @@
 package com.xhbl.xgview;
 
+import android.app.Activity;
 import android.app.AlarmManager;
 import android.app.NativeActivity;
 import android.app.PendingIntent;
@@ -135,6 +136,21 @@ public class MainActivity extends NativeActivity {
         if (appContext == null) {
             appContext = context;
         }
+    }
+
+    /**
+     * The activity the wall is drawn in, whichever front end that is.
+     *
+     * <p>Every call the native side makes arrives as a static method on this
+     * class, because a JNI call knows a class and nothing else. The wall itself
+     * may be either of two activities - the `NativeActivity` this class is, or
+     * the plain one with surfaces of its own - so a static that acts on "the
+     * activity" asks for it here instead of reading {@link #instance}, which is
+     * null whenever the other one is on screen.
+     */
+    static Activity wall() {
+        final MainActivity self = instance;
+        return self != null ? self : SurfaceActivity.current();
     }
 
     /** Whether {@code monitor_android} is loaded, so a native method may be called. */
@@ -979,7 +995,7 @@ public class MainActivity extends NativeActivity {
      * to turn to, so the wall offers no way to ask.
      */
     public static boolean supportsPortrait() {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self == null) {
             return false;
         }
@@ -1470,7 +1486,7 @@ public class MainActivity extends NativeActivity {
 
     /** The text on the clipboard, or an empty string. */
     public static String getClipboardText() {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self == null) {
             return "";
         }
@@ -1491,7 +1507,7 @@ public class MainActivity extends NativeActivity {
 
     /** Puts {@code text} on the clipboard. */
     public static void setClipboardText(final String text) {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self == null) {
             return;
         }
@@ -1515,7 +1531,7 @@ public class MainActivity extends NativeActivity {
      * A device with no handler for the scheme is logged, not an error.
      */
     public static void openUri(final String url) {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self == null) {
             return;
         }
@@ -1587,7 +1603,7 @@ public class MainActivity extends NativeActivity {
      * rather than here.
      */
     public static boolean requestRecordAudio() {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self == null) {
             return false;
         }
@@ -1688,7 +1704,7 @@ public class MainActivity extends NativeActivity {
      * (the call then stays half duplex, as everywhere else) and 1 with one.
      */
     public static int startTalkCapture() {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self == null) {
             return -2;
         }
@@ -1809,7 +1825,7 @@ public class MainActivity extends NativeActivity {
     public static void stopTalkCapture() {
         stopTalkRecord();
         stopTalkPlayback();
-        final MainActivity self = instance;
+        final Activity self = wall();
         leaveTalkAudio(self == null
                 ? null
                 : (AudioManager) self.getSystemService(Context.AUDIO_SERVICE));
@@ -1826,7 +1842,7 @@ public class MainActivity extends NativeActivity {
      */
     public static boolean startTalkPlayback(final int rate, final int channels) {
         stopTalkPlayback();
-        final MainActivity self = instance;
+        final Activity self = wall();
         final AudioManager audio =
                 self == null ? null : (AudioManager) self.getSystemService(Context.AUDIO_SERVICE);
         enterTalkAudio(audio);
@@ -1942,7 +1958,7 @@ public class MainActivity extends NativeActivity {
      * substitute for; see {@link #writeViaPublicDownload}.
      */
     private static String writeViaMediaStore(String name, String text) throws Exception {
-        final MainActivity self = instance;
+        final Activity self = wall();
         final ContentResolver resolver = self.getContentResolver();
         // `MediaStore` wants the relative path without the trailing separator.
         final String folder = Environment.DIRECTORY_DOWNLOADS + "/xgview";
@@ -2053,7 +2069,7 @@ public class MainActivity extends NativeActivity {
      */
     @SuppressWarnings("deprecation")
     private static String writeViaPublicDownload(String name, String text) throws Exception {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
             self.runOnUiThread(() -> self.requestPermissions(
@@ -2105,7 +2121,7 @@ public class MainActivity extends NativeActivity {
      * the viewer draws its own file dialog instead.
      */
     public static boolean hasDocumentPicker() {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self == null) {
             return false;
         }
@@ -2125,7 +2141,7 @@ public class MainActivity extends NativeActivity {
      * could not be read - comes back through {@link #onActivityResult}.
      */
     public static void pickConfigFile() {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self == null) {
             return;
         }
@@ -2143,6 +2159,18 @@ public class MainActivity extends NativeActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        readPickedDocument(this, requestCode, resultCode, data);
+    }
+
+    /**
+     * Reads the file an import picked, and hands it to the native side.
+     *
+     * <p>Static, and given the activity that started the picker, because either
+     * front end can be the one that asked: the answer comes back to the
+     * activity that asked, and what to do with it does not depend on which.
+     */
+    static void readPickedDocument(
+            final Activity self, final int requestCode, final int resultCode, final Intent data) {
         if (requestCode != REQUEST_IMPORT_DOCUMENT) {
             return;
         }
@@ -2152,7 +2180,7 @@ public class MainActivity extends NativeActivity {
             nativeConfigPicked(null, null);
             return;
         }
-        try (InputStream stream = getContentResolver().openInputStream(uri)) {
+        try (InputStream stream = self.getContentResolver().openInputStream(uri)) {
             if (stream == null) {
                 throw new IOException("cannot open " + uri);
             }
@@ -2185,22 +2213,22 @@ public class MainActivity extends NativeActivity {
      * relaunch the wall after boot.
      */
     public static boolean overlayAllowed() {
-        final MainActivity self = instance;
+        final Activity self = wall();
         return self != null && Settings.canDrawOverlays(self);
     }
 
     /** Opens the system screen that grants {@link #overlayAllowed()}. */
     public static void openOverlaySettings() {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self != null) {
-            self.startSettingsOrDetails(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            startSettingsOrDetails(self, new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                     Uri.parse("package:" + self.getPackageName())));
         }
     }
 
     /** Whether XGView is the device's home app - the other way to start at boot. */
     public static boolean isHomeApp() {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self == null) {
             return false;
         }
@@ -2214,9 +2242,9 @@ public class MainActivity extends NativeActivity {
 
     /** Opens the system screen that chooses the device's home app. */
     public static void openHomeSettings() {
-        final MainActivity self = instance;
+        final Activity self = wall();
         if (self != null) {
-            self.startSettingsOrDetails(new Intent(Settings.ACTION_HOME_SETTINGS));
+            startSettingsOrDetails(self, new Intent(Settings.ACTION_HOME_SETTINGS));
         }
     }
 
@@ -2225,15 +2253,15 @@ public class MainActivity extends NativeActivity {
      * when the screen does not exist on the device - some TV builds omit one of
      * them - so a button is never left doing nothing.
      */
-    private void startSettingsOrDetails(Intent intent) {
+    private static void startSettingsOrDetails(final Activity self, final Intent intent) {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try {
-            startActivity(intent);
+            self.startActivity(intent);
         } catch (RuntimeException missing) {
             android.util.Log.w("XGView.BootReceiver", "no settings screen for " + intent, missing);
             try {
-                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.parse("package:" + getPackageName()))
+                self.startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + self.getPackageName()))
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             } catch (RuntimeException error) {
                 android.util.Log.w("XGView.BootReceiver", "no app details screen either", error);

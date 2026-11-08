@@ -299,6 +299,19 @@ public class SurfaceActivity extends Activity {
     }
 
     /**
+     * The document an import picked.
+     *
+     * <p>The picker is started by whichever activity is on screen, and the
+     * answer comes back to that one; reading it is the same work either way, so
+     * it lives where the import does and this only hands it over.
+     */
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        MainActivity.readPickedDocument(this, requestCode, resultCode, data);
+    }
+
+    /**
      * Keeps the screen on, or lets it go, for the native side.
      *
      * <p>The same call `MainActivity` answers, and answered here for the same
