@@ -117,6 +117,14 @@ extern "C" {
     ) -> bool;
 }
 
+/// How many pictures the decoder's pace is measured over.
+///
+/// One line per this many pictures, at debug: the numbers say whether a channel
+/// is being held up by the codec's buffer hand-off or by the copy that reads the
+/// picture back, and they are the same numbers on every device - which is what
+/// makes two of them comparable. See `priv/docs/playback-decode-cost.md`.
+const PACE_FRAMES: u32 = 60;
+
 /// `AMediaCodec` decoder reading its pictures back as byte buffers.
 #[derive(Debug, Default)]
 pub struct AMediaCodecDecoder {
@@ -168,6 +176,21 @@ pub struct AMediaCodecDecoder {
     /// offset is computed from, and a picture that is right on one session and
     /// tinted on the next is a difference in these numbers.
     geometry_logged: bool,
+    /// Where the time went, for the last [`PACE_FRAMES`] pictures: the wait for
+    /// an input buffer and the drain that turns output buffers into planes.
+    ///
+    /// A picture that arrives late is either a codec that has not finished with
+    /// the one before it or a copy that costs too much, and the two are fixed
+    /// in different places. Reported rather than guessed at.
+    stat_dequeue: Duration,
+    stat_output: Duration,
+    stat_pack: Duration,
+    stat_queue: Duration,
+    stat_drain: Duration,
+    stat_release: Duration,
+    stat_total: Duration,
+    stat_frames: u32,
+    stat_packed: u32,
 }
 
 // Safety: the codec is owned outright by the channel worker that opened it and
@@ -210,6 +233,11 @@ impl AMediaCodecDecoder {
         // codec pick, and one here picks differently from one session to the
         // next. A codec that will not take the name is given the flexible one
         // and the shape is worked out from the buffer it hands over instead.
+        //
+        // Named first, and it costs nothing: asking for `0x15` and asking for
+        // `0x7F420888` measure the same on the box that made this a question -
+        // 44-57 ms a 1080p picture either way - so the one that decides the
+        // colour is the one to ask for. See `priv/docs/playback-decode-cost.md`.
         let codec = match Self::open_session(&mime, &csd, size, COLOR_FORMAT_SEMI_PLANAR) {
             Ok(codec) => codec,
             Err(err) => {
@@ -388,9 +416,20 @@ impl AMediaCodecDecoder {
         let Some(codec) = self.handle else {
             return;
         };
+        let whole = Instant::now();
+        self.drain_inner(codec, frames);
+        self.stat_drain += whole.elapsed();
+    }
+
+    fn drain_inner(&mut self, codec: *mut AMediaCodec, frames: &mut Vec<DecodedFrame>) {
+        let Some(_) = self.handle else {
+            return;
+        };
         loop {
             let mut info = AMediaCodecBufferInfo::default();
+            let waiting = Instant::now();
             let index = unsafe { AMediaCodec_dequeueOutputBuffer(codec, &mut info, 0) };
+            self.stat_output += waiting.elapsed();
             match index {
                 INFO_TRY_AGAIN_LATER => break,
                 INFO_OUTPUT_FORMAT_CHANGED => {
@@ -404,18 +443,24 @@ impl AMediaCodecDecoder {
                             AMediaCodec_getOutputBuffer(codec, index as usize, &mut capacity)
                         };
                         if !buffer.is_null() {
-                            if let Some(frame) = self.pack(
+                            let packing = Instant::now();
+                            let frame = self.pack(
                                 buffer,
                                 capacity,
                                 info.presentation_time_us,
                                 info.flags & BUFFER_FLAG_KEY_FRAME != 0,
-                            ) {
+                            );
+                            self.stat_pack += packing.elapsed();
+                            self.stat_packed += 1;
+                            if let Some(frame) = frame {
                                 frames.push(frame);
                             }
                         }
                     }
                     // Nothing was rendered, so there is nothing to render now.
+                    let releasing = Instant::now();
                     unsafe { AMediaCodec_releaseOutputBuffer(codec, index as usize, false) };
+                    self.stat_release += releasing.elapsed();
                 }
                 _ => break,
             }
@@ -600,8 +645,15 @@ impl VideoDecoder for AMediaCodecDecoder {
         pts_us: i64,
         keyframe: bool,
     ) -> Result<Vec<DecodedFrame>> {
+        let whole = Instant::now();
+        let opening = Instant::now();
         if self.handle.is_none() {
             self.open(access_unit)?;
+            tracing::debug!(
+                target: "xgview::codec",
+                took_ms = opening.elapsed().as_millis() as u64,
+                "the decoder was opened"
+            );
         }
         let Some(codec) = self.handle else {
             return Err(CodecError::Configure("decoder was never configured".to_string()));
@@ -612,11 +664,14 @@ impl VideoDecoder for AMediaCodecDecoder {
         // and giving the picture up there is what costs the channel its next
         // key frame. A codec that does not answer at all still ends the wait at
         // `WAIT_MAX` and the unit is given up as before.
+        let dequeuing = Instant::now();
         let Some(index) = self.dequeue_input(codec) else {
             return Err(CodecError::NoBuffer);
         };
+        self.stat_dequeue += dequeuing.elapsed();
 
         let mut capacity = 0usize;
+        let queueing = Instant::now();
         let buffer = unsafe { AMediaCodec_getInputBuffer(codec, index, &mut capacity) };
         if buffer.is_null() || capacity < access_unit.len() {
             // The input buffer has to be handed back or the codec runs out of
@@ -645,9 +700,37 @@ impl VideoDecoder for AMediaCodecDecoder {
                 flags,
             );
         }
+        self.stat_queue += queueing.elapsed();
 
         let mut frames = Vec::new();
         self.drain(&mut frames);
+        self.stat_total += whole.elapsed();
+        self.stat_frames += 1;
+        if self.stat_frames >= PACE_FRAMES {
+            tracing::debug!(
+                target: "xgview::codec",
+                size = ?(self.width, self.height),
+                calls = self.stat_frames,
+                packed = self.stat_packed,
+                dequeue_ms = self.stat_dequeue.as_millis() as u64,
+                output_ms = self.stat_output.as_millis() as u64,
+                pack_ms = self.stat_pack.as_millis() as u64,
+                queue_ms = self.stat_queue.as_millis() as u64,
+                drain_ms = self.stat_drain.as_millis() as u64,
+                release_ms = self.stat_release.as_millis() as u64,
+                total_ms = self.stat_total.as_millis() as u64,
+                "the decoder's pace"
+            );
+            self.stat_dequeue = Duration::ZERO;
+            self.stat_output = Duration::ZERO;
+            self.stat_pack = Duration::ZERO;
+            self.stat_queue = Duration::ZERO;
+            self.stat_drain = Duration::ZERO;
+            self.stat_release = Duration::ZERO;
+            self.stat_total = Duration::ZERO;
+            self.stat_frames = 0;
+            self.stat_packed = 0;
+        }
         Ok(frames)
     }
 

@@ -76,6 +76,16 @@ const LONGEST_WAIT: Duration = Duration::from_secs(2);
 /// clock where it is.
 const MAX_LAG: Duration = Duration::from_millis(250);
 
+/// How long a recording may have nothing to play before it is worth a line in
+/// the log.
+///
+/// A recording is handed over one whole fragment at a time - see
+/// [`complete_groups`] - so the join between two fragments is the one place the
+/// picture can stand still with the clock running on. This is above a frame's
+/// own interval at every rate the timeline offers, and what it reports is the
+/// wait a viewer saw: the number that says whether the read is keeping ahead.
+const STOOD_STILL: Duration = Duration::from_millis(120);
+
 /// How many samples a held seek lets past before the picture is taken back
 /// without a landing frame.
 ///
@@ -182,6 +192,17 @@ pub(super) async fn run_recording_session(
     // How many samples have gone by with the landing picture still not handed
     // over, so a decoder that never does cannot keep the picture unheld.
     let mut landing_missed: u8 = 0;
+    // When the last sample was played, for [`STOOD_STILL`]. `None` until there
+    // has been a picture: the wait for the first one is not a picture standing
+    // still, it is a picture not yet arrived.
+    let mut last_sample: Option<Instant> = None;
+    // Where the session's second went, reported once a second: the wait the
+    // clock asked for, the decode, and how often the clock had to be moved on
+    // because the picture was too far behind it.
+    let mut pace_wait = Duration::ZERO;
+    let mut pace_decode = Duration::ZERO;
+    let mut pace_samples = 0u32;
+    let mut pace_late = 0u32;
 
     loop {
         // The channel this session belongs to has been given to another one.
@@ -320,6 +341,23 @@ pub(super) async fn run_recording_session(
             _ => 0,
         };
 
+        // The join between two fragments, seen from the viewer's side: the
+        // stretch since the last sample was played, spent waiting for this one
+        // to arrive. A read that keeps ahead makes it nothing; a read that does
+        // not makes it the fetch, once per fragment.
+        let had_samples = !steps.is_empty();
+        if let Some(since) = last_sample.filter(|_| had_samples) {
+            let stood = since.elapsed();
+            if stood > STOOD_STILL {
+                tracing::debug!(
+                    target: "xgview::pipeline",
+                    index,
+                    stood_still_ms = stood.as_millis() as u64,
+                    "the recording had nothing to play"
+                );
+            }
+        }
+
         for (pts, step) in steps.into_iter().skip(skip) {
             // A jump is taken between two samples rather than between two
             // reads: a read holds seconds of pictures, and the viewer's finger
@@ -437,8 +475,11 @@ pub(super) async fn run_recording_session(
                     // is what keeps a slow read from being repaid as a stretch
                     // of fast-forward.
                     began = now.checked_sub(played).unwrap_or(now);
+                    pace_late += 1;
                 } else if due > now {
+                    let waited = Instant::now();
                     tokio::time::sleep((due - now).min(LONGEST_WAIT)).await;
+                    pace_wait += waited.elapsed();
                 }
             }
 
@@ -482,7 +523,11 @@ pub(super) async fn run_recording_session(
                     // early is a picture held in memory for as long as the wait
                     // lasts, and 1080p is three megabytes apiece.
                     if let Some(dec) = decoder.as_mut() {
-                        match dec.decode(&sample.data, sample.pts_us, sample.keyframe) {
+                        let decoding = Instant::now();
+                        let outcome = dec.decode(&sample.data, sample.pts_us, sample.keyframe);
+                        pace_decode += decoding.elapsed();
+                        pace_samples += 1;
+                        match outcome {
                             Ok(decoded) => {
                                 window.counters.decoded += decoded.len() as u64;
                                 // Decoded on the way to the moment asked for and
@@ -532,6 +577,13 @@ pub(super) async fn run_recording_session(
             }
         }
 
+        // Taken after the samples rather than at the top of the loop: what
+        // [`STOOD_STILL`] measures is the wait that follows the last picture,
+        // not the playtime that preceded it.
+        if had_samples {
+            last_sample = Some(Instant::now());
+        }
+
         if window.due() {
             let seconds = window.seconds();
             stats.publish(StreamStats {
@@ -547,6 +599,20 @@ pub(super) async fn run_recording_session(
                 bitrate_kbps: window.counters.kbps(seconds),
                 total_frames,
             });
+            tracing::debug!(
+                target: "xgview::pipeline",
+                index,
+                rate = rate_of(rates.as_ref()),
+                samples = pace_samples,
+                late = pace_late,
+                decode_ms = pace_decode.as_millis() as u64,
+                wait_ms = pace_wait.as_millis() as u64,
+                "the recording's pace"
+            );
+            pace_wait = Duration::ZERO;
+            pace_decode = Duration::ZERO;
+            pace_samples = 0;
+            pace_late = 0;
             window.close();
         }
     }
@@ -681,14 +747,21 @@ enum Recording {
     },
 }
 
-/// A fragment being fetched into memory while the viewer's finger is still on
-/// the timeline.
+/// A fragment being fetched into memory before the reading reaches it.
 ///
 /// A seek is measured from the moment it is asked for, and most of that is the
 /// fragment: on the box of 2026-11-02 its first byte took 115-164 ms and the
 /// stretch up to the seek's horizon had to be read after that. The finger says
 /// where the seek will land seconds before it does, so the fragment under it is
 /// fetched then and the seek finds the bytes in hand.
+///
+/// Playout uses it for the same reason, and needs it more. A fragment is played
+/// from its first sample to its last and the next one is asked for only when
+/// the last has been shown, so without this the picture stands still for as
+/// long as a fragment takes to arrive - 200 ms of a 10 s fragment on the box of
+/// 2026-11-07, once every fragment at normal speed and twice as often at double.
+/// The fetch is started when the fragment before it is opened, which leaves it
+/// the whole of that fragment's playtime to finish in.
 struct Ahead {
     /// Which fragment these bytes are.
     index: usize,
@@ -747,9 +820,21 @@ impl Recording {
     fn jump_to(&mut self, at: i64) -> bool {
         match self {
             Self::Clip { .. } => false,
-            Self::Vod { playlist, next, response, .. } => {
-                *next = fragment_at(playlist, at);
+            Self::Vod { playlist, next, response, ahead, .. } => {
+                let index = fragment_at(playlist, at);
+                *next = index;
                 *response = None;
+                // What is in hand is the fragment after the one being left, and
+                // a jump that does not land on it is a fragment nothing is going
+                // to read from here: kept, it would be the slot every read-ahead
+                // after the jump is refused for, and every join would stand
+                // still until the reading reached it again. The one it does land
+                // on is the seek's own bytes, and is kept.
+                if ahead.as_ref().is_some_and(|ahead| ahead.index != index) {
+                    if let Some(stale) = ahead.take() {
+                        stale.task.abort();
+                    }
+                }
                 true
             }
         }
@@ -849,6 +934,7 @@ impl Recording {
                             match fetched.task.await {
                                 Ok(Ok(bytes)) => {
                                     *next += 1;
+                                    fetch_ahead(playlist, *next, ahead, credentials, token);
                                     return Ok(Some(bytes));
                                 }
                                 // A fetch that did not arrive is only a fetch
@@ -870,6 +956,11 @@ impl Recording {
                     };
                     let uri = playlist.fragment_uri(fragment);
                     *next += 1;
+                    // Started before this fragment is read rather than after it
+                    // is played: the read-ahead has this fragment's playtime to
+                    // arrive in, and a fragment that is in hand is a picture
+                    // that never stands still at the join.
+                    fetch_ahead(playlist, *next, ahead, credentials, token);
                     // The login is kept for the fragments after this one: a
                     // playlist is a request every ten seconds, and a login for
                     // each of them would be three round trips where one will do.
@@ -1102,6 +1193,44 @@ async fn fetch_fragment(
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes.into())
+}
+
+/// Starts fetching the fragment the reading will want after the one it has just
+/// opened, unless one is already in hand.
+///
+/// What is in hand and still ahead of the reading is kept: it may be the
+/// fragment a finger dragged the timeline to, and a seek is more urgent than the
+/// fragment after this one - a prefetch costs the read-ahead one fragment rather
+/// than the seek its bytes. What is in hand and behind the reading is a fragment
+/// the viewer dragged over and did not land on, and is dropped: left there it
+/// would block every read-ahead after it, and the picture would stand still at
+/// every join for the rest of the recording.
+///
+/// A fetch that is never read - the recording ended first - is a task that is
+/// dropped with the slot, and a fragment's worth of bytes nobody waited for.
+fn fetch_ahead(
+    playlist: &VodPlaylist,
+    next: usize,
+    ahead: &mut Option<Box<Ahead>>,
+    credentials: &Option<(String, String)>,
+    token: &Option<String>,
+) {
+    if ahead.as_ref().is_some_and(|ahead| ahead.index >= next) {
+        return;
+    }
+    if let Some(stale) = ahead.take() {
+        stale.task.abort();
+    }
+    let Some(fragment) = playlist.fragments.get(next) else {
+        return;
+    };
+    let uri = playlist.fragment_uri(fragment);
+    let credentials = credentials.clone();
+    let token = token.clone();
+    *ahead = Some(Box::new(Ahead {
+        index: next,
+        task: tokio::spawn(fetch_fragment(uri, credentials, token)),
+    }));
 }
 
 /// Opens one request for one piece of a recording, and answers the login it was
@@ -1407,6 +1536,41 @@ mod tests {
         );
     }
 
+    /// A jump keeps the fragment it lands on and drops anything else that is in
+    /// hand. Kept, a fragment the jump left behind would be the slot every
+    /// read-ahead after the jump is refused for, and the picture would stand
+    /// still at every join until the reading reached it again.
+    #[tokio::test]
+    async fn a_jump_drops_a_fragment_it_does_not_land_on() {
+        let mut source = Recording::vod(three_fragments(), None, None, "cam-a-jump-and-ahead");
+        let Recording::Vod { playlist, ahead, .. } = &mut source else {
+            panic!("a playlist is a playlist");
+        };
+        // The reading is at the second fragment and the one after it is in hand.
+        fetch_ahead(playlist, 2, ahead, &None, &None);
+        assert_eq!(ahead.as_ref().map(|ahead| ahead.index), Some(2));
+
+        // A jump to 101 s lands on the first fragment, which is not the one in
+        // hand: it is dropped, so the read-ahead can fill the slot again.
+        assert!(source.jump_to(101));
+        let Recording::Vod { ahead, .. } = &source else {
+            panic!("a playlist is a playlist");
+        };
+        assert!(ahead.is_none(), "the fragment the jump left behind");
+
+        // A jump that lands on the fragment in hand keeps it: those are the
+        // bytes the seek is owed.
+        let Recording::Vod { playlist, ahead, .. } = &mut source else {
+            panic!("a playlist is a playlist");
+        };
+        fetch_ahead(playlist, 2, ahead, &None, &None);
+        assert!(source.jump_to(135));
+        let Recording::Vod { ahead, .. } = &source else {
+            panic!("a playlist is a playlist");
+        };
+        assert_eq!(ahead.as_ref().map(|ahead| ahead.index), Some(2), "the fragment 135 is in");
+    }
+
     /// A window's pictures are dated from the moment it was asked for; a
     /// playlist's from its own start plus the moment the sample carries, because
     /// its fragments count from there and rebasing would add the offset twice.
@@ -1460,5 +1624,55 @@ mod tests {
         );
         assert_eq!(api_base("http://192.168.17.88:8500/api/x"), Some("http://192.168.17.88:8500"));
         assert_eq!(api_base("rtsp://192.168.17.88:554/x"), None);
+    }
+
+    /// The fragment after the one being opened is on its way while that one
+    /// plays: a recording is handed over a fragment at a time, and a fetch that
+    /// only starts when the picture has run out is the picture standing still.
+    #[tokio::test]
+    async fn the_fragment_after_the_one_opened_is_fetched_ahead() {
+        let playlist = three_fragments();
+        let mut ahead: Option<Box<Ahead>> = None;
+        fetch_ahead(&playlist, 1, &mut ahead, &None, &None);
+        assert_eq!(
+            ahead.as_ref().map(|ahead| ahead.index),
+            Some(1),
+            "the fragment the reading will want next"
+        );
+    }
+
+    /// A fragment already in hand and still ahead of the reading is kept. It may
+    /// be the fragment a finger dragged the timeline to, and a seek is more
+    /// urgent than a fragment that is ten seconds of playtime away.
+    #[tokio::test]
+    async fn a_fragment_ahead_of_the_reading_is_kept() {
+        let playlist = three_fragments();
+        let mut ahead: Option<Box<Ahead>> = None;
+        fetch_ahead(&playlist, 2, &mut ahead, &None, &None);
+        fetch_ahead(&playlist, 1, &mut ahead, &None, &None);
+        assert_eq!(ahead.as_ref().map(|ahead| ahead.index), Some(2), "the finger's fragment");
+    }
+
+    /// A fragment behind the reading is one the viewer dragged over and did not
+    /// land on. Left in hand it would block every read-ahead after it, and the
+    /// picture would stand still at every join for the rest of the recording.
+    #[tokio::test]
+    async fn a_fragment_behind_the_reading_is_dropped() {
+        let playlist = three_fragments();
+        let mut ahead: Option<Box<Ahead>> = None;
+        fetch_ahead(&playlist, 1, &mut ahead, &None, &None);
+        fetch_ahead(&playlist, 2, &mut ahead, &None, &None);
+        assert_eq!(ahead.as_ref().map(|ahead| ahead.index), Some(2), "the one the reading wants");
+    }
+
+    /// The end of a playlist is not a fetch: the last fragment has nothing after
+    /// it, and a request for one would be a request for a name that is not
+    /// there.
+    #[tokio::test]
+    async fn nothing_is_fetched_past_the_last_fragment() {
+        let playlist = three_fragments();
+        let mut ahead: Option<Box<Ahead>> = None;
+        fetch_ahead(&playlist, 3, &mut ahead, &None, &None);
+        assert!(ahead.is_none(), "three fragments, and the reading is past the last");
     }
 }

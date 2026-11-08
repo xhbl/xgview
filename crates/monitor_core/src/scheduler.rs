@@ -253,6 +253,8 @@ pub struct Scheduler {
     /// rather than for a page's worth of sessions being torn down and opened
     /// again. The viewer sets it; see `XgViewApp::zoom_park_at`.
     park_others: bool,
+    /// The channel playing a recording, if one is. See [`Self::set_recording`].
+    recording: Option<usize>,
 }
 
 impl Scheduler {
@@ -271,6 +273,7 @@ impl Scheduler {
             current: None,
             suspended: false,
             park_others: true,
+            recording: None,
         };
         scheduler.normalize();
         scheduler
@@ -450,6 +453,21 @@ impl Scheduler {
         changed
     }
 
+    /// Says which channel is playing a recording, and reports whether that was
+    /// a change.
+    ///
+    /// A channel playing a recording is not showing its camera: what the
+    /// viewport draws comes from the recording's own session, and the camera's
+    /// is a decoder nobody looks at. On a box that decodes one 1080p stream at
+    /// a time that is not a spare - the recording plays at half the pictures
+    /// per second it could, and a recording of a camera at 25 frames a second
+    /// then runs at two thirds of its own speed with the picture stepping.
+    pub fn set_recording(&mut self, recording: Option<usize>) -> bool {
+        let changed = self.recording != recording;
+        self.recording = recording;
+        changed
+    }
+
     /// Steps the magnified viewport to the previous or next channel.
     ///
     /// A magnified viewport is one channel, not a grid: there is no cell to
@@ -512,6 +530,14 @@ impl Scheduler {
                     live.extend(page_info.start..page_info.end);
                     live.sort_unstable();
                     live.dedup();
+                }
+                // A magnified channel playing a recording is not showing its
+                // camera at all: what the viewport draws comes from the
+                // recording's session, and the camera's own would be a decoder
+                // drawing nothing - one 1080p stream's worth of the box, taken
+                // from the one picture on screen. See [`Self::set_recording`].
+                if self.recording == Some(index) {
+                    live.retain(|slot| *slot != index);
                 }
                 (vec![Some(index)], live)
             }
@@ -834,6 +860,55 @@ mod tests {
         assert!(!scheduler.parks_others());
         assert!(scheduler.zoom_out());
         assert!(scheduler.parks_others(), "the next magnification starts fresh");
+    }
+
+    /// A channel playing a recording is not showing its camera, so the camera's
+    /// own session is let go: on a box that carries one 1080p picture at a time
+    /// the recording would otherwise play at half the pictures a second it could.
+    #[test]
+    fn a_channel_playing_a_recording_lets_its_camera_go() {
+        let cameras = cameras(9);
+        let mut scheduler = Scheduler::new(GridLayout::G3x3, 0, Some(0), cameras.len());
+        assert!(scheduler.zoom_in());
+        scheduler.refresh(&cameras);
+        assert!(scheduler.set_park_others(true));
+        scheduler.refresh(&cameras);
+
+        // The magnified channel is live on its main stream until a recording
+        // plays on it.
+        let magnified = scheduler
+            .current()
+            .expect("a schedule")
+            .plans
+            .iter()
+            .find(|plan| plan.index == 0)
+            .expect("the magnified channel");
+        assert_eq!(magnified.mode.stream(), Some(StreamKind::Main), "the camera's own picture");
+
+        assert!(scheduler.set_recording(Some(0)));
+        let changes = scheduler.refresh(&cameras);
+        assert_eq!(changes.len(), 1, "one channel let go, and nothing else");
+        let paused = scheduler
+            .current()
+            .expect("a schedule")
+            .plans
+            .iter()
+            .find(|plan| plan.index == 0)
+            .expect("the magnified channel");
+        assert!(paused.mode.is_suspended(), "the recording draws this viewport");
+
+        // And back to the camera when the recording is put away.
+        assert!(scheduler.set_recording(None));
+        let changes = scheduler.refresh(&cameras);
+        assert_eq!(changes.len(), 1);
+        let resumed = scheduler
+            .current()
+            .expect("a schedule")
+            .plans
+            .iter()
+            .find(|plan| plan.index == 0)
+            .expect("the magnified channel");
+        assert_eq!(resumed.mode.stream(), Some(StreamKind::Main));
     }
 
     /// A magnified viewport steps along the channel list, not the grid, and

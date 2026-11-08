@@ -316,6 +316,24 @@ impl Supervisor {
     /// Puts a recording on a channel, whatever shape it is served in.
     fn play(&mut self, endpoint: Endpoint) {
         let index = endpoint.index;
+        // The speed a viewer set belongs to the channel, not to the request
+        // that happens to be open. A recording that runs into the end of its
+        // range opens another one - a new playlist, a new session, a new
+        // control - and a speed that came back as 1x there is a speed control
+        // that does nothing: the picture carries on at normal speed while the
+        // bar still says eight times.
+        //
+        // The speed alone, not the whole control: a hold or a jump left over
+        // from the request being replaced is about a moment that request was
+        // on, and this one is not there.
+        let carried = self
+            .channels
+            .get(&index)
+            .and_then(|runtime| runtime.endpoint.control.as_ref())
+            .map(|control| control.rate());
+        if let (Some(rate), Some(control)) = (carried, endpoint.control.as_ref()) {
+            control.set_rate(rate);
+        }
         if let Some(existing) = self.channels.remove(&index) {
             existing.stop.store(true, Ordering::Relaxed);
             existing.task.abort();

@@ -866,6 +866,15 @@ impl ClipControl {
         self.rate.send_replace(rate);
     }
 
+    /// The speed this control is holding.
+    ///
+    /// Read so that a new request on the same channel can be given the speed
+    /// the viewer set: the rate belongs to the channel, and a recording that
+    /// runs into the end of its range is another request.
+    fn rate(&self) -> f32 {
+        *self.rate.borrow()
+    }
+
     /// Asks the session to play from `at`.
     fn jump(&self, at: i64) {
         let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;

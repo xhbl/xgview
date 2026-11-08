@@ -490,6 +490,12 @@ impl XgViewApp {
         let index = self.playback_index();
         let from = window.0;
         let begin = begin.map(|at| begin_in(window, at));
+        // The camera's own session under this slot is a decoder drawing nothing
+        // from here on: the recording is what the viewport shows. Let go of it
+        // before the recording's first fragment is asked for, so that the two
+        // are not both pulling a 1080p picture through a box that can carry one.
+        self.scheduler.set_recording(Some(channel));
+        self.needs_sync = true;
         let vod = self.play_recording(index, &source, window, playlist, begin);
         let merged = stretches(&segments);
         // What opening actually heard back: without it the first drag would
@@ -569,6 +575,11 @@ impl XgViewApp {
         // something else in this row. It goes to the seat, which draws nothing
         // until an arrow picks a control. See [`Self::leave_playback`].
         self.restore_focus = Some(tilebar::seat());
+        // A new recording starts at normal speed whatever the last one was
+        // played at, and says so: the channel's control outlives the request
+        // that is open - see `Supervisor::play` - so the speed it is holding is
+        // the previous recording's until this one names its own.
+        self.manager.set_rate(index, 1.0);
         // The speaker belongs to the channel whose picture is on screen, and
         // that has just become the recording's.
         self.apply_audio();
@@ -1508,6 +1519,11 @@ impl XgViewApp {
         self.channels.remove(&playback.index);
         self.textures.remove(&playback.index);
         self.video.release(playback.index);
+        // The camera's own session is wanted again: the viewport shows the
+        // camera once more, and it has had no decoder for as long as the
+        // recording was up.
+        self.scheduler.set_recording(None);
+        self.needs_sync = true;
         // And back to the camera's own sound, which never stopped playing.
         self.apply_audio();
         tracing::debug!(

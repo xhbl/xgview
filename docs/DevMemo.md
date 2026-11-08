@@ -6196,3 +6196,64 @@ planar session - `slice=600 capacity=460800` - and both with the room's own warm
 
 The dump is kept, `monitor_codec::dump`, one picture per distinct geometry into the app's own
 folder: it is what turned a week of guessing into two files and ten minutes.
+
+### The fragment nobody asked for until the picture had run out
+
+*Landed 2026-11-07, in 2.2.9.*
+
+A recording felt choppy, and twice as choppy at double speed. One cause was the
+join between two fragments: the picture stood still for as long as a fragment
+took to arrive, once per fragment, and then caught up by playing the backlog as
+fast as it could - a freeze and a jump every ten seconds at normal speed, every
+five at double.
+
+**This is not the whole of it, and not the largest part.** Reading ahead was
+worth doing and is kept, but the picture stayed choppy after it: the same box
+gives 1080p **20 pictures a second** on the path this application reads pictures
+back through, and the recording is 25.83. That is the wall the rates run into,
+it is not in this file's scope to fix, and it is written up in
+`priv/docs/playback-decode-cost.md` - read that before touching pacing again.
+
+**Measured first.** One fragment of `cam_living_room` (10 s, 1080p, ~2.3 Mbps) is
+2.40-2.88 MB, and the box - 802.11ax, 1080 Mbps link, RSSI -38 - pulls 3.1 MB in
+275 ms, adb's own startup included. So the stall was ~200 ms a fragment, and the
+arithmetic that matters is not the size of the stall but how often: a fragment
+plays for ten seconds at 1x and five at 2x.
+
+**Why it was serial.** `complete_groups` hands over nothing until a `moof` and
+the `mdat` it describes have both arrived, so a fragment is played only once it
+is whole in memory. And the next fragment was asked for when `next_chunk` was
+called for it, which is after the last sample of the current one has been shown.
+`Ahead` - one fragment fetched on its own task - already existed, but only
+`prefetch` filled it, and `prefetch` is only called from `take_hint`: a finger
+dragging the timeline. Normal playout had no read-ahead at all.
+
+**The fix is one fragment of lead.** `fetch_ahead` is called where a fragment is
+opened and where one is taken from the slot, and starts the fetch of the fragment
+after it - which then has that fragment's whole playtime to arrive in. Two rules
+keep the slot honest, and both were bugs waiting to happen:
+
+- **A fragment still ahead of the reading is never displaced.** It may be the one
+  a finger dragged to, and a seek is more urgent than a fragment ten seconds
+  away. A drag costs the read-ahead one fragment, not the seek its bytes.
+- **A fragment behind the reading is dropped, and so is one a jump does not land
+  on** (`jump_to`). Left in the slot it would be the reason every read-ahead
+  after it is refused, and every join would stand still again until the reading
+  walked back past it - a seek would have made the rest of the recording choppy.
+
+**Measured after**, on the same box, the log line `STOOD_STILL` (120 ms, one
+debug line per join: "the recording had nothing to play") as the instrument:
+
+| rate | watched | stalls at a join | left |
+|---|---|---|---|
+| 1× | 120 s | 0 (116 s of it one unbroken session, ~11 joins) | 3, all a seek or a new range: 128-497 ms |
+| 2× | 100 s | 0 (~20 joins) | 0 |
+
+A seek still pays for its fragment - 1832 ms for a moment inside a stretch the
+box had to cut - and that is the next thing to look at if a drag ever feels slow
+again. It is not the same problem: a seek is a moment the viewer asked for, and
+the picture is supposed to change under it.
+
+Four tests hold the slot: the fragment after the one opened is fetched, one ahead
+of the reading is kept, one behind it is dropped, and a jump keeps only what it
+lands on.
