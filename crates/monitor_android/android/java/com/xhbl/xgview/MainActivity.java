@@ -1270,6 +1270,7 @@ public class MainActivity extends NativeActivity {
     public static void setPreventSleep(final boolean wanted) {
         final MainActivity self = instance;
         if (self == null) {
+            SurfaceActivity.setPreventSleep(wanted);
             return;
         }
         self.runOnUiThread(() -> {
@@ -1300,6 +1301,10 @@ public class MainActivity extends NativeActivity {
     public static void setKeepScreenOn(final boolean wanted) {
         final MainActivity self = instance;
         if (self == null) {
+            // The wall on screen is the other front end. The native side only
+            // knows this class, so every static that acts on "the activity"
+            // has to hand the call on to whichever one is actually there.
+            SurfaceActivity.setKeepScreenOn(wanted);
             return;
         }
         self.runOnUiThread(() -> {

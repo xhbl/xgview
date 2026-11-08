@@ -37,11 +37,21 @@ public class LauncherActivity extends Activity {
         // side talks to. Its class, not the remembered preference, is what the
         // running wall actually is.
         final MainActivity running = MainActivity.current();
-        final String target = running != null
-                ? running.getClass().getName()
-                : (portrait
-                        ? "com.xhbl.xgview.MainActivityPortrait"
-                        : "com.xhbl.xgview.MainActivity");
+        final String target;
+        if (running != null) {
+            target = running.getClass().getName();
+        } else if (portrait) {
+            // Upright, the wall keeps the `NativeActivity` it has always had:
+            // the three-surface arrangement is the landscape one, and a phone
+            // held upright has a picture that fits its window without help.
+            target = "com.xhbl.xgview.MainActivityPortrait";
+        } else {
+            // Landscape goes to the wall on surfaces of its own. The picture is
+            // decoded straight into a `SurfaceView` and never read back, which
+            // is the difference between 26 frames a second and 12 for a 1080p
+            // camera on a box that cannot afford the copy.
+            target = "com.xhbl.xgview.SurfaceActivity";
+        }
         final Intent intent = new Intent();
         intent.setComponent(new ComponentName(getPackageName(), target));
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK

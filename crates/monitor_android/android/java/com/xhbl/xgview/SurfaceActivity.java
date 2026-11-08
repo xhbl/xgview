@@ -38,6 +38,15 @@ import java.io.OutputStream;
  * video still takes the byte-buffer path.
  */
 public class SurfaceActivity extends Activity {
+    /**
+     * The one this process has, if it has one.
+     *
+     * <p>The native side reaches Java through static methods on a class, because
+     * that is all a JNI call knows; with two front ends in one process those
+     * statics have to find whichever activity is actually on screen.
+     */
+    private static SurfaceActivity instance;
+
     private static final String TAG = "xgview-surface";
 
     private SurfaceView canvas;
@@ -72,6 +81,7 @@ public class SurfaceActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        instance = this;
         // This activity is started on its own, so nothing else has loaded the
         // library for it.
         System.loadLibrary("monitor_android");
@@ -269,9 +279,75 @@ public class SurfaceActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (instance == this) {
+            instance = null;
+        }
+        releaseWakeLock();
         nativeStopWall();
         super.onDestroy();
     }
+
+    /**
+     * Keeps the screen on, or lets it go, for the native side.
+     *
+     * <p>The same call `MainActivity` answers, and answered here for the same
+     * reason: a surveillance wall that goes to sleep is not a wall. The native
+     * side reaches Java through `MainActivity`'s statics, which hand it on to
+     * whichever activity is on screen - see {@link #current}.
+     */
+    public static void setKeepScreenOn(final boolean wanted) {
+        final SurfaceActivity self = instance;
+        if (self == null) {
+            return;
+        }
+        self.runOnUiThread(() -> {
+            if (wanted) {
+                self.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            } else {
+                self.getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        });
+    }
+
+    /** Holds the CPU awake, or lets it go; see {@link #setKeepScreenOn}. */
+    public static void setPreventSleep(final boolean wanted) {
+        final SurfaceActivity self = instance;
+        if (self == null) {
+            return;
+        }
+        self.runOnUiThread(() -> {
+            if (!wanted) {
+                self.releaseWakeLock();
+                return;
+            }
+            if (self.wakeLock == null) {
+                final android.os.PowerManager manager = (android.os.PowerManager)
+                        self.getSystemService(android.content.Context.POWER_SERVICE);
+                if (manager == null) {
+                    return;
+                }
+                self.wakeLock = manager.newWakeLock(
+                        android.os.PowerManager.PARTIAL_WAKE_LOCK, "xgview:wall");
+                self.wakeLock.setReferenceCounted(false);
+            }
+            self.wakeLock.acquire();
+        });
+    }
+
+    private void releaseWakeLock() {
+        final android.os.PowerManager.WakeLock held = wakeLock;
+        wakeLock = null;
+        if (held != null && held.isHeld()) {
+            held.release();
+        }
+    }
+
+    /** The wall on screen in this process, or {@code null}. */
+    public static SurfaceActivity current() {
+        return instance;
+    }
+
+    private android.os.PowerManager.WakeLock wakeLock;
 
     private String externalFilesDir() {
         final File dir = getExternalFilesDir(null);

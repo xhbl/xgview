@@ -165,14 +165,19 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
             android:screenOrientation="userLandscape" />
 
-        <!-- The wall on a surface of its own: the first step of moving off
-             `NativeActivity`, which is what blocks a video layer underneath.
-             See `SurfaceActivity` and `priv/docs/android-surface-plan.md`.
-             Started by hand for now. -->
+        <!-- The wall on surfaces of its own: the picture is decoded straight
+             into a `SurfaceView` under the wall and the controls are drawn into
+             a strip over it, so nothing is read back and a 1080p camera plays at
+             its own rate. This is the landscape entry point now; `MainActivity`
+             below is what portrait still uses, and what landscape falls back to
+             if this arrangement is ever withdrawn. See `SurfaceActivity` and
+             `priv/docs/android-surface-plan.md`. -->
         <activity
             android:name=".SurfaceActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false"
             android:screenOrientation="userLandscape" />
 
         <!-- The wall, landscape. `userLandscape` allows both landscape
