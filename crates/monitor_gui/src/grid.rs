@@ -307,6 +307,9 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
     // Body: either video placeholder, spinner or error panel.
     let state = tile.channel.map(|channel| channel.state).unwrap_or(ConnectionState::Idle);
     let detail = tile.channel.map(|channel| channel.detail.as_str()).unwrap_or("");
+    // Whether the picture on screen is being held while a stream is on its way:
+    // a switch, a seek, or a channel that was parked and is being opened again.
+    let holding = holds_last_picture(state, tile.recording.is_some(), tile.video.is_some());
     match state {
         // A recording that has played to its end keeps the last picture it
         // drew, exactly as a stalled live stream does: there is nothing to
@@ -333,7 +336,7 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
             painter.text(body.center(), Align2::CENTER_CENTER, monitor_i18n::tr("grid-suspended"), FontId::proportional(13.0), dim(theme::TEXT_DIM));
         }
         ConnectionState::Idle | ConnectionState::Connecting | ConnectionState::Reconnecting => {
-            if holds_last_picture(state, tile.recording.is_some(), tile.video.is_some()) {
+            if holding {
                 // A recording being seeked: the picture is the window being
                 // left, and the next one is a request away.
                 live_canvas(&painter, body, tile, tier);
@@ -377,6 +380,22 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
                 monitor_i18n::tr_args("grid-holding-last", &[("tag", monitor_i18n::tr(from.tag()).into())]),
                 FontId::proportional(11.0),
                 theme::TEXT_DIM,
+            );
+        } else if holding && matches!(state, ConnectionState::Connecting | ConnectionState::Reconnecting) {
+            // The same wait without a stream to name: a channel that was parked
+            // and is being opened again holds the last picture it had, and says
+            // nothing about it - a still picture with no reason given, which
+            // reads as a camera that has stopped rather than one being fetched.
+            let width = (rect.width() - theme::space::L).clamp(120.0, 430.0);
+            let band = Rect::from_center_size(rect.center(), vec2(width, 34.0));
+            painter.rect_filled(band, CornerRadius::ZERO, Color32::from_black_alpha(205));
+            spinner(&painter, band.left_center() + vec2(22.0, 0.0), 10.0, tile.time, theme::FOCUS);
+            painter.text(
+                band.left_center() + vec2(42.0, 0.0),
+                Align2::LEFT_CENTER,
+                monitor_i18n::tr(state.label()),
+                FontId::proportional(13.0),
+                theme::FOCUS,
             );
         }
     }
