@@ -21,7 +21,7 @@ pub(super) async fn run_mjpeg_session(
     handshake_timeout: Duration,
     sinks: Sinks<'_>,
 ) -> Result<()> {
-    let Sinks { events, frames, stats } = sinks;
+    let Sinks { events, frames, stats, stop } = sinks;
     let Endpoint { index, camera_id, uri, stream, .. } = endpoint;
     let camera_id = camera_id.as_str();
 
@@ -80,6 +80,10 @@ pub(super) async fn run_mjpeg_session(
     });
 
     loop {
+        // The channel this session belongs to has been given to another one.
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         // The read is bounded so that a server which stops writing is noticed.
         // That is the only fault this stream has: a part either arrives or it
         // does not, and there is no sequence number to miss in between.

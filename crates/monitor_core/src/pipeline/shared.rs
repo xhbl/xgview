@@ -40,6 +40,15 @@ pub(super) struct Sinks<'a> {
     pub(super) events: &'a Sender<StreamEvent>,
     pub(super) frames: &'a FrameStore,
     pub(super) stats: &'a StatsStore,
+    /// Set when the channel this session is running has been given to another
+    /// one, or parked.
+    ///
+    /// `abort` cancels a task at its next await point and nowhere else, and a
+    /// task inside a decoder call is not there for a long time - long enough for
+    /// the session it was replaced by to give up and die, leaving the survivor
+    /// running with nothing to publish to. So the session is asked to stop
+    /// instead, and checks between packets: a few milliseconds, not a minute.
+    pub(super) stop: &'a AtomicBool,
 }
 
 /// An error followed by every cause under it, outermost first.
@@ -74,9 +83,14 @@ pub(super) fn publish_frames(
     at: Option<f64>,
 ) -> Option<(u32, u32)> {
     let mut size = None;
+    let mut undrawable = 0usize;
     for frame in decoded {
         let mut planes = frame.planes.into_iter();
         let (Some(y), Some(uv)) = (planes.next(), planes.next()) else {
+            // The decoder produced a picture the renderer cannot take - a
+            // backend that renders into a GPU buffer of its own has no planes.
+            // Nothing is published, and the tile keeps whatever it had.
+            undrawable += 1;
             continue;
         };
         *sequence += 1;
@@ -93,6 +107,14 @@ pub(super) fn publish_frames(
             }),
         );
         size = Some((frame.width, frame.height));
+    }
+    if undrawable > 0 {
+        tracing::debug!(
+            target: "xgview::pipeline",
+            index,
+            pictures = undrawable,
+            "pictures that cannot be drawn"
+        );
     }
     size
 }

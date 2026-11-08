@@ -4,6 +4,22 @@
 use super::*;
 
 use super::channel::run_channel;
+
+/// How often a channel whose task has ended is noticed.
+///
+/// Two seconds is a tile that comes back before the viewer has decided
+/// something is wrong, and it costs one pass over a map of nine.
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How often each channel says what it is doing, in watchdog ticks.
+///
+/// The tile is the only view of a channel's health, and it cannot tell a
+/// session that is running without producing pictures from one that is not
+/// running at all - both are a black rectangle with a line of text. This is the
+/// number that separates them: pictures published in the last interval. Zero
+/// with a live task is a pipeline that is stuck, zero with a dead task is a
+/// channel nobody restarted, and a count with a black tile is the renderer.
+const HEALTH_EVERY: u32 = 5;
 use super::rtsp_session::talk_worker;
 
 /// What the supervisor knows about how to reach one camera's speaker.
@@ -111,7 +127,32 @@ impl Supervisor {
 
     /// Reads commands until the manager says to stop.
     pub(super) async fn run(mut self) {
-        while let Some(command) = self.commands.recv().await {
+        // A channel whose task has ended is a channel with nothing left to
+        // restart it: the tile keeps whatever state the session left, which is
+        // a black picture under "reconnecting" and a countdown that never
+        // arrives. Nothing tells the supervisor - the task simply returns - so
+        // it is asked every couple of seconds, and a channel that should be
+        // live is started again from the endpoint it was last given.
+        let mut watchdog = tokio::time::interval(WATCHDOG_INTERVAL);
+        watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut health_tick: u32 = 0;
+        // Pictures each channel had published when the last report was made.
+        let mut reported: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+        loop {
+            let command = tokio::select! {
+                command = self.commands.recv() => match command {
+                    Some(command) => command,
+                    None => break,
+                },
+                _ = watchdog.tick() => {
+                    self.restart_finished();
+                    health_tick = health_tick.wrapping_add(1);
+                    if health_tick % HEALTH_EVERY == 0 {
+                        self.report_health(&mut reported);
+                    }
+                    continue;
+                }
+            };
             match command {
                 ChannelCommand::Activate { index, source, stream, previous_stream } => {
                     self.activate(index, source, stream, previous_stream)
@@ -143,6 +184,7 @@ impl Supervisor {
         }
 
         for (_, runtime) in std::mem::take(&mut self.channels) {
+            runtime.stop.store(true, Ordering::Relaxed);
             runtime.task.abort();
         }
         tracing::debug!(target: "xgview::pipeline", "supervisor stopped");
@@ -154,6 +196,17 @@ impl Supervisor {
     /// the insert - and each had to remember all nine.
     fn spawn_channel(&mut self, endpoint: Endpoint, wake: Arc<Notify>) {
         let index = endpoint.index;
+        // The channel belongs to this session from here on. The one it replaces
+        // is aborted, but aborting is not immediate - it takes effect at the
+        // task's next await, and a task inside a decoder call is not there yet -
+        // so for a moment two sessions run, and the older one goes on decoding
+        // and publishing. The token is what makes its pictures land nowhere: two
+        // publishers on one channel is a picture that alternates between the
+        // magnified stream and the grid's, frame by frame.
+        // The session is told to stop before it is aborted: see
+        // [`ChannelRuntime::stop`].
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
         let task = self.handle.spawn(run_channel(
             endpoint.clone(),
             self.prefer_hardware,
@@ -163,9 +216,11 @@ impl Supervisor {
             self.stats.clone(),
             self.audio.clone(),
             self.talk.clone(),
+            stop.clone(),
+            done.clone(),
             wake.clone(),
         ));
-        self.channels.insert(index, ChannelRuntime { endpoint, task, wake });
+        self.channels.insert(index, ChannelRuntime { endpoint, task, wake, stop, done });
     }
 
     fn activate(
@@ -191,6 +246,14 @@ impl Supervisor {
             }
         }
         if let Some(existing) = self.channels.remove(&index) {
+            tracing::debug!(
+                target: "xgview::pipeline",
+                index,
+                was = existing.endpoint.stream.as_str(),
+                now = stream.as_str(),
+                "replacing the channel's session"
+            );
+            existing.stop.store(true, Ordering::Relaxed);
             existing.task.abort();
             // The sample belongs to the session being replaced, and it
             // is dropped before the transition is announced: read after
@@ -254,6 +317,7 @@ impl Supervisor {
     fn play(&mut self, endpoint: Endpoint) {
         let index = endpoint.index;
         if let Some(existing) = self.channels.remove(&index) {
+            existing.stop.store(true, Ordering::Relaxed);
             existing.task.abort();
             self.stats.clear(index);
         }
@@ -310,10 +374,64 @@ impl Supervisor {
         }
     }
 
+    /// Says, once every few seconds, what each channel is doing.
+    ///
+    /// See [`HEALTH_EVERY`] for what the numbers are for.
+    fn report_health(&self, reported: &mut std::collections::HashMap<usize, u64>) {
+        for (index, runtime) in &self.channels {
+            let published = self.frames.published(*index);
+            let before = reported.insert(*index, published).unwrap_or(published);
+            tracing::info!(
+                target: "xgview::health",
+                index,
+                camera = %runtime.endpoint.camera_id,
+                stream = runtime.endpoint.stream.as_str(),
+                recording = runtime.endpoint.is_recording(),
+                alive = !runtime.task.is_finished(),
+                asked_to_stop = runtime.stop.load(Ordering::Relaxed),
+                done = runtime.done.load(Ordering::Relaxed),
+                pictures = published.saturating_sub(before),
+                total = published,
+                "channel health"
+            );
+        }
+    }
+
+    /// Starts again a channel whose task has ended without being told to.
+    ///
+    /// A task that returns leaves the channel in the map with nothing running:
+    /// no retry, no countdown, no event - a black tile under "reconnecting" that
+    /// stays that way until something else touches the channel. Two things end a
+    /// task on purpose and both say so with [`ChannelRuntime::done`]; anything
+    /// else is a task that died, and a channel that should be live is started
+    /// again from the endpoint it was last given.
+    fn restart_finished(&mut self) {
+        let finished: Vec<usize> = self
+            .channels
+            .iter()
+            .filter(|(_, runtime)| runtime.task.is_finished() && !runtime.done.load(Ordering::Relaxed))
+            .map(|(index, _)| *index)
+            .collect();
+        for index in finished {
+            let Some(runtime) = self.channels.remove(&index) else {
+                continue;
+            };
+            tracing::debug!(
+                target: "xgview::pipeline",
+                index,
+                "the channel's task ended on its own, starting it again"
+            );
+            self.stats.clear(index);
+            self.spawn_channel(runtime.endpoint, runtime.wake);
+        }
+    }
+
     fn suspend(&mut self, index: usize) {
         if let Some(existing) = self.channels.remove(&index) {
+            existing.stop.store(true, Ordering::Relaxed);
             existing.task.abort();
-            // The numbers belonged to the session that was just stopped.
+            // The numbers belonged to the session that was just stopped, and
+            // the channel is nobody's until something activates it again.
             self.stats.clear(index);
             tracing::debug!(target: "xgview::pipeline", index, "channel suspended");
         }
@@ -358,6 +476,7 @@ impl Supervisor {
                 self.channels.insert(index, runtime);
                 continue;
             }
+            runtime.stop.store(true, Ordering::Relaxed);
             runtime.task.abort();
             // Reopened, not continued: the sample described the decoder
             // this channel is leaving behind, and `hardware` in it would
@@ -575,6 +694,7 @@ impl Supervisor {
 
     fn talk_fallback(&mut self, index: usize) {
         let Some(runtime) = self.channels.remove(&index) else { return };
+        runtime.stop.store(true, Ordering::Relaxed);
         runtime.task.abort();
         // The session is reopened to carry the microphone, and what it
         // measured before is not what it will measure now.

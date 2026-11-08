@@ -107,7 +107,7 @@ pub(super) async fn run_recording_session(
     sinks: Sinks<'_>,
     audio: &AudioHub,
 ) -> Result<()> {
-    let Sinks { events, frames, stats } = sinks;
+    let Sinks { events, frames, stats, stop } = sinks;
     let Endpoint { index, camera_id, uri, stream, credentials, window, control, vod, begin, .. } =
         endpoint;
     let camera_id_str = camera_id.as_str();
@@ -184,6 +184,10 @@ pub(super) async fn run_recording_session(
     let mut landing_missed: u8 = 0;
 
     loop {
+        // The channel this session belongs to has been given to another one.
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         // A jump the viewer asked for is taken before the next read: what is
         // open is the fragment being left, and its bytes are the stretch being
         // left with it. The decoder, the parser and the login are untouched.

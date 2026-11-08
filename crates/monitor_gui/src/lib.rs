@@ -91,10 +91,20 @@ impl RunOptions {
 /// arrives as. The pool therefore follows the CPU count, bounded so that a
 /// machine with many cores does not spawn threads the decoding load cannot use.
 fn worker_threads() -> usize {
+    // Twice the cores, not the cores.
+    //
+    // A channel's session spends part of every frame inside `AMediaCodec`, which
+    // blocks the thread it runs on - and a thread that is blocked is not reading
+    // its socket or checking its stall deadline. Nine sessions on a four-core box
+    // meant nine blocking calls competing for four threads, and when eight of
+    // them opened at once - a page turn, a magnification being left - the whole
+    // wall went quiet for as long as it took, with channels giving up on their
+    // stall deadlines for want of being scheduled at all. Blocked threads cost no
+    // CPU, so there is nothing to lose by having more of them than cores.
     std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get())
-        .unwrap_or(2)
-        .clamp(2, 8)
+        .map(|parallelism| parallelism.get() * 2)
+        .unwrap_or(4)
+        .clamp(4, 16)
 }
 
 /// Builds the tokio runtime used by every background job.

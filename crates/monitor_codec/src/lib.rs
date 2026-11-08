@@ -33,6 +33,7 @@ pub mod h264;
 pub mod jpeg;
 pub mod null;
 pub mod sps;
+pub mod wait;
 
 #[cfg(target_os = "android")]
 pub mod amediacodec;

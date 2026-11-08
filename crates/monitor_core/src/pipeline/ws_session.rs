@@ -248,7 +248,7 @@ pub(super) async fn run_ws_session(
     sinks: Sinks<'_>,
     audio: &AudioHub,
 ) -> Result<()> {
-    let Sinks { events, frames, stats } = sinks;
+    let Sinks { events, frames, stats, stop } = sinks;
 
     use futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
@@ -281,6 +281,10 @@ pub(super) async fn run_ws_session(
     let mut announced = false;
 
     loop {
+        // The channel this session belongs to has been given to another one.
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let msg = match tokio::time::timeout(MJPEG_IDLE_TIMEOUT, ws.next()).await {
             Ok(Some(Ok(msg))) => msg,
             Ok(Some(Err(e))) => {

@@ -1101,6 +1101,16 @@ pub struct XgViewApp {
     /// channel, or the way back to the grid - because a window is a part of one
     /// picture and means nothing on the next. See [`PictureZoom`].
     picture_zoom: PictureZoom,
+    /// When the magnification that is up lets the rest of the page go, or
+    /// `None` when nothing is magnified.
+    ///
+    /// A magnification parks the other channels, which is right for watching
+    /// one camera and wrong for looking at it: the sessions of a whole page are
+    /// torn down and opened again on the way in and out, and on a box that
+    /// cannot afford nine of them at once that is seconds of blank tiles. So
+    /// the page is held for [`paging::ZOOM_PARK_GRACE`] first, and a look and a
+    /// step back costs one stream switch. See [`XgViewApp::settle_zoom_park`].
+    zoom_park_at: Option<Instant>,
     /// The floating bar inside the magnified viewport.
     ///
     /// A press in the picture's top or bottom band brings it up, and it is
@@ -1537,6 +1547,7 @@ impl XgViewApp {
             tap_multi: false,
             tap_open_at: None,
             picture_zoom: PictureZoom::FULL,
+            zoom_park_at: None,
             tile_bar: tilebar::Bar::new(),
             sound_on,
             playback: None,
@@ -2211,6 +2222,7 @@ impl XgViewApp {
         // hands it on - see the anchor at the end of the frame.
         let focus_before = ctx.memory(|memory| memory.focused());
         self.advance_animations(ctx);
+        self.settle_zoom_park();
         self.sync();
         self.upload_frames();
 

@@ -941,7 +941,22 @@ fn osd_corner_rotated(
 /// never drawn anything has nothing to keep either, and a live stream that
 /// dropped is saying something the viewer should see.
 fn holds_last_picture(state: ConnectionState, recording: bool, has_picture: bool) -> bool {
-    recording && has_picture && state == ConnectionState::Connecting
+    if !has_picture {
+        return false;
+    }
+    match state {
+        // A picture that is on screen and a request behind it: a recording
+        // being seeked, or a channel switching streams.
+        ConnectionState::Connecting => true,
+        // A live stream that was cut keeps its last picture while it comes
+        // back. The corner already says it is reconnecting, and a panel over
+        // the picture says the same thing worse - the viewer loses the picture
+        // they had in exchange for nothing. A recording is the exception: a
+        // seek that fails has to say so rather than leave a still picture
+        // sitting there with no explanation.
+        ConnectionState::Reconnecting => !recording,
+        _ => false,
+    }
 }
 
 /// Paints the newest decoded pictures of a live channel, or a placeholder while
@@ -1253,19 +1268,22 @@ mod tests {
         );
     }
 
-    /// A recording being seeked keeps the picture it has: the window it is
-    /// leaving is what is on screen, and blanking it would make every drag look
-    /// like a stream that stopped. Nothing else does.
+    /// A picture that is on screen stays there while the request behind it is
+    /// answered - a recording being seeked, a channel switching streams, a live
+    /// stream that was cut and is coming back.
     #[test]
-    fn only_a_recording_holds_its_picture_through_a_seek() {
+    fn a_picture_stays_up_while_it_is_being_asked_for_again() {
+        // Opening, with something already on screen.
         assert!(holds_last_picture(ConnectionState::Connecting, true, true));
-        // A recording with nothing on screen has nothing to hold.
-        assert!(!holds_last_picture(ConnectionState::Connecting, true, false));
-        // A live stream that dropped is saying something the viewer should see.
-        assert!(!holds_last_picture(ConnectionState::Connecting, false, true));
-        // And an attempt that failed is news, even for a recording: a seek that
-        // does not come back must not leave a picture sitting there unexplained.
+        assert!(holds_last_picture(ConnectionState::Connecting, false, true));
+        // Reconnecting: a live stream keeps its picture, a recording does not -
+        // a seek that does not come back must say so rather than leave a still
+        // picture sitting there unexplained.
+        assert!(holds_last_picture(ConnectionState::Reconnecting, false, true));
         assert!(!holds_last_picture(ConnectionState::Reconnecting, true, true));
+        // Nothing on screen is nothing to hold.
+        assert!(!holds_last_picture(ConnectionState::Connecting, false, false));
+        assert!(!holds_last_picture(ConnectionState::Reconnecting, false, false));
 
         // A channel that is streaming draws its picture anyway, and one that is
         // idle has been stopped rather than asked for.

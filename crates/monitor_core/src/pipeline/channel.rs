@@ -82,9 +82,27 @@ pub(super) async fn run_channel(
     stats: Arc<StatsStore>,
     audio: Arc<AudioHub>,
     talk: Arc<TalkHub>,
+    stop: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
     wake: Arc<Notify>,
 ) {
     let index = endpoint.index;
+    // Says when this task stops existing, whether it returned or was aborted.
+    // A task that outlives its channel is what two publishers on one channel
+    // looked like: the store drops what it publishes now, but a task that never
+    // ends is still a session that never stopped, and this is how that is seen.
+    struct TaskEnd(usize, &'static str);
+    impl Drop for TaskEnd {
+        fn drop(&mut self) {
+            tracing::debug!(
+                target: "xgview::pipeline",
+                index = self.0,
+                reason = self.1,
+                "channel task ended"
+            );
+        }
+    }
+    let mut end = TaskEnd(index, "aborted");
     let mut attempt: u32 = 0;
     // Reason of the last failure, kept so that the countdown does not hide it:
     // a rejected password or an unreachable device is the only explanation the
@@ -93,10 +111,26 @@ pub(super) async fn run_channel(
     // The stores this channel's sessions publish into. Built once: every attempt
     // writes to the same three, and the channel's own events go through
     // `events` directly.
-    let sinks = Sinks { events: &events, frames: &frames, stats: &stats };
+    let sinks = Sinks { events: &events, frames: &frames, stats: &stats, stop: &stop };
 
     loop {
+        // The channel has been given to another session, or parked. Nothing
+        // below is worth doing any more: see `ChannelRuntime::stop`.
+        if stop.load(Ordering::Relaxed) {
+            end.1 = "the channel was given to another session";
+            return;
+        }
         attempt += 1;
+        // Every attempt says so: a channel that has stopped retrying and one
+        // that is retrying into a server that will not answer look the same from
+        // the tile, and only one of them is a fault here.
+        tracing::debug!(
+            target: "xgview::pipeline",
+            index,
+            attempt,
+            camera = %endpoint.camera_id,
+            "an attempt begins"
+        );
         // Read afresh every attempt, so a setting the user edits while this
         // channel is running is picked up at its next attempt rather than at
         // the next reopen: retry timing is not worth interrupting a healthy
@@ -228,6 +262,8 @@ pub(super) async fn run_channel(
                     index,
                     "the recording reached its end"
                 );
+                done.store(true, Ordering::Relaxed);
+                end.1 = "the recording reached its end";
                 return;
             }
             SessionEnd::Closed => failure = "stream closed by peer".to_string(),
@@ -300,6 +336,8 @@ pub(super) async fn run_channel(
                     detail: failure,
                 },
             );
+            done.store(true, Ordering::Relaxed);
+            end.1 = "the failure is one waiting cannot fix";
             return;
         }
 

@@ -986,6 +986,12 @@ impl<'a> RtspSession<'a> {
     /// The packet loop: one iteration per packet, or per clock that came due.
     async fn pump(&mut self) -> Result<()> {
         loop {
+            // The channel this session belongs to has been given to another one,
+            // or parked. Stopping here rather than at the next abort is what
+            // keeps two sessions off one channel: see `ChannelRuntime::stop`.
+            if self.sinks.stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
             // Talk-back, before waiting on the picture: the session's clock is the
             // RTP clock, and it must not be tied to how often a camera sends video.
             self.pump_talk();
@@ -1345,8 +1351,16 @@ impl<'a> RtspSession<'a> {
                     // and the stream is no less alive for it.
                     if !decoded.is_empty() {
                         let was_stalled = self.stall.stalled_since.is_some();
+                        // The first picture of a session, which is a recovery
+                        // too: a channel that was cut and has opened again is
+                        // "reconnecting" as far as the wall knows, and a tile in
+                        // that state is painted over with the pending canvas -
+                        // the picture is there and nobody can see it. A session
+                        // that never says it is streaming leaves that canvas up
+                        // for as long as it lasts.
+                        let first_picture = !self.stall.running;
                         self.stall.picture(Instant::now());
-                        if was_stalled {
+                        if was_stalled || first_picture {
                             emit(
                                 self.sinks.events,
                                 StreamEvent::State {

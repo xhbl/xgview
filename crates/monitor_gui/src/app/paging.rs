@@ -3,6 +3,20 @@
 
 use super::*;
 
+/// How long a magnification keeps the rest of the page live before it lets it
+/// go.
+///
+/// A magnification parks the other channels: one picture, and the bandwidth and
+/// the decoders of the rest given up for as long as it is up. That is right for
+/// watching and wrong for looking - the sessions of a whole page are torn down
+/// on the way in and opened again on the way out, which on a box that cannot
+/// afford nine of them at once is seconds of blank tiles, and starves decoders
+/// past the deadline that ends a session and waits out a backoff. Holding the
+/// page for this long makes a look and a step back cost one stream switch;
+/// whoever stays pays the bandwidth of the rest for these seconds and no
+/// longer.
+const ZOOM_PARK_GRACE: Duration = Duration::from_secs(10);
+
 impl XgViewApp {
     pub(super) fn set_layout(&mut self, layout: GridLayout) {
         if self.scheduler.layout() == layout && !self.scheduler.is_zoomed() {
@@ -212,6 +226,8 @@ impl XgViewApp {
 
     pub(super) fn zoom_in(&mut self) {
         if self.scheduler.zoom_in() {
+            // The page is held for a while yet: see [`ZOOM_PARK_GRACE`].
+            self.zoom_park_at = Some(Instant::now() + ZOOM_PARK_GRACE);
             // The viewport comes up whole: the window the last one was left at is
             // a part of another picture, and there is none of this one to keep.
             self.picture_zoom = PictureZoom::FULL;
@@ -227,12 +243,39 @@ impl XgViewApp {
         // picture of its own anywhere else, and a channel left running unseen
         // is a request to the server for nothing.
         self.leave_playback();
+        // Whatever the next magnification does, it starts its own wait. The
+        // scheduler puts its parking back itself, so a magnification left by a
+        // group switch or a page turn is covered too.
+        self.zoom_park_at = None;
         if self.scheduler.zoom_out() {
             self.needs_sync = true;
             self.mark_dirty();
             self.apply_audio();
         }
         self.settle_tile_bar();
+    }
+
+    /// Lets the rest of the page go once the magnification has lasted long
+    /// enough.
+    ///
+    /// Called once a frame, before the schedule is applied. The wall repaints
+    /// while it has pictures to draw, so the wait needs no clock of its own: a
+    /// magnification that is up is a wall that is being drawn.
+    pub(super) fn settle_zoom_park(&mut self) {
+        if !self.scheduler.is_zoomed() {
+            self.zoom_park_at = None;
+            return;
+        }
+        let Some(at) = self.zoom_park_at else {
+            return;
+        };
+        if Instant::now() < at {
+            return;
+        }
+        self.zoom_park_at = None;
+        if self.scheduler.set_park_others(true) {
+            self.needs_sync = true;
+        }
     }
 
     pub(super) fn zoom_to(&mut self, index: usize) {

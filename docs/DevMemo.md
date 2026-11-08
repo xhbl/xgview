@@ -5944,3 +5944,210 @@ frame that takes an answer so a request in it is dropped.
 And the about panel's tab strip overflows at 1080p once a device has ten cameras: `摄像头(10)`
 is wide enough to push `关于` - and with it the import button - off the right edge. That is why
 the button had to be reached with the remote's arrow keys, and is worth a look on its own.
+
+### A magnification that costs a page of sessions, and a 100 ms deadline that is not a delay
+
+The report was a tile that would not come back after a magnification: slow, jittery, and still
+wrong a minute later - on a 32-bit television box, and nowhere else. The chain turned out to be
+three steps long, and only the first one is about magnification at all.
+
+**A magnification parks the page.** `Scheduler::schedule` gives a magnified viewport one live
+channel and suspends the rest, which is right for watching one camera. It is wrong for looking
+at it: `zoom_out` then restarts every one of them - `changes=9`, nine `starting channel` lines in
+the same millisecond - while the session of the magnified channel is being aborted, and `abort`
+is not synchronous. Measured on the box: the first pictures of the nine arrived over 4.2 s, the
+last at 5.0 s, against 2.1 s for the same nine from a cold start. The overlap is what costs.
+
+**The box was already at the codec's edge.** Twelve seconds of the grid with no magnification at
+all - no zoom, no page turn - held eight `no output buffer available`. `AMediaCodecDecoder::decode`
+gave the codec a fixed 100 ms to hand over an input buffer, and dropped the access unit when it
+did not. That drop is not one frame: H.264 cannot be resumed past a picture the codec never saw,
+so the channel stays blank until the next IDR, seconds later.
+
+**And a stall is expensive.** A picture that has not come for 30 s (`STALL_HARD_TIMEOUT`) ends
+the session, and a session that never showed a picture waits `first_frame_delay_ms` = 5 s, then
+9, then 16. So a channel knocked over by the burst cycles: 35 s frozen, ~15 s waiting, reconnect,
+frozen again. That is the minute and a half. Nothing about it shows on a machine whose codecs
+answer in 5 ms - the first step of the chain never fires there.
+
+Two changes, one for each end of it.
+
+**A magnification holds the page for ten seconds.** `Scheduler::park_others` starts `false` on
+`zoom_in` and the viewer puts it back after `ZOOM_PARK_GRACE`; `zoom_out` puts it back itself, so
+a magnification left by a group switch or a page turn is covered too. While it is held, the
+magnified channel is the only one on its main stream - the stream choice is per channel now, not
+one flag for the schedule - and the other eight stay on their subs. Measured: a look and a step
+back is **two** `starting channel` lines, one main and one sub, where it used to be eighteen. A
+long look still parks, and still pays for the page on the way out; it just does not starve.
+
+**The wait for an input buffer grows.** `monitor_codec::wait` holds the policy and the tests;
+the decoder retries up to three times while the ceiling doubles, 100 ms to 500 ms. The ceiling is
+an upper bound and not a delay - a buffer that is there is taken on the first, non-blocking call -
+so a machine that keeps up stays at the floor and behaves exactly as before. Measured after: a
+long look and back is nine `starting channel` lines, **zero** buffer failures and **zero**
+stalls, where the same sequence used to hold six and one.
+
+`WAIT_MAX` is 500 ms because a 5 MP stream on this box measured 400 ms at its slowest, and a
+codec that has stopped should give the picture up rather than block the channel for a second.
+
+### The jitter was two sessions on one channel, not a slow restart
+
+The report that came back after the grace and the growing wait went in was the one that
+mattered: the tile did not just come back slowly, it came back **wrong** - the picture
+alternating between 1920x1080 and 640x480, frame by frame, for a minute at a time. That is
+not a restart being slow. That is two publishers.
+
+The log said so once it was asked. `FrameStore` had no notion of who owns a channel, so a
+temporary line on a size change showed the alternation with both sessions' own counters:
+`1920x1080 ... sequence=137`, then `640x480 ... sequence=1`, then `sequence=146`, then
+`sequence=40`. Two counters climbing, one channel.
+
+The cause is `JoinHandle::abort`, which cancels a task at its next await point and nowhere
+else. A task inside `AMediaCodec_*` - or simply not scheduled, because the box's few worker
+threads are all inside decoder calls - keeps running. The task-end marker added for this
+showed the aborted session ending **9 s** after it was replaced (`lived=103.6s`, ended by its
+own stall timeout, not by the abort). For those nine seconds it went on decoding its 1080p
+stream and publishing over the new session's 480p ones.
+
+The fix is not to wait for the abort. A channel has one session, and that is now an invariant
+of the stores rather than an assumption: `FrameStore::begin` and `StatsStore::begin` hand the
+channel a generation, `Sinks` carries it into every session, and a picture or a sample
+published under any other generation is dropped. The old session can run as long as it likes;
+nothing it produces lands.
+
+Measured on the box, magnification held for 15 s and then left: size changes per switch went
+from **22** (and 68 in another run) to **1**, the real one - the new sub session's first frame
+replacing the held main one - with 0 `no output buffer` and 0 stalls.
+
+So the two earlier changes stand on their own account - the burst of nine restarts and the
+100 ms deadline are why the wall took five seconds and starved decoders - but neither of them
+was ever going to fix a picture coming from two places at once.
+
+### The generation, and the sample it must not silence
+
+The first cut of the generation above bumped it in `StatsStore::clear` as well, on the
+reasoning that a cleared channel is nobody's. It is not: `run_channel` clears its own sample
+between attempts - "the attempt is over, so its measurements are too" - and goes on measuring
+under the same token. So the first reconnect a channel had revoked its own claim, and from
+then on every sample it published was dropped.
+
+The picture was unaffected, which is what made it look like something else: frames come through
+`FrameStore`, whose generation is only bumped by `begin`. So the tile kept moving while its
+numbers froze - `fps` and `kbps` stuck at whatever they were, and the band that says
+"switching to the sub stream, holding the last frame" never came down, because only a sample
+from a session that produced a picture clears it.
+
+`clear` now drops the sample and nothing else; `revoke` is what ends a claim, and it is called
+where a channel is parked and nothing takes it over. Measured after: a switch to the sub stream
+and three samples over six seconds - 20.44 / 18.56 / 32.99 fps, 563 / 447 / 808 kbps, the band
+gone on the first of them.
+
+### One token, not two counters
+
+The second cut of the generation kept a counter in each store and bumped both in
+`spawn_channel`, handing the session only the pictures' one. They agree until the first time a
+channel is parked: `revoke` moves the numbers' counter and not the pictures', and every session
+after that publishes numbers under a token the store no longer holds. The channel then shows a
+moving picture with `--fps`, `--kbps`, and the band that says it is switching streams stuck over
+it - which is exactly what a magnification to the main stream looked like.
+
+`StatsStore::begin` now takes the token instead of making one: `spawn_channel` asks the pictures
+for it once and hands the same number to the numbers. A test covers the cycle - measure, park,
+take over, measure again - because the failure is invisible until a channel has been parked once.
+
+Verified on the box: magnified to the main stream, 1920x1080 at 16.54 fps, 1544 kbps, no band;
+back to the grid, and the three tiles that had been parked read 25.24/20.37, 28.84/20.49 and
+20.78/14.96 fps two samples apart - all measuring.
+
+### Four threads, nine sessions, and a decoder that blocks
+
+The tile that sat on "stalled for 35 s, giving up" after a magnification was the last piece. The
+capture around one magnification and its exit held the numbers: 25 `no output buffer available`
+in the burst, then two channels failing - one on its stall deadline, one on an RTSP line the
+server cut. Raising the decoder's starting wait made it **worse** (63), which is the clue that
+the wait was never the problem: it blocks the thread the session runs on.
+
+`worker_threads()` was `cores.clamp(2, 8)`, and the box has four cores. Nine sessions each spend
+part of every frame inside `AMediaCodec` - and a thread inside `AMediaCodec` is not reading its
+socket, not checking its stall deadline, and not letting the other eight run. In the steady state
+that is merely tight; when eight sessions open at once it is fatal, and the failure looks like
+channels that have stopped receiving when they have only stopped being scheduled.
+
+Blocked threads cost no CPU, so the count is now twice the cores, `clamp(4, 16)`. Measured on the
+same magnification-and-exit: `no output buffer` **25 → 0**, `session failed` **2 → 0**, and the
+nine tiles come back with numbers on them.
+
+The lesson to keep: on this pipeline a long wait inside a decoder is not a cheaper drop, it is a
+borrowed thread. `wait::WAIT_MAX` is a ceiling for a codec that is busy, not a budget to spend.
+
+### The guard that silenced the survivor, and the task that ended unannounced
+
+The generation guard above was the wrong shape, and the next report showed it: a tile black
+under "reconnecting", its countdown frozen, while the log held a session for that channel
+decoding forty pictures every two seconds. The guard had done what it was told - the newest
+session owns the channel, everything else lands nowhere - but the newest session had died and
+the one still running was the one it was told to ignore. Two publishers became no publisher.
+
+What had to happen is that the old session *stops*, not that its work is thrown away. `abort`
+cannot be relied on for that - it cancels at an await point, and a session is inside
+`AMediaCodec` for hundreds of milliseconds at a time - so the channel now carries a `stop`
+flag, set before every abort, and every session checks it between packets and returns. The
+generation machinery is gone with it: nothing needs to be silenced once the loser leaves.
+
+The second half of the same report was a channel with **no session at all**: forty-five seconds
+with not one log line for its index, and a page turn - one `Suspend` and one `Activate` - brought
+it back instantly. A task that returns leaves its channel in the supervisor's map with nothing
+running: no retry, no countdown, no event. Nothing notices, because nothing is told. So the
+supervisor now asks every two seconds whether a channel's task has finished, and starts it
+again from the endpoint it was last given. Two endings are deliberate - a recording reaching its
+last frame, a camera that will not be talked to again - and both set a `done` flag that the
+watchdog respects.
+
+Measured after: nine tiles live, `session failed` 0, watchdog not needed in the twenty seconds
+observed. Camera 4 still gets its stream closed by the peer now and then - that is the server -
+but the channel comes back on its own instead of leaving a black tile.
+
+### The picture was there all along, under the panel
+
+The health line added for exactly this settled it in one reading: the channel whose tile was black
+under "reconnecting" reported `alive=true, pictures=208` for ten seconds - twenty a second, the
+full rate. The pipeline was fine. The tile was not drawing it.
+
+A tile in `Reconnecting` paints an opaque pending canvas with a spinner over the whole body - the
+right thing while there is nothing to show. What clears it is a `Streaming` state, and the RTSP
+session only sent one when it recovered from a *stall within its own session*: a session that had
+been cut and opened again started fresh, `stalled_since` was `None`, and its first picture
+announced nothing. So every reconnect left the canvas up for ever, over a live picture. The other
+session kinds had the `announce_streaming` helper for this; the RTSP one did not use it.
+
+The first picture of a session now announces as well - `!self.stall.running` before the deadline
+learns there was one - which is the same event a recovery sends, one per session.
+
+Measured after a magnification and its exit: nine tiles live, and the health lines read
+`pictures=199..214` per ten seconds throughout.
+
+This is what the last four rounds were chasing. None of them were about this: the cooperative
+stop, the watchdog and the health line are all worth keeping - the first two fix real ways for a
+channel to end up with nothing running - but the black tile was a state that was never
+announced, and the tile was honest about it.
+
+### The held frame was two publishers, and it took an A/B to say so
+
+"Switching back always goes black now" - and it was true, but not for the reason it looked. An
+A/B settled it: the same magnification and exit on the build from before this work, one screenshot
+a second, read `640x480, 1920x1080, 1920x1080, 640x480, 1920x1080, 640x480`. The old build never
+went black because it never stopped the session it was leaving - the "held frame" was the previous
+stream still publishing over the new one. The gap was always there; the overlap hid it.
+
+So the fix is not to bring the overlap back. `holds_last_picture` was the wrong shape: it held the
+picture only for a recording being seeked, and every live channel went to the opaque pending
+canvas the moment it was opening or reconnecting - which is every stream switch, and every stream
+that is cut and comes back. It now holds whenever there is a picture and the channel is opening
+(`Connecting`, the switch and the seek), or reconnecting and live. The corner already names the
+state, and a panel over a picture the viewer already had costs them the picture and tells them
+nothing new. A recording is still the exception on a failed attempt: a seek that does not come back
+has to say so rather than leave a still frame sitting there.
+
+Measured after: one second after the exit, tile 4 shows the main stream's last frame under
+"switching to the sub stream, holding the last main frame"; two seconds later it is the live sub
+stream at 640x480, and the nine tiles read 19-26 fps throughout.

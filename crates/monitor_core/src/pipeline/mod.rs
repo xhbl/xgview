@@ -10,6 +10,7 @@
 //! the first step when the session drops.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -243,6 +244,22 @@ impl FrameStore {
     fn publish(&self, index: usize, frame: Arc<VideoFrame>) {
         if let Ok(mut channels) = self.channels.lock() {
             let entry = channels.entry(index).or_default();
+            // Two sessions publishing into one channel is a picture that
+            // alternates between two sizes, and the renderer rebuilding its
+            // textures on every frame. It is not supposed to happen - a channel
+            // has one session - so when it does, the log should say so.
+            if let Some(last) = entry.newest.as_ref() {
+                if last.width != frame.width || last.height != frame.height {
+                    tracing::debug!(
+                        target: "xgview::pipeline",
+                        index,
+                        from = ?(last.width, last.height),
+                        to = ?(frame.width, frame.height),
+                        sequence = frame.sequence,
+                        "the picture changed size"
+                    );
+                }
+            }
             entry.newest = Some(frame);
             entry.published += 1;
         }
@@ -320,6 +337,7 @@ pub struct StatsStore {
 #[derive(Debug, Default)]
 struct StatsInner {
     channels: HashMap<usize, Arc<StatsEntry>>,
+    /// Which session owns a channel's numbers, as [`FrameStore`] does for its
     /// Samples published since the process started.
     published: u64,
 }
@@ -960,6 +978,19 @@ struct ChannelRuntime {
     task: JoinHandle<()>,
     /// Wakes this channel out of a backoff wait; see [`ChannelCommand::Wake`].
     wake: Arc<Notify>,
+    /// Tells the session that it is no longer this channel's.
+    ///
+    /// `abort` alone is not enough: it cancels a task at its next await point,
+    /// and a task inside a decoder call is not there for hundreds of
+    /// milliseconds - long enough for the session that replaced it to give up
+    /// and die, leaving the one that was supposed to stop as the only one still
+    /// decoding. It is set before the abort, and the session checks it between
+    /// packets.
+    stop: Arc<AtomicBool>,
+    /// Set by the session when it ends on purpose - a recording that reached
+    /// its last frame, a camera that will not be talked to again - so that the
+    /// watchdog does not take it for a task that died and start it over.
+    done: Arc<AtomicBool>,
 }
 
 /// Credentials configured for a camera, if any.

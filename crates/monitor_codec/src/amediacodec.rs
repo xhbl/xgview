@@ -140,6 +140,17 @@ pub struct AMediaCodecDecoder {
     started: bool,
     /// Set once an output format this cannot read as NV12 has been reported.
     format_reported: bool,
+    /// How long to wait for an input buffer before giving the access unit up.
+    ///
+    /// The codec holds its input buffers until it has worked through what it
+    /// was given, so the wait is the codec's own pace - and it is a wait, not a
+    /// delay: a buffer that is there is taken on the first, non-blocking try,
+    /// and a machine that keeps up never waits at all. Giving the unit up
+    /// instead is expensive: H.264 cannot be resumed past a picture it never
+    /// saw, so the channel stays blank until the next key frame, seconds later,
+    /// and a run of them is what the session's stall detector reads as a frozen
+    /// stream. See [`crate::wait`], which is where the growth is decided.
+    wait: Duration,
 }
 
 // Safety: the codec is owned outright by the channel worker that opened it and
@@ -461,6 +472,12 @@ impl VideoDecoder for AMediaCodecDecoder {
         // Remembered, not acted on: the codec session is opened on the first
         // access unit, which is the first thing that can describe the stream.
         self.config = config.clone();
+        // A new session knows nothing about the pace of this codec yet, so it
+        // starts at the floor and finds out. Waiting longer than the codec needs
+        // is not free: the wait blocks the thread the session runs on, and a
+        // session that blocks is a session that is not reading its socket - see
+        // `worker_threads`. See [`Self::wait`].
+        self.wait = crate::wait::WAIT_MIN;
         Ok(())
     }
 
@@ -477,23 +494,23 @@ impl VideoDecoder for AMediaCodecDecoder {
             return Err(CodecError::Configure("decoder was never configured".to_string()));
         };
 
-        let deadline = Instant::now() + Duration::from_millis(100);
-        let mut index = unsafe { AMediaCodec_dequeueInputBuffer(codec, 0) };
-        while index < 0 && Instant::now() < deadline {
-            index = unsafe { AMediaCodec_dequeueInputBuffer(codec, 10_000) };
-        }
-        if index < 0 {
+        // The wait is retried once the ceiling has grown: a codec that was a
+        // hundred milliseconds short of a buffer is the case this exists for,
+        // and giving the picture up there is what costs the channel its next
+        // key frame. A codec that does not answer at all still ends the wait at
+        // `WAIT_MAX` and the unit is given up as before.
+        let Some(index) = self.dequeue_input(codec) else {
             return Err(CodecError::NoBuffer);
-        }
+        };
 
         let mut capacity = 0usize;
-        let buffer = unsafe { AMediaCodec_getInputBuffer(codec, index as usize, &mut capacity) };
+        let buffer = unsafe { AMediaCodec_getInputBuffer(codec, index, &mut capacity) };
         if buffer.is_null() || capacity < access_unit.len() {
             // The input buffer has to be handed back or the codec runs out of
             // them; queueing it empty is how a dequeued input buffer is returned
             // unused. The picture it would have carried is lost either way.
             unsafe {
-                AMediaCodec_queueInputBuffer(codec, index as usize, 0, 0, pts_us.max(0) as u64, 0);
+                AMediaCodec_queueInputBuffer(codec, index, 0, 0, pts_us.max(0) as u64, 0);
             }
             return Err(CodecError::Decode("input buffer too small".to_string()));
         }
@@ -508,7 +525,7 @@ impl VideoDecoder for AMediaCodecDecoder {
         unsafe {
             AMediaCodec_queueInputBuffer(
                 codec,
-                index as usize,
+                index,
                 0,
                 access_unit.len(),
                 pts_us.max(0) as u64,
@@ -540,6 +557,35 @@ impl Drop for AMediaCodecDecoder {
 }
 
 impl AMediaCodecDecoder {
+    /// Waits for an input buffer, growing the ceiling and trying again while
+    /// the codec is only a little behind.
+    ///
+    /// Three rounds at most: the ceiling doubles, so the last one is four times
+    /// the first, and a codec that has not answered by then has stopped rather
+    /// than fallen behind. `None` is that case, and the picture is given up as
+    /// it always was. See [`Self::wait`].
+    fn dequeue_input(&mut self, codec: *mut AMediaCodec) -> Option<usize> {
+        for _ in 0..3 {
+            let budget = self.wait.max(crate::wait::WAIT_MIN);
+            let started = Instant::now();
+            let deadline = started + budget;
+            let mut index = unsafe { AMediaCodec_dequeueInputBuffer(codec, 0) };
+            while index < 0 && Instant::now() < deadline {
+                index = unsafe { AMediaCodec_dequeueInputBuffer(codec, 10_000) };
+            }
+            let next = crate::wait::next_wait(budget, started.elapsed(), index >= 0);
+            let grew = next > budget;
+            self.wait = next;
+            if index >= 0 {
+                return Some(index as usize);
+            }
+            if !grew {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Drops the buffered pictures and restarts the codec, for a stream switch
     /// (main <-> sub) that keeps the same session.
     pub fn reset(&mut self) {

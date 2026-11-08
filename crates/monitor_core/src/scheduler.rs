@@ -244,6 +244,15 @@ pub struct Scheduler {
     /// Set while the wall is blacked out: every channel is parked regardless of
     /// what the grid is showing.
     suspended: bool,
+    /// Whether a magnification parks the rest of the page.
+    ///
+    /// `true` is what a magnification means: one picture, and the bandwidth and
+    /// the decoders of the others given up for as long as it is up. `false` is
+    /// the first few seconds of one - the grid kept live, so that a viewer who
+    /// looks at a tile and comes straight back pays for one stream switch
+    /// rather than for a page's worth of sessions being torn down and opened
+    /// again. The viewer sets it; see `XgViewApp::zoom_park_at`.
+    park_others: bool,
 }
 
 impl Scheduler {
@@ -261,6 +270,7 @@ impl Scheduler {
             channel_count,
             current: None,
             suspended: false,
+            park_others: true,
         };
         scheduler.normalize();
         scheduler
@@ -408,12 +418,36 @@ impl Scheduler {
         let focus = focus.min(self.channel_count - 1);
         self.focus = Some(focus);
         self.zoom = Some(focus);
+        // A magnification starts with the page kept live; whoever put it up
+        // decides when to let the rest go. See [`Self::park_others`].
+        self.park_others = false;
         true
     }
 
     /// Leaves the magnified view.
     pub fn zoom_out(&mut self) -> bool {
+        // Set here rather than at the call sites: a group switch, a page turn
+        // and the Back key all leave the magnification without going through
+        // the viewer's own zoom-out, and the next magnification must start
+        // unparked however this one ended.
+        self.park_others = true;
         self.zoom.take().is_some()
+    }
+
+    /// Whether a magnification is still holding the rest of the page.
+    pub fn parks_others(&self) -> bool {
+        self.park_others
+    }
+
+    /// Lets the rest of the page go, or holds it, and reports whether that was
+    /// a change.
+    ///
+    /// Only meaningful while magnified: with nothing magnified every channel of
+    /// the page is live either way.
+    pub fn set_park_others(&mut self, parks: bool) -> bool {
+        let changed = self.park_others != parks;
+        self.park_others = parks;
+        changed
     }
 
     /// Steps the magnified viewport to the previous or next channel.
@@ -468,9 +502,18 @@ impl Scheduler {
 
         let (visible, live): (Vec<Option<usize>>, Vec<usize>) = match zoom {
             Some(index) => {
-                // A magnified viewport decodes the main stream of one camera,
-                // every other channel is parked to save bandwidth and CPU.
-                (vec![Some(index)], vec![index])
+                // A magnified viewport shows one camera. What it decodes is one
+                // camera too, unless the viewer has not settled yet: for the
+                // first seconds of a magnification the page is kept live, so
+                // that a look and a step back costs one stream switch rather
+                // than a page's worth of sessions - see [`Self::park_others`].
+                let mut live = vec![index];
+                if !self.park_others {
+                    live.extend(page_info.start..page_info.end);
+                    live.sort_unstable();
+                    live.dedup();
+                }
+                (vec![Some(index)], live)
             }
             None => {
                 let indices: Vec<usize> = (page_info.start..page_info.end).collect();
@@ -494,7 +537,11 @@ impl Scheduler {
         // stream from there - see `CameraSource::grid_stream`. A magnification
         // is above all of that: it is the viewer asking for the close look, and
         // it pulls the main stream whatever a tile was pinned to.
-        let main_stream = zoom.is_some();
+        //
+        // Per channel rather than for the whole schedule: a magnification that
+        // is still holding the page live has eight channels on their sub
+        // streams and the ninth on its main one, and asking for all nine mains
+        // would be nine times the bandwidth for one picture.
         let plans = cameras
             .iter()
             .enumerate()
@@ -505,7 +552,12 @@ impl Scheduler {
                     // socket stays open and no decoder stays running.
                     ChannelMode::Suspend
                 } else if live.contains(&index) {
-                    ChannelMode::Decode(if main_stream { StreamKind::Main } else { camera.grid_stream() })
+                    let stream = if zoom == Some(index) {
+                        StreamKind::Main
+                    } else {
+                        camera.grid_stream()
+                    };
+                    ChannelMode::Decode(stream)
                 } else {
                     ChannelMode::Suspend
                 };
@@ -722,14 +774,66 @@ mod tests {
     }
 
     #[test]
-    fn zoom_switches_to_main_stream_and_suspends_the_rest() {
+    fn zoom_switches_to_main_stream_and_holds_the_page_at_first() {
         let cameras = cameras(9);
         let mut scheduler = Scheduler::new(GridLayout::G3x3, 0, Some(0), cameras.len());
         assert!(scheduler.zoom_in());
+        // A magnification starts with the page kept live - one main stream and
+        // eight subs, which is the grid's own load - so that looking at a tile
+        // and stepping back does not tear a page's worth of sessions down.
+        let schedule = scheduler.schedule(&cameras);
+        assert_eq!(schedule.live().count(), 9);
+        assert_eq!(schedule.mode_of(0), ChannelMode::Decode(StreamKind::Main));
+        assert_eq!(schedule.mode_of(1), ChannelMode::Decode(StreamKind::Sub));
+        // Once the viewer has settled on it, the rest is let go.
+        assert!(scheduler.set_park_others(true));
         let schedule = scheduler.schedule(&cameras);
         assert_eq!(schedule.live().count(), 1);
         assert_eq!(schedule.mode_of(0), ChannelMode::Decode(StreamKind::Main));
         assert_eq!(schedule.mode_of(1), ChannelMode::Suspend);
+    }
+
+    /// The whole point of holding the page: a magnification and a step back
+    /// cost one stream switch each, not a page of sessions opened and closed.
+    #[test]
+    fn a_magnification_that_holds_the_page_restarts_one_channel() {
+        let cameras = cameras(9);
+        let mut scheduler = Scheduler::new(GridLayout::G3x3, 0, Some(0), cameras.len());
+        assert_eq!(scheduler.refresh(&cameras).len(), 9, "the page comes up");
+        assert!(scheduler.zoom_in());
+        let magnified = scheduler.refresh(&cameras);
+        assert_eq!(magnified.len(), 1, "only the magnified channel changes");
+        assert_eq!(magnified[0].index(), 0);
+        assert!(magnified[0].is_stream_switch(), "sub to main, not a fresh start");
+        assert!(scheduler.zoom_out());
+        let back = scheduler.refresh(&cameras);
+        assert_eq!(back.len(), 1, "and one on the way back");
+        assert_eq!(back[0].index(), 0);
+    }
+
+    /// Letting the page go is a page of suspensions, and nothing else.
+    #[test]
+    fn letting_the_page_go_suspends_the_rest() {
+        let cameras = cameras(9);
+        let mut scheduler = Scheduler::new(GridLayout::G3x3, 0, Some(0), cameras.len());
+        assert!(scheduler.zoom_in());
+        scheduler.refresh(&cameras);
+        assert!(scheduler.set_park_others(true));
+        let parked = scheduler.refresh(&cameras);
+        assert_eq!(parked.len(), 8);
+        assert!(parked.iter().all(|change| !change.is_stream_switch()));
+    }
+
+    /// A magnification left by something other than the viewer's own zoom-out -
+    /// a group switch, a page turn - must not leave the next one parked.
+    #[test]
+    fn leaving_the_magnification_any_way_parks_the_next_one() {
+        let cameras = cameras(9);
+        let mut scheduler = Scheduler::new(GridLayout::G3x3, 0, Some(0), cameras.len());
+        assert!(scheduler.zoom_in());
+        assert!(!scheduler.parks_others());
+        assert!(scheduler.zoom_out());
+        assert!(scheduler.parks_others(), "the next magnification starts fresh");
     }
 
     /// A magnified viewport steps along the channel list, not the grid, and
@@ -773,7 +877,13 @@ mod tests {
         scheduler.zoom_in();
         let changes = scheduler.refresh(&cameras);
         assert!(changes.iter().any(ScheduleChange::is_stream_switch));
-        assert!(changes.iter().any(|change| matches!(change, ScheduleChange::Suspend { .. })));
+        // The rest of the page is held while the viewer is still arriving at
+        // the picture, so nothing is parked yet.
+        assert!(!changes.iter().any(|change| matches!(change, ScheduleChange::Suspend { .. })));
+        // Once they have settled, the page is let go.
+        scheduler.set_park_others(true);
+        let parked = scheduler.refresh(&cameras);
+        assert!(parked.iter().all(|change| matches!(change, ScheduleChange::Suspend { .. })));
     }
 
     #[test]
