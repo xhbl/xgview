@@ -377,6 +377,7 @@ fn run() -> anyhow::Result<()> {
         None;
     let mut bar_attached: *mut c_void = std::ptr::null_mut();
     let mut last_focus: Option<egui::Id> = None;
+    let mut bar_open = false;
     // Starts hidden: the wall comes up on the grid, and the picture's view has
     // nothing to show until a viewport is magnified.
     let mut video_shown = false;
@@ -605,6 +606,7 @@ fn run() -> anyhow::Result<()> {
         let magnified = app.magnified();
         if magnified != video_shown {
             video_shown = magnified;
+            tracing::info!(target: "xgview", visible = magnified, "the picture's view");
             crate::android::set_video_visible(magnified);
         }
 
@@ -766,6 +768,16 @@ fn run() -> anyhow::Result<()> {
                         egui::Pos2::new(0.0, strip_h - screen_h),
                         egui::vec2(screen_w, screen_h),
                     );
+                    let open = app.bar_open();
+                    if open != bar_open {
+                        bar_open = open;
+                        tracing::info!(
+                            target: "xgview",
+                            open,
+                            strip = ?bar_rect,
+                            "the bar's own frame"
+                        );
+                    }
                     let bar_output =
                         bar_context.run(bar_input, |ctx| app.draw_bar_only(ctx, picture));
                     let bar_jobs =

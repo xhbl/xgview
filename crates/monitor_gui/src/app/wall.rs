@@ -108,6 +108,11 @@ impl XgViewApp {
         self.scheduler.is_zoomed()
     }
 
+    /// Whether the magnified viewport's bar is up.
+    pub fn bar_open(&self) -> bool {
+        self.tile_bar.is_open()
+    }
+
     pub(super) fn magnified_area(
         &self,
         cameras: &[CameraSource],

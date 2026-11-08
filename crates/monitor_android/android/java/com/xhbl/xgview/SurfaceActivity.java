@@ -132,6 +132,7 @@ public class SurfaceActivity extends Activity {
             @Override
             public void surfaceDestroyed(SurfaceHolder holder) {
                 if (EXTRA_SURFACES) {
+                    Log.i(TAG, "video surface destroyed");
                     nativeStopVideo();
                 }
             }
@@ -198,6 +199,7 @@ public class SurfaceActivity extends Activity {
             @Override
             public void surfaceDestroyed(SurfaceHolder holder) {
                 if (EXTRA_SURFACES) {
+                    Log.i(TAG, "bar surface destroyed");
                     nativeStopBar();
                 }
             }
@@ -409,10 +411,15 @@ public class SurfaceActivity extends Activity {
             return;
         }
         self.runOnUiThread(() -> {
-            final int wanted = visible ? View.VISIBLE : View.GONE;
-            if (self.video.getVisibility() != wanted) {
-                self.video.setVisibility(wanted);
-            }
+            // Moved out of the way rather than made `GONE`: hiding a
+            // `SurfaceView` destroys its surface, and the surface coming back
+            // rebuilds every layer above it - which is how the bar stopped being
+            // drawn after a return to the grid. A translation leaves the surface
+            // alive and only takes it off the screen.
+            final int height = self.video.getHeight() > 0
+                    ? self.video.getHeight()
+                    : self.getResources().getDisplayMetrics().heightPixels;
+            self.video.setTranslationY(visible ? 0f : -height);
         });
     }
 
