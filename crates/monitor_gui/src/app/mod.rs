@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use egui::{Align, Align2, CornerRadius, FontId, Id, Key, Layout, Modifiers, Rect, RichText, Sense, StrokeKind, vec2};
-#[cfg(not(target_os = "android"))]
 use egui_file_dialog::{DialogState, FileDialog, FileDialogLabels};
 use tokio::runtime::Handle;
 
@@ -779,7 +778,6 @@ enum FileJob {
 /// it was last left in, and its labels are read from the language pack here
 /// rather than on every frame. See [`XgViewApp::ask_for_file`] for why it is
 /// drawn by egui rather than by the desktop.
-#[cfg(not(target_os = "android"))]
 fn new_file_dialog() -> FileDialog {
     let configurations = monitor_i18n::tr("file-dialog-filter-config");
     FileDialog::new()
@@ -795,7 +793,6 @@ fn new_file_dialog() -> FileDialog {
 /// Every label it draws is named here; the two it never draws - the titles of
 /// the folder and multiple-selection modes, which this program does not open -
 /// are left at the default by `..Default`.
-#[cfg(not(target_os = "android"))]
 fn file_dialog_labels() -> FileDialogLabels {
     FileDialogLabels {
         title_select_file: monitor_i18n::tr("file-dialog-title-open"),
@@ -946,9 +943,10 @@ pub struct XgViewApp {
     /// is what the answer is for, and `None` while the dialog is closed. Kept
     /// between uses so the directory it was last left in is kept. See
     /// [`Self::ask_for_file`].
-    #[cfg(not(target_os = "android"))]
+    ///
+    /// Android uses it too, but only when the device has no document picker to
+    /// hand an import to; see [`Self::import_with_builtin_dialog`].
     file_dialog: FileDialog,
-    #[cfg(not(target_os = "android"))]
     file_job: Option<FileJob>,
     /// Whether the file dialog had the keyboard when this frame's keys were
     /// handed out.
@@ -959,6 +957,16 @@ pub struct XgViewApp {
     /// wall reads it - and would take the settings panel down behind it as
     /// well.
     file_dialog_keys: bool,
+    /// Whether this frame's poll took an answer from the file dialog.
+    ///
+    /// The panel is still drawn under the dialog, and a touch screen sends the
+    /// press and the release in different frames: the press lands on the
+    /// dialog's button, and the release arrives after [`Self::poll_file_dialog`]
+    /// has closed the dialog and put the panel back under the finger. Read
+    /// twice, that one press answers the dialog and presses the control behind
+    /// it - which is the control the dialog was opened from. A request that
+    /// arrives in the frame the answer did is the same press, and is dropped.
+    file_dialog_answered: bool,
     /// The control the file dialog was opened from, to be given the focus back
     /// when it closes - the way a window's `from` does for the others.
     file_dialog_anchor: Option<Id>,
@@ -1476,11 +1484,10 @@ impl XgViewApp {
             frame_clock: crate::frame::FrameClock::from_env(),
             events_tx,
             events_rx,
-            #[cfg(not(target_os = "android"))]
             file_dialog: new_file_dialog(),
-            #[cfg(not(target_os = "android"))]
             file_job: None,
             file_dialog_keys: false,
+            file_dialog_answered: false,
             file_dialog_anchor: None,
             autostart,
             power,
@@ -1702,6 +1709,11 @@ impl XgViewApp {
     /// it while it is up.
     #[cfg(not(target_os = "android"))]
     fn ask_for_file(&mut self, job: FileJob) {
+        // The press that answered the dialog, read again by the control it was
+        // opened from. See [`Self::file_dialog_answered`].
+        if self.file_dialog_answered {
+            return;
+        }
         match &job {
             FileJob::Export(passphrase) => {
                 // The name says which of the two the file is: the sealed export
@@ -2653,7 +2665,6 @@ impl XgViewApp {
         // The file dialog, while it is up: drawn and answered here, at the top
         // of the frame, so that a configuration it picked is the one the wall
         // behind is drawn from. See `ask_for_file`.
-        #[cfg(not(target_os = "android"))]
         self.poll_file_dialog(ctx);
 
         // Anything the soft keyboard typed has to be in the input queue before

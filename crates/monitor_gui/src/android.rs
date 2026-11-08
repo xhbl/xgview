@@ -9,6 +9,7 @@
 //! reasoning for attaching the VM to the UI thread permanently. Only compiled
 //! on Android.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI8, Ordering};
 use std::sync::Mutex;
 
@@ -426,6 +427,19 @@ pub fn write_download(name: &str, text: &str) -> Result<ExportOutcome, String> {
     })
 }
 
+/// Whether the device has a document picker at all.
+///
+/// A television build can ship without `DocumentsUI`, and - as on the boxes
+/// this was written for - without a single `DocumentsProvider` behind it,
+/// while still answering the intent with the Android TV framework's
+/// placeholder, which opens nothing. That is not a picker, and
+/// [`Self::pick_config_file`] on such a device leaves the viewer looking at a
+/// screen that does nothing. What asks is the activity; see
+/// `MainActivity.hasDocumentPicker`.
+pub fn has_document_picker() -> bool {
+    call_bool("hasDocumentPicker")
+}
+
 /// Asks the activity to open the system's document picker for an import.
 ///
 /// The answer comes back later, through [`java_config_picked`] and
@@ -437,6 +451,25 @@ pub fn pick_config_file() {
     };
     let _ = env.call_static_method(class, "pickConfigFile", "()V", &[]);
     clear_exception(&mut env);
+}
+
+/// The app's own folder on the shared volume, remembered from the entry point.
+///
+/// `/storage/emulated/0/Android/data/<package>/files`: the one place a file
+/// transfer - or the viewer's own file dialog - can put a document that the
+/// app may read back without a permission, on every Android version. `None`
+/// when the entry point never had one to hand over, which is what the viewer
+/// falls back to its current directory for.
+static EXTERNAL_FILES: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Hands the folder over, once, from the entry point.
+pub fn set_external_files(dir: impl Into<PathBuf>) {
+    let _ = EXTERNAL_FILES.set(dir.into());
+}
+
+/// That folder, if the entry point handed one over.
+pub fn external_files_dir() -> Option<PathBuf> {
+    EXTERNAL_FILES.get().cloned()
 }
 
 /// What the document picker answered since the last frame.

@@ -5906,3 +5906,41 @@ What was wrong was the span. An event with no end ends where the *question* did 
 upper bound of the read, which is the moment the strip was asked about - so the mark grows
 with each read instead of being a second. It grows in steps of the wait between reads,
 which is what a mark on a live edge is: a second's worth of colour arriving every ten.
+
+### The import a television build has nothing to hand to
+
+The report was an import button that answered "no app can do that". The box - an onn 4K Plus,
+Android 14, and the reason the 32-bit package exists - has no `DocumentsUI`, and, unlike a
+phone with it removed, not a single `DocumentsProvider` behind it either:
+
+    pm list packages | grep documents        -> nothing
+    cmd package query-providers DOCUMENTS_PROVIDER -> nothing
+    cmd package query-activities ACTION_OPEN_DOCUMENT -> Stubs$DocumentsStub only
+
+The last line is the trap. `com.android.tv.frameworkpackagestubs` is Android TV's stand-in for
+the apps a build leaves out: it *answers* the intent, so `queryIntentActivities` is not empty,
+`resolveActivity` is not null, and `startActivityForResult` does not throw. It opens nothing.
+Installing a `DocumentsUI` would not help either - the roots a picker lists come from
+providers holding `MANAGE_DOCUMENTS`, which is `signature|privileged`, so a copy from anywhere
+else is an empty window.
+
+So the viewer draws its own: the dialog the desktop has always used, egui inside this window,
+which needs no activity, no provider and no permission behind it. `egui-file-dialog` moved
+from the desktop-only dependencies to the common ones for that - it is pure egui and compiled
+for `armv7-linux-androideabi` without a change.
+
+It starts in the app's own folder on the shared volume,
+`/storage/emulated/0/Android/data/<package>/files`, which is the one place a transfer can put a
+file the app may read back: `WRITE_EXTERNAL_STORAGE` is capped at `maxSdkVersion="28"`, so on
+Android 14 the app has no external-storage permission at all, and `Download/xgview` - which it
+can *write* through `MediaStore`, and had - cannot be read back by it.
+
+Two things cost a cycle. The dialog is drawn over a panel that is still drawn and still taking
+presses, and a touch screen sends the press and the release in different frames: the press
+answered the dialog, the release landed on the control behind it - the very button the dialog
+was opened from - and the import dialog came straight back. `file_dialog_answered` marks the
+frame that takes an answer so a request in it is dropped.
+
+And the about panel's tab strip overflows at 1080p once a device has ten cameras: `摄像头(10)`
+is wide enough to push `关于` - and with it the import button - off the right edge. That is why
+the button had to be reached with the remote's arrow keys, and is worth a look on its own.

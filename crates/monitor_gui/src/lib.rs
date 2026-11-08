@@ -581,6 +581,12 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
     if let Some(dir) = app.internal_data_path() {
         monitor_core::config::set_config_home(dir);
     }
+    // The same folder on the shared volume, kept for the file dialog a device
+    // without a document picker falls back to: it is the one place a transfer
+    // can put a configuration and the app can still read it back.
+    if let Some(dir) = app.external_data_path() {
+        crate::android::set_external_files(dir);
+    }
     // The language packs shipped as APK assets are extracted to the
     // configuration directory before `XgViewApp::new` runs, so the catalogue
     // built there discovers them alongside the embedded English fallback. A

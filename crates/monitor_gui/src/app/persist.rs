@@ -114,8 +114,12 @@ impl XgViewApp {
     // ------------------------------------------------------------ navigation
 
     /// Draws the file dialog while it is up, and acts on what it answers.
-    #[cfg(not(target_os = "android"))]
     pub(super) fn poll_file_dialog(&mut self, ctx: &egui::Context) {
+        // Cleared first, set again below only if this frame is the one that
+        // takes the answer - so the panel drawn later in the same frame knows
+        // the press that answered the dialog is spent. See
+        // [`Self::file_dialog_answered`].
+        self.file_dialog_answered = false;
         // The frame it goes up, whatever held the focus hands it over. The
         // button that opened the dialog is behind it now, and the dialog reads
         // its own keys only while no widget has the focus - so an Esc still
@@ -139,10 +143,15 @@ impl XgViewApp {
         }
         self.file_dialog.update(ctx);
         if let Some(path) = self.file_dialog.take_picked() {
+            self.file_dialog_answered = true;
             match self.file_job.take() {
+                // Android never opens this dialog to export - the file goes
+                // into the public folder through `MediaStore` instead - so a
+                // path picked there is always an import.
+                #[cfg(not(target_os = "android"))]
                 Some(FileJob::Export(passphrase)) => self.export_to(&path, passphrase.as_deref()),
                 Some(FileJob::Import) => self.import_from(path),
-                None => {}
+                _ => {}
             }
         } else if matches!(
             self.file_dialog.state(),
@@ -150,6 +159,7 @@ impl XgViewApp {
         ) {
             // The viewer backed out of it: nothing is imported or exported, and
             // there is nothing to say about it.
+            self.file_dialog_answered = true;
             self.file_job = None;
         }
         // It is down now, so the control behind it takes the focus back - the
@@ -163,27 +173,54 @@ impl XgViewApp {
     }
 
     /// Opens what Android has instead of a file dialog: the export is written
-    /// straight into the public folder, and the import hands the picker to
-    /// another activity, whose answer [`Self::poll_picked_config`] takes.
+    /// straight into the public folder, and the import is handed to the
+    /// system's document picker - or, on a device without one, to the viewer's
+    /// own dialog.
     #[cfg(target_os = "android")]
     pub(super) fn ask_for_file(&mut self, job: FileJob) {
+        // The press that answered the dialog, read again by the control it was
+        // opened from. See [`Self::file_dialog_answered`].
+        if self.file_dialog_answered {
+            return;
+        }
         match job {
             FileJob::Export(passphrase) => self.export_config(passphrase.as_deref()),
-            FileJob::Import => self.import_config(),
+            FileJob::Import => {
+                // A television build can ship without `DocumentsUI` and without
+                // a single document provider behind it, while still answering
+                // the intent with the framework's placeholder - so asking
+                // whether there is a picker is not the same question as asking
+                // whether anything claims to be one. See
+                // `MainActivity.hasDocumentPicker`.
+                if crate::android::has_document_picker() {
+                    self.import_config();
+                } else {
+                    self.import_with_builtin_dialog();
+                }
+            }
         }
+    }
+
+    /// Opens the viewer's own file dialog for an import.
+    ///
+    /// The dialog the desktop uses - drawn by egui inside this window, so it
+    /// needs no other activity, no provider and no permission behind it. It is
+    /// started in the app's own folder on the shared volume, the one place a
+    /// file transfer can put a configuration the app may read back. A remote
+    /// drives it poorly; a device with no picker at all has nothing better.
+    #[cfg(target_os = "android")]
+    fn import_with_builtin_dialog(&mut self) {
+        if let Some(dir) = crate::android::external_files_dir() {
+            self.file_dialog.config_mut().initial_directory = dir;
+        }
+        self.file_dialog.pick_file();
+        self.file_job = Some(FileJob::Import);
     }
 
     /// Whether the file dialog is up. It owns the screen while it is: the
     /// pointer, the focus and the keyboard all belong to it.
     pub(super) fn file_dialog_open(&self) -> bool {
-        #[cfg(not(target_os = "android"))]
-        {
-            self.file_job.is_some()
-        }
-        #[cfg(target_os = "android")]
-        {
-            false
-        }
+        self.file_job.is_some()
     }
 
     /// What the export / import pair does, where the export has a fixed folder
@@ -289,8 +326,8 @@ impl XgViewApp {
     /// A sealed document asks for its passphrase before anything is touched, and
     /// the prompt takes it from there; an older export - JSON, in clear - is
     /// imported on the spot, the way it always was. The file was chosen by the
-    /// dialog [`Self::ask_for_file`] opens on another thread.
-    #[cfg(not(target_os = "android"))]
+    /// dialog [`Self::ask_for_file`] opens - on Android, on the devices that
+    /// have one, by the system's picker instead.
     pub(super) fn import_from(&mut self, path: PathBuf) {
         let data = match std::fs::read_to_string(&path) {
             Ok(data) => data,

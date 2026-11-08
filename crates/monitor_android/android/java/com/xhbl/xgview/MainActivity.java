@@ -1529,6 +1529,16 @@ public class MainActivity extends NativeActivity {
     /** Request code for the document picker an import opens. */
     private static final int REQUEST_IMPORT_DOCUMENT = 0x5848;
 
+    /**
+     * The Android TV framework's stand-in for the apps a television build
+     * leaves out.
+     *
+     * <p>It answers intents for the apps that are not there - documents, media,
+     * contacts - and opens nothing when it is started. See
+     * {@link #hasDocumentPicker}.
+     */
+    private static final String STUB_PACKAGE = "com.android.tv.frameworkpackagestubs";
+
     /** Request code for the microphone permission talk-back needs. */
     private static final int REQUEST_RECORD_AUDIO = 0x5849;
 
@@ -2036,6 +2046,49 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
+     * The intent an import asks the system for a document with.
+     *
+     * <p>Built in one place because it is asked twice: once to find out whether
+     * anything on the device answers it, and once to put it up.
+     */
+    private static Intent importIntent() {
+        return new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*")
+                // A picker honouring the filter shows only these, which keeps
+                // a wall of unrelated files out of the way.
+                .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
+                        SEALED_MIME_TYPE, "application/json", "text/plain",
+                        "application/octet-stream"
+                });
+    }
+
+    /**
+     * Whether this device has a document picker worth opening.
+     *
+     * <p>Called from the native side before {@link #pickConfigFile}, which is
+     * only worth doing when this answers `true`. A television build can ship
+     * without `DocumentsUI` - and, on the boxes this was written for, without
+     * any {@code DocumentsProvider} behind it - while still answering the
+     * intent with {@link #STUB_PACKAGE}'s placeholder, which opens nothing and
+     * says nothing. A handler that is that placeholder is not a handler, and
+     * the viewer draws its own file dialog instead.
+     */
+    public static boolean hasDocumentPicker() {
+        final MainActivity self = instance;
+        if (self == null) {
+            return false;
+        }
+        for (ResolveInfo handler : self.getPackageManager().queryIntentActivities(importIntent(), 0)) {
+            final String owner = handler.activityInfo == null ? null : handler.activityInfo.packageName;
+            if (owner != null && !STUB_PACKAGE.equals(owner)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Opens the system's document picker for an import.
      *
      * <p>Called from the native side. The answer - the file's text, or why it
@@ -2047,17 +2100,8 @@ public class MainActivity extends NativeActivity {
             return;
         }
         self.runOnUiThread(() -> {
-            final Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
-                    .addCategory(Intent.CATEGORY_OPENABLE)
-                    .setType("*/*")
-                    // A picker honouring the filter shows only these, which keeps
-                    // a wall of unrelated files out of the way.
-                    .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
-                            SEALED_MIME_TYPE, "application/json", "text/plain",
-                            "application/octet-stream"
-                    });
             try {
-                self.startActivityForResult(intent, REQUEST_IMPORT_DOCUMENT);
+                self.startActivityForResult(importIntent(), REQUEST_IMPORT_DOCUMENT);
             } catch (RuntimeException none) {
                 // Some television builds have no document provider at all.
                 android.util.Log.w("xgview", "no document picker on this device", none);
