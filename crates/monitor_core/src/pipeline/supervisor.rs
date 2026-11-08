@@ -381,7 +381,7 @@ impl Supervisor {
         for (index, runtime) in &self.channels {
             let published = self.frames.published(*index);
             let before = reported.insert(*index, published).unwrap_or(published);
-            tracing::info!(
+            tracing::debug!(
                 target: "xgview::health",
                 index,
                 camera = %runtime.endpoint.camera_id,

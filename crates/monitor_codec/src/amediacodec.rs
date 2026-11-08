@@ -28,6 +28,7 @@ use std::ptr;
 use std::time::{Duration, Instant};
 
 use crate::audio::{AudioCodec, AudioDecoder, AudioStreamInfo};
+use crate::layout::{Layout, shape_of};
 use crate::sps::decode_parameter_sets;
 use crate::{
     plane_stride, CodecError, ColorMatrix, ColorRange, ColorSpace, DecodedFrame, DecoderConfig,
@@ -47,19 +48,6 @@ const BUFFER_FLAG_KEY_FRAME: u32 = 1;
 const INFO_OUTPUT_FORMAT_CHANGED: isize = -2;
 /// `INFO_TRY_AGAIN_LATER`
 const INFO_TRY_AGAIN_LATER: isize = -1;
-
-/// How a session's colour is laid out in the buffers the codec hands over.
-///
-/// `color-format` names neither: it says `YUV420Flexible`, which both are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Layout {
-    /// One interleaved plane, one chroma row per two luma rows (NV12).
-    SemiPlanar,
-    /// Two planes of their own, half as wide as the picture (I420).
-    Planar,
-    /// Neither fits the buffer, so nothing is drawn from it.
-    Unknown,
-}
 
 /// `COLOR_FormatYUV420Flexible`: the format a decoder offers when it is given no
 /// surface to render into. What it hands over is NV12 in practice, with the row
@@ -173,7 +161,7 @@ pub struct AMediaCodecDecoder {
     /// once from the first one and then trusted: deciding per buffer flips
     /// between two interpretations as the sizes vary, which is a picture whose
     /// colour changes from frame to frame.
-    layout: Option<Layout>,
+    layout: Option<(Layout, usize)>,
     /// Whether the geometry of this session's pictures has been logged.
     ///
     /// The stride and slice height the codec chose are what the chroma plane's
@@ -218,7 +206,21 @@ impl AMediaCodecDecoder {
         let (csd, size) = decode_parameter_sets(config.codec, access_unit);
         let size = size.or(Some((config.width, config.height)).filter(|(w, h)| *w > 0 && *h > 0));
 
-        let codec = Self::open_session(&mime, &csd, size)?;
+        // The layout is asked for rather than guessed: `YUV420Flexible` lets the
+        // codec pick, and one here picks differently from one session to the
+        // next. A codec that will not take the name is given the flexible one
+        // and the shape is worked out from the buffer it hands over instead.
+        let codec = match Self::open_session(&mime, &csd, size, COLOR_FORMAT_SEMI_PLANAR) {
+            Ok(codec) => codec,
+            Err(err) => {
+                tracing::debug!(
+                    target: "xgview::codec",
+                    %err,
+                    "the codec would not take a named layout, asking for a flexible one"
+                );
+                Self::open_session(&mime, &csd, size, COLOR_FORMAT_FLEXIBLE)?
+            }
+        };
 
         self.handle = Some(codec);
         self.started = true;
@@ -248,6 +250,7 @@ impl AMediaCodecDecoder {
         mime: &CString,
         csd: &[Vec<u8>],
         size: Option<(u32, u32)>,
+        colour_format: i32,
     ) -> Result<*mut AMediaCodec> {
         let codec = unsafe { AMediaCodec_createDecoderByType(mime.as_ptr()) };
         if codec.is_null() {
@@ -277,7 +280,7 @@ impl AMediaCodecDecoder {
             // Left alone, the codec reorders by the presentation times it was
             // given and hands them over to be shown, and a stream with no
             // B-frames still comes out one after another as it always did.
-            AMediaFormat_setInt32(format, c"color-format".as_ptr(), COLOR_FORMAT_FLEXIBLE);
+            AMediaFormat_setInt32(format, c"color-format".as_ptr(), colour_format);
         }
 
         tracing::debug!(
@@ -463,19 +466,16 @@ impl AMediaCodecDecoder {
         // exactly 640x480 + 320x240 + 320x240 - on the next. Read as the wrong
         // one, the picture is sharp and green-magenta striped: the luma where it
         // should be, and the colour of a picture that is not there.
-        let chroma_stride = width / 2;
+        //
+        // The shape is asked for at configure time - `COLOR_FormatYUV420SemiPlanar`
+        // - and a codec that takes the name has no say in it. This is for the ones
+        // that do not: it reads the shape out of the size of the buffer, and when
+        // the two shapes are the same size - which they are when the luma is not
+        // padded - it takes the one that was asked for.
         let base = stride * slice_height;
-        let layout = *self.layout.get_or_insert_with(|| {
-            let semi = stride * slice_height + stride * chroma_height;
-            let planar = stride * height + 2 * chroma_stride * chroma_height;
-            if semi <= capacity {
-                Layout::SemiPlanar
-            } else if planar <= capacity {
-                Layout::Planar
-            } else {
-                Layout::Unknown
-            }
-        });
+        let (layout, chroma_stride) = *self
+            .layout
+            .get_or_insert_with(|| shape_of(width, height, stride, slice_height, capacity));
         if !self.geometry_logged {
             self.geometry_logged = true;
             // Chroma is meant to sit near 128 for a low-saturation picture, so
