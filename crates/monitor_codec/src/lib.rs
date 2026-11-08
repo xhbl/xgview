@@ -299,6 +299,19 @@ pub trait VideoDecoder: Send {
 
     /// Stream description once known.
     fn info(&self) -> Option<&VideoStreamInfo>;
+
+    /// Pictures this decoder has produced since it was created.
+    ///
+    /// A decoder given a surface hands its pictures to the compositor and
+    /// returns nothing, so `decode` coming back empty says nothing about whether
+    /// the stream is alive. This does: a caller that watches it can tell a
+    /// working stream from a stalled one on either path.
+    ///
+    /// Zero for a backend that does not count, which is also every backend whose
+    /// pictures come back as frames - those are visible in `decode` itself.
+    fn pictures(&self) -> u64 {
+        0
+    }
 }
 
 /// What the current target can actually do.

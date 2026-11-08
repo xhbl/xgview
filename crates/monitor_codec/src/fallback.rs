@@ -91,6 +91,15 @@ impl VideoDecoder for Fallback {
         self.active().name()
     }
 
+    /// Handed to whichever decoder is doing the work.
+    ///
+    /// Not the default: a decoder given a surface returns no frames, and the
+    /// session that feeds it counts pictures instead - a wrapper that answered
+    /// zero here would tell every such session its stream had stalled.
+    fn pictures(&self) -> u64 {
+        self.active().pictures()
+    }
+
     fn configure(&mut self, config: &DecoderConfig) -> Result<()> {
         self.config = Some(config.clone());
         match self.preferred.configure(config) {

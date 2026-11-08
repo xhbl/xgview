@@ -580,6 +580,13 @@ pub struct AMediaCodecDecoder {
     /// so a session that is presenting rather than reading back still shows a
     /// rate; it stays zero on every path that does not present.
     stat_presented: u32,
+    /// Pictures the codec has produced, counted whether or not they came back.
+    ///
+    /// A codec given a surface hands its pictures to the compositor and returns
+    /// nothing, so the session that feeds it cannot tell a working stream from a
+    /// stalled one by looking at the frames - this is what it counts instead.
+    /// See `VideoDecoder::pictures`.
+    pictures: u64,
     /// Configuration remembered from [`VideoDecoder::configure`], which is the
     /// only thing known before the stream is: the parameter sets the codec has
     /// to be opened with come with the first access unit.
@@ -1263,6 +1270,12 @@ impl AMediaCodecDecoder {
                     let releasing = Instant::now();
                     unsafe { AMediaCodec_releaseOutputBuffer(codec, index as usize, render) };
                     self.stat_release += releasing.elapsed();
+                    if info.flags & BUFFER_FLAG_END_OF_STREAM == 0 {
+                        // A picture came out, whether it was read back or handed
+                        // to the compositor. The session that feeds this decoder
+                        // counts these; see `VideoDecoder::pictures`.
+                        self.pictures = self.pictures.wrapping_add(1);
+                    }
                 }
                 _ => break,
             }
@@ -1830,6 +1843,7 @@ impl VideoDecoder for AMediaCodecDecoder {
                 plane_ms = self.stat_plane.as_millis() as u64,
                 copy_ms = self.stat_copy.as_millis() as u64,
                 presented = self.stat_presented,
+                pictures = self.pictures,
                 total_ms = self.stat_total.as_millis() as u64,
                 surface = cfg!(feature = "surface"),
                 "the decoder's pace"
@@ -1858,6 +1872,10 @@ impl VideoDecoder for AMediaCodecDecoder {
         let mut frames = Vec::new();
         self.drain(&mut frames);
         Ok(frames)
+    }
+
+    fn pictures(&self) -> u64 {
+        self.pictures
     }
 
     fn info(&self) -> Option<&VideoStreamInfo> {

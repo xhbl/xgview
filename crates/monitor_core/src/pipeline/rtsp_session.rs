@@ -1341,6 +1341,12 @@ impl<'a> RtspSession<'a> {
             self.baseline_fix.observe(self.index, self.kind, &mut unit.data);
             self.stall.observe(unit.keyframe, Instant::now());
             let started = Instant::now();
+            // Counted before and after, because a decoder given a surface keeps
+            // its pictures: `decode` comes back empty on a stream that is
+            // arriving perfectly well, and a session that read that as "no
+            // picture" declared the channel stalled - an orange dot over a
+            // moving picture, and a reconnect after the hard timeout.
+            let pictures_before = decoder.pictures();
             let decoded = decoder.decode(&unit.data, unit.pts_us(), unit.keyframe);
             self.window.counters.decode_took(started.elapsed());
             match decoded {
@@ -1349,7 +1355,7 @@ impl<'a> RtspSession<'a> {
                     // do with it: on the platform whose frames stay
                     // in a GPU buffer there are no planes to publish,
                     // and the stream is no less alive for it.
-                    if !decoded.is_empty() {
+                    if !decoded.is_empty() || decoder.pictures() != pictures_before {
                         let was_stalled = self.stall.stalled_since.is_some();
                         // The first picture of a session, which is a recovery
                         // too: a channel that was cut and has opened again is
