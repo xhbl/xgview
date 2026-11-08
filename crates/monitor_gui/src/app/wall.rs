@@ -115,6 +115,59 @@ impl XgViewApp {
         Some(grid::picture_area(size, rect, aspect, self.magnified_rotated()))
     }
 
+    /// Draws the magnified view's bar alone, into a context whose whole screen
+    /// is the bar.
+    ///
+    /// The bar has a surface of its own, over the picture, and a surface is a
+    /// rectangle: it can only show the bar if the bar is all that is drawn in
+    /// it. So this is the bar's own frame - the same controls, in the same
+    /// order, doing the same things - with the layout worked out for the
+    /// rectangle it will occupy rather than for the picture it sits over.
+    ///
+    /// Nothing here reads input: the bar's presses are found in the wall's own
+    /// frame, where the pointer and the remote already are. This frame paints.
+    pub fn draw_bar_only(&mut self, ctx: &egui::Context) {
+        // A bar that is not up is nothing at all: the strip is see-through, so
+        // an empty frame leaves the picture as it was rather than a band over
+        // it. This is also what keeps the wall's grid from carrying a bar it
+        // never draws - the strip is up in every view, the bar is not.
+        if !self.tile_bar.is_open() {
+            return;
+        }
+        let rect = ctx.screen_rect();
+        if rect.width() < 24.0 || rect.height() < 8.0 {
+            return;
+        }
+        let entries = self.tile_bar_entries().0;
+        let widths = vec![tilebar::icon_width(); entries.len()];
+        let break_after = self.tile_bar_break();
+        let margin = self.tile_bar_margin();
+        let dock = self.tile_bar.dock();
+        // The strip is given a timeline on the same terms the picture is: only
+        // a recording has one to draw, and only a panel that fits in the strip
+        // is a strip of controls. A 140 px strip is too shallow for both rows,
+        // so a recording's bar comes up here without one - and the wall's own
+        // copy of the bar, which is what takes the presses, is laid out over the
+        // picture and does carry it. Nothing is reachable that is not drawn:
+        // `tile_bar_activate` reads the same controls either way.
+        let playing = self.scheduler.zoom().is_some_and(|slot| self.is_playing_back(slot));
+        let timeline =
+            playing && tilebar::fits_timeline(rect, false, margin, &widths, break_after);
+        let layout = tilebar::layout(rect, false, dock, margin, &widths, break_after, timeline);
+        let controls: Vec<tilebar::Control> = entries.iter().map(|(control, _)| *control).collect();
+        let muted: Vec<bool> = entries
+            .iter()
+            .map(|(_, action)| !self.tile_bar_available(*action))
+            .collect();
+        let tips = self.tile_bar_tips(&entries);
+        egui::Area::new(egui::Id::new("xgview-bar-surface"))
+            .fixed_pos(rect.min)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                tilebar::draw(ui, &mut self.nav, &layout, false, &controls, &muted, &tips);
+            });
+    }
+
     pub(super) fn paint_view(
         &self,
         ui: &mut egui::Ui,

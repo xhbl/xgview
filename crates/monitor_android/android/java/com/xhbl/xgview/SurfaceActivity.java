@@ -138,6 +138,11 @@ public class SurfaceActivity extends Activity {
         }
         // The bar, last, so it is drawn over the picture.
         bar = new SurfaceView(this);
+        // See-through, which the picture cannot be: the codec refuses to render
+        // into an `RGBA_8888` surface on this chip, but the bar draws nothing
+        // the codec touches, and a translucent bar is a bar over the picture
+        // rather than a band cut out of it.
+        bar.getHolder().setFormat(android.graphics.PixelFormat.TRANSLUCENT);
         bar.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {

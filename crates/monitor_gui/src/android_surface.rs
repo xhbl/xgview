@@ -370,9 +370,21 @@ fn run() -> anyhow::Result<()> {
     let mut built: Option<(egui::Context, egui_wgpu::RenderState, XgViewApp)> = None;
     let mut surface: Option<(wgpu::Surface<'_>, wgpu::SurfaceConfiguration)> = None;
     let mut attached: *mut c_void = std::ptr::null_mut();
-    // The bar's own swapchain, over the picture.
-    let mut bar: Option<(wgpu::Surface<'_>, wgpu::SurfaceConfiguration)> = None;
+    // The bar's own swapchain, over the picture - and its own renderer, because
+    // two `egui::Context`s share nothing: each numbers its textures from
+    // `Managed(0)`, so the font atlas of one would land on the other's.
+    let mut bar: Option<(wgpu::Surface<'_>, wgpu::SurfaceConfiguration, egui_wgpu::Renderer)> =
+        None;
     let mut bar_attached: *mut c_void = std::ptr::null_mut();
+
+    // The bar has a screen of its own: a surface is a rectangle, so the only way
+    // it can show the bar is for the bar to be all that is drawn in it. Same
+    // theme, same faces, same pixels per point - a different screen.
+    let bar_context = egui::Context::default();
+    let bar_pixels = DENSITY.load(Ordering::Acquire) as f32 / 1000.0;
+    bar_context.set_pixels_per_point(bar_pixels);
+    crate::theme::install(&bar_context);
+    crate::fonts::install_for(&bar_context, &monitor_i18n::current_language());
 
     let started = Instant::now();
     let mut last = Instant::now();
@@ -660,47 +672,102 @@ fn run() -> anyhow::Result<()> {
                     if let Some(config) = fresh.get_default_config(&render_state.adapter, width, height)
                     {
                         fresh.configure(&render_state.device, &config);
+                        let caps = fresh.get_capabilities(&render_state.adapter);
                         tracing::info!(
                             target: "xgview",
                             width = config.width,
                             height = config.height,
+                            alpha_mode = ?config.alpha_mode,
+                            supported_alpha = ?caps.alpha_modes,
+                            format = ?config.format,
                             "the bar has a surface of its own"
                         );
-                        bar = Some((fresh, config));
+                        let renderer = egui_wgpu::Renderer::new(
+                            &render_state.device,
+                            config.format,
+                            None,
+                            1,
+                            false,
+                        );
+                        bar = Some((fresh, config, renderer));
                         bar_attached = bar_window;
                     }
                 }
             }
         }
-        if let Some((bar_surface, _)) = bar.as_ref() {
+        if let Some((bar_surface, bar_config, bar_renderer)) = bar.as_mut() {
             match bar_surface.get_current_texture() {
                 Ok(bar_frame) => {
                     let view = bar_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
                     let mut encoder =
                         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    let phase = (started.elapsed().as_secs_f32() * 0.8).sin() * 0.5 + 0.5;
+                    // The bar's own frame. It reads no input - the presses are
+                    // found in the wall's frame, where the pointer and the
+                    // remote already are - so this is a paint, not an update.
+                    let bar_rect = egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(
+                            bar_config.width as f32 / pixels_per_point,
+                            bar_config.height as f32 / pixels_per_point,
+                        ),
+                    );
+                    let bar_input = egui::RawInput {
+                        screen_rect: Some(bar_rect),
+                        time: Some(started.elapsed().as_secs_f64()),
+                        ..Default::default()
+                    };
+                    let bar_output = bar_context.run(bar_input, |ctx| app.draw_bar_only(ctx));
+                    let bar_jobs =
+                        bar_context.tessellate(bar_output.shapes, bar_output.pixels_per_point);
+                    let bar_screen = egui_wgpu::ScreenDescriptor {
+                        size_in_pixels: [bar_config.width, bar_config.height],
+                        pixels_per_point,
+                    };
                     {
-                        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("bar"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                                        r: 0.08 + 0.6 * phase as f64,
-                                        g: 0.10,
-                                        b: 0.16,
-                                        a: 1.0,
-                                    }),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: None,
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                        });
+                        for (id, delta) in &bar_output.textures_delta.set {
+                            bar_renderer.update_texture(&device, &queue, *id, delta);
+                        }
                     }
-                    queue.submit([encoder.finish()]);
+                    let prepared = bar_renderer.update_buffers(
+                        &device,
+                        &queue,
+                        &mut encoder,
+                        &bar_jobs,
+                        &bar_screen,
+                    );
+                    {
+                        let mut pass = encoder
+                            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("bar"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        // Nothing under the bar is the bar's:
+                                        // the strip is see-through wherever it
+                                        // has nothing to say, so the picture
+                                        // runs under it as it does everywhere
+                                        // else.
+                                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                                            r: 0.0,
+                                            g: 0.0,
+                                            b: 0.0,
+                                            a: 0.0,
+                                        }),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            })
+                            .forget_lifetime();
+                        bar_renderer.render(&mut pass, &bar_jobs, &bar_screen);
+                    }
+                    queue.submit(prepared.into_iter().chain(std::iter::once(encoder.finish())));
+                    for id in &bar_output.textures_delta.free {
+                        bar_renderer.free_texture(id);
+                    }
                     bar_frame.present();
                 }
                 Err(error) => {
