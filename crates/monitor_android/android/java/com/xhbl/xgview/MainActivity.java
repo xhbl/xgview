@@ -124,6 +124,19 @@ public class MainActivity extends NativeActivity {
      */
     private static volatile Context appContext;
 
+    /**
+     * Hands the application context over from the other front end.
+     *
+     * <p>The calls that need no activity - a renderer restart, the configuration
+     * paths - go through {@link #appContext}, and only this class ever set it.
+     * Whichever wall is on screen sets it now, so those calls work from either.
+     */
+    static void useApplicationContext(final Context context) {
+        if (appContext == null) {
+            appContext = context;
+        }
+    }
+
     /** Whether {@code monitor_android} is loaded, so a native method may be called. */
     private boolean nativeLoaded;
 
@@ -442,6 +455,9 @@ public class MainActivity extends NativeActivity {
     public static void setKeyboardWanted(final boolean wanted, final boolean multiline) {
         final MainActivity self = instance;
         if (self == null || self.inputView == null) {
+            // The wall on screen is the other front end; its input method is
+            // the one the viewer is typing into.
+            SurfaceActivity.setKeyboardWanted(wanted, multiline);
             return;
         }
         self.runOnUiThread(() -> {

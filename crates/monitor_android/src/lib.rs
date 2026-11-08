@@ -88,6 +88,53 @@ pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeKeyboardHidden(
     monitor_gui::keyboard::java_keyboard_hidden();
 }
 
+// The same four, for the wall on surfaces of its own. JNI finds a method by the
+// class it is declared on, so a second front end needs its own exports even
+// though they do the same thing - the input method is the activity's, and so is
+// the view it types into.
+
+/// The keyboard typed something; see `SurfaceActivity`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeCommit(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    text: jni::objects::JString,
+) {
+    monitor_gui::keyboard::java_commit(&mut env, &text);
+}
+
+/// The keyboard deleted some characters; see `SurfaceActivity`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeBackspace(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    count: jni::sys::jint,
+) {
+    monitor_gui::keyboard::java_backspace(count);
+}
+
+/// The keyboard's Done / Enter key was pressed; see `SurfaceActivity`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeEnter(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    monitor_gui::keyboard::java_enter();
+}
+
+/// The keyboard went away unasked; see `SurfaceActivity`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeKeyboardHidden(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    monitor_gui::keyboard::java_keyboard_hidden();
+}
+
 /// The document an import picked, or why it could not be read. See
 /// `MainActivity.onActivityResult`.
 #[cfg(target_os = "android")]
