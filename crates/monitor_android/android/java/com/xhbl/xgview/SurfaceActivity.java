@@ -49,6 +49,9 @@ public class SurfaceActivity extends Activity {
      */
     private static SurfaceActivity instance;
 
+    /** The boot-launch grace window and its retry chain; see {@link BootRace}. */
+    private final BootRace boot = new BootRace(this);
+
     private static final String TAG = "xgview-surface";
 
     private SurfaceView canvas;
@@ -88,6 +91,14 @@ public class SurfaceActivity extends Activity {
         // configuration paths - go through the application context, which until
         // now only the other front end ever handed over.
         MainActivity.useApplicationContext(getApplicationContext());
+        // A boot launch races every other app that starts itself, and the wall
+        // is the one nobody is watching: it has to ask for the foreground back.
+        final android.content.Intent launch = getIntent();
+        if (launch != null
+                && launch.getBooleanExtra("com.xhbl.xgview.FROM_AUTOSTART", false)) {
+            MainActivity.markAutostart();
+            boot.arm();
+        }
         // This activity is started on its own, so nothing else has loaded the
         // library for it.
         System.loadLibrary("monitor_android");
@@ -286,6 +297,18 @@ public class SurfaceActivity extends Activity {
             return true;
         }
         return super.onGenericMotionEvent(event);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        boot.onResume();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        boot.onPause();
     }
 
     @Override

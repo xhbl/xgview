@@ -172,33 +172,24 @@ public class MainActivity extends NativeActivity {
     private static boolean fromAutostart = false;
 
     /**
-     * When the boot-launch grace window ends, on {@link SystemClock#elapsedRealtime},
-     * or zero when this launch was not a boot launch.
+     * Records that the boot receiver started this launch.
+     *
+     * <p>Asked by the native side through {@link #getFromAutostart}, and read
+     * here for the grace window. The wall may be the other front end, which
+     * never reaches this class's `onCreate`, so whichever one was started says
+     * so here.
      */
-    private long bootGraceUntil;
-
-    /** How many times the wall has taken the foreground back since this launch. */
-    private int bootReasserts;
-
-    /** Whether this activity is the resumed one, as far as it has been told. */
-    private boolean resumed;
+    static void markAutostart() {
+        fromAutostart = true;
+    }
 
     /**
-     * When the wall last reached the foreground, on
-     * {@link SystemClock#elapsedRealtime}, or zero if it has not since this
-     * launch.
+     * The boot-launch grace window and the retry chain that belongs to it.
      *
-     * <p>Reported in the pause log so that a boot which "did not show a
-     * picture" can be told apart from one where the wall came up and was then
-     * covered: the number is how long it had been on screen.
+     * <p>See {@link BootRace}: the wall is unattended at boot, so a wall that
+     * lost the race for the foreground has to ask for it back.
      */
-    private long lastResumedAt;
-
-    /** Posts {@link #bootReassert}, so a re-assert can be dropped again on resume. */
-    private final Handler ui = new Handler(Looper.getMainLooper());
-
-    /** Takes the foreground back after something covered the wall during boot. */
-    private final Runnable bootReassert = this::takeForegroundBack;
+    private final BootRace boot = new BootRace(this);
 
     /** The one pixel view the input method types into. */
     private View inputView;
@@ -292,9 +283,9 @@ public class MainActivity extends NativeActivity {
         // A boot launch is the only launch that has to win a race for the
         // foreground, so it is the only one that gets a window to do it in.
         // A manual open is the viewer asking, and covering it with ourselves
-        // would be wrong - see BOOT_GRACE_MS.
+        // would be wrong - see `BootRace`.
         if (fromAutostart) {
-            bootGraceUntil = SystemClock.elapsedRealtime() + BOOT_GRACE_MS;
+            boot.arm();
         }
         // Before super.onCreate, for the same reason `applyVulkanGate` is: the
         // native thread starts inside it, and a renderer that panics on its
@@ -862,14 +853,9 @@ public class MainActivity extends NativeActivity {
     protected void onResume() {
         super.onResume();
         // On screen again, so a re-assert scheduled by a cover that has since
-        // gone away has nothing left to do. The time is kept for the pause log.
-        resumed = true;
-        lastResumedAt = SystemClock.elapsedRealtime();
-        // Wall clock, and on disk: the boot retry compares it against the boot
-        // and cannot read anything this process holds in memory.
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putLong(KEY_RESUMED_AT, System.currentTimeMillis()).apply();
-        ui.removeCallbacks(bootReassert);
+        // gone away has nothing left to do - and the resume is written down for
+        // the boot retry, which cannot read anything this process holds.
+        boot.onResume();
         // The activity on screen is the one native calls must reach, even when
         // it was not the last one created. This is also where a sibling that
         // the launcher started and then destroyed can leave the static behind.
@@ -890,7 +876,7 @@ public class MainActivity extends NativeActivity {
      * <p>Being covered is the one thing a wall must not accept quietly at boot:
      * the box is unattended, so a wall that lost the race for the foreground
      * stays lost until somebody walks up to it. The delay and the limit are
-     * what make taking it back safe; see {@link #BOOT_GRACE_MS}.
+     * what make taking it back safe; see {@link BootRace}.
      *
      * <p>No attempt is made to tell a cover from the viewer pressing Home.
      * {@code onUserLeaveHint} is the documented way to know, and it was tried
@@ -906,87 +892,7 @@ public class MainActivity extends NativeActivity {
     @Override
     protected void onPause() {
         super.onPause();
-        resumed = false;
-        final long now = SystemClock.elapsedRealtime();
-        final long shown = lastResumedAt == 0 ? 0 : now - lastResumedAt;
-        final long left = bootGraceUntil == 0 ? 0 : bootGraceUntil - now;
-        android.util.Log.i("xgview", "paused; shown=" + shown + " graceLeft=" + left
-                + " attempts=" + bootReasserts);
-        // A wall that is on its way out must not pull itself back: the pause
-        // would otherwise be answered with a start that undoes the exit.
-        if (isFinishing() || isDestroyed()) {
-            return;
-        }
-        if (bootGraceUntil == 0 || now >= bootGraceUntil) {
-            return;
-        }
-        if (bootReasserts >= BOOT_REASSERT_LIMIT) {
-            return;
-        }
-        ui.removeCallbacks(bootReassert);
-        ui.postDelayed(bootReassert, BOOT_REASSERT_DELAY_MS);
-    }
-
-    /**
-     * Takes the foreground back if the wall is still covered, and does nothing
-     * if it is not.
-     *
-     * <p>Runs on the main thread a moment after {@link #onPause}, so the state
-     * it acts on is the settled one rather than a start that was still in
-     * flight.
-     *
-     * <p>The intent re-sent is the launcher intent - {@code LauncherActivity},
-     * the same entry the boot receiver uses - not this activity's own
-     * {@link #getIntent()}. Measured on the device: re-sending this activity is
-     * a no-op, because it is already the root of its task and the flags that
-     * bring a task forward ({@code NEW_TASK | CLEAR_TOP | SINGLE_TOP}) make
-     * {@code ActivityStarter} treat it as "already at the top, deliver
-     * {@code onNewIntent}". Two attempts went out and neither produced a
-     * resume; the activity was still there, still paused, and the launcher
-     * stayed in front. Starting the exported entry instead does bring the task
-     * back, and it also picks the right one of the two orientations.
-     *
-     * <p>Schedules the next attempt itself instead of waiting for another
-     * {@link #onPause}. A cover is one pause, and an attempt that loses is
-     * still a pause that has already happened - so waiting for the next one
-     * made the limit mean "one try, then never again": measured on the device,
-     * an attempt that lost to the launcher's own start by 658ms left the wall
-     * behind for the rest of the window with one attempt unspent. The chain
-     * stops at {@link #onResume}, which drops the callback.
-     *
-     * <p>Whether the system allows it at all depends on the same whitelist that
-     * let the boot receiver start us - {@code SYSTEM_ALERT_WINDOW} here; see
-     * the manifest. A refusal is not retried beyond the limit.
-     */
-    private void takeForegroundBack() {
-        if (resumed) {
-            return;
-        }
-        if (bootGraceUntil == 0 || SystemClock.elapsedRealtime() >= bootGraceUntil) {
-            return;
-        }
-        if (bootReasserts >= BOOT_REASSERT_LIMIT) {
-            return;
-        }
-        final Intent back = getPackageManager().getLaunchIntentForPackage(getPackageName());
-        if (back == null) {
-            android.util.Log.w("xgview", "no launcher intent to take the foreground back with");
-            return;
-        }
-        bootReasserts++;
-        android.util.Log.i("xgview", "covered during boot; taking the foreground back ("
-                + bootReasserts + "/" + BOOT_REASSERT_LIMIT + ")");
-        back.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        try {
-            startActivity(back);
-        } catch (RuntimeException error) {
-            android.util.Log.w("xgview", "cannot take the foreground back", error);
-        }
-        // The answer is whether the wall is resumed, not whether the start was
-        // accepted, so look again rather than assuming this one worked.
-        ui.postDelayed(bootReassert, BOOT_REASSERT_DELAY_MS);
+        boot.onPause();
     }
 
     /**
@@ -1054,47 +960,6 @@ public class MainActivity extends NativeActivity {
     private static final int RESTART_LIMIT = 3;
 
     private static final long RESTART_WINDOW_MS = 10 * 60 * 1000L;
-
-    /**
-     * How long after a boot launch the wall may take the foreground back, and
-     * how many times.
-     *
-     * <p>A boot launch races every other app that starts itself at boot, and
-     * the wall only ever asked once. Measured on the SHIELD: the Google TV
-     * launcher resumed at {@code +2.4s}, a third-party launcher (Projectivy)
-     * resumed at {@code +3.2s} and again at {@code +3.7s}, and this activity
-     * resumed at {@code +3.9s} - a 435ms win with nothing behind it. The
-     * third-party launcher issues its second start from its own process, so
-     * there is no order between that and {@code BootReceiver}; when it lands a
-     * little later the wall is covered and stays covered, because nothing looks
-     * again. That is the "sometimes" of "boots but sometimes no picture".
-     *
-     * <p>The window bounds the defence; past it the wall stops asking, which is
-     * what keeps it from being a box nobody can get out of. The limit stops a
-     * launcher that keeps taking the screen back from trading it with us for
-     * ever.
-     *
-     * <p>Two attempts in one minute, not three in two. The first pass was the
-     * wider pair, and on the device the three were spent within 33 seconds -
-     * which left the rest of the window unguarded anyway, so the width bought
-     * nothing and only lengthened the argument with a launcher that wanted the
-     * screen. A minute covers the boot burst, which is over within a few
-     * seconds of the launcher settling; two attempts cover a launcher that
-     * takes the screen back once more after we have answered.
-     */
-    private static final long BOOT_GRACE_MS = 60 * 1000L;
-
-    /** How many times the wall may take the foreground back within {@link #BOOT_GRACE_MS}. */
-    private static final int BOOT_REASSERT_LIMIT = 2;
-
-    /**
-     * How long to wait after being covered before taking the foreground back.
-     *
-     * <p>Long enough for the launcher that covered the wall to finish its own
-     * start: asking while that start is still in flight only gets overwritten
-     * by it again, which is how the limit above would be spent on nothing.
-     */
-    private static final long BOOT_REASSERT_DELAY_MS = 1500;
 
     /**
 
