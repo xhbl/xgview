@@ -29,41 +29,36 @@ import java.io.OutputStream;
  * {@code priv/docs/android-surface-plan.md} and, for the numbers,
  * {@code playback-decode-cost.md} §13-16.
  *
- * <p>With a {@code SurfaceView} the native side gets a window of its own, the
- * view hierarchy stays the activity's, and a second surface can carry a decoded
- * picture straight to the compositor. This activity is the first step of that
- * move: the wall draws here and the video still takes the old path.
- *
- * <p>Two things are handed over rather than inherited. The activity itself,
- * because the audio sink needs a real Android context. And {@code MainActivity},
- * because the native side talks to Java through the static methods on it -
- * power, rotation, the file picker - and those live there, not here. There is no
- * {@code MainActivity} instance behind this one, so those calls do nothing;
- * giving both activities one shared bridge is part of the move, not of this
- * step.
+ * <p>With a {@code SurfaceView} the native side gets a window of its own and the
+ * view hierarchy stays the activity's. What it cannot yet do is share the screen
+ * with a decoded picture: a wgpu surface is always opaque here, so the wall
+ * cannot be drawn over one and let it show through, and every arrangement that
+ * would put the picture underneath is closed (the plan document has each one and
+ * why). This is therefore the first step only - the wall draws here, and the
+ * video still takes the byte-buffer path.
  */
 public class SurfaceActivity extends Activity {
     private static final String TAG = "xgview-surface";
 
-    /**
-     * Whether a decoded picture gets a surface of its own underneath the wall.
-     *
-     * <p>Off, because it does not work yet: the wall's surface has to be
-     * see-through for the picture to show through it, and the compositor will
-     * not do that. wgpu's Vulkan surface offers only {@code Inherit} as a
-     * composite alpha mode, and a {@code SurfaceView} is treated as opaque -
-     * below its window because that is the background, and above it even with
-     * {@code setZOrderOnTop} and an {@code RGBA_8888} format. With the picture
-     * on top of the wall instead, it shows perfectly at 26 fps, which is what
-     * proved the decoder's side of this is sound; the wall's side is what is
-     * missing. See {@code priv/docs/android-surface-plan.md} §10.
-     */
-    private static final boolean VIDEO_SURFACE = false;
-
-    /** The wall, over the picture. */
     private SurfaceView canvas;
-    /** The decoded picture, under the wall. */
+    /** The decoded picture, between the wall and the bar. */
     private SurfaceView video;
+    /** The controls, over the picture. */
+    private SurfaceView bar;
+
+    /**
+     * Whether the picture and the bar get surfaces of their own.
+     *
+     * <p>On, and the arrangement under test: three opaque surfaces stacked -
+     * the wall, the picture over it, and the bar over that. Nothing here needs
+     * to be see-through, which is the whole reason it can work at all; the bar
+     * covers the picture where the bar is, and that is what "floating over"
+     * means.
+     */
+    private static final boolean EXTRA_SURFACES = true;
+
+    /** How tall the bar's own surface is, in pixels. */
+    private static final int BAR_HEIGHT = 140;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -80,21 +75,12 @@ public class SurfaceActivity extends Activity {
 
         final FrameLayout root = new FrameLayout(this);
 
-        // The picture, underneath. A decoded frame is written straight into this
-        // surface and the compositor scans it out, so it never enters the
-        // process - which is the whole reason the wall is not drawn on a
-        // `NativeActivity` any more.
+        // The picture, first, so the wall is drawn over it.
         video = new SurfaceView(this);
-        // Both surfaces go above the window. A `SurfaceView` below its window is
-        // the background as far as the compositor is concerned, and a background
-        // is opaque - which is why a translucent one under an opaque one shows
-        // nothing. Above the window, translucency is allowed, and the order they
-        // are added in is the order they stack.
-        video.setZOrderOnTop(true);
         video.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
-                if (VIDEO_SURFACE) {
+                if (EXTRA_SURFACES) {
                     Log.i(TAG, "video surface created");
                     nativeStartVideo(holder.getSurface());
                 }
@@ -102,32 +88,19 @@ public class SurfaceActivity extends Activity {
 
             @Override
             public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-                if (VIDEO_SURFACE) {
+                if (EXTRA_SURFACES) {
                     nativeStartVideo(holder.getSurface());
                 }
             }
 
             @Override
             public void surfaceDestroyed(SurfaceHolder holder) {
-                if (VIDEO_SURFACE) {
+                if (EXTRA_SURFACES) {
                     nativeStopVideo();
                 }
             }
         });
-
-        if (VIDEO_SURFACE) {
-            root.addView(video, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT));
-        }
-
-        // The wall, over it, and see-through where it draws nothing: that is
-        // how the picture underneath shows. Its own surface is translucent for
-        // the same reason - an opaque one would hide the video behind a black
-        // frame no matter what egui painted.
         canvas = new SurfaceView(this);
-        canvas.setZOrderOnTop(true);
-        canvas.getHolder().setFormat(android.graphics.PixelFormat.RGBA_8888);
         canvas.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
@@ -154,6 +127,45 @@ public class SurfaceActivity extends Activity {
         root.addView(canvas, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Over the wall, not under it: the wall cannot be see-through, so the
+        // picture has to cover the area the wall leaves for it. The bar is added
+        // after this one, which puts it over both.
+        if (EXTRA_SURFACES) {
+            root.addView(video, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+        // The bar, last, so it is drawn over the picture.
+        bar = new SurfaceView(this);
+        bar.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder holder) {
+                if (EXTRA_SURFACES) {
+                    Log.i(TAG, "bar surface created");
+                    nativeStartBar(holder.getSurface(), bar.getWidth(), bar.getHeight());
+                }
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                if (EXTRA_SURFACES) {
+                    nativeStartBar(holder.getSurface(), bar.getWidth(), bar.getHeight());
+                }
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder holder) {
+                if (EXTRA_SURFACES) {
+                    nativeStopBar();
+                }
+            }
+        });
+        if (EXTRA_SURFACES) {
+            root.addView(bar, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, BAR_HEIGHT,
+                    android.view.Gravity.BOTTOM));
+        }
 
         setContentView(root);
 
@@ -323,4 +335,9 @@ public class SurfaceActivity extends Activity {
     private static native void nativeStartVideo(android.view.Surface surface);
 
     private static native void nativeStopVideo();
+
+    private static native void nativeStartBar(
+            android.view.Surface surface, int width, int height);
+
+    private static native void nativeStopBar();
 }

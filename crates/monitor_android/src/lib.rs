@@ -372,6 +372,37 @@ pub extern "system" fn Java_com_xhbl_xgview_LayerProbeActivity_nativeStopUi(
     monitor_gui::probe_render::stop();
 }
 
+/// The bar's own surface, over the picture.
+///
+/// A rectangle of its own, opaque, on top of the picture - which is how a
+/// control bar sits over a decoded frame without anything having to be
+/// see-through. See `monitor_gui::android_surface::set_bar_window`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStartBar(
+    env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    surface: jni::objects::JObject,
+    width: jni::sys::jint,
+    height: jni::sys::jint,
+) {
+    if surface.is_null() {
+        return;
+    }
+    let window = unsafe { ANativeWindow_fromSurface(env.get_native_interface(), surface.as_raw()) };
+    monitor_gui::android_surface::set_bar_window(window, width, height);
+}
+
+/// The bar's surface is gone.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStopBar(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    monitor_gui::android_surface::set_bar_window(std::ptr::null_mut(), 0, 0);
+}
+
 /// The surface a decoded picture is rendered into, under the wall.
 ///
 /// The codec is configured with this window rather than with an image reader,

@@ -53,6 +53,28 @@ static WINDOW: std::sync::atomic::AtomicPtr<c_void> =
 /// Whether the drawing thread has been started. There is one for the process.
 static STARTED: AtomicBool = AtomicBool::new(false);
 
+/// The window of the bar's own surface, and its size in pixels.
+///
+/// A second surface rather than part of the wall's: the bar has to sit *over* a
+/// decoded picture, and nothing here can be see-through - so it is given a
+/// rectangle of its own, on top of the picture, and draws an opaque bar in it.
+/// Covering the picture under the bar is the point, not a cost.
+static BAR_WINDOW: std::sync::atomic::AtomicPtr<c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static BAR_WIDTH: AtomicU32 = AtomicU32::new(1920);
+static BAR_HEIGHT: AtomicU32 = AtomicU32::new(140);
+
+/// Takes the surface the bar is drawn into, or null when it went away.
+pub fn set_bar_window(window: *mut c_void, width: i32, height: i32) {
+    if width > 0 {
+        BAR_WIDTH.store(width as u32, Ordering::Release);
+    }
+    if height > 0 {
+        BAR_HEIGHT.store(height as u32, Ordering::Release);
+    }
+    BAR_WINDOW.store(window, Ordering::Release);
+}
+
 /// The two directories the activity handed over, kept for the one thread.
 static DIRECTORIES: Mutex<Option<(PathBuf, PathBuf)>> = Mutex::new(None);
 
@@ -348,6 +370,9 @@ fn run() -> anyhow::Result<()> {
     let mut built: Option<(egui::Context, egui_wgpu::RenderState, XgViewApp)> = None;
     let mut surface: Option<(wgpu::Surface<'_>, wgpu::SurfaceConfiguration)> = None;
     let mut attached: *mut c_void = std::ptr::null_mut();
+    // The bar's own swapchain, over the picture.
+    let mut bar: Option<(wgpu::Surface<'_>, wgpu::SurfaceConfiguration)> = None;
+    let mut bar_attached: *mut c_void = std::ptr::null_mut();
 
     let started = Instant::now();
     let mut last = Instant::now();
@@ -431,7 +456,17 @@ fn run() -> anyhow::Result<()> {
                     })?;
 
             let Some(fresh_config) = fresh.get_default_config(&adapter, width, height) else {
-                anyhow::bail!("the surface has no default config at {width}x{height}");
+                // A surface the activity has already let go of offers nothing,
+                // and one of those arrives on the way to a good one. Waiting for
+                // the next is the whole handling it needs.
+                tracing::info!(
+                    target: "xgview",
+                    width,
+                    height,
+                    "a surface offered no config; waiting for the next"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
             };
             // The picture is on a surface *under* this one, so this one has to
             // let it through where nothing is drawn. `Auto` picks opaque when it
@@ -597,6 +632,84 @@ fn run() -> anyhow::Result<()> {
             }
         }
         frame.present();
+
+        // The bar, over the picture. Its own surface and its own swapchain; the
+        // colour moves so a frozen one cannot be mistaken for a live one.
+        let bar_window = BAR_WINDOW.load(Ordering::Acquire);
+        if bar_window.is_null() {
+            bar = None;
+            bar_attached = std::ptr::null_mut();
+        } else if bar.is_none() || bar_attached != bar_window {
+            if let Some(window_ptr) = std::ptr::NonNull::new(bar_window) {
+                let handle_ndk = wgpu::rwh::RawWindowHandle::AndroidNdk(
+                    wgpu::rwh::AndroidNdkWindowHandle::new(window_ptr),
+                );
+                // Safety: the activity keeps the `SurfaceView` alive until it
+                // calls `stop`, and a new window replaces this one only after.
+                let fresh = unsafe {
+                    instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                        raw_display_handle: wgpu::rwh::RawDisplayHandle::Android(
+                            wgpu::rwh::AndroidDisplayHandle::new(),
+                        ),
+                        raw_window_handle: handle_ndk,
+                    })
+                };
+                if let Ok(fresh) = fresh {
+                    let (width, height) =
+                        (BAR_WIDTH.load(Ordering::Acquire), BAR_HEIGHT.load(Ordering::Acquire));
+                    if let Some(config) = fresh.get_default_config(&render_state.adapter, width, height)
+                    {
+                        fresh.configure(&render_state.device, &config);
+                        tracing::info!(
+                            target: "xgview",
+                            width = config.width,
+                            height = config.height,
+                            "the bar has a surface of its own"
+                        );
+                        bar = Some((fresh, config));
+                        bar_attached = bar_window;
+                    }
+                }
+            }
+        }
+        if let Some((bar_surface, _)) = bar.as_ref() {
+            match bar_surface.get_current_texture() {
+                Ok(bar_frame) => {
+                    let view = bar_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                    let phase = (started.elapsed().as_secs_f32() * 0.8).sin() * 0.5 + 0.5;
+                    {
+                        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("bar"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                                        r: 0.08 + 0.6 * phase as f64,
+                                        g: 0.10,
+                                        b: 0.16,
+                                        a: 1.0,
+                                    }),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+                    }
+                    queue.submit([encoder.finish()]);
+                    bar_frame.present();
+                }
+                Err(error) => {
+                    tracing::info!(target: "xgview", %error, "the bar's surface stopped taking frames");
+                    bar = None;
+                    bar_attached = std::ptr::null_mut();
+                }
+            }
+        }
 
         // The pictures arriving from the cameras are not something egui knows
         // about, so every frame is drawn whether or not one was asked for.
