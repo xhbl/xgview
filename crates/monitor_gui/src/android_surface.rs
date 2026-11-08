@@ -376,6 +376,7 @@ fn run() -> anyhow::Result<()> {
     let mut bar: Option<(wgpu::Surface<'_>, wgpu::SurfaceConfiguration, egui_wgpu::Renderer)> =
         None;
     let mut bar_attached: *mut c_void = std::ptr::null_mut();
+    let mut last_focus: Option<egui::Id> = None;
 
     // The bar has a screen of its own: a surface is a rectangle, so the only way
     // it can show the bar is for the bar to be all that is drawn in it. Same
@@ -716,7 +717,42 @@ fn run() -> anyhow::Result<()> {
                         time: Some(started.elapsed().as_secs_f64()),
                         ..Default::default()
                     };
-                    let bar_output = bar_context.run(bar_input, |ctx| app.draw_bar_only(ctx));
+                    // The ring the remote puts on a control is the one thing a
+                    // paint cannot work out for itself: egui draws it for
+                    // whatever its own memory says has the focus, and the focus
+                    // lives in the wall's context - the one that reads the
+                    // arrows. So it is carried across, every frame, and the
+                    // strip's copy of the bar lights the same control the
+                    // wall's copy would.
+                    if let Some(focused) = context.memory(|memory| memory.focused()) {
+                        bar_context.memory_mut(|memory| memory.request_focus(focused));
+                    }
+                    {
+                        let now_focused = context.memory(|memory| memory.focused());
+                        if now_focused != last_focus {
+                            last_focus = now_focused;
+                            tracing::debug!(
+                                target: "xgview::tilebar",
+                                focused = ?now_focused,
+                                "the focus the strip was given"
+                            );
+                        }
+                    }
+                    // The picture's rectangle in the strip's own coordinates: the
+                    // screen's size, shifted up by the strip's height so that the
+                    // picture's bottom edge is the strip's. The bar is laid out
+                    // against it, which is where the wall lays it out too - so
+                    // what is drawn here is in the place the wall's copy takes
+                    // presses.
+                    let screen_w = WIDTH.load(Ordering::Acquire) as f32 / pixels_per_point;
+                    let screen_h = HEIGHT.load(Ordering::Acquire) as f32 / pixels_per_point;
+                    let strip_h = bar_config.height as f32 / pixels_per_point;
+                    let picture = egui::Rect::from_min_size(
+                        egui::Pos2::new(0.0, strip_h - screen_h),
+                        egui::vec2(screen_w, screen_h),
+                    );
+                    let bar_output =
+                        bar_context.run(bar_input, |ctx| app.draw_bar_only(ctx, picture));
                     let bar_jobs =
                         bar_context.tessellate(bar_output.shapes, bar_output.pixels_per_point);
                     let bar_screen = egui_wgpu::ScreenDescriptor {

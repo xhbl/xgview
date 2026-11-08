@@ -57,8 +57,17 @@ public class SurfaceActivity extends Activity {
      */
     private static final boolean EXTRA_SURFACES = true;
 
-    /** How tall the bar's own surface is, in pixels. */
-    private static final int BAR_HEIGHT = 140;
+    /**
+     * How tall the bar's own surface is, in pixels.
+     *
+     * <p>Deep enough for the deepest bar there is: a recording carries two rows
+     * of controls and a row of times under them - 156 points in all, plus the
+     * 12 it keeps from the screen's edge - and a strip that could not hold that
+     * would have its timeline refused. Nothing is lost by the strip being
+     * deeper than the bar: it is see-through, so the extra height is picture,
+     * and the bar is docked to the screen's edge wherever the strip starts.
+     */
+    private static final int BAR_HEIGHT = 360;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {

@@ -6257,3 +6257,122 @@ the picture is supposed to change under it.
 Four tests hold the slot: the fragment after the one opened is fetched, one ahead
 of the reading is kept, one behind it is dropped, and a jump keeps only what it
 lands on.
+
+## 71. A picture on a surface of its own
+
+*Landed 2026-11-08, in 2.2.11 to 2.2.13.*
+
+A 1080p camera on the onn 4K Plus played at 18.6 fps and the speed control did
+nothing. The wall's nine 640x480 pictures were fine. Everything about that points
+at the codec, and the codec was not the problem.
+
+**The cost was the trip through the CPU.** This backend decodes into byte buffers:
+`AMediaCodec_getOutputBuffer`, then a copy of the pixels into a texture, then
+`releaseOutputBuffer`. Timed per call over 60 frames, a 1080p stream spent 34.7 ms
+in `releaseOutputBuffer` and 16.1 ms in `dequeueInputBuffer` - 50.8 ms against the
+38.7 ms a frame is given at 25 fps. Nothing in this codebase can make that faster,
+because it is the price of asking the CPU for pixels it does not need. The
+`AMediaCodec_getOutputBuffer` call is 15.9 ms on its own, and keeping the pointer
+across frames only moves the cost into `releaseOutputBuffer` (17 to 34.7).
+
+**Nor was the memory slow.** `AHardwareBuffer_allocate` with `CPU_READ_OFTEN` moves
+863 MB/s on this box - the gralloc heap is fine. An `AImageReader`'s buffers move
+33 MB/s, and five different `usage` combinations changed nothing. So the reader
+cannot be the way to get a picture back either; the only way is not to take it
+back at all.
+
+**Which is what a video player does.** `AMediaCodec_configure` takes a window, the
+decoder renders into it, `releaseOutputBuffer(index, true)` hands the frame to the
+compositor and the CPU never sees it. A 1080p picture then costs 3.0-3.7 ms a
+frame - `packed=0`, `pack_ms=0`, `copy_ms=0`, and the speed control works because
+there is time left over.
+
+**The wall could not simply become see-through.** The picture has to be under the
+UI and the UI over the picture, and every arrangement that gives one of them alpha
+failed on this chip: Vulkan offers only `Inherit` as a composite alpha mode and GL
+only `Opaque`; `ASurfaceControl` is null on a `NativeActivity`'s window;
+`WindowManager.addView` with a child window takes the activity's input channel away;
+`addContentView` hands the window's surface to the framework and the wall goes
+black; `Window.takeSurface` plus any view at all destroys the surface two
+milliseconds later.
+
+**So the answer is one more surface, not one more alpha.** Three rectangles, stacked
+and all opaque:
+
+```text
+SurfaceView 3 (top)     the bar     1920x140, a swapchain of its own
+SurfaceView 2 (middle)  the picture full screen, the decoder renders into it
+SurfaceView 1 (bottom)  the wall    full screen, egui
+```
+
+A bar that is its own rectangle covers the picture where the bar is - that is what
+"floating over" means, and it needs no transparency at all. The order is the whole
+trap: the picture goes in **after** the wall, because the wall cannot be see-through
+and so must be covered. The first version added the picture first and the screen was
+black.
+
+**And then the bar's own surface turned out to be see-through after all.** The rule
+above is about the codec's surface: the Amlogic component refuses to be configured
+on `RGBA_8888`, which is why the picture's `SurfaceView` is `OPAQUE`. The bar has no
+codec behind it, so `setFormat(TRANSLUCENT)` gives it `RGBA_8888`, wgpu reports
+`supported_alpha=[Inherit]` and `alpha_mode=Auto`, and a frame cleared to alpha 0 is
+blended away. The bar is a translucent pill over a full-height picture instead of a
+band cut out of it - and a bar that is not up draws nothing at all, so no JNI is
+needed to hide the surface.
+
+**Two egui contexts need two renderers.** A surface is a rectangle and can only show
+the bar if the bar is all that is drawn in it, so the bar gets a context whose whole
+screen is the strip. That context numbers its font atlas `TextureId::Managed(0)`
+exactly as the wall's does, so one `egui_wgpu::Renderer` shared between them has the
+second atlas land on the first and the wall's text comes out as the bar's. Each gets
+its own; the layout is `tilebar::layout` either way, with the strip's rectangle in
+place of the picture's.
+
+**The ring has to be carried across, and the bar has to be laid out where it is
+pressed.** Two things the paint cannot work out for itself.
+
+*The focus.* egui draws the ring for whatever its own memory says has the focus, and
+the focus lives in the wall's context - the one that reads the arrows. So the strip's
+context is told the wall's focused id every frame before its own, and its copy of the
+bar lights the same control. Without that the bar comes up and nothing on it ever
+lights, because nothing in the strip's context has ever been pressed.
+
+*The rectangle.* The strip is a rectangle at the bottom of the screen, but the bar is
+laid out against the **picture** - that is what the wall does, and the wall's copy is
+what takes the presses. So the picture's rectangle is passed in shifted by the strip's
+height, which puts the bar in exactly the place the wall's copy sits rather than in a
+second layout that happens to agree. It did agree, for a bar docked to the bottom
+edge, and only because the strip's height and the margin happened to cancel out.
+
+**The strip is 360 px deep, and nothing is lost by that.** A recording's bar in
+landscape is twelve controls on one line and a row of times under them: 109 points
+plus the 12 it keeps from the edge. A 140 px strip could not hold that, so the
+timeline was refused and a recording's bar came up without one. The strip is
+see-through, so the extra depth is picture - the bar is docked to the screen's edge
+wherever the strip starts - and the row is drawn by the same `draw_timeline` the wall
+uses, in the row the strip's own geometry put there.
+
+**Three traps cost time and are worth knowing.**
+
+*The box's graphics stack wedges.* After enough application restarts a surface stops
+offering a config at all - `the surface has no default config at 1920x1080` - and it
+does it for a build that has already run, so it reads as a regression. `adb reboot`
+brings the same APK straight back. **A surface that will not take a config is the
+device, not the code**, and a whole afternoon went into a three-surface experiment
+that was declared inconclusive for this reason and was in fact working.
+
+*`AImage_getPlaneData` reports the U plane one byte short.* At 1080p the length is
+1036799, not 1920*540. Reading the last row as `row*stride + width*2` walks off the
+end, the frame is dropped, and the log shows `packed` climbing while the picture
+stands still - which reads as "working but slow". **Look at whether the picture's
+timestamp is moving before believing an fps number.**
+
+*`AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE` is -30001*, not `0x80000001`. It is in
+`NdkMediaError.h`, and the wrong value means every ordinary "not yet" is treated as
+a broken reader.
+
+**What is still open.** The wall is not composited at all in the magnified view -
+`dumpsys SurfaceFlinger` lists two layers, the picture and the bar - because
+`on_video_layer` leaves its frame fully transparent. So the timestamp in that
+picture's top-left corner is the camera's own, burned into the stream; ours is lost.
+Moving the corner display into the bar is the next piece.

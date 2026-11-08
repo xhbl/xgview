@@ -125,8 +125,17 @@ impl XgViewApp {
     /// rectangle it will occupy rather than for the picture it sits over.
     ///
     /// Nothing here reads input: the bar's presses are found in the wall's own
-    /// frame, where the pointer and the remote already are. This frame paints.
-    pub fn draw_bar_only(&mut self, ctx: &egui::Context) {
+    /// frame, where the pointer and the remote already are. This frame paints -
+    /// and the ring the remote puts on a control is mirrored into this context
+    /// by the caller, which is the one thing painting alone cannot supply.
+    ///
+    /// `picture` is the picture's rectangle **in the strip's own coordinates** -
+    /// the screen's size, shifted up by the strip's height so that the bottom
+    /// edge of the picture is the bottom edge of the strip. It is laid out
+    /// against rather than the strip itself so that the bar is drawn in exactly
+    /// the place the wall's copy of it takes presses: the two are one layout
+    /// seen twice, not two layouts that happen to agree.
+    pub fn draw_bar_only(&self, ctx: &egui::Context, picture: egui::Rect) {
         // A bar that is not up is nothing at all: the strip is see-through, so
         // an empty frame leaves the picture as it was rather than a band over
         // it. This is also what keeps the wall's grid from carrying a bar it
@@ -134,8 +143,8 @@ impl XgViewApp {
         if !self.tile_bar.is_open() {
             return;
         }
-        let rect = ctx.screen_rect();
-        if rect.width() < 24.0 || rect.height() < 8.0 {
+        let strip = ctx.screen_rect();
+        if strip.width() < 24.0 || strip.height() < 8.0 {
             return;
         }
         let entries = self.tile_bar_entries().0;
@@ -145,26 +154,34 @@ impl XgViewApp {
         let dock = self.tile_bar.dock();
         // The strip is given a timeline on the same terms the picture is: only
         // a recording has one to draw, and only a panel that fits in the strip
-        // is a strip of controls. A 140 px strip is too shallow for both rows,
-        // so a recording's bar comes up here without one - and the wall's own
-        // copy of the bar, which is what takes the presses, is laid out over the
-        // picture and does carry it. Nothing is reachable that is not drawn:
-        // `tile_bar_activate` reads the same controls either way.
+        // is a strip of controls. Which is asked of the strip, because the strip
+        // is what has to hold it; where it goes is asked of the picture, because
+        // that is where the bar belongs.
         let playing = self.scheduler.zoom().is_some_and(|slot| self.is_playing_back(slot));
-        let timeline =
-            playing && tilebar::fits_timeline(rect, false, margin, &widths, break_after);
-        let layout = tilebar::layout(rect, false, dock, margin, &widths, break_after, timeline);
+        let timeline = playing && tilebar::fits_timeline(strip, false, margin, &widths, break_after);
+        let layout = tilebar::layout(picture, false, dock, margin, &widths, break_after, timeline);
         let controls: Vec<tilebar::Control> = entries.iter().map(|(control, _)| *control).collect();
         let muted: Vec<bool> = entries
             .iter()
             .map(|(_, action)| !self.tile_bar_available(*action))
             .collect();
         let tips = self.tile_bar_tips(&entries);
+        // A navigation state of its own, thrown away with the frame. The walk is
+        // the wall's - it is the wall's frame that reads the arrows - and these
+        // same controls register there already; registering them here as well
+        // would put every one of them on that walk twice.
+        let mut nav = crate::nav::Nav::new(&[]);
         egui::Area::new(egui::Id::new("xgview-bar-surface"))
-            .fixed_pos(rect.min)
+            .fixed_pos(strip.min)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                tilebar::draw(ui, &mut self.nav, &layout, false, &controls, &muted, &tips);
+                tilebar::draw(ui, &mut nav, &layout, false, &controls, &muted, &tips);
+                // What the recording holds, in the row the strip's own geometry
+                // put there. The wall draws the same thing over the picture; this
+                // is the copy that can be seen.
+                if let Some(row) = layout.timeline {
+                    self.draw_timeline(ui, row);
+                }
             });
     }
 
