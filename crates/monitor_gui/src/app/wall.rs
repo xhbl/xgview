@@ -202,12 +202,19 @@ impl XgViewApp {
                 if magnified {
                     if let Some(index) = self.scheduler.zoom() {
                         let cameras = self.config.active_cameras();
+                        // Interactive, so the corners are drawn at full
+                        // strength: `dim` is the page sliding out, and half a
+                        // brightness here would be a corner display that is
+                        // dimmer than the one the wall draws on the same
+                        // picture. Nothing is pressed on this copy - the
+                        // presses are the wall's - and `ring` is false so it
+                        // carries no cursor either.
                         let tile = self.tile_of(
                             Id::new("xgview-overlay-tile"),
                             Some(index),
                             &cameras,
                             1,
-                            false,
+                            true,
                             false,
                         );
                         grid::osd(ui.painter(), picture, &tile);
