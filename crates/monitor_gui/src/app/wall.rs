@@ -151,12 +151,13 @@ impl XgViewApp {
     /// against rather than the strip itself so that the bar is drawn in exactly
     /// the place the wall's copy of it takes presses: the two are one layout
     /// seen twice, not two layouts that happen to agree.
-    pub fn draw_bar_only(&self, ctx: &egui::Context, picture: egui::Rect) {
-        // A bar that is not up is nothing at all: the strip is see-through, so
-        // an empty frame leaves the picture as it was rather than a band over
-        // it. This is also what keeps the wall's grid from carrying a bar it
-        // never draws - the strip is up in every view, the bar is not.
-        if !self.tile_bar.is_open() {
+    pub fn draw_overlay_only(&self, ctx: &egui::Context, picture: egui::Rect) {
+        // Nothing to say over a grid: the wall is on screen there and draws its
+        // own corners and its own bars. The overlay is see-through, so an empty
+        // frame leaves the picture as it was rather than a band over it.
+        let magnified = self.magnified();
+        let open = self.tile_bar.is_open();
+        if !magnified && !open {
             return;
         }
         let strip = ctx.screen_rect();
@@ -191,14 +192,112 @@ impl XgViewApp {
             .fixed_pos(strip.min)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                tilebar::draw(ui, &mut nav, &layout, false, &controls, &muted, &tips);
-                // What the recording holds, in the row the strip's own geometry
-                // put there. The wall draws the same thing over the picture; this
-                // is the copy that can be seen.
-                if let Some(row) = layout.timeline {
-                    self.draw_timeline(ui, row);
+                // The corner display first, in the place the wall would put it.
+                // The wall draws it too, and that copy is the one nobody sees:
+                // the picture is on a surface above it, and the wall's frame is
+                // left transparent where the picture is - so the compositor
+                // drops it entirely. These corners are the copy that can be
+                // seen, and they are the same corners: `grid::osd`, the same
+                // tile, the same place on the picture.
+                if magnified {
+                    if let Some(index) = self.scheduler.zoom() {
+                        let cameras = self.config.active_cameras();
+                        let tile = self.tile_of(
+                            Id::new("xgview-overlay-tile"),
+                            Some(index),
+                            &cameras,
+                            1,
+                            false,
+                            false,
+                        );
+                        grid::osd(ui.painter(), picture, &tile);
+                    }
+                }
+                if open {
+                    tilebar::draw(ui, &mut nav, &layout, false, &controls, &muted, &tips);
+                    // What the recording holds, in the row the strip's own
+                    // geometry put there. The wall draws the same thing over the
+                    // picture; this is the copy that can be seen.
+                    if let Some(row) = layout.timeline {
+                        self.draw_timeline(ui, row);
+                    }
                 }
             });
+    }
+
+    /// One tile of the wall, as everything that paints it needs it.
+    ///
+    /// The magnified viewport is painted twice - by the wall, which is under the
+    /// picture, and by the overlay over it - and both have to describe it the same
+    /// way, or the corner display and the bar would disagree about what is on
+    /// screen. `ring` is passed in rather than read here so that every tile of a
+    /// frame gets the same answer; see `paint_view`.
+    fn tile_of<'a>(
+        &'a self,
+        id: Id,
+        index: Option<usize>,
+        cameras: &'a [CameraSource],
+        cells: usize,
+        interactive: bool,
+        ring: bool,
+    ) -> Tile<'a> {
+        Tile {
+            id,
+            index,
+            camera: index.and_then(|index| cameras.get(index)),
+            // The picture, and the channel behind it, come from the
+            // slot's view: a camera showing a recording is still that
+            // camera for everything else - its name, its display, its
+            // settings, its place on the wall. Until the recording's first
+            // frame arrives the camera's own picture stays, so pressing the
+            // control does not blank the viewport.
+            channel: index.and_then(|index| self.view_channel(index)),
+            video: index.and_then(|index| self.view_texture(index)).map(|entry| entry.surface),
+            // The one picture the decoder's probe is scanning out of the
+            // activity's surface. It is the magnified viewport, which is
+            // the only view with a single cell.
+            on_video_layer: cells == 1 && crate::probe_video_layer_active(),
+            // The ring is a cursor, and a wall nobody is operating is just a
+            // picture: it is drawn from the last key or press on and goes
+            // once the wall has been left alone for the shorter of the ring's
+            // own idle and the bars'. Which bars are up does not come into
+            // it. See `ring_shown`.
+            focused: interactive && index == self.scheduler.focus() && ring,
+            interactive,
+            dim: !interactive,
+            osd: self.config.osd,
+            combined: [
+                &self.config.combined_info[0],
+                &self.config.combined_info[1],
+                &self.config.combined_info[2],
+                &self.config.combined_info[3],
+            ],
+            time: self.time,
+            // The moment the picture is of. A recording's frame carries its
+            // own; before the first one has arrived the cursor's is the
+            // moment being fetched, and "now" is the one thing it is not.
+            clock: index
+                .and_then(|index| self.view_texture(index))
+                .and_then(|entry| entry.at)
+                .or_else(|| index.and_then(|index| self.playback_clock(index))),
+            aspect: index
+                .and_then(|index| cameras.get(index))
+                .map(|camera| self.tile_aspect(camera))
+                .unwrap_or_default(),
+            rotated: self.magnified_rotated(),
+            // The magnified viewport is the one picture that can be pushed
+            // in - it is the whole wall while it stands - and it is the only
+            // tile that carries the window. Nothing else is zoomable, so
+            // nothing else is given one.
+            picture_zoom: (index.is_some() && index == self.scheduler.zoom())
+                .then_some(self.picture_zoom),
+            // A recording keeps its picture through a seek, which reports
+            // the state a live stream reports when it has nothing to show.
+            // Everything the corners say about one comes with it: where it
+            // is being read from, and what the picture is doing - moving,
+            // held, or out of range. See [`grid::Recording`].
+            recording: index.and_then(|slot| self.recording_mark(slot)),
+            }
     }
 
     pub(super) fn paint_view(
@@ -216,7 +315,6 @@ impl XgViewApp {
         if origin.max.x < area.min.x - 4.0 || origin.min.x > area.max.x + 4.0 {
             return actions;
         }
-        let focus = self.scheduler.focus();
         // Read once for the frame: the same answer for every tile, and it is the
         // frame's clock rather than each cell's turn at it.
         let ring = self.ring_shown();
@@ -226,63 +324,15 @@ impl XgViewApp {
             if rect.max.x < area.min.x - 4.0 || rect.min.x > area.max.x + 4.0 {
                 continue;
             }
-            let tile = Tile {
-                id: Id::new(("xgview-tile", tag, cell, index.unwrap_or(usize::MAX))),
-                index: *index,
-                camera: index.and_then(|index| cameras.get(index)),
-                // The picture, and the channel behind it, come from the
-                // slot's view: a camera showing a recording is still that
-                // camera for everything else - its name, its display, its
-                // settings, its place on the wall. Until the recording's first
-                // frame arrives the camera's own picture stays, so pressing the
-                // control does not blank the viewport.
-                channel: index.and_then(|index| self.view_channel(index)),
-                video: index.and_then(|index| self.view_texture(index)).map(|entry| entry.surface),
-                // The one picture the decoder's probe is scanning out of the
-                // activity's surface. It is the magnified viewport, which is
-                // the only view with a single cell.
-                on_video_layer: view.cells.len() == 1 && crate::probe_video_layer_active(),
-                // The ring is a cursor, and a wall nobody is operating is just a
-                // picture: it is drawn from the last key or press on and goes
-                // once the wall has been left alone for the shorter of the ring's
-                // own idle and the bars'. Which bars are up does not come into
-                // it. See `ring_shown`.
-                focused: interactive && *index == focus && ring,
-                interactive,
-                dim: !interactive,
-                osd: self.config.osd,
-                combined: [
-                    &self.config.combined_info[0],
-                    &self.config.combined_info[1],
-                    &self.config.combined_info[2],
-                    &self.config.combined_info[3],
-                ],
-                time: self.time,
-                // The moment the picture is of. A recording's frame carries its
-                // own; before the first one has arrived the cursor's is the
-                // moment being fetched, and "now" is the one thing it is not.
-                clock: index
-                    .and_then(|index| self.view_texture(index))
-                    .and_then(|entry| entry.at)
-                    .or_else(|| index.and_then(|index| self.playback_clock(index))),
-                aspect: index
-                    .and_then(|index| cameras.get(index))
-                    .map(|camera| self.tile_aspect(camera))
-                    .unwrap_or_default(),
-                rotated: self.magnified_rotated(),
-                // The magnified viewport is the one picture that can be pushed
-                // in - it is the whole wall while it stands - and it is the only
-                // tile that carries the window. Nothing else is zoomable, so
-                // nothing else is given one.
-                picture_zoom: (index.is_some() && *index == self.scheduler.zoom())
-                    .then_some(self.picture_zoom),
-                // A recording keeps its picture through a seek, which reports
-                // the state a live stream reports when it has nothing to show.
-                // Everything the corners say about one comes with it: where it
-                // is being read from, and what the picture is doing - moving,
-                // held, or out of range. See [`grid::Recording`].
-                recording: index.and_then(|slot| self.recording_mark(slot)),
-            };
+            let tile =
+                self.tile_of(
+                    Id::new(("xgview-tile", tag, cell, index.unwrap_or(usize::MAX))),
+                    *index,
+                    cameras,
+                    view.cells.len(),
+                    interactive,
+                    ring,
+                );
             let response = grid::paint(ui, rect, &tile);
             if interactive {
                 if response.clicked() {

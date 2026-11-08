@@ -72,16 +72,15 @@ public class SurfaceActivity extends Activity {
     private static final boolean EXTRA_SURFACES = true;
 
     /**
-     * How tall the bar's own surface is, in pixels.
+     * What the surface over the picture carries.
      *
-     * <p>Deep enough for the deepest bar there is: a recording carries two rows
-     * of controls and a row of times under them - 156 points in all, plus the
-     * 12 it keeps from the screen's edge - and a strip that could not hold that
-     * would have its timeline refused. Nothing is lost by the strip being
-     * deeper than the bar: it is see-through, so the extra height is picture,
-     * and the bar is docked to the screen's edge wherever the strip starts.
+     * <p>Everything the wall would draw over the picture and cannot, because the
+     * picture is on a surface above it: the bar, and the corner display. It is
+     * the whole screen rather than a strip along the bottom because the corners
+     * are the screen's corners; it is see-through, so where it draws nothing the
+     * picture shows, and an empty frame costs nothing at all - the compositor
+     * drops a layer with nothing opaque in it.
      */
-    private static final int BAR_HEIGHT = 360;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -205,9 +204,12 @@ public class SurfaceActivity extends Activity {
             }
         });
         if (EXTRA_SURFACES) {
+            // The whole screen, not a strip along the bottom: it carries the
+            // corner display as well as the bar, and the corners of the picture
+            // are the corners of the screen. See `draw_overlay_only`.
             root.addView(bar, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, BAR_HEIGHT,
-                    android.view.Gravity.BOTTOM));
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
         }
 
         // Last, and outside the view the wall is drawn on: the one pixel the

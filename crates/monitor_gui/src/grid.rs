@@ -422,7 +422,11 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
 }
 
 /// Draws the four corners of a tile's on-screen display.
-fn osd(painter: &egui::Painter, body: Rect, tile: &Tile<'_>) {
+///
+/// Public because the magnified viewport is painted twice: by the wall, which is
+/// under the picture, and by the strip over it. The corners are the same answer
+/// either way, and this is the one place that knows what they say.
+pub(crate) fn osd(painter: &egui::Painter, body: Rect, tile: &Tile<'_>) {
     let ctx = painter.ctx();
     let ppp = ctx.pixels_per_point();
     let screen_min = ctx.screen_rect().size().min_elem() * ppp;

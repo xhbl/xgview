@@ -779,7 +779,7 @@ fn run() -> anyhow::Result<()> {
                         );
                     }
                     let bar_output =
-                        bar_context.run(bar_input, |ctx| app.draw_bar_only(ctx, picture));
+                        bar_context.run(bar_input, |ctx| app.draw_overlay_only(ctx, picture));
                     let bar_jobs =
                         bar_context.tessellate(bar_output.shapes, bar_output.pixels_per_point);
                     let bar_screen = egui_wgpu::ScreenDescriptor {
