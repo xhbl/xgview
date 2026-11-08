@@ -153,10 +153,33 @@ fn run(window: *mut std::ffi::c_void) {
     };
 
     let (width, height) = (WIDTH.load(Ordering::Acquire), HEIGHT.load(Ordering::Acquire));
-    let Some(mut config) = surface.get_default_config(&adapter, width, height) else {
+    let Some(config) = surface.get_default_config(&adapter, width, height) else {
         note(&format!("the surface has no default config at {width}x{height}"));
         return;
     };
+    // The whole question: whether this surface can carry alpha at all, and which
+    // composite mode it would take. A window's surface and a `SurfaceView`'s are
+    // not the same object to the compositor, and only this one is left to ask.
+    let caps = surface.get_capabilities(&adapter);
+    note(&format!(
+        "surface offers alpha={:?} formats={:?}",
+        caps.alpha_modes, caps.formats
+    ));
+    let mut config = wgpu::SurfaceConfiguration {
+        alpha_mode: if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
+            wgpu::CompositeAlphaMode::PreMultiplied
+        } else {
+            caps.alpha_modes[0]
+        },
+        ..config
+    };
+    note(&format!(
+        "using alpha={:?} format={:?}",
+        config.alpha_mode, config.format
+    ));
     surface.configure(&device, &config);
 
     // The whole point: egui's own renderer, on a surface the app owns.
@@ -198,23 +221,37 @@ fn run(window: *mut std::ffi::c_void) {
             ..Default::default()
         };
         let output = context.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.heading("egui on a SurfaceView");
-                ui.label(format!("frame {frames}"));
-                ui.separator();
-                ui.label("Crisp text and a bar that moves mean egui is drawing here.");
-                let (rect, _) = ui
-                    .allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::hover());
-                ui.painter()
-                    .rect_filled(rect, 8.0, egui::Color32::from_rgb(40, 120, 220));
-                let phase = (started.elapsed().as_secs_f32() * 0.8).sin() * 0.5 + 0.5;
-                let bar = egui::Rect::from_min_size(
-                    rect.min,
-                    egui::vec2(rect.width() * phase, rect.height()),
-                );
-                ui.painter()
-                    .rect_filled(bar, 8.0, egui::Color32::from_rgb(240, 200, 60));
-            });
+            // A panel with a fill of its own, in the bottom band: opaque where
+            // it draws, transparent everywhere else. That is the whole
+            // arrangement under test - the block has to be readable over the
+            // picture, and the picture has to be visible around it.
+            egui::TopBottomPanel::bottom("bar")
+                .frame(
+                    egui::Frame::default()
+                        .fill(egui::Color32::from_rgb(24, 26, 32))
+                        .inner_margin(egui::Margin::same(12)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("controls");
+                        ui.label(format!("frame {frames}"));
+                        let phase = (started.elapsed().as_secs_f32() * 0.8).sin() * 0.5 + 0.5;
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(240.0, 40.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter()
+                            .rect_filled(rect, 8.0, egui::Color32::from_rgb(40, 120, 220));
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(
+                                rect.min,
+                                egui::vec2(rect.width() * phase, rect.height()),
+                            ),
+                            8.0,
+                            egui::Color32::from_rgb(240, 200, 60),
+                        );
+                    });
+                });
         });
 
         let jobs = context.tessellate(output.shapes, output.pixels_per_point);
@@ -232,11 +269,14 @@ fn run(window: *mut std::ffi::c_void) {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
+                            // Transparent on purpose: this surface sits over
+                            // the picture, and whatever is not drawn here has
+                            // to let it through.
                             load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.05,
-                                g: 0.05,
-                                b: 0.07,
-                                a: 1.0,
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
                             }),
                             store: wgpu::StoreOp::Store,
                         },

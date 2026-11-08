@@ -155,6 +155,16 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
             android:screenOrientation="userLandscape" />
 
+        <!-- Measurement scaffolding: the window's own surface for the UI and a
+             `SurfaceView` below for the picture - the arrangement every Android
+             video player uses for controls over a picture, and the one thing
+             this app has never been able to do. See `LayerProbeActivity`. -->
+        <activity
+            android:name=".LayerProbeActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
+            android:screenOrientation="userLandscape" />
+
         <!-- The wall on a surface of its own: the first step of moving off
              `NativeActivity`, which is what blocks a video layer underneath.
              See `SurfaceActivity` and `priv/docs/android-surface-plan.md`.

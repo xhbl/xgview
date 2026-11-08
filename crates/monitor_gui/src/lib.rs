@@ -496,11 +496,11 @@ fn init_android_logging() {
 /// own, so the picture is what shows through wherever the wall draws nothing.
 /// Always false in a build without the probe.
 pub fn probe_video_layer_active() -> bool {
-    #[cfg(all(target_os = "android", feature = "probe", feature = "surface"))]
+    #[cfg(target_os = "android")]
     {
         monitor_codec::amediacodec::video_layer_active()
     }
-    #[cfg(not(all(target_os = "android", feature = "probe", feature = "surface")))]
+    #[cfg(not(target_os = "android"))]
     {
         false
     }

@@ -45,7 +45,25 @@ import java.io.OutputStream;
 public class SurfaceActivity extends Activity {
     private static final String TAG = "xgview-surface";
 
+    /**
+     * Whether a decoded picture gets a surface of its own underneath the wall.
+     *
+     * <p>Off, because it does not work yet: the wall's surface has to be
+     * see-through for the picture to show through it, and the compositor will
+     * not do that. wgpu's Vulkan surface offers only {@code Inherit} as a
+     * composite alpha mode, and a {@code SurfaceView} is treated as opaque -
+     * below its window because that is the background, and above it even with
+     * {@code setZOrderOnTop} and an {@code RGBA_8888} format. With the picture
+     * on top of the wall instead, it shows perfectly at 26 fps, which is what
+     * proved the decoder's side of this is sound; the wall's side is what is
+     * missing. See {@code priv/docs/android-surface-plan.md} §10.
+     */
+    private static final boolean VIDEO_SURFACE = false;
+
+    /** The wall, over the picture. */
     private SurfaceView canvas;
+    /** The decoded picture, under the wall. */
+    private SurfaceView video;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -61,7 +79,55 @@ public class SurfaceActivity extends Activity {
         copyLanguagePacks();
 
         final FrameLayout root = new FrameLayout(this);
+
+        // The picture, underneath. A decoded frame is written straight into this
+        // surface and the compositor scans it out, so it never enters the
+        // process - which is the whole reason the wall is not drawn on a
+        // `NativeActivity` any more.
+        video = new SurfaceView(this);
+        // Both surfaces go above the window. A `SurfaceView` below its window is
+        // the background as far as the compositor is concerned, and a background
+        // is opaque - which is why a translucent one under an opaque one shows
+        // nothing. Above the window, translucency is allowed, and the order they
+        // are added in is the order they stack.
+        video.setZOrderOnTop(true);
+        video.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder holder) {
+                if (VIDEO_SURFACE) {
+                    Log.i(TAG, "video surface created");
+                    nativeStartVideo(holder.getSurface());
+                }
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                if (VIDEO_SURFACE) {
+                    nativeStartVideo(holder.getSurface());
+                }
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder holder) {
+                if (VIDEO_SURFACE) {
+                    nativeStopVideo();
+                }
+            }
+        });
+
+        if (VIDEO_SURFACE) {
+            root.addView(video, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+
+        // The wall, over it, and see-through where it draws nothing: that is
+        // how the picture underneath shows. Its own surface is translucent for
+        // the same reason - an opaque one would hide the video behind a black
+        // frame no matter what egui painted.
         canvas = new SurfaceView(this);
+        canvas.setZOrderOnTop(true);
+        canvas.getHolder().setFormat(android.graphics.PixelFormat.RGBA_8888);
         canvas.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
@@ -88,6 +154,7 @@ public class SurfaceActivity extends Activity {
         root.addView(canvas, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
+
         setContentView(root);
 
         hideSystemBars();
@@ -252,4 +319,8 @@ public class SurfaceActivity extends Activity {
             int phase, int id, float x, float y, float force);
 
     private static native void nativeScroll(float dx, float dy);
+
+    private static native void nativeStartVideo(android.view.Surface surface);
+
+    private static native void nativeStopVideo();
 }

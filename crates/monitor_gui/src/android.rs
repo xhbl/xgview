@@ -180,6 +180,29 @@ pub fn install_activity(env: &mut JNIEnv, class: &jni::objects::JClass, activity
     }
 }
 
+/// Asks the compositor for a layer under the given window, and says whether it
+/// came. See `monitor_codec`'s `create_overlay`.
+#[cfg(all(feature = "probe", feature = "surface"))]
+pub fn create_overlay(window: *mut std::ffi::c_void) -> bool {
+    monitor_codec::amediacodec::create_overlay(window)
+}
+
+/// False where there is no probe.
+#[cfg(not(all(feature = "probe", feature = "surface")))]
+pub fn create_overlay(_window: *mut std::ffi::c_void) -> bool {
+    false
+}
+
+/// Hands the decoder the surface a decoded picture is rendered into.
+///
+/// The wall keeps its own surface for the interface; this is the one underneath
+/// it, and a codec given it renders straight into a buffer the compositor scans
+/// out. A null window means the surface went away, and the next session falls
+/// back to whatever it would otherwise use.
+pub fn set_video_surface(window: *mut std::ffi::c_void) {
+    monitor_codec::amediacodec::set_surface_window(window);
+}
+
 /// Records the window insets the activity reported.
 ///
 /// Called from the JNI entry point in `monitor_android`, on the UI thread.

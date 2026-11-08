@@ -299,6 +299,24 @@ fn run() -> anyhow::Result<()> {
     crate::init_android_logging();
     crate::install_panic_hook();
 
+    // Diagnostic: `ASurfaceControl_createFromWindow` answered null for a
+    // `NativeActivity`'s window, which is what stopped a compositor layer from
+    // being used at all. This is an ordinary activity, so the question is worth
+    // asking again - a layer of the compositor's own is the one arrangement
+    // that would let the picture sit under the wall without either of them
+    // having to be see-through. It is asked here rather than in the JNI entry
+    // because the log subscriber is installed just above.
+    #[cfg(all(feature = "probe", feature = "surface"))]
+    {
+        let window = WINDOW.load(Ordering::Acquire);
+        let made = crate::android::create_overlay(window);
+        tracing::info!(
+            target: "xgview",
+            made,
+            "the compositor layer from a SurfaceView window"
+        );
+    }
+
     let Some((internal, external)) = DIRECTORIES.lock().ok().and_then(|d| d.clone()) else {
         anyhow::bail!("the activity never handed its directories over");
     };
@@ -415,7 +433,31 @@ fn run() -> anyhow::Result<()> {
             let Some(fresh_config) = fresh.get_default_config(&adapter, width, height) else {
                 anyhow::bail!("the surface has no default config at {width}x{height}");
             };
+            // The picture is on a surface *under* this one, so this one has to
+            // let it through where nothing is drawn. `Auto` picks opaque when it
+            // can, which would put a black frame over the video however little
+            // egui painted - the alpha mode has to be asked for.
+            let caps = fresh.get_capabilities(&adapter);
+            let fresh_config = wgpu::SurfaceConfiguration {
+                alpha_mode: if caps
+                    .alpha_modes
+                    .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+                {
+                    wgpu::CompositeAlphaMode::PreMultiplied
+                } else {
+                    caps.alpha_modes[0]
+                },
+                ..fresh_config
+            };
             fresh.configure(&device, &fresh_config);
+            tracing::info!(
+                target: "xgview",
+                alpha_mode = ?fresh_config.alpha_mode,
+                supported_alpha = ?caps.alpha_modes,
+                format = ?fresh_config.format,
+                supported_formats = ?caps.formats,
+                "the wall's surface"
+            );
 
             let renderer = egui_wgpu::Renderer::new(&device, fresh_config.format, None, 1, false);
             let render_state = egui_wgpu::RenderState {

@@ -342,6 +342,65 @@ pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeScroll(
     monitor_gui::android_surface::push_scroll(dx, dy);
 }
 
+/// The window's own surface, given to the renderer.
+///
+/// The one arrangement that would let a control bar float over the picture: the
+/// picture is a `SurfaceView` below, the bar is drawn here, and the window is
+/// translucent so the picture shows through where the bar is not. See
+/// `LayerProbeActivity` and `monitor_gui::probe_render`.
+#[cfg(all(target_os = "android", feature = "probe"))]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_LayerProbeActivity_nativeStartUi(
+    env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    surface: jni::objects::JObject,
+) {
+    if surface.is_null() {
+        return;
+    }
+    let window = unsafe { ANativeWindow_fromSurface(env.get_native_interface(), surface.as_raw()) };
+    monitor_gui::probe_render::start(window);
+}
+
+/// The window's surface went away.
+#[cfg(all(target_os = "android", feature = "probe"))]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_LayerProbeActivity_nativeStopUi(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    monitor_gui::probe_render::stop();
+}
+
+/// The surface a decoded picture is rendered into, under the wall.
+///
+/// The codec is configured with this window rather than with an image reader,
+/// so the picture is scanned out by the compositor and never read back. See
+/// `monitor_gui::android::set_video_surface`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStartVideo(
+    env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    surface: jni::objects::JObject,
+) {
+    if surface.is_null() {
+        return;
+    }
+    let window = unsafe { ANativeWindow_fromSurface(env.get_native_interface(), surface.as_raw()) };
+    monitor_gui::android::set_video_surface(window);
+}
+
+/// The picture's surface is gone.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStopVideo(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    monitor_gui::android::set_video_surface(std::ptr::null_mut());
+}
+
 /// A block of a call's capture, handed back by the activity's record thread.
 ///
 /// `samples` is 16 bit mono PCM, `count` how many of it are valid and `rate` the

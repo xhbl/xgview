@@ -282,100 +282,53 @@ extern "C" {
 static OVERLAY_CONTROL: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(ptr::null_mut());
 
-/// The `ANativeWindow` of the activity's probe `SurfaceView`, once it exists.
+/// The `ANativeWindow` the activity gave us for a decoded picture, once it
+/// exists.
 ///
 /// A codec configured with this renders into it and never hands a picture back:
-/// the compositor scans the buffer out. It is the path every Android video
-/// player takes and the reason none of them care which box they run on.
-#[cfg(all(feature = "surface", feature = "probe"))]
+/// the compositor scans the buffer out, and the pixels never enter this process.
+/// That is the path every Android video player takes, and the reason none of
+/// them care which box they run on. The wall keeps its own surface for the
+/// interface, above this one, and leaves the picture's area unpainted.
 static SURFACE_WINDOW: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(ptr::null_mut());
 
-/// Takes the surface the probe's `SurfaceView` renders into, or null when it
-/// went away. See `MainActivity.startOverlaySurface`.
-#[cfg(all(feature = "surface", feature = "probe"))]
+/// Takes the surface a decoded picture is rendered into, or null when it went
+/// away. See `SurfaceActivity` and `monitor_gui::android_surface`.
 pub fn set_surface_window(window: *mut c_void) {
     SURFACE_WINDOW.store(window, std::sync::atomic::Ordering::Release);
     tracing::info!(
         target: "xgview::codec",
         present = !window.is_null(),
-        "the probe's surface came or went"
+        "the surface a picture is rendered into came or went"
     );
 }
 
-/// Whether the probe was asked for the `SurfaceView` path
-/// (`debug.xgview.surface.overlay = 3`).
-#[cfg(all(feature = "surface", feature = "probe"))]
-pub fn overlay_wants_surface() -> bool {
-    probe::number("debug.xgview.surface.overlay", 0) == 3
-}
-
-/// Whether a picture is being scanned out of the activity's surface right now.
+/// Makes a compositor layer under the given window, and says whether it could.
 ///
-/// The wall asks this to know that the one picture it would otherwise draw is
-/// already on the screen - underneath its window, which is why it has to leave
-/// that area unpainted for the compositor to show through.
-#[cfg(all(feature = "surface", feature = "probe"))]
-pub fn video_layer_active() -> bool {
-    !SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire).is_null()
-        && probe::number("debug.xgview.surface.overlay", 0) == 3
-        && probe_translucent()
-}
-
-/// Whether the window has to be see-through for that layer to show
-/// (`debug.xgview.surface.hole = 1`).
-///
-/// Separate from the layer itself so the two can be asked apart: a wall drawn
-/// with an opaque window over a child surface says whether adding a view
-/// disturbs the native drawing at all, and only a see-through window says
-/// whether the compositor lets the picture through.
-#[cfg(all(feature = "surface", feature = "probe"))]
-pub fn probe_translucent() -> bool {
-    probe::number("debug.xgview.surface.hole", 0) == 1
-}
-
-/// Always false where there is no probe: nothing is ever scanned out then.
-#[cfg(not(all(feature = "surface", feature = "probe")))]
-pub fn video_layer_active() -> bool {
-    false
-}
-
-/// Always false where there is no probe: the window stays opaque.
-#[cfg(not(all(feature = "surface", feature = "probe")))]
-pub fn probe_translucent() -> bool {
-    false
-}
-
-/// Remembers the window the overlay layer hangs off, and makes the layer.
-///
-/// Called from `monitor_gui`'s frame loop, on the UI thread - which is where
-/// the window is reachable from and where the framework expects a layer to be
-/// made. Returns whether the layer exists, so the caller can stop asking.
+/// This is the one arrangement that would let a decoded picture sit *under* the
+/// wall without either surface having to be see-through: the layer is the
+/// compositor's, not the view hierarchy's, so nothing has to blend. It answered
+/// null for a `NativeActivity`'s window, which is what stopped it being used;
+/// whether an ordinary activity's window differs is the question this asks.
 #[cfg(all(feature = "surface", feature = "probe"))]
 pub fn create_overlay(window: *mut c_void) -> bool {
-    if !OVERLAY_CONTROL.load(std::sync::atomic::Ordering::Acquire).is_null() {
-        return true;
-    }
     if window.is_null() {
         return false;
     }
-    let width = unsafe { ANativeWindow_getWidth(window as *mut ANativeWindow) };
-    let height = unsafe { ANativeWindow_getHeight(window as *mut ANativeWindow) };
-    let control =
-        unsafe { ASurfaceControl_createFromWindow(window as *mut ANativeWindow, c"xgview".as_ptr()) };
+    let control = unsafe {
+        ASurfaceControl_createFromWindow(window as *mut ANativeWindow, c"xgview".as_ptr())
+    };
     if control.is_null() {
         tracing::warn!(
             target: "xgview::codec",
-            window_width = width,
-            window_height = height,
-            "the probe could not create a compositor layer"
+            "this window offered no compositor layer"
         );
         return false;
     }
     let transaction = unsafe { ASurfaceTransaction_create() };
     unsafe {
-        // SHOW, opaque, above the wall's own window: the wall is not drawing
-        // this picture, so there is nothing to see through.
+        // SHOW, opaque, above the wall's own layer.
         ASurfaceTransaction_setVisibility(transaction, control, 1);
         ASurfaceTransaction_setBufferTransparency(transaction, control, 2);
         ASurfaceTransaction_setZOrder(transaction, control, 1_000_000);
@@ -386,11 +339,37 @@ pub fn create_overlay(window: *mut c_void) -> bool {
     OVERLAY_CONTROL.store(control, std::sync::atomic::Ordering::Release);
     tracing::info!(
         target: "xgview::codec",
-        window_width = width,
-        window_height = height,
-        "the probe made a compositor layer above the wall"
+        "this window offered a compositor layer"
     );
     true
+}
+
+/// Whether there is a surface a picture could be rendered into right now.
+pub fn video_layer_active() -> bool {
+    !SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire).is_null()
+}
+
+/// Whether the probe was asked for its own compositor layer
+/// (`debug.xgview.surface.overlay = 3`).
+///
+/// Superseded: the wall now has a surface of its own to hand a decoder, and this
+/// is what the older probe used before that existed.
+#[cfg(all(feature = "surface", feature = "probe"))]
+pub fn overlay_wants_surface() -> bool {
+    probe::number("debug.xgview.surface.overlay", 0) == 3
+}
+
+/// Whether the probe's window has to be see-through
+/// (`debug.xgview.surface.hole = 1`).
+#[cfg(all(feature = "surface", feature = "probe"))]
+pub fn probe_translucent() -> bool {
+    probe::number("debug.xgview.surface.hole", 0) == 1
+}
+
+/// False where there is no probe.
+#[cfg(not(all(feature = "surface", feature = "probe")))]
+pub fn probe_translucent() -> bool {
+    false
 }
 
 /// How many pictures the decoder's pace is measured over.
@@ -624,6 +603,15 @@ pub struct AMediaCodecDecoder {
     #[cfg_attr(feature = "surface", allow(dead_code))]
     slice_height: u32,
     started: bool,
+    /// Whether this session was configured with a surface to render into - a
+    /// reader's or the activity's own.
+    ///
+    /// It decides how a decoded picture leaves the codec: rendered, and never
+    /// read back, or copied into the planes the renderer uploads. It is a
+    /// property of the session rather than of the build, because the wall runs
+    /// both kinds side by side - nine sub streams on byte buffers and the one
+    /// magnified picture on a surface of its own.
+    on_surface: bool,
     /// Set once an output format this cannot read as NV12 has been reported.
     ///
     /// Byte-buffer mode only: with a surface the codec reports
@@ -790,30 +778,20 @@ impl AMediaCodecDecoder {
         // In surface mode the colour-format is not asked for: the codec renders
         // into the AImageReader's Surface and the format is whatever the reader
         // was created with (`YUV_420_888`), not what `color-format` names.
-        #[cfg(feature = "surface")]
-        let (codec, reader) = {
-            // Mode 3 hands the codec the activity's own `SurfaceView`, so the
-            // picture is scanned out by the compositor and never enters this
-            // process at all. There is no reader in that case - nothing to
-            // acquire, nothing to read.
-            //
-            // Only one session may have it: the view is one surface, and nine
-            // decoders rendering into it would be one picture drawn nine times
-            // over. The grid's sub streams stay on the reader; the magnified
-            // and replayed picture - the one that is worth the trouble - is the
-            // one wide enough to be it.
-            #[cfg(feature = "probe")]
-            let external = if self.overlay_mode == 3
-                && size.is_some_and(|(width, _)| width >= 1280)
-            {
-                SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire) as *mut ANativeWindow
-            } else {
-                ptr::null_mut()
-            };
-            #[cfg(not(feature = "probe"))]
-            let external: *mut ANativeWindow = ptr::null_mut();
-
-            if !external.is_null() {
+        // The activity's own surface, when it has one. A codec given it renders
+        // the picture into a buffer the compositor scans out, and nothing about
+        // those pixels ever reaches this process - which on a box whose decoder
+        // makes its output CPU-visible only at a price is the difference
+        // between a picture at its own rate and one at three quarters of it.
+        //
+        // Only one session may have it: it is one surface, and nine decoders
+        // rendering into it would be one picture drawn nine times over. The
+        // grid's sub streams stay on their own path; the picture wide enough to
+        // be worth the trouble is the magnified one, and a replay.
+        if video_layer_active() && size.is_some_and(|(width, _)| width >= 1280) {
+            let window = SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire)
+                as *mut ANativeWindow;
+            if !window.is_null() {
                 tracing::info!(
                     target: "xgview::codec",
                     "the codec is rendering into the activity's surface"
@@ -823,7 +801,7 @@ impl AMediaCodecDecoder {
                     &csd,
                     size,
                     COLOR_FORMAT_SEMI_PLANAR,
-                    Some(external),
+                    Some(window),
                 ) {
                     Ok(codec) => Ok(codec),
                     Err(err) => {
@@ -832,13 +810,16 @@ impl AMediaCodecDecoder {
                             %err,
                             "the codec would not take a named layout, asking for a flexible one"
                         );
-                        Self::open_session(&mime, &csd, size, COLOR_FORMAT_FLEXIBLE, Some(external))
+                        Self::open_session(&mime, &csd, size, COLOR_FORMAT_FLEXIBLE, Some(window))
                     }
                 };
                 return match opened {
                     Ok(codec) => {
                         self.handle = Some(codec);
                         self.started = true;
+                        // Rendering into the activity's surface: the picture
+                        // leaves the codec as a rendered frame, never as bytes.
+                        self.on_surface = true;
                         if let (Some((width, height)), Some(info)) = (size, self.info.as_mut()) {
                             info.width = width;
                             info.height = height;
@@ -848,7 +829,10 @@ impl AMediaCodecDecoder {
                     Err(err) => Err(err),
                 };
             }
+        }
 
+        #[cfg(feature = "surface")]
+        let (codec, reader) = {
             let (width, height) = size.unwrap_or((0, 0));
             let reader = Self::create_reader(width, height)?;
             let mut window: *mut ANativeWindow = ptr::null_mut();
@@ -897,6 +881,9 @@ impl AMediaCodecDecoder {
         self.handle = Some(codec);
         #[cfg(feature = "surface")]
         {
+            // A reader is a surface too: the codec renders into it, and the
+            // pictures come back as images rather than as byte buffers.
+            self.on_surface = reader.is_some();
             self.reader = reader;
         }
         self.started = true;
@@ -1195,26 +1182,28 @@ impl AMediaCodecDecoder {
                     continue;
                 }
                 index if index >= 0 => {
-                    #[cfg(feature = "surface")]
-                    {
-                        // A surface buffer's `size` is not the picture: some
-                        // devices report zero for every one of them, so it
-                        // cannot be the test. What is not a picture is the
-                        // end-of-stream marker, and that is skipped.
+                    if self.on_surface {
+                        // A codec rendering into a surface hands its picture
+                        // over by rendering it - there is nothing to read back
+                        // here. A surface buffer's `size` is not the picture
+                        // either: some devices report zero for every one of
+                        // them. What is not a picture is the end-of-stream
+                        // marker, and that is skipped.
                         //
-                        // Only when there is a reader to pair the entry up
-                        // with: a codec rendering into the activity's own
-                        // surface hands over no image, and a queue that grew
-                        // for pictures nobody will take is a leak.
+                        // The entry remembered here pairs the flag and the
+                        // moment with the image that will arrive through the
+                        // reader. A codec rendering into the activity's own
+                        // surface hands over no image at all, so nothing is
+                        // remembered for it - a queue that grew for pictures
+                        // nobody will take is a leak.
+                        #[cfg(feature = "surface")]
                         if self.reader.is_some() && info.flags & BUFFER_FLAG_END_OF_STREAM == 0 {
                             self.pending.push_back((
                                 info.presentation_time_us,
                                 info.flags & BUFFER_FLAG_KEY_FRAME != 0,
                             ));
                         }
-                    }
-                    #[cfg(not(feature = "surface"))]
-                    {
+                    } else {
                         if info.size > 0 {
                             #[cfg(feature = "probe")]
                             let known = if self.cache_output {
@@ -1266,14 +1255,11 @@ impl AMediaCodecDecoder {
                         }
                     }
                     // Nothing is rendered in byte-buffer mode, so there is
-                    // nothing to render now. In surface mode the render *is*
-                    // the hand-off: this is the call the box spends 14-20 ms
-                    // in when there is no surface, and the whole point of the
-                    // experiment is what it costs when there is one.
-                    #[cfg(feature = "surface")]
-                    let render = info.flags & BUFFER_FLAG_END_OF_STREAM == 0;
-                    #[cfg(not(feature = "surface"))]
-                    let render = false;
+                    // nothing to render now. A codec given a surface is the
+                    // other way round: the render *is* the hand-off, and this
+                    // is the call the box spends 14-20 ms in when there is no
+                    // surface to render into.
+                    let render = self.on_surface && info.flags & BUFFER_FLAG_END_OF_STREAM == 0;
                     let releasing = Instant::now();
                     unsafe { AMediaCodec_releaseOutputBuffer(codec, index as usize, render) };
                     self.stat_release += releasing.elapsed();
