@@ -48,6 +48,19 @@ const INFO_OUTPUT_FORMAT_CHANGED: isize = -2;
 /// `INFO_TRY_AGAIN_LATER`
 const INFO_TRY_AGAIN_LATER: isize = -1;
 
+/// How a session's colour is laid out in the buffers the codec hands over.
+///
+/// `color-format` names neither: it says `YUV420Flexible`, which both are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// One interleaved plane, one chroma row per two luma rows (NV12).
+    SemiPlanar,
+    /// Two planes of their own, half as wide as the picture (I420).
+    Planar,
+    /// Neither fits the buffer, so nothing is drawn from it.
+    Unknown,
+}
+
 /// `COLOR_FormatYUV420Flexible`: the format a decoder offers when it is given no
 /// surface to render into. What it hands over is NV12 in practice, with the row
 /// pitch and plane height it reports as `stride` and `slice-height`.
@@ -151,6 +164,22 @@ pub struct AMediaCodecDecoder {
     /// and a run of them is what the session's stall detector reads as a frozen
     /// stream. See [`crate::wait`], which is where the growth is decided.
     wait: Duration,
+    /// The `color-format` the codec announced, `None` until it did.
+    colour_format: Option<i32>,
+    /// How this session's colour is laid out, decided on its first picture.
+    ///
+    /// The codec does not change the shape of its output mid-session, and the
+    /// buffers it hands over are not all the same size, so the shape is read
+    /// once from the first one and then trusted: deciding per buffer flips
+    /// between two interpretations as the sizes vary, which is a picture whose
+    /// colour changes from frame to frame.
+    layout: Option<Layout>,
+    /// Whether the geometry of this session's pictures has been logged.
+    ///
+    /// The stride and slice height the codec chose are what the chroma plane's
+    /// offset is computed from, and a picture that is right on one session and
+    /// tinted on the next is a difference in these numbers.
+    geometry_logged: bool,
 }
 
 // Safety: the codec is owned outright by the channel worker that opened it and
@@ -332,6 +361,7 @@ impl AMediaCodecDecoder {
             self.colorspace.range =
                 if range == 1 { ColorRange::Full } else { ColorRange::Limited };
         }
+        self.colour_format = has_colour.then_some(colour_format);
         let nv12 = !has_colour
             || colour_format == COLOR_FORMAT_FLEXIBLE
             || colour_format == COLOR_FORMAT_SEMI_PLANAR;
@@ -395,7 +425,7 @@ impl AMediaCodecDecoder {
     /// describes, which is a picture this cannot cut correctly and is better
     /// dropped than cut in the wrong place.
     fn pack(
-        &self,
+        &mut self,
         buffer: *const u8,
         capacity: usize,
         pts_us: i64,
@@ -421,14 +451,95 @@ impl AMediaCodecDecoder {
             y.get_mut(row * padded..row * padded + width)?.copy_from_slice(source);
         }
 
-        // The interleaved chroma plane follows the luma one, one chroma row per
-        // two luma rows, and the codec's padding sits between them.
+        // Where the colour is, and in which of the two shapes the codec chose.
+        //
+        // `color-format` says `YUV420Flexible` for both of them, so it cannot be
+        // asked: what distinguishes them is the size of the buffer the codec
+        // handed over. Interleaved (NV12) needs the luma plane, its padding and
+        // one chroma row per two luma rows; planar (I420) needs the luma plane
+        // and two chroma planes of half the width each. One here does both, on
+        // the same 640x480 stream, from one session to the next: 491520 bytes
+        // (768 rows, interleaved, chroma at row 512) on one, and 460800 -
+        // exactly 640x480 + 320x240 + 320x240 - on the next. Read as the wrong
+        // one, the picture is sharp and green-magenta striped: the luma where it
+        // should be, and the colour of a picture that is not there.
+        let chroma_stride = width / 2;
         let base = stride * slice_height;
+        let layout = *self.layout.get_or_insert_with(|| {
+            let semi = stride * slice_height + stride * chroma_height;
+            let planar = stride * height + 2 * chroma_stride * chroma_height;
+            if semi <= capacity {
+                Layout::SemiPlanar
+            } else if planar <= capacity {
+                Layout::Planar
+            } else {
+                Layout::Unknown
+            }
+        });
+        if !self.geometry_logged {
+            self.geometry_logged = true;
+            // Chroma is meant to sit near 128 for a low-saturation picture, so
+            // the first bytes at each candidate offset say which of them holds
+            // it: two numbers per offset, both around 128, and it is chroma.
+            let at = |offset: usize| -> [u8; 4] {
+                let mut out = [0u8; 4];
+                if let Some(slice) = data.get(offset..offset + 4) {
+                    out.copy_from_slice(slice);
+                }
+                out
+            };
+            tracing::debug!(
+                target: "xgview::codec",
+                width,
+                height,
+                stride,
+                slice_height,
+                capacity,
+                chroma_base = base,
+                colour_format = ?self.colour_format,
+                at_height = ?at(stride * height),
+                at_slice = ?at(stride * slice_height),
+                "the geometry of a session's pictures"
+            );
+            // One picture out per geometry, for looking at by hand. The grid's
+            // streams only: a 1080p buffer is three megabytes and the fault is
+            // in the small ones.
+            if capacity <= 1_500_000 {
+                crate::dump::dump(width as u32, height as u32, stride as u32, slice_height as u32, data);
+            }
+        }
         let mut uv = vec![0u8; padded * chroma_height];
-        for row in 0..chroma_height {
-            let start = base + row * stride;
-            let source = data.get(start..start + width)?;
-            uv.get_mut(row * padded..row * padded + width)?.copy_from_slice(source);
+        match layout {
+            Layout::SemiPlanar => {
+            // The interleaved plane follows the luma one, one chroma row per two
+            // luma rows, with the codec's padding in between.
+            for row in 0..chroma_height {
+                let start = base + row * stride;
+                let source = data.get(start..start + width)?;
+                uv.get_mut(row * padded..row * padded + width)?.copy_from_slice(source);
+            }
+            }
+            Layout::Planar => {
+            // Two planes of their own, U then V, each half as wide as the
+            // picture, interleaved into the one plane the renderer binds.
+            let u_base = stride * height;
+            let v_base = u_base + chroma_stride * chroma_height;
+            for row in 0..chroma_height {
+                let u_row = data.get(u_base + row * chroma_stride..u_base + (row + 1) * chroma_stride)?;
+                let v_row = data.get(v_base + row * chroma_stride..v_base + (row + 1) * chroma_stride)?;
+                let out = uv.get_mut(row * padded..row * padded + width)?;
+                for column in 0..chroma_stride {
+                    out[column * 2] = u_row[column];
+                    out[column * 2 + 1] = v_row[column];
+                }
+            }
+            }
+            Layout::Unknown => {
+                // Neither shape fits the buffer the codec handed over, which is
+                // a layout this cannot read: the picture is given up rather than
+                // drawn in colours that are not there.
+                return None;
+            }
         }
 
         Some(DecodedFrame {
@@ -478,6 +589,8 @@ impl VideoDecoder for AMediaCodecDecoder {
         // session that blocks is a session that is not reading its socket - see
         // `worker_threads`. See [`Self::wait`].
         self.wait = crate::wait::WAIT_MIN;
+        self.geometry_logged = false;
+        self.layout = None;
         Ok(())
     }
 

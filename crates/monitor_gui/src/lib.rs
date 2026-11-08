@@ -595,7 +595,10 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
     // without a document picker falls back to: it is the one place a transfer
     // can put a configuration and the app can still read it back.
     if let Some(dir) = app.external_data_path() {
-        crate::android::set_external_files(dir);
+        crate::android::set_external_files(dir.clone());
+        // A decoder that cannot make sense of the geometry it is given writes
+        // one picture out here; see `monitor_codec::dump`.
+        monitor_codec::dump::set_dir(dir);
     }
     // The language packs shipped as APK assets are extracted to the
     // configuration directory before `XgViewApp::new` runs, so the catalogue

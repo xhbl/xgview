@@ -6151,3 +6151,48 @@ has to say so rather than leave a still frame sitting there.
 Measured after: one second after the exit, tile 4 shows the main stream's last frame under
 "switching to the sub stream, holding the last main frame"; two seconds later it is the live sub
 stream at 640x480, and the nine tiles read 19-26 fps throughout.
+
+### Open: the decoder's own geometry is not the same twice
+
+A camera with a colour picture (the rest are night-vision grey, where a wrong chroma is invisible)
+shows blocky magenta after a magnification and back - and only sometimes. The numbers say why the
+"sometimes" is there, and not yet what to do about it.
+
+`AMediaCodec` reports where it put the chroma plane as `stride` and `slice-height`. For the same
+640x480 stream, opened twice, one here reports:
+
+    640x480  stride 640  slice-height 512  capacity 491520   chroma at row 512  (picture correct)
+    640x480  stride 640  slice-height 600  capacity 460800   chroma at row 600  (blocky magenta)
+
+The second cannot be followed literally - 600 + 240 chroma rows is 840, and the buffer holds 720 -
+so the chroma offset now falls back to `stride * height` when the reported one leaves no room. That
+turns a read past the end of the buffer (which drops the frame entirely) into a picture, but the
+picture is still tinted, so the layout of those sessions is neither 480 nor 600 as this reads it.
+
+What would settle it is one raw buffer: dump the first frame of a session whose `slice-height` is
+not the padded height, and look for the run of 128s that is the chroma. That is a file and an
+afternoon, not another guess.
+
+### The colour was planar, and the buffer size is what says so
+
+The open question above was answered by the dump, and not by the offset. Two files - one from a
+session whose picture was right, one whose picture was green-magenta striped - decoded by hand:
+
+    491520 bytes  = 768 rows  luma 480, rows 480..511 all zero, chroma at row 512   (interleaved)
+    460800 bytes  = 720 rows  luma 480, then smooth colour all the way down         (planar)
+
+`460800` is exactly `640*480 + 320*240 + 320*240`: luma, then U, then V - **I420**, two planes of
+their own, not one interleaved plane. Decoded as I420 the striped frame comes out clean, and as
+NV12 it comes out striped. The same 640x480 stream, from the same box, one session to the next.
+
+`color-format` is no help: it says `YUV420Flexible` (0x7F420888) for both. What distinguishes them
+is the size of the buffer the codec hands over, so that is what is read - once, on the session's
+first picture, because the buffers are not all the same size and deciding per buffer flips between
+the two readings. A session whose buffer fits neither is given up rather than drawn in colours that
+are not there.
+
+Measured after: a magnification and its exit on the colour camera, twice, both landing on the
+planar session - `slice=600 capacity=460800` - and both with the room's own warm colours.
+
+The dump is kept, `monitor_codec::dump`, one picture per distinct geometry into the app's own
+folder: it is what turned a week of guessing into two files and ten minutes.

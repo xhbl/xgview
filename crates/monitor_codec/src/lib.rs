@@ -31,6 +31,7 @@ pub mod g711;
 #[cfg(feature = "h264")]
 pub mod h264;
 pub mod jpeg;
+pub mod dump;
 pub mod null;
 pub mod sps;
 pub mod wait;

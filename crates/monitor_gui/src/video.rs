@@ -251,7 +251,22 @@ impl VideoRenderer {
         }
 
         if self.channels.get(&index).map_or(true, |channel| channel.size != size) {
+            let from = self.channels.get(&index).map(|channel| channel.size);
+            tracing::debug!(
+                target: "xgview::video",
+                index,
+                from = ?from,
+                to = ?size,
+                "rebuilding the picture's textures"
+            );
             self.rebuild(index, size);
+            tracing::debug!(
+                target: "xgview::video",
+                index,
+                matrix = ?frame.colorspace.matrix,
+                range = ?frame.colorspace.range,
+                "the first picture of a rebuilt texture"
+            );
         }
         let Some(channel) = self.channels.get_mut(&index) else {
             return;
