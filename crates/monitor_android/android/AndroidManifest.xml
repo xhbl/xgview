@@ -143,6 +143,28 @@
             </intent-filter>
         </activity>
 
+        <!-- Measurement scaffolding: two surfaces in one ordinary activity, to
+             answer whether the renderer can draw into a surface the app owns
+             and whether a view above it keeps its place and its keys. Nothing
+             launches it; it is started by hand with `am start`, which is why it
+             is exported. Remove it with the probe. See `ProbeActivity` and
+             `priv/docs/playback-decode-cost.md` §14. -->
+        <activity
+            android:name=".ProbeActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
+            android:screenOrientation="userLandscape" />
+
+        <!-- The wall on a surface of its own: the first step of moving off
+             `NativeActivity`, which is what blocks a video layer underneath.
+             See `SurfaceActivity` and `priv/docs/android-surface-plan.md`.
+             Started by hand for now. -->
+        <activity
+            android:name=".SurfaceActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
+            android:screenOrientation="userLandscape" />
+
         <!-- The wall, landscape. `userLandscape` allows both landscape
              directions and follows the device sensor, while still respecting
              the user's rotation lock; portrait is not allowed either way.

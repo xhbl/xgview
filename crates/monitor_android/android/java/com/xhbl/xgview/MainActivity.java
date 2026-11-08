@@ -17,6 +17,7 @@ import android.content.pm.ResolveInfo;
 import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Insets;
+import android.graphics.PixelFormat;
 import android.graphics.Point;
 import android.hardware.display.DisplayManager;
 import android.media.AudioAttributes;
@@ -41,6 +42,7 @@ import android.text.InputType;
 import android.view.KeyEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
@@ -294,6 +296,13 @@ public class MainActivity extends NativeActivity {
         System.loadLibrary("monitor_android");
         nativeLoaded = true;
         nativeReady();
+        // The probe's video layer is a child view of this window, so its surface
+        // sits *under* the window's own: the wall has to be able to be
+        // see-through where it leaves the picture alone. Set here because the
+        // window's format has to be decided before the surface is created.
+        if (nativeProbeTranslucent()) {
+            getWindow().setFormat(PixelFormat.TRANSLUCENT);
+        }
     }
 
     @Override
@@ -2260,4 +2269,82 @@ public class MainActivity extends NativeActivity {
      * lost. See {@link #onResume}.
      */
     private static native void nativeResumed();
+
+    /**
+     * The probe surface a decoder can render into, or {@code null} when it went
+     * away. See {@link #startOverlaySurface} and
+     * {@code monitor_android}'s matching entry point.
+     */
+    private static native void nativeOverlaySurface(Surface surface);
+
+    /**
+     * Whether this build carries the decoder's compositor probe, whose video
+     * layer needs a see-through window. False in every shipped build.
+     */
+    private static native boolean nativeProbeTranslucent();
+
+    /**
+     * The SurfaceView the decoder's compositor probe draws into, or {@code null}
+     * while there is none. See {@link #startOverlaySurface}.
+     */
+    private SurfaceView probeView;
+
+    /**
+     * Puts a SurfaceView over the wall, for the decoder to render straight into.
+     *
+     * <p>This is how every Android video player shows a picture: the codec writes
+     * into a buffer the compositor scans out, and the pixels never reach this
+     * process. The wall cannot use it - it composites nine tiles itself - but a
+     * magnified or replayed camera can, and on a box whose decoder makes its
+     * output CPU-visible only at a price it is the difference between a picture
+     * at its own rate and one at three quarters of it.
+     *
+     * <p>Measurement scaffolding: it is only called when the decoder's probe is
+     * asked for, it covers the wall while it is up, and it does not yet take the
+     * control bar or the OSD into account.
+     */
+    public static void startOverlaySurface() {
+        final MainActivity self = instance;
+        if (self == null) {
+            return;
+        }
+        // On the activity's own thread: the native side calls this from
+        // `android_main`, which is a thread of its own and has no `Looper` - and
+        // adding a window needs one.
+        self.runOnUiThread(self::showOverlaySurface);
+    }
+
+    private void showOverlaySurface() {
+        if (probeView != null) {
+            return;
+        }
+        final SurfaceView view = new SurfaceView(this);
+        final SurfaceHolder holder = view.getHolder();
+        holder.addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder h) {
+                nativeOverlaySurface(h.getSurface());
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder h, int format, int width, int height) {
+                nativeOverlaySurface(h.getSurface());
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder h) {
+                nativeOverlaySurface(null);
+            }
+        });
+        // A child view of this window, not a window of its own: a panel window
+        // added through the WindowManager takes the activity's input away with
+        // it - measured, the viewer stopped answering keys entirely. As a child
+        // the surface is simply below the window's own, which is exactly the
+        // order wanted: picture underneath, bars and OSD on top of it.
+        view.setZOrderOnTop(false);
+        addContentView(view, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        probeView = view;
+    }
 }

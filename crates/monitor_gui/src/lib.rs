@@ -37,7 +37,11 @@ pub mod instance;
 #[cfg(target_os = "android")]
 pub mod android;
 #[cfg(target_os = "android")]
+pub mod android_surface;
+#[cfg(target_os = "android")]
 pub mod keyboard;
+#[cfg(all(target_os = "android", feature = "probe"))]
+pub mod probe_render;
 pub mod mic;
 pub mod nav;
 pub mod theme;
@@ -331,7 +335,15 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
         monitor_core::APP_DISPLAY_NAME,
         native_options(options.fullscreen),
         Box::new(move |cc| {
-            Ok(Box::new(XgViewApp::new(cc, options, config_path, handle)) as Box<dyn eframe::App>)
+            Ok(Box::new(XgViewApp::new(
+                &cc.egui_ctx,
+                cc.wgpu_render_state
+                    .as_ref()
+                    .expect("eframe is built with the wgpu backend"),
+                options,
+                config_path,
+                handle,
+            )) as Box<dyn eframe::App>)
         }),
     )
     .map_err(|err| {
@@ -474,6 +486,24 @@ fn init_android_logging() {
         .with_max_level(tracing::Level::DEBUG)
         .with_target(true)
         .try_init();
+}
+
+/// Whether the decoder's compositor probe is showing a picture under this
+/// window.
+///
+/// When it is, the wall has to leave that picture's area unpainted: the video
+/// layer is a child view of the window and its surface is below the window's
+/// own, so the picture is what shows through wherever the wall draws nothing.
+/// Always false in a build without the probe.
+pub fn probe_video_layer_active() -> bool {
+    #[cfg(all(target_os = "android", feature = "probe", feature = "surface"))]
+    {
+        monitor_codec::amediacodec::video_layer_active()
+    }
+    #[cfg(not(all(target_os = "android", feature = "probe", feature = "surface")))]
+    {
+        false
+    }
 }
 
 /// The message a panic payload carries, or a stand-in when it carries none.
@@ -756,7 +786,15 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
                         );
                     }
                 }
-                Ok(Box::new(XgViewApp::new(cc, options, config_path, handle))
+                Ok(Box::new(XgViewApp::new(
+                &cc.egui_ctx,
+                cc.wgpu_render_state
+                    .as_ref()
+                    .expect("eframe is built with the wgpu backend"),
+                options,
+                config_path,
+                handle,
+            ))
                     as Box<dyn eframe::App>)
             }),
         )

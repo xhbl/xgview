@@ -74,6 +74,112 @@ pub fn set_window_geometry(width: i32, height: i32) {
     }
 }
 
+/// Hands the decoder's compositor probe the activity's window.
+///
+/// The decoder hangs a compositor layer off that window, and the window is the
+/// one thing only this side can reach. It does not exist when `run_android`
+/// starts - the activity creates its surface later - so this is called from the
+/// frame loop and stops asking as soon as it has one.
+#[cfg(all(feature = "probe", feature = "surface"))]
+pub fn publish_overlay_window() {
+    use std::sync::atomic::AtomicBool;
+    static PUBLISHED: AtomicBool = AtomicBool::new(false);
+    if PUBLISHED.load(Ordering::Relaxed) {
+        return;
+    }
+    // The `SurfaceView` path: the activity puts a surface over the wall and the
+    // decoder renders into it, so the picture is scanned out by the compositor
+    // and never comes back here. Asked for once; the surface arrives later,
+    // through `set_probe_surface`.
+    if monitor_codec::amediacodec::overlay_wants_surface() {
+        PUBLISHED.store(true, Ordering::Relaxed);
+        call_void("startOverlaySurface");
+        return;
+    }
+    let Some(window) = APP.get().and_then(|app| app.native_window()) else {
+        return;
+    };
+    // The layer is made here, on the UI thread, and the decoder only hands it
+    // pictures afterwards. A failure is retried on the next frame: the window
+    // exists before its surface is attached on some boxes.
+    if monitor_codec::amediacodec::create_overlay(window.ptr().as_ptr().cast()) {
+        PUBLISHED.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Hands the decoder the surface the probe's `SurfaceView` renders into.
+///
+/// `ANativeWindow_fromSurface` returns a window this side owns; the codec takes
+/// it as its output, and nothing about the picture ever comes back to this
+/// process. A null surface means the view went away, and the decoder falls back
+/// to whatever the next session opens with.
+#[cfg(all(feature = "probe", feature = "surface"))]
+pub fn set_probe_surface(env: &mut JNIEnv, surface: &jni::objects::JObject) {
+    #[link(name = "android")]
+    extern "C" {
+        fn ANativeWindow_fromSurface(
+            env: *mut jni::sys::JNIEnv,
+            surface: jni::sys::jobject,
+        ) -> *mut std::ffi::c_void;
+    }
+    if surface.is_null() {
+        monitor_codec::amediacodec::set_surface_window(std::ptr::null_mut());
+        return;
+    }
+    let window = unsafe { ANativeWindow_fromSurface(env.get_native_interface(), surface.as_raw()) };
+    monitor_codec::amediacodec::set_surface_window(window);
+}
+
+/// The same, in a build without the probe: the activity's `SurfaceView` is
+/// never asked for, so nothing ever calls this, and a call that did would have
+/// nowhere to put the window.
+#[cfg(not(all(feature = "probe", feature = "surface")))]
+pub fn set_probe_surface(_env: &mut JNIEnv, _surface: &jni::objects::JObject) {}
+
+/// Whether this build's window has to be see-through, which the activity asks
+/// before it creates its surface. See `monitor_codec`'s `probe_translucent`.
+#[cfg(all(feature = "probe", feature = "surface"))]
+pub fn probe_translucent() -> bool {
+    monitor_codec::amediacodec::probe_translucent()
+}
+
+/// False in every build without the probe: the window stays opaque.
+#[cfg(not(all(feature = "probe", feature = "surface")))]
+pub fn probe_translucent() -> bool {
+    false
+}
+
+/// Installs the two things `android-activity` used to install for the wall.
+///
+/// The `NativeActivity` path gets them from `android-activity` before
+/// `android_main` runs: a `GlobalRef` to the activity, which every call back
+/// into Java goes through, and the Android context, which the audio sink's
+/// Oboe backend asks for and which panics the process when it is missing. A
+/// `SurfaceView` path has no `AndroidApp`, so the activity hands both over here.
+pub fn install_activity(env: &mut JNIEnv, class: &jni::objects::JClass, activity: &jni::objects::JObject) {
+    crate::keyboard::java_ready(env, class);
+    let Ok(vm) = env.get_java_vm() else {
+        tracing::warn!(target: "xgview", "no JavaVM; the audio sink will not find its context");
+        return;
+    };
+    // A global reference, leaked on purpose: the context has to outlive this
+    // call, and a local reference would be dead the moment it returned. The
+    // pointer is taken first, then the reference itself is leaked - forgetting
+    // the pointer would do nothing, because a pointer is `Copy`.
+    let Ok(held) = env.new_global_ref(activity) else {
+        tracing::warn!(target: "xgview", "cannot hold the activity; the audio sink has no context");
+        return;
+    };
+    let context = held.as_obj().as_raw() as *mut std::ffi::c_void;
+    std::mem::forget(held);
+    // Safety: both pointers are valid for the life of the process - the VM is
+    // the one this call came through, and the context is the global reference
+    // just made.
+    unsafe {
+        ndk_context::initialize_android_context(vm.get_java_vm_pointer().cast(), context);
+    }
+}
+
 /// Records the window insets the activity reported.
 ///
 /// Called from the JNI entry point in `monitor_android`, on the UI thread.

@@ -117,6 +117,14 @@ pub struct Tile<'a> {
     pub channel: Option<&'a ChannelUi>,
     /// Newest decoded picture of the channel, `None` until the first frame.
     pub video: Option<VideoSurface>,
+    /// The picture of this tile is already on the screen, scanned out of the
+    /// activity's own surface underneath this window - so this tile must leave
+    /// its area unpainted and let the compositor show it.
+    ///
+    /// Only ever true for the one picture the decoder's probe is presenting,
+    /// which is the magnified viewport or a recording. See
+    /// `monitor_gui::probe_video_layer_active`.
+    pub on_video_layer: bool,
     /// Draw the focus ring.
     pub focused: bool,
     /// Accept clicks and drags.
@@ -981,6 +989,14 @@ fn holds_last_picture(state: ConnectionState, recording: bool, has_picture: bool
 /// Paints the newest decoded pictures of a live channel, or a placeholder while
 /// the first one is on its way.
 fn live_canvas(painter: &egui::Painter, rect: Rect, tile: &Tile<'_>, tier: Tier) {
+    // The picture is already on the screen, scanned out of the activity's own
+    // surface under this window: painting the canvas colour here would cover it,
+    // and painting the texture would be the very copy the layer exists to avoid.
+    // What is drawn on top of this tile - its corners, its ring - still goes on
+    // above the picture, which is the point of putting the layer underneath.
+    if tile.on_video_layer {
+        return;
+    }
     painter.rect_filled(rect, CornerRadius::ZERO, theme::CANVAS);
 
     let Some(surface) = tile.video else {

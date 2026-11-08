@@ -1329,8 +1329,17 @@ impl XgViewApp {
         answer
     }
 
+    /// Builds the wall.
+    ///
+    /// It takes the two things it needs from a renderer rather than eframe's
+    /// `CreationContext`: the egui context the interface is drawn in, and the
+    /// wgpu state the pictures are uploaded through. eframe hands both over on
+    /// the desktop; on Android the surface comes from a `SurfaceView` and this
+    /// is the whole of what that path has to reproduce. `eframe::Frame` is not
+    /// used at all.
     pub fn new(
-        cc: &eframe::CreationContext<'_>,
+        egui_ctx: &egui::Context,
+        render_state: &egui_wgpu::RenderState,
         options: RunOptions,
         config_path: PathBuf,
         handle: Handle,
@@ -1364,8 +1373,8 @@ impl XgViewApp {
         }
         monitor_i18n::init(&config.language, &language_dirs);
 
-        theme::install(&cc.egui_ctx);
-        fonts::install_for(&cc.egui_ctx, &monitor_i18n::current_language());
+        theme::install(egui_ctx);
+        fonts::install_for(egui_ctx, &monitor_i18n::current_language());
 
         let autostart = autostart::status();
         if autostart.supported {
@@ -1439,10 +1448,8 @@ impl XgViewApp {
         let (events_tx, events_rx) = unbounded();
         let capabilities = monitor_codec::capabilities();
 
-        // eframe is built with the wgpu backend, so it always offers the render
-        // state the plane uploads go through.
-        let render_state =
-            cc.wgpu_render_state.as_ref().expect("eframe is built with the wgpu backend");
+        // The state the plane uploads go through: eframe's on the desktop, the
+        // one built beside the `SurfaceView`'s surface on Android.
         // The Windows selector falls back to WARP rather than leaving the
         // machine unable to draw (see `select_adapter`), and the wall says so:
         // a frame rate that low would otherwise be taken for the cameras'.
@@ -2140,8 +2147,18 @@ fn clock_field(nav: &mut crate::nav::Nav, ui: &mut egui::Ui, minutes: &mut u16) 
     changed
 }
 
-impl eframe::App for XgViewApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl XgViewApp {
+    /// Draws one frame.
+    ///
+    /// This is the whole of what a frame is, and it is an inherent method rather
+    /// than the `eframe::App` one because two things drive it: eframe on the
+    /// desktop, and - on Android - the loop in `crate::android_surface`, which
+    /// owns a `SurfaceView`'s surface instead of an activity window.
+    pub fn frame(&mut self, ctx: &egui::Context) {
+        // The activity's window does not exist when the process starts, and the
+        // decoder's compositor probe needs it; this asks until it has one.
+        #[cfg(all(target_os = "android", feature = "probe", feature = "surface"))]
+        crate::android::publish_overlay_window();
         let start = self.begin_frame(ctx);
         self.pump_background(ctx);
         self.collect_events(ctx);
@@ -2154,6 +2171,26 @@ impl eframe::App for XgViewApp {
         self.draw_chrome(ctx);
         self.draw_wall(ctx);
         self.end_frame(ctx, start, focus_before);
+    }
+}
+
+impl eframe::App for XgViewApp {
+    /// The colour the frame is cleared to.
+    ///
+    /// Transparent while the probe's video layer is showing: that layer is a
+    /// child view of this window and its surface is *under* the window's own,
+    /// so wherever the wall paints nothing the picture is what shows. Every
+    /// other frame clears to the wall's own background, which is also what a
+    /// window that cannot be see-through falls back to.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if crate::probe_video_layer_active() {
+            return [0.0, 0.0, 0.0, 0.0];
+        }
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.frame(ctx);
     }
 }
 /// What the frame's beginning read and its end will need.
@@ -2909,7 +2946,13 @@ impl XgViewApp {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(theme::BACKGROUND))
+            .frame(egui::Frame::default().fill(if crate::probe_video_layer_active() {
+                // See-through, so the picture scanned out under this window
+                // shows where the wall paints nothing.
+                egui::Color32::TRANSPARENT
+            } else {
+                theme::BACKGROUND
+            }))
             .show(ctx, |ui| {
                 let area = ui.available_rect_before_wrap();
                 self.draw_grid(ui);

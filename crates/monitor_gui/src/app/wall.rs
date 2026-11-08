@@ -152,6 +152,10 @@ impl XgViewApp {
                 // control does not blank the viewport.
                 channel: index.and_then(|index| self.view_channel(index)),
                 video: index.and_then(|index| self.view_texture(index)).map(|entry| entry.surface),
+                // The one picture the decoder's probe is scanning out of the
+                // activity's surface. It is the magnified viewport, which is
+                // the only view with a single cell.
+                on_video_layer: view.cells.len() == 1 && crate::probe_video_layer_active(),
                 // The ring is a cursor, and a wall nobody is operating is just a
                 // picture: it is drawn from the last key or press on and goes
                 // once the wall has been left alone for the shorter of the ring's
@@ -246,15 +250,21 @@ impl XgViewApp {
             return;
         }
 
+        let view = self.current_view(total);
+
         // The wall's own colour is the grid line: the tiles leave one line's
         // width around and between themselves, and it shows through. Drawing
         // it here rather than as a border on each tile is what keeps every line
         // one line wide - two neighbours would otherwise double up in the
         // middle while the outer ring stayed half as thick.
-        ui.painter().rect_filled(area, egui::CornerRadius::ZERO, theme::GRID_LINE);
+        //
+        // Not while the picture is being scanned out under this window: that
+        // fill would be opaque over it. A magnified view has one cell, so the
+        // area being left alone is the picture's own.
+        if !(view.cells.len() == 1 && crate::probe_video_layer_active()) {
+            ui.painter().rect_filled(area, egui::CornerRadius::ZERO, theme::GRID_LINE);
+        }
         let wall = area.shrink(grid::LINE);
-
-        let view = self.current_view(total);
 
         // Where the focused tile is: the arrow that walks off the top of the
         // wall should come down into the bar above that tile rather than at one

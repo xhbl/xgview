@@ -25,3 +25,12 @@ jni = "0.21"
 
 monitor_core = { path = "../monitor_core" }
 monitor_gui = { path = "../monitor_gui" }
+
+[features]
+# Experimental, passed straight through to the decoder: render into an
+# `AImageReader` Surface instead of decoding into byte buffers. See
+# `monitor_gui`'s `surface` and `priv/docs/playback-decode-cost.md`.
+surface = ["monitor_gui/surface"]
+# Measurement knobs for the decoder, off in every shipped build. See
+# `monitor_gui`'s `probe`.
+probe = ["monitor_gui/probe"]
