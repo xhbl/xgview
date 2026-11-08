@@ -394,6 +394,28 @@ public class SurfaceActivity extends Activity {
         return instance;
     }
 
+    /**
+     * Shows or hides the view the picture is scanned out of.
+     *
+     * <p>A {@code SurfaceView} keeps the last frame it was given and is drawn
+     * over the wall, so one left standing after a return to the grid covers it
+     * with a still picture - nine channels decoding underneath, and the screen
+     * showing one frozen one. Nothing can clear the buffer (it is the codec's),
+     * so the view goes away and comes back with the magnified viewport.
+     */
+    public static void setVideoVisible(final boolean visible) {
+        final SurfaceActivity self = instance;
+        if (self == null || self.video == null) {
+            return;
+        }
+        self.runOnUiThread(() -> {
+            final int wanted = visible ? View.VISIBLE : View.GONE;
+            if (self.video.getVisibility() != wanted) {
+                self.video.setVisibility(wanted);
+            }
+        });
+    }
+
     private android.os.PowerManager.WakeLock wakeLock;
 
     // ------------------------------------------------------------ soft keyboard

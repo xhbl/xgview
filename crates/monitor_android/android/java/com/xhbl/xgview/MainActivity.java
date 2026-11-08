@@ -1190,6 +1190,17 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
+     * Shows or hides the view the picture is scanned out of.
+     *
+     * <p>Nothing to do here - the `NativeActivity` has no such view - but the
+     * native side calls it through this class, so it hands it on to the wall
+     * that does have one.
+     */
+    public static void setVideoVisible(final boolean visible) {
+        SurfaceActivity.setVideoVisible(visible);
+    }
+
+    /**
      * Keeps the screen on.
      *
      * <p>A window flag rather than a wake lock, so it goes away with the window

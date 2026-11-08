@@ -203,6 +203,17 @@ pub fn set_video_surface(window: *mut std::ffi::c_void) {
     monitor_codec::amediacodec::set_surface_window(window);
 }
 
+/// Shows or hides the view the picture is scanned out of.
+///
+/// A `SurfaceView` keeps the last frame it was given, and it is drawn over the
+/// wall: left standing when the wall goes back to the grid, it covers it with a
+/// still picture. There is no way to clear one - the buffer is the codec's, not
+/// the app's - so the view goes away instead, and comes back when the magnified
+/// viewport does.
+pub fn set_video_visible(visible: bool) {
+    call_void_bool("setVideoVisible", visible);
+}
+
 /// Records the window insets the activity reported.
 ///
 /// Called from the JNI entry point in `monitor_android`, on the UI thread.

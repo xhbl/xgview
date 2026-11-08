@@ -377,6 +377,10 @@ fn run() -> anyhow::Result<()> {
         None;
     let mut bar_attached: *mut c_void = std::ptr::null_mut();
     let mut last_focus: Option<egui::Id> = None;
+    // Starts hidden: the wall comes up on the grid, and the picture's view has
+    // nothing to show until a viewport is magnified.
+    let mut video_shown = false;
+    crate::android::set_video_visible(false);
 
     // The bar has a screen of its own: a surface is a rectangle, so the only way
     // it can show the bar is for the bar to be all that is drawn in it. Same
@@ -592,6 +596,17 @@ fn run() -> anyhow::Result<()> {
             ..Default::default()
         };
         let output = context.run(input, |ctx| app.frame(ctx));
+
+        // The picture's view is only shown while the wall is showing one
+        // picture full screen. A `SurfaceView` keeps the last frame it was
+        // given and is drawn over the wall, so one left behind after a return
+        // to the grid covers it with a still picture - the wall looks frozen
+        // with the grid's decoders running underneath it.
+        let magnified = app.magnified();
+        if magnified != video_shown {
+            video_shown = magnified;
+            crate::android::set_video_visible(magnified);
+        }
 
         let jobs = context.tessellate(output.shapes, output.pixels_per_point);
         let screen = egui_wgpu::ScreenDescriptor {

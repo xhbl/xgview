@@ -97,6 +97,17 @@ impl XgViewApp {
         }
     }
 
+    /// Whether the wall is showing one picture full screen.
+    ///
+    /// The picture's own surface is only worth having while it is. A
+    /// `SurfaceView` keeps the last frame it was given, and it is drawn over the
+    /// wall: left standing when the grid comes back, it covers the wall with a
+    /// still picture - a wall that has gone back to nine channels and looks
+    /// like one frozen one.
+    pub fn magnified(&self) -> bool {
+        self.scheduler.is_zoomed()
+    }
+
     pub(super) fn magnified_area(
         &self,
         cameras: &[CameraSource],
