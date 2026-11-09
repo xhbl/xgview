@@ -598,13 +598,22 @@ fn run() -> anyhow::Result<()> {
             // at, drawn as a scale of the view - bigger than the box, offset so
             // that the part being looked at is the part in it. The window is in
             // the picture's own coordinates, so where the picture's corner goes
-            // is that window's corner times the box.
+            // is that window's corner times the box **at that scale**: the view
+            // is scaled about its own corner, and a translation given to a
+            // scaled view is added to the scaled drawing, not to the box. Leave
+            // the scale out and the picture is both placed wrong and moves at a
+            // fraction of the finger - `1/scale` of it, which is exactly what a
+            // drag at 4x looked like. See `setVideoZoom`.
             if let Some(box_) = app.picture_rect() {
                 let zoom = app.picture_zoom();
                 let window = zoom.window();
                 let scale = zoom.scale;
-                let dx = (-window.min.x * box_.width() * pixels_per_point).round();
-                let dy = (-window.min.y * box_.height() * pixels_per_point).round();
+                let drawn = egui::vec2(
+                    box_.width() * pixels_per_point,
+                    box_.height() * pixels_per_point,
+                );
+                let dx = (-window.min.x * drawn.x * scale).round();
+                let dy = (-window.min.y * drawn.y * scale).round();
                 let wanted = (scale, dx, dy);
                 if video_zoom != Some(wanted) {
                     video_zoom = Some(wanted);

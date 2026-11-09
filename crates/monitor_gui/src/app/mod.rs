@@ -3176,7 +3176,17 @@ fn wheel_frame(input: &egui::InputState, speed: f32, area: Rect) -> Option<(f32,
 /// drag as one. A gesture made with two fingers is not a drag of its own - the
 /// pointer follows the first of them - and a press that began on a bar belongs to
 /// the bar, which is why where it began is what decides.
+///
+/// The frame the finger lands on is not a movement. `egui` measures a frame's
+/// movement from wherever the pointer was *last seen*, and a touch screen has no
+/// pointer between touches: the position it remembers is the last place a finger
+/// was lifted from. So the first frame of every drag reports the distance between
+/// two unrelated touches - the picture jumped by it, once, the moment a finger
+/// touched down anywhere but where the last one left.
 fn drag_frame(input: &egui::InputState, area: Rect) -> Option<egui::Vec2> {
+    if input.pointer.any_pressed() {
+        return None;
+    }
     let delta = input.pointer.delta();
     if delta == egui::Vec2::ZERO || input.multi_touch().is_some() {
         return None;
@@ -3891,6 +3901,17 @@ mod tests {
         frame(&ctx, vec![button(pos2(640.0, 380.0), false)]);
         frame(&ctx, vec![egui::Event::PointerMoved(pos2(700.0, 380.0))]);
         assert_eq!(read(&ctx), None, "a released pointer drags nothing");
+
+        // A finger landing somewhere else is not travel: egui measures a frame
+        // from the position the pointer was last *seen* at, and between two
+        // touches that is where the last finger left the glass - so the frame a
+        // finger lands on would report the distance between the two, and the
+        // picture jumped by it.
+        frame(&ctx, vec![button(pos2(120.0, 200.0), true)]);
+        assert_eq!(read(&ctx), None, "landing is not dragging, however far away it landed");
+        frame(&ctx, vec![egui::Event::PointerMoved(pos2(130.0, 200.0))]);
+        assert_eq!(read(&ctx), Some(vec2(10.0, 0.0)), "and the drag starts from where it landed");
+        frame(&ctx, vec![button(pos2(130.0, 200.0), false)]);
 
         // A press that began on a bar, and moved over the wall, is the bar's.
         frame(&ctx, vec![button(pos2(640.0, 10.0), true)]);
