@@ -10,13 +10,17 @@
 //!   14-20 ms per 1080p frame inside `releaseOutputBuffer` alone — see
 //!   `priv/docs/playback-decode-cost.md`.
 //!
-//! - **Surface mode** (`surface` feature): the codec is configured with an
-//!   `AImageReader`'s `ANativeWindow`, and decoded pictures are acquired as
-//!   `AImage` objects through `AImageReader_acquireNextImage`. The image's Y/U/V
-//!   planes are read with `AImage_getPlaneData` and interleaved into the same
-//!   NV12 planes. This is the path the box's own player uses, and the
-//!   experiment is to measure whether the 14-20 ms disappears when the codec
-//!   does not have to make its output CPU-visible.
+//! - **The activity's surface**: when the session has a window to render into,
+//!   the codec is configured with it and `releaseOutputBuffer` hands the picture
+//!   to the compositor. Nothing comes back through this process, which is what
+//!   makes a 1080p picture cost a millisecond a frame instead of fifty. See
+//!   `set_surface_window` and `SurfaceActivity`.
+//!
+//! A third mode once existed - an `AImageReader`'s window, with the pictures
+//! acquired as `AImage` objects - and it was removed: on a SHIELD its buffers
+//! cannot be locked for CPU access at all, and reading a picture back costs the
+//! same from a reader as from the codec's own buffer. The measurements that
+//! argued for it are in `priv/docs/playback-decode-cost.md`.
 //!
 //! The surface path was tried once before and abandoned — it aborted on a
 //! SHIELD (NVIDIA) within seconds when the process also drove a wgpu surface,
@@ -170,9 +174,9 @@ const PACE_FRAMES: u32 = 60;
 
 /// `AMediaCodec` decoder.
 ///
-/// In byte-buffer mode (the default) it reads pictures back through
-/// `AMediaCodec_getOutputBuffer`. In surface mode (`surface` feature) it reads
-/// them through `AImageReader_acquireNextImage` + `AImage_getPlaneData`.
+/// It reads pictures back through `AMediaCodec_getOutputBuffer`, unless the
+/// session was given the activity's surface - then there is nothing to read and
+/// nothing comes back.
 #[derive(Debug, Default)]
 pub struct AMediaCodecDecoder {
     /// The codec, alive from the first access unit to the end of the session.
@@ -199,9 +203,9 @@ pub struct AMediaCodecDecoder {
     /// Row pitch of a plane, and the number of rows the luma plane occupies.
     /// Both are the codec's to choose and are padding, not geometry.
     ///
-    /// Byte-buffer mode only: a picture handed over as a buffer has the codec's
-    /// padding around it, and these are what it is stripped with. An `AImage`
-    /// carries its own row stride per plane, so surface mode never reads them.
+    /// What the codec's own padding is stripped with, on the one path that has
+    /// a buffer to strip: a picture handed over as bytes has the codec's padding
+    /// around it, and a picture rendered into a surface never comes here.
     stride: u32,
     slice_height: u32,
     started: bool,
@@ -274,28 +278,6 @@ pub struct AMediaCodecDecoder {
     stat_queue: Duration,
     stat_drain: Duration,
     stat_release: Duration,
-    /// Time spent in `AImageReader_acquireNextImage` (surface mode only).
-    /// Reported beside `release_ms` so the two paths can be compared.
-    stat_acquire: Duration,
-    /// Time spent asking an `AImage` for its planes - the three
-    /// `AImage_getPlaneData` calls and the strides that come with them.
-    ///
-    /// Separate from the copy below because the two say different things: this
-    /// one is the framework's price for making the buffer readable, and the
-    /// copy is the price of the memory itself.
-    stat_plane: Duration,
-    /// Time spent in `AImage_getTimestamp` alone.
-    ///
-    /// It is not a field read: the framework may wait here for the picture to
-    /// be finished with, and on the box this was measured on it was where a
-    /// 1080p picture's time went.
-    stat_stamp: Duration,
-    /// Time spent copying the planes out of the image (surface mode only).
-    stat_copy: Duration,
-    /// Time spent reading planes out of an `AImage` (surface mode only).
-    /// Reported beside `pack_ms` for the same reason, and is the sum of the
-    /// two above.
-    stat_image: Duration,
     stat_total: Duration,
     stat_frames: u32,
     stat_packed: u32,
@@ -314,11 +296,9 @@ impl AMediaCodecDecoder {
 
     /// Opens the codec session.
     ///
-    /// In byte-buffer mode the codec is given no surface, so it hands every
-    /// decoded picture back as a byte buffer. In surface mode (`surface`
-    /// feature) an `AImageReader` is created and its `ANativeWindow` is passed
-    /// to the codec, so decoded pictures are rendered into the reader's buffers
-    /// and acquired as `AImage` objects.
+    /// With no window the codec hands every decoded picture back as a byte
+    /// buffer. With one - the activity's surface - it renders the picture into
+    /// it and hands nothing back at all.
     ///
     /// `access_unit` is the first one to reach the decoder, and it is what
     /// carries the parameter sets.
@@ -352,9 +332,8 @@ impl AMediaCodecDecoder {
         // 44-57 ms a 1080p picture either way - so the one that decides the
         // colour is the one to ask for. See `priv/docs/playback-decode-cost.md`.
         //
-        // In surface mode the colour-format is not asked for: the codec renders
-        // into the AImageReader's Surface and the format is whatever the reader
-        // was created with (`YUV_420_888`), not what `color-format` names.
+        // A codec given a surface is not asked: the format names the layout of
+        // memory this side reads, and a picture that never comes back has none.
         // The activity's own surface, when it has one. A codec given it renders
         // the picture into a buffer the compositor scans out, and nothing about
         // those pixels ever reaches this process - which on a box whose decoder
@@ -621,9 +600,9 @@ impl AMediaCodecDecoder {
     ///
     /// Every buffer has to be taken and given back: a buffer the codec hands out
     /// is not returned until it is released, and there are only a handful of
-    /// them. That is true in both modes - what differs is what the release does
-    /// with the picture. In byte-buffer mode it is thrown away after the copy;
-    /// in surface mode `render = true` is what pushes it into the image reader.
+    /// them. What the release does with the picture is the one thing that
+    /// differs: a byte buffer is thrown away after the copy, and a picture on
+    /// the activity's surface is `render = true` - the release *is* the hand-off.
     fn drain(&mut self, frames: &mut Vec<DecodedFrame>) {
         let Some(codec) = self.handle else {
             return;
@@ -958,11 +937,6 @@ impl VideoDecoder for AMediaCodecDecoder {
                 queue_ms = self.stat_queue.as_millis() as u64,
                 drain_ms = self.stat_drain.as_millis() as u64,
                 release_ms = self.stat_release.as_millis() as u64,
-                acquire_ms = self.stat_acquire.as_millis() as u64,
-                image_ms = self.stat_image.as_millis() as u64,
-                stamp_ms = self.stat_stamp.as_millis() as u64,
-                plane_ms = self.stat_plane.as_millis() as u64,
-                copy_ms = self.stat_copy.as_millis() as u64,
                 pictures = self.pictures,
                 total_ms = self.stat_total.as_millis() as u64,
                 "the decoder's pace"
@@ -974,11 +948,6 @@ impl VideoDecoder for AMediaCodecDecoder {
             self.stat_queue = Duration::ZERO;
             self.stat_drain = Duration::ZERO;
             self.stat_release = Duration::ZERO;
-            self.stat_acquire = Duration::ZERO;
-            self.stat_plane = Duration::ZERO;
-            self.stat_stamp = Duration::ZERO;
-            self.stat_copy = Duration::ZERO;
-            self.stat_image = Duration::ZERO;
             self.stat_total = Duration::ZERO;
             self.stat_frames = 0;
             self.stat_packed = 0;
