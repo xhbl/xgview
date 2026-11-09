@@ -209,7 +209,10 @@ pub(super) async fn run_channel(
             resume_at(
                 endpoint.is_recording(),
                 frames.published(index) > published,
-                frames.latest(index).and_then(|frame| frame.at),
+                // The moment, not the frame's moment: a recording that played
+                // into a surface has no frame to read one from, and resuming
+                // without it replays the range from its first fragment.
+                frames.moment(index),
             )
         } else {
             None

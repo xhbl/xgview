@@ -412,12 +412,20 @@ pub(super) async fn run_ws_session(
             }
 
             if let Some(dec) = decoder.as_mut() {
+                // Counted around the call: a decoder given a surface keeps its
+                // pictures, and a picture that went there is one the viewer is
+                // watching. See `FrameStore::note_picture`.
+                let pictures_before = dec.pictures();
                 match dec.decode(&sample.data, sample.pts_us, sample.keyframe) {
                     Ok(decoded) => {
                         window.counters.decoded += decoded.len() as u64;
-                        if let Some((w, h)) = publish_frames(frames, index, &mut sequence, decoded, None) {
+                        let published = publish_frames(frames, index, &mut sequence, decoded, None);
+                        if let Some((w, h)) = published {
                             width = Some(w);
                             height = Some(h);
+                        }
+                        if published.is_none() && dec.pictures() != pictures_before {
+                            frames.note_picture(index, None);
                         }
                     }
                     Err(err) => {

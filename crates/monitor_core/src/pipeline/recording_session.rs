@@ -560,7 +560,7 @@ pub(super) async fn run_recording_session(
                                     // see, and the timeline still has to follow
                                     // it.
                                     if produced && published.is_none() {
-                                        frames.note_moment(index, at);
+                                        frames.note_picture(index, Some(at));
                                     }
                                     // The landing frame is the one the seek is
                                     // owed, and a hardware decoder hands it over

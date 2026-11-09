@@ -276,11 +276,23 @@ impl FrameStore {
         }
     }
 
-    /// Records the moment a picture is of, for a session whose pictures never
-    /// come back as frames. See [`ChannelFrames::moment`].
-    pub fn note_moment(&self, index: usize, at: f64) {
+    /// Records a picture that went somewhere this side cannot see.
+    ///
+    /// A decoder given a surface renders into it and hands nothing back, so
+    /// there is no frame to publish and no pixels to draw - but the picture is
+    /// on screen, and everything that asks "did this session show anything" is
+    /// answered by counting pictures. `published` is that count, and it is the
+    /// same one `publish` raises: a session that worked is a session that
+    /// worked, whichever way its pictures left.
+    ///
+    /// `at` is the moment the picture is of, where the stream has one.
+    pub fn note_picture(&self, index: usize, at: Option<f64>) {
         if let Ok(mut channels) = self.channels.lock() {
-            channels.entry(index).or_default().moment = Some(at);
+            let entry = channels.entry(index).or_default();
+            if at.is_some() {
+                entry.moment = at;
+            }
+            entry.published += 1;
         }
     }
 

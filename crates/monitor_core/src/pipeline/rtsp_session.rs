@@ -1382,17 +1382,25 @@ impl<'a> RtspSession<'a> {
                         }
                     }
                     self.window.counters.decoded += decoded.len() as u64;
-                    if let Some((picture_width, picture_height)) =
-                        publish_frames(
-                            self.sinks.frames,
-                            self.index,
-                            &mut self.sequence,
-                            decoded,
-                            None,
-                        )
-                    {
+                    let published = publish_frames(
+                        self.sinks.frames,
+                        self.index,
+                        &mut self.sequence,
+                        decoded,
+                        None,
+                    );
+                    if let Some((picture_width, picture_height)) = published {
                         self.width = Some(picture_width);
                         self.height = Some(picture_height);
+                    }
+                    // A picture that went to the surface has no frame to
+                    // publish, and it is on screen all the same: counted here,
+                    // or a session that works looks to the channel like one
+                    // that never came up - the mse address is tried, the backoff
+                    // is not reset, and the health line says `pictures=0` about
+                    // a picture the viewer is watching.
+                    if published.is_none() && decoder.pictures() != pictures_before {
+                        self.sinks.frames.note_picture(self.index, None);
                     }
                 }
                 // One damaged picture is not worth a new session:
