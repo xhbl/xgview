@@ -59,6 +59,8 @@ public class SurfaceActivity extends Activity {
     private SurfaceView video;
     /** The controls, over the picture. */
     private SurfaceView bar;
+    /** Whether the picture's view is on screen; see {@link #setVideoVisible}. */
+    private boolean videoShown = true;
 
     /**
      * Whether the picture and the bar get surfaces of their own.
@@ -426,11 +428,63 @@ public class SurfaceActivity extends Activity {
             // rebuilds every layer above it - which is how the bar stopped being
             // drawn after a return to the grid. A translation leaves the surface
             // alive and only takes it off the screen.
-            final int height = self.video.getHeight() > 0
-                    ? self.video.getHeight()
-                    : self.getResources().getDisplayMetrics().heightPixels;
-            self.video.setTranslationY(visible ? 0f : -height);
+            self.videoShown = visible;
+            self.applyVideoPlacement();
         });
+    }
+
+    /**
+     * Places the view the picture is scanned out of, in physical pixels.
+     *
+     * <p>Full screen until this says otherwise: a codec rendering into a
+     * full-screen surface stretches its picture into the screen's shape, so the
+     * fit switch used to change the wall's mind about where the picture is and
+     * nothing on the screen. The rectangle is where the wall would have drawn
+     * the picture itself, and it arrives already rounded.
+     *
+     * <p>The layout is moved rather than the picture scaled, for this step: a
+     * relayout resizes the surface the codec renders into, which is a thing to
+     * do when the picture's shape changes and not while a pinch is moving.
+     */
+    public static void setVideoRect(final float x, final float y, final float width, final float height) {
+        final SurfaceActivity self = instance;
+        if (self == null || self.video == null) {
+            return;
+        }
+        final int left = Math.round(x);
+        final int top = Math.round(y);
+        final int w = Math.round(width);
+        final int h = Math.round(height);
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        self.runOnUiThread(() -> {
+            final FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(w, h);
+            params.setMargins(left, top, 0, 0);
+            self.video.setLayoutParams(params);
+            self.applyVideoPlacement();
+        });
+    }
+
+    /**
+     * Puts the picture's view where the rectangle it was last given says, or out
+     * of the way when it is hidden.
+     *
+     * <p>The distance it is moved by is its own top plus its own height, not its
+     * height alone: a letterboxed picture does not start at the top of the
+     * screen, and moving it up by its height would leave the bottom of it
+     * showing in the band above the grid.
+     */
+    private void applyVideoPlacement() {
+        if (video == null) {
+            return;
+        }
+        final ViewGroup.LayoutParams raw = video.getLayoutParams();
+        final int height = raw != null && raw.height > 0 ? raw.height : video.getHeight();
+        final int top = raw instanceof FrameLayout.LayoutParams
+                ? ((FrameLayout.LayoutParams) raw).topMargin
+                : 0;
+        video.setTranslationY(videoShown ? 0f : -(top + height));
     }
 
     private android.os.PowerManager.WakeLock wakeLock;

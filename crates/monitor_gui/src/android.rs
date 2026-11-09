@@ -158,6 +158,43 @@ pub fn set_video_visible(visible: bool) {
     call_void_bool("setVideoVisible", visible);
 }
 
+/// Places the view the picture is scanned out of, in physical pixels.
+///
+/// The view is a full-screen `SurfaceView` until this says otherwise, and a
+/// codec rendering into a full-screen surface stretches its picture into the
+/// screen's shape: the fit switch changed the wall's idea of where the picture
+/// is and nothing on the screen. This is that idea, made real - the box
+/// `XgViewApp::picture_rect` gives, which is where the wall would have drawn
+/// the picture itself.
+///
+/// Only the box travels here; what the picture shows inside it does not. A
+/// window a pinch pushes in is a crop of the picture, and moving in and out of
+/// it will be a scale of this view - not another box, because a relayout
+/// resizes the surface the codec is rendering into.
+pub fn set_video_rect(x: f32, y: f32, width: f32, height: f32) {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return;
+    };
+    let called = env.call_static_method(
+        class,
+        "setVideoRect",
+        "(FFFF)V",
+        &[
+            JValue::Float(x),
+            JValue::Float(y),
+            JValue::Float(width),
+            JValue::Float(height),
+        ],
+    );
+    if let Err(error) = called {
+        tracing::warn!(target: "xgview", %error, "the picture's rectangle was refused");
+        env.exception_describe().ok();
+    }
+    // Cleared, as everywhere else here: an exception left pending aborts the
+    // process on the next JNI call.
+    clear_exception(&mut env);
+}
+
 /// Records the window insets the activity reported.
 ///
 /// Called from the JNI entry point in `monitor_android`, on the UI thread.

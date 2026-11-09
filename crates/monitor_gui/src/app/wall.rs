@@ -124,9 +124,45 @@ impl XgViewApp {
         self.magnified() && crate::picture_on_its_own_surface()
     }
 
+    /// The rectangle the magnified picture occupies, in wall points, while a
+    /// surface of its own is showing it.
+    ///
+    /// `None` when the wall draws the picture itself - on every platform that
+    /// has no such surface, and on this one when the decode fell back to
+    /// buffers. The caller that places the other view reads this; nothing on
+    /// the wall's own side does.
+    pub fn picture_rect(&self) -> Option<egui::Rect> {
+        self.picture_rect
+    }
+
     /// Whether the magnified viewport's bar is up.
     pub fn bar_open(&self) -> bool {
         self.tile_bar.is_open()
+    }
+
+    /// The shape of the picture being magnified.
+    ///
+    /// From the last frame uploaded, which is the picture, while the wall draws
+    /// it. While a surface of its own scans it out **no frame is uploaded at
+    /// all**, so the last one belongs to whatever was decoded before the
+    /// magnification - the sub stream of a channel that has just switched to its
+    /// main one, say - and the box the picture is given would be that stream's
+    /// shape. What the session reports it is decoding is the answer there, and it
+    /// is not the texture's: `ChannelUi` is fed by the stream's own statistics.
+    fn picture_size(&self, index: usize) -> Option<egui::Vec2> {
+        if crate::picture_on_its_own_surface() {
+            if let Some(size) = self.channels.get(&index).and_then(|channel| {
+                match (channel.width, channel.height) {
+                    (Some(width), Some(height)) if width > 0 && height > 0 => {
+                        Some(vec2(width as f32, height as f32))
+                    }
+                    _ => None,
+                }
+            }) {
+                return Some(size);
+            }
+        }
+        self.view_texture(index).map(|entry| entry.surface.size)
     }
 
     pub(super) fn magnified_area(
@@ -140,7 +176,7 @@ impl XgViewApp {
         let cell = view.cells.iter().position(|slot| *slot == Some(index))?;
         let rect = grid::tile_rect(wall.translate(vec2(dx, 0.0)), view.layout, cell, grid::LINE);
         let camera = cameras.get(index)?;
-        let size = self.view_texture(index)?.surface.size;
+        let size = self.picture_size(index)?;
         let aspect = self.tile_aspect(camera);
         // Upright, the magnified picture is the one that may be drawn sideways -
         // the same answer the tile is drawn with. See `paint_view`.
@@ -463,6 +499,19 @@ impl XgViewApp {
         if self.picture_on_layer() {
             self.picture_zoom = PictureZoom::FULL;
         }
+        // The box the picture occupies on the screen, for the view that is
+        // showing it. Where a tile's picture lands inside its cell is the fit
+        // switch's answer, and a surface of its own has to be given the same
+        // one: left full screen, the picture is stretched into a screen its
+        // stream never had, and the switch changes nothing on it.
+        //
+        // This is the *box*, not what the box shows: a window a pinch pushes
+        // in is a crop of it, applied to the view as a scale of this rectangle
+        // rather than as another rectangle. See `picture_zoom`.
+        self.picture_rect = match self.picture_on_layer() {
+            true => self.magnified_area(&cameras, &view, wall, dx),
+            false => None,
+        };
         let pinched = match self.picture_on_layer() {
             true => None,
             false => ui.ctx().input(|input| pinch_frame(input, area)),

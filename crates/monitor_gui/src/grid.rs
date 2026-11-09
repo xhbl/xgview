@@ -413,7 +413,17 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
     // over whatever the state left on the tile, so that a stream that failed
     // still says which camera it is. When the picture is turned sideways the
     // OSD corners trade places, but the text still lives on the whole tile.
-    osd(&painter, body, tile);
+    //
+    // Not while the picture is scanned out of a surface of its own: those
+    // corners are this wall's, drawn where the *tile* is, and the picture is
+    // narrower than the tile as soon as it is not stretched. The wall is under
+    // the picture, so the copy used to be covered by it and never seen - with
+    // the picture fitted it shows in the bands, twice over, beside the copy the
+    // overlay draws in the picture's own corners. See `draw_overlay_only`,
+    // which is that copy.
+    if !tile.on_video_layer {
+        osd(&painter, body, tile);
+    }
 
     if tile.focused {
         ring(&painter, rect);

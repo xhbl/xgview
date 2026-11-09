@@ -1203,6 +1203,17 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
+     * Places the view the picture is scanned out of.
+     *
+     * <p>Handed on for the same reason {@link #setVideoVisible} is - the calls
+     * the native side makes are this class's, whether or not this front end has
+     * the view they act on.
+     */
+    public static void setVideoRect(final float x, final float y, final float width, final float height) {
+        SurfaceActivity.setVideoRect(x, y, width, height);
+    }
+
+    /**
      * Keeps the screen on.
      *
      * <p>A window flag rather than a wake lock, so it goes away with the window

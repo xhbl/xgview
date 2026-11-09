@@ -311,6 +311,12 @@ fn run() -> anyhow::Result<()> {
     // Starts hidden: the wall comes up on the grid, and the picture's view has
     // nothing to show until a viewport is magnified.
     let mut video_shown = false;
+    // The rectangle the picture's view was last given, in physical pixels. A
+    // relayout is not free - it resizes the surface the codec renders into - so
+    // the rectangle is only sent when the wall's answer changes, and forgotten
+    // when the view goes away so that the first frame of the next magnification
+    // sends it again.
+    let mut video_rect: Option<(f32, f32, f32, f32)> = None;
     crate::android::set_video_visible(false);
 
     // The bar has a screen of its own: a surface is a rectangle, so the only way
@@ -555,6 +561,34 @@ fn run() -> anyhow::Result<()> {
             video_shown = on_layer;
             tracing::info!(target: "xgview", visible = on_layer, "the picture's view");
             crate::android::set_video_visible(on_layer);
+            // Shown again, the view is placed again: the rectangle it was left
+            // at belongs to whatever was magnified then, which may have been
+            // another camera with another shape.
+            video_rect = None;
+        }
+        // Where the picture is. The view the codec renders into is full screen
+        // until it is told otherwise, and a full-screen surface stretches the
+        // picture into the screen's shape - which is why the fit switch used to
+        // change the wall's mind and nothing on the screen. Rounded to a pixel,
+        // and sent only when the answer changes: this resizes the surface the
+        // codec is drawing into, which is not something to do every frame.
+        if on_layer {
+            if let Some(rect) = app.picture_rect() {
+                let left = (rect.min.x * pixels_per_point).round();
+                let top = (rect.min.y * pixels_per_point).round();
+                let right = (rect.max.x * pixels_per_point).round();
+                let bottom = (rect.max.y * pixels_per_point).round();
+                let wanted = (left, top, right, bottom);
+                if video_rect != Some(wanted) {
+                    video_rect = Some(wanted);
+                    tracing::info!(
+                        target: "xgview",
+                        rect = ?wanted,
+                        "the picture's rectangle"
+                    );
+                    crate::android::set_video_rect(left, top, right - left, bottom - top);
+                }
+            }
         }
 
         let jobs = context.tessellate(output.shapes, output.pixels_per_point);
@@ -736,13 +770,20 @@ fn run() -> anyhow::Result<()> {
                     // against it, which is where the wall lays it out too - so
                     // what is drawn here is in the place the wall's copy takes
                     // presses.
+                    //
+                    // The *screen*, not the picture the fit switch leaves inside
+                    // it: the corners and the bar are laid out against the tile,
+                    // here and in the wall's own copy, and the wall is what reads
+                    // the presses. Laid out against a letterboxed picture, the bar
+                    // would be drawn where no press could reach it.
                     let screen_w = WIDTH.load(Ordering::Acquire) as f32 / pixels_per_point;
                     let screen_h = HEIGHT.load(Ordering::Acquire) as f32 / pixels_per_point;
                     let strip_h = bar_config.height as f32 / pixels_per_point;
                     let picture = egui::Rect::from_min_size(
-                        egui::Pos2::new(0.0, strip_h - screen_h),
+                        egui::Pos2::ZERO,
                         egui::vec2(screen_w, screen_h),
-                    );
+                    )
+                    .translate(egui::vec2(0.0, strip_h - screen_h));
                     let open = app.bar_open();
                     if open != bar_open {
                         bar_open = open;

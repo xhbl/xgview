@@ -1101,6 +1101,18 @@ pub struct XgViewApp {
     /// channel, or the way back to the grid - because a window is a part of one
     /// picture and means nothing on the next. See [`PictureZoom`].
     picture_zoom: PictureZoom,
+    /// Where the magnified picture is drawn, in wall points, while a surface of
+    /// its own is showing it - the rectangle the wall leaves to the picture's
+    /// view.
+    ///
+    /// `None` whenever the wall draws the picture itself, which is every frame
+    /// on a platform without that surface: there is no other view to place.
+    /// Recomputed in `draw_grid` from the same answers the tile is drawn with,
+    /// so that the two cannot disagree about where the picture is - it is what
+    /// the fit switch changes. The corners and the bar are laid out against the
+    /// tile, not against this: they belong to the wall's frame, and the wall is
+    /// what reads the presses on them.
+    picture_rect: Option<egui::Rect>,
     /// When the magnification that is up lets the rest of the page go, or
     /// `None` when nothing is magnified.
     ///
@@ -1554,6 +1566,7 @@ impl XgViewApp {
             tap_multi: false,
             tap_open_at: None,
             picture_zoom: PictureZoom::FULL,
+            picture_rect: None,
             zoom_park_at: None,
             tile_bar: tilebar::Bar::new(),
             sound_on,
