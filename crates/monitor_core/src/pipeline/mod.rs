@@ -238,6 +238,14 @@ struct ChannelFrames {
     /// cannot answer the question a reconnecting channel asks: whether the
     /// session that has just ended put anything on screen at all.
     published: u64,
+    /// The moment the newest picture is of, in seconds since the epoch.
+    ///
+    /// Kept apart from the picture because the two do not always arrive
+    /// together: a decoder given a surface renders the picture where nothing
+    /// here can reach it, and only the moment comes back. The timeline follows
+    /// the picture, so without this it would sit at the moment a recording was
+    /// opened for as long as it played.
+    moment: Option<f64>,
 }
 
 impl FrameStore {
@@ -260,9 +268,25 @@ impl FrameStore {
                     );
                 }
             }
+            if frame.at.is_some() {
+                entry.moment = frame.at;
+            }
             entry.newest = Some(frame);
             entry.published += 1;
         }
+    }
+
+    /// Records the moment a picture is of, for a session whose pictures never
+    /// come back as frames. See [`ChannelFrames::moment`].
+    pub fn note_moment(&self, index: usize, at: f64) {
+        if let Ok(mut channels) = self.channels.lock() {
+            channels.entry(index).or_default().moment = Some(at);
+        }
+    }
+
+    /// The moment the newest picture is of, whether or not it could be drawn.
+    pub fn moment(&self, index: usize) -> Option<f64> {
+        self.channels.lock().ok()?.get(&index)?.moment
     }
 
     /// Newest picture of a channel, `None` until the first one is decoded.

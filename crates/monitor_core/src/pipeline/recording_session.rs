@@ -524,12 +524,23 @@ pub(super) async fn run_recording_session(
                     // lasts, and 1080p is three megabytes apiece.
                     if let Some(dec) = decoder.as_mut() {
                         let decoding = Instant::now();
+                        // Counted around the call, because a decoder given a
+                        // surface keeps its pictures: `decode` comes back empty
+                        // on a sample that was decoded perfectly well, and both
+                        // the timeline and the seek's landing depend on knowing
+                        // that one came out.
+                        let pictures_before = dec.pictures();
                         let outcome = dec.decode(&sample.data, sample.pts_us, sample.keyframe);
                         pace_decode += decoding.elapsed();
                         pace_samples += 1;
                         match outcome {
                             Ok(decoded) => {
                                 window.counters.decoded += decoded.len() as u64;
+                                // A picture came out, whether or not it came back:
+                                // a session rendering into a surface hands over
+                                // nothing to draw and is no less played for it.
+                                let produced =
+                                    !decoded.is_empty() || dec.pictures() != pictures_before;
                                 // Decoded on the way to the moment asked for and
                                 // not shown: it is there for the pictures after
                                 // it to be predicted from.
@@ -545,14 +556,19 @@ pub(super) async fn run_recording_session(
                                         width = Some(w);
                                         height = Some(h);
                                     }
+                                    // The picture is somewhere this side cannot
+                                    // see, and the timeline still has to follow
+                                    // it.
+                                    if produced && published.is_none() {
+                                        frames.note_moment(index, at);
+                                    }
                                     // The landing frame is the one the seek is
                                     // owed, and a hardware decoder hands it over
                                     // a sample or two after the one it was given.
                                     // The picture is only taken back once it has
                                     // arrived, or once it is clear it never will.
                                     if landing {
-                                        if published.is_some() || landing_missed >= LANDING_MISSES
-                                        {
+                                        if produced || landing_missed >= LANDING_MISSES {
                                             landing = false;
                                             landing_missed = 0;
                                         } else {

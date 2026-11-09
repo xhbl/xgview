@@ -1696,6 +1696,12 @@ impl XgViewApp {
                 continue;
             }
             let Some(frame) = self.manager.frames().latest(index) else {
+                // No picture to upload, and a moment all the same: a session
+                // that renders into a surface publishes what its picture is of
+                // and hands nothing back. A seek waiting for it still ends on
+                // it - see `Playback::pending`.
+                let arrived = self.manager.frames().moment(index);
+                self.picture_arrived(index, arrived);
                 continue;
             };
             let current = self.textures.get(&index).map(|entry| entry.sequence);
@@ -1710,10 +1716,13 @@ impl XgViewApp {
                 index,
                 ChannelTexture { sequence: frame.sequence, at: frame.at, surface },
             );
-            // A frame is the only thing that says where the picture has got
-            // to, so it is what ends a seek's wait for the cursor to be let
-            // go of. See `Playback::pending`.
-            self.picture_arrived(index, frame.at);
+            // The moment the picture is of is what says where it has got to,
+            // and it is what ends a seek's wait for the cursor to be let go of.
+            // Read from the store rather than from the frame, because a picture
+            // that goes to a surface has a moment and no frame at all. See
+            // `Playback::pending`.
+            let arrived = self.manager.frames().moment(index);
+            self.picture_arrived(index, arrived);
         }
         self.video.flush();
     }

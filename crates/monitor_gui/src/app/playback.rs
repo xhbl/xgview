@@ -1042,11 +1042,12 @@ impl XgViewApp {
     /// is showing: a finger on the strip or a seek still on its way puts the
     /// cursor somewhere else. See [`Playback::pending_from`].
     fn pictured(&self, index: usize) -> Option<i64> {
-        self.manager
-            .frames()
-            .latest(index)
-            .and_then(|frame| frame.at)
-            .map(|at| at as i64)
+        // The moment rather than the picture: a decoder given a surface renders
+        // into it and hands nothing back, so the store is told what the picture
+        // is of even when there is no frame to draw. Reading the frame's own
+        // moment instead left the cursor at the moment the recording opened,
+        // for as long as it played.
+        self.manager.frames().moment(index).map(|at| at as i64)
     }
 
     /// The stretch the strip is drawn across: the width it is showing, centred
