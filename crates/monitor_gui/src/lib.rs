@@ -588,6 +588,10 @@ static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
     init_android_logging();
     install_panic_hook();
+    // `android-activity` installed the process-wide Android context before this
+    // ran, and it can only be installed once: the `SurfaceView` front end may
+    // still be started in this process, and its own install would abort it.
+    android::native_activity_installed_context();
 
     // Checked before anything is built, because what is missing is the event
     // loop itself and every step below would be wasted work on a process that

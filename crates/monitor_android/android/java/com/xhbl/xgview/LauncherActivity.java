@@ -36,10 +36,20 @@ public class LauncherActivity extends Activity {
         // foreground, and the one that lost would clear the static the native
         // side talks to. Its class, not the remembered preference, is what the
         // running wall actually is.
+        //
+        // Both front ends count, and the surface one has to be asked first-hand:
+        // it is not a `MainActivity`, so `MainActivity.current()` is null while
+        // it is on screen. That is how a boot retry started a `NativeActivity`
+        // into a process that was already running the wall on a `SurfaceView` -
+        // and the Android context can only be installed once per process, so
+        // the second one aborted it. See `monitor_gui::android::CONTEXT`.
         final MainActivity running = MainActivity.current();
+        final SurfaceActivity surface = SurfaceActivity.current();
         final String target;
         if (running != null) {
             target = running.getClass().getName();
+        } else if (surface != null) {
+            target = "com.xhbl.xgview.SurfaceActivity";
         } else if (portrait) {
             // Upright, the wall keeps the `NativeActivity` it has always had:
             // the three-surface arrangement is the landscape one, and a phone

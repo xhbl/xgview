@@ -74,6 +74,21 @@ pub fn set_window_geometry(width: i32, height: i32) {
     }
 }
 
+/// Whether the Android context has been installed in this process.
+///
+/// `ndk_context::initialize_android_context` asserts that it is called exactly
+/// once and **aborts the process** on a second call, and there are two callers
+/// that cannot see each other: `android-activity`, which installs it before
+/// `android_main` on the `NativeActivity` path, and [`install_activity`]. They
+/// also both happen in one process more often than the design suggests - a boot
+/// launch that lost the race and was retried into the other front end, a wall
+/// started by hand beside one that was already up - and the `SurfaceView`'s own
+/// `surfaceCreated` fires again after a relayout, which re-enters the same JNI
+/// entry point. Whichever arrives first installs it; the other leaves it alone,
+/// because the value is process-global and there is nothing better about the
+/// second one.
+static CONTEXT: std::sync::Once = std::sync::Once::new();
+
 /// Installs the two things `android-activity` used to install for the wall.
 ///
 /// The `NativeActivity` path gets them from `android-activity` before
@@ -82,7 +97,24 @@ pub fn set_window_geometry(width: i32, height: i32) {
 /// Oboe backend asks for and which panics the process when it is missing. A
 /// `SurfaceView` path has no `AndroidApp`, so the activity hands both over here.
 pub fn install_activity(env: &mut JNIEnv, class: &jni::objects::JClass, activity: &jni::objects::JObject) {
+    // The class and its VM are what the keyboard needs, and setting them twice
+    // is harmless - the second is refused and dropped.
     crate::keyboard::java_ready(env, class);
+    CONTEXT.call_once(|| install_context(env, activity));
+}
+
+/// Tells [`install_activity`] that `android-activity` has already been there.
+///
+/// Called first thing in `run_android`, which only ever runs on the
+/// `NativeActivity` path - the context is installed before it, and claiming it
+/// here is what keeps a `SurfaceView` started later in the same process from
+/// installing it a second time and aborting.
+pub fn native_activity_installed_context() {
+    CONTEXT.call_once(|| {});
+}
+
+/// The one install, run at most once by [`CONTEXT`].
+fn install_context(env: &JNIEnv, activity: &jni::objects::JObject) {
     let Ok(vm) = env.get_java_vm() else {
         tracing::warn!(target: "xgview", "no JavaVM; the audio sink will not find its context");
         return;
