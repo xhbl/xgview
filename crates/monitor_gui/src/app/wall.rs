@@ -452,7 +452,21 @@ impl XgViewApp {
         // frame's own input: while the magnification stands there is one picture
         // over the whole wall, and no tile beside it to catch a drag as one. See
         // `PictureZoom`.
-        let pinched = ui.ctx().input(|input| pinch_frame(input, area));
+        // A picture the wall does not draw has no window to push in. On the
+        // surface path the magnified picture is the codec's own surface, full
+        // screen under this window, and the compositor scans it out: a window
+        // this side moves changes nothing on screen. It is not free, either -
+        // a picture left magnified takes the drag away from the only gesture
+        // that still has something to do up here, which is stepping to the next
+        // channel. So the window is kept whole and the fingers are left to the
+        // drag. See `picture_on_layer`.
+        if self.picture_on_layer() {
+            self.picture_zoom = PictureZoom::FULL;
+        }
+        let pinched = match self.picture_on_layer() {
+            true => None,
+            false => ui.ctx().input(|input| pinch_frame(input, area)),
+        };
         // Unless it is over the strip: two fingers there are asking for a wider
         // or narrower timeline, and the picture keeps the window it has.
         let pinched =
@@ -463,7 +477,10 @@ impl XgViewApp {
         // scrolls elsewhere, and the magnified viewport is the one place where
         // there is nothing to scroll. See `wheel_frame`.
         let speed = ui.ctx().options(|options| options.input_options.scroll_zoom_speed);
-        let wheeled = ui.ctx().input(|input| wheel_frame(input, speed, area));
+        let wheeled = match self.picture_on_layer() {
+            true => None,
+            false => ui.ctx().input(|input| wheel_frame(input, speed, area)),
+        };
         // The fingers are the wall's on the same terms as the keys: while
         // something else owns them - a panel, a window, or the black - a gesture
         // made over the wall is the panel's to answer, and the picture keeps the
