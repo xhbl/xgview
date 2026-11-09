@@ -191,6 +191,10 @@ fn push(item: Typed) {
 /// a picked document, like a keystroke - would otherwise wait for the wall's
 /// own next repaint.
 pub(crate) fn wake() {
+    // The surfaces front end has a loop of its own, and it sleeps until the
+    // next repaint rather than being driven by a window's event loop. Asking
+    // egui's context cannot wake that sleep; the loop is told directly.
+    crate::android_surface::wake();
     if let Some(ctx) = CONTEXT.get() {
         ctx.request_repaint();
     }

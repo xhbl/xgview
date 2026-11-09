@@ -238,6 +238,9 @@ pub fn set_insets(left_px: i32, top_px: i32, right_px: i32, bottom_px: i32) {
     INSET_TOP_PX.store(top_px, Ordering::Relaxed);
     INSET_RIGHT_PX.store(right_px, Ordering::Relaxed);
     INSET_BOTTOM_PX.store(bottom_px, Ordering::Relaxed);
+    // A kept navigation bar changes the wall's shape without an input event
+    // of its own, and the surfaces loop may be waiting for its next repaint.
+    crate::android_surface::wake();
 }
 
 /// The window's safe insets in physical pixels: the navigation bar's strip and

@@ -16,7 +16,7 @@
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::app::XgViewApp;
@@ -29,6 +29,30 @@ use monitor_core::config::AppConfig;
 /// frame. A mutex rather than a channel because the loop must never block: a
 /// frame that waits for input is a frame that stops drawing.
 static PENDING: Mutex<Vec<egui::Event>> = Mutex::new(Vec::new());
+
+/// An urgent request for a frame, and the thing that parks the loop until one
+/// is due. The loop waits for egui's own `repaint_delay`, which is half a second
+/// when the wall is idle; a key, a touch or a message that arrives in the middle
+/// of that wait cannot wait for the timer to run out.
+static WAKE: OnceLock<(Mutex<bool>, Condvar)> = OnceLock::new();
+
+fn wake_pair() -> &'static (Mutex<bool>, Condvar) {
+    WAKE.get_or_init(|| (Mutex::new(false), Condvar::new()))
+}
+
+/// Cuts short the wait for the next frame.
+///
+/// Called from the UI thread (an input event, a new surface, a changed inset)
+/// and from the soft keyboard's queue. A timed repaint request is not urgent:
+/// its delay is in `repaint_delay`, which the loop reads at the end of the
+/// frame it was made in.
+pub fn wake() {
+    let (lock, cvar) = wake_pair();
+    if let Ok(mut urgent) = lock.lock() {
+        *urgent = true;
+    }
+    cvar.notify_all();
+}
 
 /// Whether the activity's window has focus, as last reported.
 static FOCUSED: AtomicBool = AtomicBool::new(true);
@@ -52,6 +76,15 @@ static WINDOW: std::sync::atomic::AtomicPtr<c_void> =
 /// Whether the drawing thread has been started. There is one for the process.
 static STARTED: AtomicBool = AtomicBool::new(false);
 
+/// Whether the overlay's surface can only be opaque.
+///
+/// An overlay that cannot be seen through would paint a black rectangle over
+/// the picture, and nothing below it could draw over that. On such a device the
+/// codec is told to give its frames back to the wall, which draws everything
+/// itself - slower, but a picture rather than a black screen. See where the
+/// surface path is suspended in `run`.
+static OPAQUE_ONLY: AtomicBool = AtomicBool::new(false);
+
 /// The window of the bar's own surface, and its size in pixels.
 ///
 /// A second surface rather than part of the wall's: the bar has to sit *over* a
@@ -72,6 +105,7 @@ pub fn set_bar_window(window: *mut c_void, width: i32, height: i32) {
         BAR_HEIGHT.store(height as u32, Ordering::Release);
     }
     BAR_WINDOW.store(window, Ordering::Release);
+    wake();
 }
 
 /// The two directories the activity handed over, kept for the one thread.
@@ -86,11 +120,13 @@ pub fn push_event(event: egui::Event) {
             pending.push(event);
         }
     }
+    wake();
 }
 
 /// Records whether the window has focus.
 pub fn set_focused(focused: bool) {
     FOCUSED.store(focused, Ordering::Release);
+    wake();
 }
 
 /// Translates one Android key and hands its events to the next frame.
@@ -207,6 +243,7 @@ pub fn resize(width: i32, height: i32) {
     if height > 0 {
         HEIGHT.store(height as u32, Ordering::Release);
     }
+    wake();
 }
 
 /// Detaches the loop from its surface.
@@ -216,6 +253,7 @@ pub fn resize(width: i32, height: i32) {
 /// for that would drop every camera for a second.
 pub fn stop() {
     WINDOW.store(std::ptr::null_mut(), Ordering::Release);
+    wake();
 }
 
 /// Runs one future to completion on a runtime of its own.
@@ -261,6 +299,7 @@ pub fn start(window: *mut c_void, internal: String, external: String, density: f
             }
         });
     }
+    wake();
 }
 fn run() -> anyhow::Result<()> {
     crate::init_android_logging();
@@ -526,15 +565,21 @@ fn run() -> anyhow::Result<()> {
             surface_config.height = height;
             surface_ref.configure(&device, surface_config);
         }
-        let frame_started = Instant::now();
         let frame = match surface_ref.get_current_texture() {
             Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Timeout) => continue,
+            Err(wgpu::SurfaceError::Timeout) => {
+                // A frame that never began. The loop no longer sleeps at the
+                // end of every frame, so retrying this with no pause would spin
+                // at full speed while a swapchain is slow to come back.
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
             Err(error) => {
                 // The surface under us went away. Drop it and wait for the next
                 // one rather than tearing the wall down.
                 tracing::info!(target: "xgview", %error, "the surface stopped taking frames");
                 lost = true;
+                std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
         };
@@ -545,7 +590,17 @@ fn run() -> anyhow::Result<()> {
             .map(|mut pending| std::mem::take(&mut *pending))
             .unwrap_or_default();
         let now = Instant::now();
-        let predicted = now.duration_since(last).as_secs_f32().max(1.0 / 120.0);
+        // egui subtracts this from every repaint request it is given. Left at
+        // the real frame interval it becomes a feedback loop of its own: a
+        // half-second idle wait makes the next request ask for almost nothing,
+        // and the loop alternates a long sleep with none at all. A window's
+        // cadence is a sixtieth - what the older front end's event loop
+        // reports - so that is the ceiling here. The real clock still travels
+        // in `RawInput::time`, so animations keep their own time.
+        let predicted = now
+            .duration_since(last)
+            .as_secs_f32()
+            .clamp(1.0 / 120.0, 1.0 / 60.0);
         last = now;
         let pixels_per_point = DENSITY.load(Ordering::Acquire) as f32 / 1000.0;
         let input = egui::RawInput {
@@ -568,13 +623,27 @@ fn run() -> anyhow::Result<()> {
         // surface path for as long as the turn is up and the codec gives the
         // frames back to the wall, which draws them exactly as the older front
         // end always has. See `monitor_codec::amediacodec::set_surface_suspended`.
-        let turned = app.picture_turned();
-        if turned != surface_suspended {
-            surface_suspended = turned;
-            monitor_codec::amediacodec::set_surface_suspended(turned);
-            tracing::info!(target: "xgview", suspended = turned, "the surface path was suspended");
+        //
+        // An opaque-only overlay asks for the same suspension for good: with no
+        // see-through layer over the picture, the wall is the only place the
+        // OSD and the bar can be drawn, and it can only draw them if the codec
+        // hands its frames back.
+        let suspend = app.picture_turned() || OPAQUE_ONLY.load(Ordering::Acquire);
+        if suspend != surface_suspended {
+            surface_suspended = suspend;
+            monitor_codec::amediacodec::set_surface_suspended(suspend);
+            tracing::info!(target: "xgview", suspended = suspend, "the surface path was suspended");
         }
         let output = context.run(input, |ctx| app.frame(ctx));
+        // egui's answer to "when next?". Every frame the application asks for
+        // 33 ms while a live picture or an animation is running, or half a
+        // second when the wall is idle. Both contexts may ask; the sooner wins.
+        let mut repaint_delay = output
+            .viewport_output
+            .values()
+            .map(|viewport| viewport.repaint_delay)
+            .min()
+            .unwrap_or(Duration::MAX);
 
         // The picture's view is shown by the same answer that makes the wall
         // leave its area blank: a magnified viewport with a session really
@@ -739,18 +808,21 @@ fn run() -> anyhow::Result<()> {
                         // The overlay is drawn over the picture, so it is only
                         // an overlay if it can be see-through. A device whose
                         // surfaces offer nothing but `Opaque` would paint a
-                        // black rectangle over the picture instead - the one
-                        // failure this arrangement cannot absorb - and it says
-                        // so here, because nothing else on that device would.
-                        if caps
+                        // black rectangle over the picture instead. There is
+                        // no second arrangement of layers that fixes it, but
+                        // there is an older one: give the frames back to the
+                        // wall and let it draw the whole screen itself.
+                        let opaque = caps
                             .alpha_modes
                             .iter()
-                            .all(|mode| *mode == wgpu::CompositeAlphaMode::Opaque)
-                        {
+                            .all(|mode| *mode == wgpu::CompositeAlphaMode::Opaque);
+                        OPAQUE_ONLY.store(opaque, Ordering::Release);
+                        if opaque {
                             tracing::warn!(
                                 target: "xgview",
-                                "this surface cannot be see-through: the overlay will cover the picture"
+                                "this surface cannot be see-through: the pictures go back to the wall"
                             );
+                            wake();
                         }
                         let renderer = egui_wgpu::Renderer::new(
                             &render_state.device,
@@ -879,6 +951,14 @@ fn run() -> anyhow::Result<()> {
                     }
                     let bar_output = bar_context
                         .run(bar_input, |ctx| app.draw_overlay_only(ctx, picture, body));
+                    repaint_delay = repaint_delay.min(
+                        bar_output
+                            .viewport_output
+                            .values()
+                            .map(|viewport| viewport.repaint_delay)
+                            .min()
+                            .unwrap_or(Duration::MAX),
+                    );
                     let bar_jobs =
                         bar_context.tessellate(bar_output.shapes, bar_output.pixels_per_point);
                     let bar_screen = egui_wgpu::ScreenDescriptor {
@@ -940,15 +1020,35 @@ fn run() -> anyhow::Result<()> {
             }
         }
 
-        // The pictures arriving from the cameras are not something egui knows
-        // about, so every frame is drawn whether or not one was asked for. The
-        // wait is what is left of a sixtieth of a second rather than a sixtieth
-        // on top of the frame - a fixed sleep after the work is a wall that
-        // cannot reach sixty, and a key that waits for it.
-        let spent = frame_started.elapsed();
-        let budget = Duration::from_micros(16_667);
-        if spent < budget {
-            std::thread::sleep(budget - spent);
+        // Wait for the next frame egui asked for, instead of compositing both
+        // surfaces sixty times a second whether or not anything changed. A
+        // live channel asks for 33 ms and an idle wall for half a second - the
+        // same two answers eframe's loop gets on the older front end. The
+        // picture the codec scans straight into its own surface needs no
+        // repaint from here; one the wall draws from a texture is a live
+        // channel, and `needs_animation` has already asked for the 33 ms.
+        //
+        // egui has already taken `predicted_dt` off the delay it asks for, so
+        // the frame's own cost is not subtracted a second time here.
+        //
+        // Urgent work does not wait for the timer. A key, a touch, a new
+        // surface or a worker thread's message calls `wake`, which cuts the
+        // wait short; the cap is a net under any state that changes without
+        // one.
+        let wait = repaint_delay.min(Duration::from_secs(1));
+        if !wait.is_zero() {
+            let (lock, cvar) = wake_pair();
+            let mut urgent = lock.lock().unwrap_or_else(|error| error.into_inner());
+            if *urgent {
+                // Asked for while this frame was being drawn: the frame it
+                // wants is the next one, so there is nothing to wait for.
+                *urgent = false;
+            } else {
+                let (mut guard, _) = cvar
+                    .wait_timeout(urgent, wait)
+                    .unwrap_or_else(|error| error.into_inner());
+                *guard = false;
+            }
         }
     }
 }

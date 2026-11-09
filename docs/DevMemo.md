@@ -6392,8 +6392,13 @@ includes the `DateTime` corner, which reads `tile.clock` - so the camera's own
 timestamp burned into the stream's top-left is no longer the only one on screen, and
 ours lands in whichever corner the OSD layout puts it in.
 
-**Still open.** A device whose surfaces offer nothing but `Opaque` gets a black
-rectangle where the overlay is: one warning at the moment it is configured, and no
-second arrangement behind it. The rotation switch does not exist on this front end,
-whose manifest fixes landscape. And pinch and drag zoom do nothing on a picture that
-is scanned out of its own surface. See `priv/docs/android-surface-plan.md` §25.
+**What was open when this section was written is closed now.** A device whose
+surfaces offer nothing but `Opaque` suspends the codec's surface path for good
+and lets the wall draw every frame, the OSD and the bar itself - slower, but a
+picture instead of a black rectangle. A portrait alias starts the same front
+end upright, and the orientation button turns it in place; the rotation switch
+suspends the surface path only while it is on. Pinch, one-finger pan and the
+aspect switch move the picture's own view. A hardware keyboard types into fields
+and keeps F1/F2/F11, and the loop waits for egui's next repaint instead of
+compositing an idle wall sixty times a second. See
+`priv/docs/android-surface-plan.md` §25.
