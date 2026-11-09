@@ -536,16 +536,17 @@ fn run() -> anyhow::Result<()> {
         };
         let output = context.run(input, |ctx| app.frame(ctx));
 
-        // The picture's view is only shown while the wall is showing one
-        // picture full screen. A `SurfaceView` keeps the last frame it was
-        // given and is drawn over the wall, so one left behind after a return
-        // to the grid covers it with a still picture - the wall looks frozen
-        // with the grid's decoders running underneath it.
-        let magnified = app.magnified();
-        if magnified != video_shown {
-            video_shown = magnified;
-            tracing::info!(target: "xgview", visible = magnified, "the picture's view");
-            crate::android::set_video_visible(magnified);
+        // The picture's view is shown by the same answer that makes the wall
+        // leave its area blank: a magnified viewport with a session really
+        // rendering into that view. A `SurfaceView` keeps the last frame it was
+        // given and is drawn over the wall, so one left visible while the wall
+        // paints its own picture covers it - and one shown while empty is a
+        // black rectangle over everything.
+        let on_layer = app.picture_on_layer();
+        if on_layer != video_shown {
+            video_shown = on_layer;
+            tracing::info!(target: "xgview", visible = on_layer, "the picture's view");
+            crate::android::set_video_visible(on_layer);
         }
 
         let jobs = context.tessellate(output.shapes, output.pixels_per_point);
@@ -672,8 +673,9 @@ fn run() -> anyhow::Result<()> {
         // Something to say, or one frame left to say nothing in: the bar that
         // was up has to be painted away, and after that the surface is left
         // alone - it keeps its last frame, which is the empty one - until it is
-        // wanted again.
-        let overlay_wanted = app.magnified() || app.bar_open();
+        // wanted again. It is wanted only while the wall's frame is dropped;
+        // otherwise the wall draws its own corners and bar.
+        let overlay_wanted = app.picture_on_layer();
         let overlay_drawn = overlay_wanted || overlay_shown;
         overlay_shown = overlay_wanted;
         if let Some((bar_surface, bar_config, bar_renderer)) =

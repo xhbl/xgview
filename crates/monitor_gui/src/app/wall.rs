@@ -117,10 +117,10 @@ impl XgViewApp {
     /// `magnified()`, so the two have to agree - leave the area blank while the
     /// view is hidden and there is nothing on screen at all.
     ///
-    /// `picture_on_its_own_surface` answers a different question: whether a
-    /// window exists. On the wall that has surfaces of its own it always does,
-    /// including on a grid, so it cannot be the whole answer.
-    pub(super) fn picture_on_layer(&self) -> bool {
+    /// `picture_on_its_own_surface` is the other half: a session really is
+    /// rendering into that surface. A window alone is not enough - it exists on
+    /// a grid too, and a codec that fell back to byte buffers leaves it empty.
+    pub fn picture_on_layer(&self) -> bool {
         self.magnified() && crate::picture_on_its_own_surface()
     }
 
@@ -169,12 +169,13 @@ impl XgViewApp {
     /// the place the wall's copy of it takes presses: the two are one layout
     /// seen twice, not two layouts that happen to agree.
     pub fn draw_overlay_only(&self, ctx: &egui::Context, picture: egui::Rect) {
-        // Nothing to say over a grid: the wall is on screen there and draws its
-        // own corners and its own bars. The overlay is see-through, so an empty
-        // frame leaves the picture as it was rather than a band over it.
-        let magnified = self.magnified();
+        // Only while the wall's own frame is being dropped by the compositor:
+        // then the corners and the bar have nowhere else to be drawn. When the
+        // wall is on screen it draws both itself, and a second copy here would
+        // be a doubled OSD and a doubled bar. The overlay is see-through, so an
+        // empty frame leaves the picture as it was.
         let open = self.tile_bar.is_open();
-        if !magnified && !open {
+        if !self.picture_on_layer() {
             return;
         }
         let strip = ctx.screen_rect();
@@ -216,26 +217,23 @@ impl XgViewApp {
                 // drops it entirely. These corners are the copy that can be
                 // seen, and they are the same corners: `grid::osd`, the same
                 // tile, the same place on the picture.
-                if magnified {
-                    if let Some(index) = self.scheduler.zoom() {
-                        let cameras = self.config.active_cameras();
-                        // Interactive, so the corners are drawn at full
-                        // strength: `dim` is the page sliding out, and half a
-                        // brightness here would be a corner display that is
-                        // dimmer than the one the wall draws on the same
-                        // picture. Nothing is pressed on this copy - the
-                        // presses are the wall's - and `ring` is false so it
-                        // carries no cursor either.
-                        let tile = self.tile_of(
-                            Id::new("xgview-overlay-tile"),
-                            Some(index),
-                            &cameras,
-                            1,
-                            true,
-                            false,
-                        );
-                        grid::osd(ui.painter(), picture, &tile);
-                    }
+                if let Some(index) = self.scheduler.zoom() {
+                    let cameras = self.config.active_cameras();
+                    // Interactive, so the corners are drawn at full strength:
+                    // `dim` is the page sliding out, and half a brightness here
+                    // would be a corner display that is dimmer than the one the
+                    // wall draws on the same picture. Nothing is pressed on this
+                    // copy - the presses are the wall's - and `ring` is false so
+                    // it carries no cursor either.
+                    let tile = self.tile_of(
+                        Id::new("xgview-overlay-tile"),
+                        Some(index),
+                        &cameras,
+                        1,
+                        true,
+                        false,
+                    );
+                    grid::osd(ui.painter(), picture, &tile);
                 }
                 if open {
                     tilebar::draw(ui, &mut nav, &layout, false, &controls, &muted, &tips);

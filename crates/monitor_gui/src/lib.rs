@@ -487,17 +487,18 @@ fn init_android_logging() {
         .try_init();
 }
 
-/// Whether a decoded picture is being scanned out of a surface of its own,
-/// under this window.
+/// Whether a codec session is really rendering a picture into the activity's
+/// surface, under this window.
 ///
-/// This says a window exists, not that a picture is in it: on the wall that
-/// has surfaces of its own the window is there on a grid too. The wall asks
-/// `XgViewApp::picture_on_layer` before leaving an area unpainted. See
-/// `SurfaceActivity` and `android_surface`.
+/// Not whether the window exists: it is there on a grid too, and a decoder that
+/// refused it, or a stream too narrow to be offered it, still hands its pictures
+/// back as frames. The wall asks `XgViewApp::picture_on_layer` before leaving an
+/// area unpainted, and `android_surface` shows the picture's view by the same
+/// answer. See `SurfaceActivity` and `android_surface`.
 pub fn picture_on_its_own_surface() -> bool {
     #[cfg(target_os = "android")]
     {
-        monitor_codec::amediacodec::video_layer_active()
+        monitor_codec::amediacodec::surface_presenting()
     }
     #[cfg(not(target_os = "android"))]
     {

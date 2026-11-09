@@ -164,6 +164,22 @@ pub fn video_layer_active() -> bool {
     !SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire).is_null()
 }
 
+/// Sessions actually rendering into that surface, right now.
+///
+/// A window existing is not a picture being in it. A decoder can refuse the
+/// window and fall back to byte buffers, and a stream too narrow to be worth a
+/// window never asks for one - and in both cases the pictures come back as
+/// frames for the wall to draw. The wall and the picture's view both consult
+/// this, so neither of them can leave an area blank while the other shows
+/// nothing. See `monitor_gui::picture_on_its_own_surface`.
+static SURFACE_SESSIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether a codec session is rendering pictures into the activity's surface.
+pub fn surface_presenting() -> bool {
+    SURFACE_SESSIONS.load(std::sync::atomic::Ordering::Acquire) > 0
+}
+
 /// How many pictures the decoder's pace is measured over.
 ///
 /// One line per this many pictures, at debug: the numbers say whether a channel
@@ -218,6 +234,9 @@ pub struct AMediaCodecDecoder {
     /// both kinds side by side - nine sub streams on byte buffers and the one
     /// magnified picture on a surface of its own.
     on_surface: bool,
+    /// Whether this decoder counted itself in `SURFACE_SESSIONS`. `close` takes
+    /// it out again, and the flag is what makes that happen exactly once.
+    presenting: bool,
     /// Set once an output format this cannot read as NV12 has been reported.
     ///
     /// Byte-buffer mode only: with a surface the codec reports
@@ -261,10 +280,6 @@ pub struct AMediaCodecDecoder {
     /// A picture that arrives late is either a codec that has not finished with
     /// the one before it or a copy that costs too much, and the two are fixed
     /// in different places. Reported rather than guessed at.
-    /// Cached output buffer pointers, by buffer index: `(address, capacity)`.
-    ///
-    /// `AMediaCodec_getOutputBuffer` costs as much per picture as the release
-    /// does on the Amlogic box, and the address it answers with for a given
     stat_dequeue: Duration,
     stat_output: Duration,
     /// Time spent in `AMediaCodec_getOutputBuffer` alone.
@@ -376,6 +391,13 @@ impl AMediaCodecDecoder {
                         // Rendering into the activity's surface: the picture
                         // leaves the codec as a rendered frame, never as bytes.
                         self.on_surface = true;
+                        if !self.presenting {
+                            self.presenting = true;
+                            SURFACE_SESSIONS.fetch_add(
+                                1,
+                                std::sync::atomic::Ordering::AcqRel,
+                            );
+                        }
                         if let (Some((width, height)), Some(info)) = (size, self.info.as_mut()) {
                             info.width = width;
                             info.height = height;
@@ -383,9 +405,9 @@ impl AMediaCodecDecoder {
                         return Ok(());
                     }
                     // A codec that will not render into this window is not a
-                    // stream that cannot be decoded: the reader below is the
-                    // path every other stream on this device already takes, and
-                    // it is slower rather than broken. Falling through to it is
+                    // stream that cannot be decoded: the byte buffers below are
+                    // the path every other stream on this device already takes,
+                    // and it is slower rather than broken. Falling through to it is
                     // the difference between a picture at three quarters of its
                     // rate and no picture at all - which is what a device whose
                     // decoder refuses the window would otherwise get, since the
@@ -820,6 +842,10 @@ impl AMediaCodecDecoder {
     /// Stops and releases the codec. Safe to call twice, and called by [`Drop`]
     /// when the channel ends.
     fn close(&mut self) {
+        if self.presenting {
+            self.presenting = false;
+            SURFACE_SESSIONS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
         if let Some(codec) = self.handle.take() {
             if self.started {
                 unsafe { AMediaCodec_stop(codec) };
