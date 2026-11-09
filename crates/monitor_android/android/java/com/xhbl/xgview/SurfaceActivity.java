@@ -2,7 +2,6 @@ package com.xhbl.xgview;
 
 import android.app.Activity;
 import android.content.res.AssetManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -10,8 +9,6 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.WindowInsets;
-import android.view.WindowInsetsController;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
 
@@ -106,8 +103,11 @@ public class SurfaceActivity extends Activity {
             boot.arm();
         }
         // This activity is started on its own, so nothing else has loaded the
-        // library for it.
+        // library for it. The native methods the window insets are reported
+        // through live on `MainActivity`, whose class loader this load serves
+        // just as well.
         System.loadLibrary("monitor_android");
+        MainActivity.markNativeLoaded();
 
         // The language packs travel in the APK's assets. The `NativeActivity`
         // path extracts them from native code, which has the asset manager; this
@@ -226,7 +226,12 @@ public class SurfaceActivity extends Activity {
 
         setContentView(root);
 
-        hideSystemBars();
+        // The bars are the viewer's to keep or to hide, and the insets they
+        // claim are the wall's to leave free. Both are applied to this window,
+        // not to the `NativeActivity`'s: an immersive `hide` here used to be
+        // the only thing this front end ever did to its system bars, which is
+        // why "keep the navigation bar" worked on the old path and not here.
+        MainActivity.applySystemBars(this);
     }
 
     @Override
@@ -234,7 +239,7 @@ public class SurfaceActivity extends Activity {
         super.onWindowFocusChanged(hasFocus);
         nativeWallFocus(hasFocus);
         if (hasFocus) {
-            hideSystemBars();
+            MainActivity.applySystemBars(this);
         }
     }
 
@@ -778,7 +783,7 @@ public class SurfaceActivity extends Activity {
     }
 
     /** The keyboard is, or is not, on screen. Acts only on the way from showing to gone. */
-    private void onImeVisibility(boolean visible) {
+    void onImeVisibility(boolean visible) {
         if (!keyboardWanted) {
             imeSeenVisible = false;
             return;
@@ -812,17 +817,6 @@ public class SurfaceActivity extends Activity {
     private String externalFilesDir() {
         final File dir = getExternalFilesDir(null);
         return dir != null ? dir.getAbsolutePath() : getFilesDir().getAbsolutePath();
-    }
-
-    private void hideSystemBars() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            final WindowInsetsController controller = getWindow().getInsetsController();
-            if (controller != null) {
-                controller.hide(WindowInsets.Type.systemBars());
-                controller.setSystemBarsBehavior(
-                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-            }
-        }
     }
 
     /**

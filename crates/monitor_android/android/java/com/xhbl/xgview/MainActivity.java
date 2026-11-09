@@ -153,20 +153,35 @@ public class MainActivity extends NativeActivity {
         return self != null ? self : SurfaceActivity.current();
     }
 
-    /** Whether {@code monitor_android} is loaded, so a native method may be called. */
-    private boolean nativeLoaded;
+    /**
+     * Whether {@code monitor_android} is loaded, so a native method may be called.
+     *
+     * <p>Shared by the two front ends: the other one loads the same library into
+     * the same class loader, and it is the insets of whichever window is on
+     * screen that the native side has to hear.
+     */
+    private static volatile boolean nativeLoaded;
+
+    /** The other front end loaded the library; see {@link #nativeLoaded}. */
+    static void markNativeLoaded() {
+        nativeLoaded = true;
+    }
 
     /**
      * Whether the navigation bar keeps its strip, or the wall hides it and draws
      * full screen. Set from the native side; see {@link #setReserveNavigationBar}
      * and {@link #applySystemBars}.
      *
+     * <p>Static because only one wall is on screen but either front end may own
+     * it, and because the native side reports the setting once: an activity that
+     * resumes later has to start in the mode the viewer chose.
+     *
      * <p>Starts at the default the configuration applies when it says nothing at
      * all about the setting, so that the first frames already show the bars a
      * viewer who has never chosen would get; the native side reports the
      * configured value as soon as it has read the configuration.
      */
-    private boolean reserveNavigationBar = false;
+    private static volatile boolean reserveNavigationBar = false;
 
     /** Whether the activity was started by the boot receiver, read from the launch intent. */
     private static boolean fromAutostart = false;
@@ -314,7 +329,7 @@ public class MainActivity extends NativeActivity {
         // is what registers the library with this class loader - the call below
         // dies of `UnsatisfiedLinkError` before the first frame.
         System.loadLibrary("monitor_android");
-        nativeLoaded = true;
+        markNativeLoaded();
         nativeReady();
     }
 
@@ -540,7 +555,7 @@ public class MainActivity extends NativeActivity {
     }
 
     /** The keyboard is, or is not, on screen. Acts only on the way from showing to gone. */
-    private void onImeVisibility(boolean visible) {
+    void onImeVisibility(boolean visible) {
         if (!keyboardWanted) {
             imeSeenVisible = false;
             return;
@@ -591,7 +606,20 @@ public class MainActivity extends NativeActivity {
      * #imePoll}.
      */
     private void applySystemBars() {
-        final Window window = getWindow();
+        applySystemBars(this);
+    }
+
+    /**
+     * Applies the bars to whichever front end owns the window on screen.
+     *
+     * <p>The two activities have different windows but the same wall, and the
+     * insets listener has to be on the window that actually receives them: a
+     * listener on the `NativeActivity`'s decor view reports nothing at all when
+     * the surfaces front end is the one running, which is why a reserved
+     * navigation bar used to have no strip on that path.
+     */
+    static void applySystemBars(final Activity host) {
+        final Window window = host.getWindow();
         // Reported on every change: the navigation bar can move to another edge,
         // appear, or go as the keyboard comes and goes.
         window.getDecorView().setOnApplyWindowInsetsListener((view, insets) -> {
@@ -599,9 +627,9 @@ public class MainActivity extends NativeActivity {
             int top;
             final int right;
             final int bottom;
-            final boolean portrait = getResources().getConfiguration().orientation
+            final boolean portrait = host.getResources().getConfiguration().orientation
                     == Configuration.ORIENTATION_PORTRAIT;
-            final int rotation = getWindowManager().getDefaultDisplay().getRotation();
+            final int rotation = host.getWindowManager().getDefaultDisplay().getRotation();
             int notchLeft = 0;
             int notchRight = 0;
             int notchBottom = 0;
@@ -611,7 +639,7 @@ public class MainActivity extends NativeActivity {
                 top = bars.top;
                 right = bars.right;
                 bottom = bars.bottom;
-                onImeVisibility(insets.isVisible(WindowInsets.Type.ime()));
+                imeVisibility(host, insets.isVisible(WindowInsets.Type.ime()));
             } else {
                 // The status bar is hidden in this mode and has never been
                 // reserved for, so only the other three edges are taken - the
@@ -707,6 +735,18 @@ public class MainActivity extends NativeActivity {
         window.getDecorView().requestApplyInsets();
     }
 
+    /**
+     * The keyboard's comings and goings belong to the front end whose window
+     * reported them. Both have the same rule; see their `onImeVisibility`.
+     */
+    private static void imeVisibility(final Activity host, final boolean visible) {
+        if (host instanceof MainActivity) {
+            ((MainActivity) host).onImeVisibility(visible);
+        } else if (host instanceof SurfaceActivity) {
+            ((SurfaceActivity) host).onImeVisibility(visible);
+        }
+    }
+
     /** Whether a legacy notch has been looked for, and whether one was found. */
     private static Boolean legacyNotch;
 
@@ -792,17 +832,16 @@ public class MainActivity extends NativeActivity {
      * draws full screen ({@code false}).
      */
     public static void setReserveNavigationBar(final boolean reserve) {
-        final MainActivity self = instance;
-        if (self == null) {
+        // Remembered even with no wall on screen: the native side reports the
+        // setting once, and an activity that resumes afterwards has to start in
+        // that mode. Reading `instance` here used to drop the call entirely on
+        // the surfaces front end, where this class is never created.
+        reserveNavigationBar = reserve;
+        final Activity host = wall();
+        if (host == null) {
             return;
         }
-        self.runOnUiThread(() -> {
-            if (self.reserveNavigationBar == reserve) {
-                return;
-            }
-            self.reserveNavigationBar = reserve;
-            self.applySystemBars();
-        });
+        host.runOnUiThread(() -> applySystemBars(host));
     }
 
     /**
