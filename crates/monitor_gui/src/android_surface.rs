@@ -8,9 +8,8 @@
 //!
 //! What it reproduces from eframe is small, because the app only ever used two
 //! things from it - the egui context and the wgpu state - and never the frame
-//! handle. What it does not reproduce yet is input beyond keys: the pointer,
-//! wheel and multi-touch mappings are the remaining work, and the wall is
-//! driven by a remote until they land.
+//! handle. Input is the activity's to hand over: keys, one event per touch
+//! pointer, and a wheel, pushed from the UI thread into the next frame.
 //!
 //! Reached from `SurfaceActivity` through `monitor_android`'s JNI entries.
 
@@ -97,15 +96,19 @@ pub fn set_focused(focused: bool) {
 /// Translates one Android key and hands it to the next frame.
 ///
 /// `meta` is `KeyEvent.getMetaState()`; only the three modifiers the interface
-/// can act on are read. A key this does not know is dropped rather than guessed
-/// at, because a wrong guess is a control that does something else.
-pub fn push_key(code: i32, pressed: bool, repeat: bool, meta: i32) {
+/// can act on are read. A key this does not know is left alone rather than
+/// guessed at, because a wrong guess is a control that does something else.
+///
+/// Returns whether the interface took it. One it did not is one the system
+/// should still see - volume, the media keys, the language switch - and the
+/// activity answers the key event with this, so that it does.
+pub fn push_key(code: i32, pressed: bool, repeat: bool, meta: i32) -> bool {
     // `KeyEvent.META_*_ON`
     const SHIFT: i32 = 0x01;
     const ALT: i32 = 0x02;
     const CTRL: i32 = 0x1000;
-    let Some(key) = key_from_android(code) else {
-        return;
+    let Some(key) = crate::keymap::from_android(code) else {
+        return false;
     };
     push_event(egui::Event::Key {
         key,
@@ -120,73 +123,7 @@ pub fn push_key(code: i32, pressed: bool, repeat: bool, meta: i32) {
             command: meta & CTRL != 0,
         },
     });
-}
-
-/// Android's `KEYCODE_*` to egui's key, for the ones a remote or a keyboard
-/// sends. `None` for everything else - media keys, volume, the language switch.
-fn key_from_android(code: i32) -> Option<egui::Key> {
-    use egui::Key;
-    Some(match code {
-        // KeyEvent.KEYCODE_A ..= KEYCODE_Z
-        29..=54 => match code - 29 {
-            0 => Key::A,
-            1 => Key::B,
-            2 => Key::C,
-            3 => Key::D,
-            4 => Key::E,
-            5 => Key::F,
-            6 => Key::G,
-            7 => Key::H,
-            8 => Key::I,
-            9 => Key::J,
-            10 => Key::K,
-            11 => Key::L,
-            12 => Key::M,
-            13 => Key::N,
-            14 => Key::O,
-            15 => Key::P,
-            16 => Key::Q,
-            17 => Key::R,
-            18 => Key::S,
-            19 => Key::T,
-            20 => Key::U,
-            21 => Key::V,
-            22 => Key::W,
-            23 => Key::X,
-            24 => Key::Y,
-            _ => Key::Z,
-        },
-        // KEYCODE_0 ..= KEYCODE_9
-        7..=16 => match code - 7 {
-            0 => Key::Num0,
-            1 => Key::Num1,
-            2 => Key::Num2,
-            3 => Key::Num3,
-            4 => Key::Num4,
-            5 => Key::Num5,
-            6 => Key::Num6,
-            7 => Key::Num7,
-            8 => Key::Num8,
-            _ => Key::Num9,
-        },
-        19 => Key::ArrowUp,
-        20 => Key::ArrowDown,
-        21 => Key::ArrowLeft,
-        22 => Key::ArrowRight,
-        // A remote's centre button and a keyboard's enter are the same control.
-        23 | 66 => Key::Enter,
-        // Back, and a keyboard's escape: the interface unwinds a layer on both.
-        4 | 111 => Key::Escape,
-        62 => Key::Space,
-        61 => Key::Tab,
-        67 => Key::Backspace,
-        112 => Key::Delete,
-        122 => Key::Home,
-        123 => Key::End,
-        92 => Key::PageUp,
-        93 => Key::PageDown,
-        _ => return None,
-    })
+    true
 }
 
 /// How many fingers are on the glass, so a tap and a pinch can be told apart.
@@ -321,8 +258,6 @@ fn run() -> anyhow::Result<()> {
     crate::init_android_logging();
     crate::install_panic_hook();
 
-    // Diagnostic: `ASurfaceControl_createFromWindow` answered null for a
-    // `NativeActivity`'s window, which is what stopped a compositor layer from
     let Some((internal, external)) = DIRECTORIES.lock().ok().and_then(|d| d.clone()) else {
         anyhow::bail!("the activity never handed its directories over");
     };
@@ -362,6 +297,9 @@ fn run() -> anyhow::Result<()> {
     let mut bar_attached: *mut c_void = std::ptr::null_mut();
     let mut last_focus: Option<egui::Id> = None;
     let mut bar_open = false;
+    // Whether the overlay had something to say last frame; see the bar's own
+    // block below.
+    let mut overlay_shown = false;
     // Starts hidden: the wall comes up on the grid, and the picture's view has
     // nothing to show until a viewport is magnified.
     let mut video_shown = false;
@@ -435,6 +373,21 @@ fn run() -> anyhow::Result<()> {
                     tracing::warn!(target: "xgview", width, height, "the new surface has no default config");
                     std::thread::sleep(Duration::from_millis(50));
                     continue;
+                };
+                // The same alpha mode the first attach asks for: a surface that
+                // comes back is one whose format the platform may have decided
+                // again, and `Auto` picks opaque when it can.
+                let caps = fresh.get_capabilities(&render_state.adapter);
+                let fresh_config = wgpu::SurfaceConfiguration {
+                    alpha_mode: if caps
+                        .alpha_modes
+                        .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+                    {
+                        wgpu::CompositeAlphaMode::PreMultiplied
+                    } else {
+                        caps.alpha_modes[0]
+                    },
+                    ..fresh_config
                 };
                 fresh.configure(&render_state.device, &fresh_config);
                 tracing::info!(target: "xgview", width, height, "the wall took a new surface");
@@ -545,6 +498,7 @@ fn run() -> anyhow::Result<()> {
             surface_config.height = height;
             surface_ref.configure(&device, surface_config);
         }
+        let frame_started = Instant::now();
         let frame = match surface_ref.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Timeout) => continue,
@@ -647,8 +601,10 @@ fn run() -> anyhow::Result<()> {
         }
         frame.present();
 
-        // The bar, over the picture. Its own surface and its own swapchain; the
-        // colour moves so a frozen one cannot be mistaken for a live one.
+        // The bar and the corner display, over the picture. Their own surface
+        // and their own swapchain, presented only while there is something to
+        // put on them - a grid has neither, and a transparent frame every
+        // sixtieth of a second is a full-screen layer for nothing.
         let bar_window = BAR_WINDOW.load(Ordering::Acquire);
         if bar_window.is_null() {
             bar = None;
@@ -697,7 +653,16 @@ fn run() -> anyhow::Result<()> {
                 }
             }
         }
-        if let Some((bar_surface, bar_config, bar_renderer)) = bar.as_mut() {
+        // Something to say, or one frame left to say nothing in: the bar that
+        // was up has to be painted away, and after that the surface is left
+        // alone - it keeps its last frame, which is the empty one - until it is
+        // wanted again.
+        let overlay_wanted = app.magnified() || app.bar_open();
+        let overlay_drawn = overlay_wanted || overlay_shown;
+        overlay_shown = overlay_wanted;
+        if let Some((bar_surface, bar_config, bar_renderer)) =
+            bar.as_mut().filter(|_| overlay_drawn)
+        {
             match bar_surface.get_current_texture() {
                 Ok(bar_frame) => {
                     let view = bar_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -826,7 +791,14 @@ fn run() -> anyhow::Result<()> {
         }
 
         // The pictures arriving from the cameras are not something egui knows
-        // about, so every frame is drawn whether or not one was asked for.
-        std::thread::sleep(Duration::from_millis(16));
+        // about, so every frame is drawn whether or not one was asked for. The
+        // wait is what is left of a sixtieth of a second rather than a sixtieth
+        // on top of the frame - a fixed sleep after the work is a wall that
+        // cannot reach sixty, and a key that waits for it.
+        let spent = frame_started.elapsed();
+        let budget = Duration::from_micros(16_667);
+        if spent < budget {
+            std::thread::sleep(budget - spent);
+        }
     }
 }

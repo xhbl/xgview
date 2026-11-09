@@ -131,14 +131,15 @@ impl XgViewApp {
         Some(grid::picture_area(size, rect, aspect, self.magnified_rotated()))
     }
 
-    /// Draws the magnified view's bar alone, into a context whose whole screen
-    /// is the bar.
+    /// Draws everything the wall would put over the picture, into a context of
+    /// its own: the corner display, and the bar with its timeline.
     ///
-    /// The bar has a surface of its own, over the picture, and a surface is a
-    /// rectangle: it can only show the bar if the bar is all that is drawn in
-    /// it. So this is the bar's own frame - the same controls, in the same
-    /// order, doing the same things - with the layout worked out for the
-    /// rectangle it will occupy rather than for the picture it sits over.
+    /// Both need a surface of their own, over the picture, and a surface is a
+    /// rectangle: what egui draws in it is all that shows. So this is that
+    /// frame - the same corners and the same controls, in the same places,
+    /// doing the same things - laid out against the picture rather than against
+    /// the rectangle, so that it lands where the wall's own copy sits and takes
+    /// the presses the wall reads.
     ///
     /// Nothing here reads input: the bar's presses are found in the wall's own
     /// frame, where the pointer and the remote already are. This frame paints -

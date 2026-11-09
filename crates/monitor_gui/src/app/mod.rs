@@ -2171,13 +2171,15 @@ impl XgViewApp {
 }
 
 impl eframe::App for XgViewApp {
-    /// The colour the frame is cleared to.
+    /// The colour the frame is cleared to, on the paths that go through eframe.
     ///
-    /// Transparent while the probe's video layer is showing: that layer is a
-    /// child view of this window and its surface is *under* the window's own,
-    /// so wherever the wall paints nothing the picture is what shows. Every
-    /// other frame clears to the wall's own background, which is also what a
-    /// window that cannot be see-through falls back to.
+    /// Transparent while a decoded picture is being scanned out of a surface
+    /// under this window: wherever the wall paints nothing, the picture is what
+    /// shows. Every other frame clears to the wall's own background.
+    ///
+    /// The Android loop in `crate::android_surface` does not ask this - it owns
+    /// its render pass and clears to its own colour - so on a television this is
+    /// the desktop's answer only.
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         if crate::picture_on_its_own_surface() {
             return [0.0, 0.0, 0.0, 0.0];

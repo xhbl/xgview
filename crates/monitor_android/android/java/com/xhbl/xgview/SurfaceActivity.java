@@ -237,16 +237,24 @@ public class SurfaceActivity extends Activity {
      * <p>Returning true for both directions keeps the activity from also
      * treating a key as navigation, which would move the focus twice.
      */
+    /**
+     * Keys the interface knows are taken; the rest are left to the system.
+     *
+     * <p>Answering {@code true} for everything would be simpler and is wrong:
+     * the wall maps the remote's own buttons and a keyboard's letters, and
+     * nothing else - so a key it does not map would stop there, and the volume
+     * keys, the media keys and the language switch would do nothing at all. The
+     * native side answers whether it took the key, and that answer is what this
+     * returns.
+     */
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        nativeKey(keyCode, true, event.getRepeatCount() > 0, event.getMetaState());
-        return true;
+        return nativeKey(keyCode, true, event.getRepeatCount() > 0, event.getMetaState());
     }
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        nativeKey(keyCode, false, false, event.getMetaState());
-        return true;
+        return nativeKey(keyCode, false, false, event.getMetaState());
     }
 
     /**
@@ -773,7 +781,8 @@ public class SurfaceActivity extends Activity {
 
     private static native void nativeWallFocus(boolean focused);
 
-    private static native void nativeKey(int keyCode, boolean pressed, boolean repeat, int meta);
+    private static native boolean nativeKey(
+            int keyCode, boolean pressed, boolean repeat, int meta);
 
     private static native void nativeTouch(
             int phase, int id, float x, float y, float force);

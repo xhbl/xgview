@@ -6296,29 +6296,40 @@ only `Opaque`; `ASurfaceControl` is null on a `NativeActivity`'s window;
 black; `Window.takeSurface` plus any view at all destroys the surface two
 milliseconds later.
 
-**So the answer is one more surface, not one more alpha.** Three rectangles, stacked
-and all opaque:
+**So the answer is one more surface, not one more alpha.** Three rectangles, stacked:
 
 ```text
-SurfaceView 3 (top)     the bar     1920x140, a swapchain of its own
-SurfaceView 2 (middle)  the picture full screen, the decoder renders into it
-SurfaceView 1 (bottom)  the wall    full screen, egui
+SurfaceView 3 (top)     the overlay  full screen, egui: the bar and the corners
+SurfaceView 2 (middle)  the picture  full screen, the decoder renders into it
+SurfaceView 1 (bottom)  the wall     full screen, egui
 ```
 
-A bar that is its own rectangle covers the picture where the bar is - that is what
-"floating over" means, and it needs no transparency at all. The order is the whole
-trap: the picture goes in **after** the wall, because the wall cannot be see-through
-and so must be covered. The first version added the picture first and the screen was
-black.
+The overlay started as an opaque strip along the bottom carrying the bar alone, and
+grew into a see-through full-screen layer that carries everything the wall would draw
+over the picture - see below. What did not change is the order, and the order is the
+whole trap: the picture goes in **after** the wall, because the wall cannot be
+see-through and so must be covered. The first version added the picture first and the
+screen was black.
 
-**And then the bar's own surface turned out to be see-through after all.** The rule
-above is about the codec's surface: the Amlogic component refuses to be configured
-on `RGBA_8888`, which is why the picture's `SurfaceView` is `OPAQUE`. The bar has no
-codec behind it, so `setFormat(TRANSLUCENT)` gives it `RGBA_8888`, wgpu reports
-`supported_alpha=[Inherit]` and `alpha_mode=Auto`, and a frame cleared to alpha 0 is
-blended away. The bar is a translucent pill over a full-height picture instead of a
-band cut out of it - and a bar that is not up draws nothing at all, so no JNI is
-needed to hide the surface.
+**And then the overlay's own surface turned out to be see-through after all.** The
+rule above is about the codec's surface: the Amlogic component refuses to be
+configured on `RGBA_8888`, which is why the picture's `SurfaceView` is `OPAQUE`. The
+overlay has no codec behind it, so `setFormat(TRANSLUCENT)` gives it `RGBA_8888`, wgpu
+reports `supported_alpha=[Inherit]` and `alpha_mode=Auto`, and a frame cleared to
+alpha 0 is blended away. The bar is a translucent pill over a full-height picture
+instead of a band cut out of it.
+
+That is what let the same surface carry the corner display as well: the picture is on
+a surface *above* the wall, so the wall's own corners are painted where nobody can
+see them, and the overlay's copy is the one on screen. It is drawn by the same
+`grid::osd`, from the same tile, in the same place on the picture.
+
+**What did need a JNI call was the picture's own view.** A `SurfaceView` keeps the
+last frame it was given and is drawn over the wall, so one left standing after a
+return to the grid covers it with a still picture - nine channels decoding and a
+frozen living room on screen. Nothing can clear that buffer (it is the codec's, on a
+surface that has to stay opaque), so the view itself moves out of the way, and the
+frame loop tells it when.
 
 **Two egui contexts need two renderers.** A surface is a rectangle and can only show
 the bar if the bar is all that is drawn in it, so the bar gets a context whose whole

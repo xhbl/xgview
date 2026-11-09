@@ -279,8 +279,13 @@ pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeKey(
     pressed: jni::sys::jboolean,
     repeat: jni::sys::jboolean,
     meta: jni::sys::jint,
-) {
-    monitor_gui::android_surface::push_key(code, pressed != 0, repeat != 0, meta);
+) -> jni::sys::jboolean {
+    u8::from(monitor_gui::android_surface::push_key(
+        code,
+        pressed != 0,
+        repeat != 0,
+        meta,
+    ))
 }
 
 /// One touch pointer, in its own phase.

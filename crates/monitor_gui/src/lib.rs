@@ -38,6 +38,7 @@ pub mod instance;
 pub mod android;
 #[cfg(target_os = "android")]
 pub mod android_surface;
+pub mod keymap;
 #[cfg(target_os = "android")]
 pub mod keyboard;
 pub mod mic;

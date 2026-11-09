@@ -160,17 +160,6 @@ extern "C" {
         max_images: i32,
         reader: *mut *mut AImageReader,
     ) -> media_status_t;
-    /// The same reader, with the usage the buffers are allocated for. `format`
-    /// and `usage` together decide which heap the producer's buffers come from,
-    /// which is the thing the read-back speed turns out to depend on.
-    fn AImageReader_newWithUsage(
-        width: i32,
-        height: i32,
-        format: i32,
-        usage: u64,
-        max_images: i32,
-        reader: *mut *mut AImageReader,
-    ) -> media_status_t;
     fn AImageReader_delete(reader: *mut AImageReader);
     fn AImageReader_getWindow(
         reader: *mut AImageReader,
@@ -560,43 +549,12 @@ impl AMediaCodecDecoder {
         // reader's default once it announces its output format.
         let w = if width > 0 { width as i32 } else { 1920 };
         let h = if height > 0 { height as i32 } else { 1080 };
-        // Which heap the reader's buffers come from is chosen by these usage
-        // flags, and the copy out of them measured 33 MB/s against the codec's
-        // own 850 MB/s - so the flags are worth asking about. Variant 0 is the
-        // shipped behaviour (`AImageReader_new`, which means `CPU_READ_OFTEN`);
-        // the rest were reachable only through the measurement build and a
-        // `debug.xgview.surface.usage` property.
-        let variant = 0;
-        const CPU_READ_RARELY: u64 = 2;
-        const CPU_READ_OFTEN: u64 = 3;
-        const GPU_SAMPLED: u64 = 1 << 8;
-        const COMPOSER_OVERLAY: u64 = 1 << 11;
-        let usage = match variant {
-            1 => Some(CPU_READ_RARELY),
-            2 => Some(CPU_READ_OFTEN | GPU_SAMPLED),
-            3 => Some(CPU_READ_RARELY | GPU_SAMPLED),
-            4 => Some(CPU_READ_OFTEN | GPU_SAMPLED | (1 << 10)),
-            // The compositor path needs the buffer to be usable as a layer:
-            // `COMPOSER_OVERLAY` for the hardware planes and `GPU_SAMPLED_IMAGE`
-            // for the ones the GPU has to composite itself.
-            5 => Some(CPU_READ_OFTEN | GPU_SAMPLED | COMPOSER_OVERLAY),
-            _ => None,
-        };
-        let status = match usage {
-            Some(usage) => unsafe {
-                AImageReader_newWithUsage(
-                    w,
-                    h,
-                    AIMAGE_FORMAT_YUV_420_888,
-                    usage,
-                    5,
-                    &mut reader,
-                )
-            },
-            None => unsafe {
-                AImageReader_new(w, h, AIMAGE_FORMAT_YUV_420_888, 5, &mut reader)
-            },
-        };
+        // `AImageReader_new` asks for `CPU_READ_OFTEN`, and that is the only
+        // way this is created. The five other `usage` combinations were measured
+        // once - the copy out of these buffers runs at 33 MB/s against the
+        // codec's own 850 MB/s, and no combination changed it - and the property
+        // that chose between them is gone with the rest of that scaffolding.
+        let status = unsafe { AImageReader_new(w, h, AIMAGE_FORMAT_YUV_420_888, 5, &mut reader) };
         if status != AMEDIA_OK || reader.is_null() {
             return Err(CodecError::Configure(format!(
                 "AImageReader_new failed: status {status}"
@@ -606,7 +564,6 @@ impl AMediaCodecDecoder {
             target: "xgview::codec",
             width = w,
             height = h,
-            usage = ?usage,
             "AImageReader created for YUV_420_888"
         );
         Ok(reader)
@@ -751,10 +708,12 @@ impl AMediaCodecDecoder {
                 if range == 1 { ColorRange::Full } else { ColorRange::Limited };
         }
         self.colour_format = has_colour.then_some(colour_format);
-        // Only byte-buffer mode has a colour format this reads: a codec given a
-        // surface reports `COLOR_FormatSurface`, which is not a picture layout
-        // at all - the images come out of the reader in `YUV_420_888` instead.
-        {
+        // Only a byte-buffer session has a colour format this reads: a codec
+        // given a surface reports `COLOR_FormatSurface` (0x7F000789), which is
+        // not a picture layout at all - the images come out of the reader in
+        // `YUV_420_888` instead. Asked at run time rather than at build time,
+        // because both kinds of session are built by the same binary.
+        if !self.on_surface {
             let nv12 = !has_colour
                 || colour_format == COLOR_FORMAT_FLEXIBLE
                 || colour_format == COLOR_FORMAT_SEMI_PLANAR;
