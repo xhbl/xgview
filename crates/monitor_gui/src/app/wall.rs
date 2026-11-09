@@ -567,10 +567,11 @@ impl XgViewApp {
                     // Pushing the picture in or out is the viewer at the same
                     // picture: the strip keeps its place while it happens.
                     self.picture_zoom = self.picture_zoom.zoomed(delta, at, dest);
-                    // On a surface of its own, two fingers are the only way the
-                    // picture can be moved: a one-finger drag up here is the step
-                    // to the next channel, because there is no page under it to
-                    // turn. See `picture_on_layer`.
+                    // Two fingers that are already moving the window may also
+                    // carry it: a pinch and a slide are one gesture to the hands.
+                    // `drag_frame` declines while two are down - the pointer
+                    // follows the first one and would double the movement - so
+                    // this is where that half of it comes from, on both paths.
                     if self.picture_on_layer() {
                         if let Some(moved) = ui
                             .ctx()
@@ -581,11 +582,19 @@ impl XgViewApp {
                             }
                         }
                     }
-                } else if self.picture_zoom.magnified() && !self.picture_on_layer() {
+                } else if self.picture_zoom.magnified() {
                     // A drag on the picture moves it; one that starts on the bar
                     // is the bar's. A finger's tap carries a little movement, and
                     // taking that as a pan would move the picture under the
                     // press that was meant for the strip.
+                    //
+                    // This is the same rule on a surface of its own, and it was
+                    // wrong to make it different there: a picture the viewer has
+                    // pushed in is a picture they are looking *at*, and one finger
+                    // is how they look around it. A picture left whole still steps
+                    // to the next channel on a drag, which is the gesture a
+                    // magnified viewport answers when there is nothing to look
+                    // around. See `keeps_the_page`.
                     let drag = ui.ctx().input(|input| {
                         drag_frame(input, area).map(|delta| (delta, input.pointer.press_origin()))
                     });
@@ -622,19 +631,19 @@ impl XgViewApp {
         // and letting this through would turn a page under the fingers. See
         // `step_zoom`.
         //
-        // Not where a surface of its own draws the picture: up there the drag is
-        // the step to the next channel - the one gesture that still has something
-        // to do with it - and a picture left pushed in must not take it away. See
-        // `picture_on_layer`.
+        // A picture left whole is the other way round: a drag on it is the step
+        // to the next channel, which is what a magnified viewport answers when
+        // there is nothing to look around. That is the rule on both paths - the
+        // picture on a surface of its own pans while it is pushed in and steps
+        // while it is not, exactly as the one the wall draws does.
+        //
         // A finger on the timeline is not a finger on the page: what it is
         // dragging is a recording, and the picture must not slide out from under
         // it or the page turn over when it lets go. Read before the bar is
         // answered, because this frame's release is the bar's to act on and not
         // the wall's.
         let scrubbing = self.playback.as_ref().is_some_and(|playback| playback.scrubbing);
-        let keeps_the_page = pinched.is_some()
-            || scrubbing
-            || (self.picture_zoom.magnified() && !self.picture_on_layer());
+        let keeps_the_page = pinched.is_some() || scrubbing || self.picture_zoom.magnified();
         if self.scheduler.is_zoomed() && keeps_the_page {
             self.slide.dragging = false;
             self.slide.drag = 0.0;
