@@ -172,6 +172,11 @@ pub fn video_layer_active() -> bool {
 /// frames for the wall to draw. The wall and the picture's view both consult
 /// this, so neither of them can leave an area blank while the other shows
 /// nothing. See `monitor_gui::picture_on_its_own_surface`.
+///
+/// Nor is a codec that has been *opened* with the window: a surface keeps the
+/// last picture it was given until something replaces it, and on a channel step
+/// the window still holds the camera being left. Counted from the first picture
+/// rendered, which is the first moment showing the view shows this stream.
 static SURFACE_SESSIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
@@ -236,6 +241,12 @@ pub struct AMediaCodecDecoder {
     on_surface: bool,
     /// Whether this decoder counted itself in `SURFACE_SESSIONS`. `close` takes
     /// it out again, and the flag is what makes that happen exactly once.
+    ///
+    /// Counted when a picture is first rendered into the surface, not when the
+    /// codec is opened with one: between the two the surface still holds what
+    /// the last session left in it, and anything that shows the picture's view
+    /// on the strength of a window existing shows that instead - which is a
+    /// frame of the previous camera, on a channel step.
     presenting: bool,
     /// Set once an output format this cannot read as NV12 has been reported.
     ///
@@ -390,14 +401,16 @@ impl AMediaCodecDecoder {
                         self.started = true;
                         // Rendering into the activity's surface: the picture
                         // leaves the codec as a rendered frame, never as bytes.
+                        //
+                        // Not counted in `SURFACE_SESSIONS` yet. The window is
+                        // the one the last session was rendering into, and it
+                        // still holds that session's last picture; a surface
+                        // keeps what was in it until something replaces it.
+                        // Until this codec has put a picture there, the view
+                        // showing it would be showing the camera before this
+                        // one. The count is taken in `drain`, on the first
+                        // picture actually rendered.
                         self.on_surface = true;
-                        if !self.presenting {
-                            self.presenting = true;
-                            SURFACE_SESSIONS.fetch_add(
-                                1,
-                                std::sync::atomic::Ordering::AcqRel,
-                            );
-                        }
                         if let (Some((width, height)), Some(info)) = (size, self.info.as_mut()) {
                             info.width = width;
                             info.height = height;
@@ -696,6 +709,18 @@ impl AMediaCodecDecoder {
                         // to the compositor. The session that feeds this decoder
                         // counts these; see `VideoDecoder::pictures`.
                         self.pictures = self.pictures.wrapping_add(1);
+                        // And on a surface, the first one is the moment the
+                        // surface stops being the previous camera's: the render
+                        // above queued it, so whatever shows this view from here
+                        // on shows *this* stream. See `presenting`.
+                        if render && !self.presenting {
+                            self.presenting = true;
+                            SURFACE_SESSIONS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            tracing::info!(
+                                target: "xgview::codec",
+                                "the first picture is in the activity's surface"
+                            );
+                        }
                     }
                 }
                 _ => break,
