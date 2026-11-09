@@ -61,6 +61,11 @@ public class SurfaceActivity extends Activity {
     private SurfaceView bar;
     /** Whether the picture's view is on screen; see {@link #setVideoVisible}. */
     private boolean videoShown = true;
+    /** How much bigger than its box the picture is drawn; see {@link #setVideoZoom}. */
+    private float videoScale = 1f;
+    /** Where that drawing starts, relative to the box's corner, in pixels. */
+    private float videoDx = 0f;
+    private float videoDy = 0f;
 
     /**
      * Whether the picture and the bar get surfaces of their own.
@@ -467,13 +472,47 @@ public class SurfaceActivity extends Activity {
     }
 
     /**
+     * Draws the picture bigger than its box, or back at its own size.
+     *
+     * <p>A pinch pushes the picture in by showing a part of it: the view keeps
+     * its box and draws the whole picture {@code scale} times bigger, moved so
+     * that the part being looked at is the part in the box. A scale and not
+     * another box, because a relayout resizes the surface the codec is
+     * rendering into, and that is not something to do while a pinch is moving.
+     *
+     * <p>{@code dx} and {@code dy} are where the picture's top-left corner goes,
+     * relative to the box's - so a window off the picture's top-left is a
+     * negative offset, and one on the middle of it is half the box times one
+     * minus the scale.
+     */
+    public static void setVideoZoom(final float scale, final float dx, final float dy) {
+        final SurfaceActivity self = instance;
+        if (self == null || self.video == null) {
+            return;
+        }
+        self.runOnUiThread(() -> {
+            self.videoScale = scale > 0f ? scale : 1f;
+            self.videoDx = dx;
+            self.videoDy = dy;
+            // About the corner the offsets are measured from, so that `dx`/`dy`
+            // are the whole of where the picture starts.
+            self.video.setPivotX(0f);
+            self.video.setPivotY(0f);
+            self.video.setScaleX(self.videoScale);
+            self.video.setScaleY(self.videoScale);
+            self.applyVideoPlacement();
+        });
+    }
+
+    /**
      * Puts the picture's view where the rectangle it was last given says, or out
      * of the way when it is hidden.
      *
-     * <p>The distance it is moved by is its own top plus its own height, not its
-     * height alone: a letterboxed picture does not start at the top of the
-     * screen, and moving it up by its height would leave the bottom of it
-     * showing in the band above the grid.
+     * <p>The distance it is moved by when hidden is its own top plus its own
+     * height as scaled, not its height alone: a letterboxed picture does not
+     * start at the top of the screen, and one pushed in is taller than its box -
+     * leave either out and the bottom of it still shows in the band above the
+     * grid.
      */
     private void applyVideoPlacement() {
         if (video == null) {
@@ -484,7 +523,8 @@ public class SurfaceActivity extends Activity {
         final int top = raw instanceof FrameLayout.LayoutParams
                 ? ((FrameLayout.LayoutParams) raw).topMargin
                 : 0;
-        video.setTranslationY(videoShown ? 0f : -(top + height));
+        video.setTranslationX(videoShown ? videoDx : 0f);
+        video.setTranslationY(videoShown ? videoDy : -(top + height * videoScale));
     }
 
     private android.os.PowerManager.WakeLock wakeLock;

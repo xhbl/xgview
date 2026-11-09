@@ -317,6 +317,10 @@ fn run() -> anyhow::Result<()> {
     // when the view goes away so that the first frame of the next magnification
     // sends it again.
     let mut video_rect: Option<(f32, f32, f32, f32)> = None;
+    // How much bigger than its box the picture's view is drawn, and where that
+    // drawing starts, as last sent. Same terms as the box: a transform is free
+    // to repeat but pointless to.
+    let mut video_zoom: Option<(f32, f32, f32)> = None;
     crate::android::set_video_visible(false);
 
     // The bar has a screen of its own: a surface is a rectangle, so the only way
@@ -565,6 +569,7 @@ fn run() -> anyhow::Result<()> {
             // at belongs to whatever was magnified then, which may have been
             // another camera with another shape.
             video_rect = None;
+            video_zoom = None;
         }
         // Where the picture is. The view the codec renders into is full screen
         // until it is told otherwise, and a full-screen surface stretches the
@@ -587,6 +592,23 @@ fn run() -> anyhow::Result<()> {
                         "the picture's rectangle"
                     );
                     crate::android::set_video_rect(left, top, right - left, bottom - top);
+                }
+            }
+            // What the picture shows of itself: the window a pinch has left it
+            // at, drawn as a scale of the view - bigger than the box, offset so
+            // that the part being looked at is the part in it. The window is in
+            // the picture's own coordinates, so where the picture's corner goes
+            // is that window's corner times the box.
+            if let Some(box_) = app.picture_rect() {
+                let zoom = app.picture_zoom();
+                let window = zoom.window();
+                let scale = zoom.scale;
+                let dx = (-window.min.x * box_.width() * pixels_per_point).round();
+                let dy = (-window.min.y * box_.height() * pixels_per_point).round();
+                let wanted = (scale, dx, dy);
+                if video_zoom != Some(wanted) {
+                    video_zoom = Some(wanted);
+                    crate::android::set_video_zoom(scale, dx, dy);
                 }
             }
         }

@@ -1214,6 +1214,15 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
+     * Draws the picture bigger than its box; see {@link SurfaceActivity#setVideoZoom}.
+     *
+     * <p>Handed on like the other two: the native side's calls are this class's.
+     */
+    public static void setVideoZoom(final float scale, final float dx, final float dy) {
+        SurfaceActivity.setVideoZoom(scale, dx, dy);
+    }
+
+    /**
      * Keeps the screen on.
      *
      * <p>A window flag rather than a wake lock, so it goes away with the window

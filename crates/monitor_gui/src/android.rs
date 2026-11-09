@@ -195,6 +195,37 @@ pub fn set_video_rect(x: f32, y: f32, width: f32, height: f32) {
     clear_exception(&mut env);
 }
 
+/// Scales the view the picture is scanned out of, about its own top-left corner.
+///
+/// A pinch pushes the picture in: the wall shows a part of it, and the surface
+/// path shows that part by drawing the whole picture bigger than the box it was
+/// given and off-centre by as much as the window it is showing of it. `scale`
+/// is how much bigger, and `dx`/`dy` - in physical pixels, relative to the box -
+/// how far the picture's top-left corner is from the box's.
+///
+/// A scale rather than another rectangle: a relayout resizes the surface the
+/// codec is rendering into, which is not something to do while a pinch is
+/// moving. What the picture spills over the box is covered by the overlay, which
+/// is above it - see `XgViewApp::draw_overlay_only`.
+pub fn set_video_zoom(scale: f32, dx: f32, dy: f32) {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return;
+    };
+    let called = env.call_static_method(
+        class,
+        "setVideoZoom",
+        "(FFF)V",
+        &[JValue::Float(scale), JValue::Float(dx), JValue::Float(dy)],
+    );
+    if let Err(error) = called {
+        tracing::warn!(target: "xgview", %error, "the picture's zoom was refused");
+        env.exception_describe().ok();
+    }
+    // Cleared, as everywhere else here: an exception left pending aborts the
+    // process on the next JNI call.
+    clear_exception(&mut env);
+}
+
 /// Records the window insets the activity reported.
 ///
 /// Called from the JNI entry point in `monitor_android`, on the UI thread.

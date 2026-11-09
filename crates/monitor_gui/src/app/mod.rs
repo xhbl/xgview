@@ -3203,6 +3203,32 @@ fn in_tile_bar_strip(pos: egui::Pos2, area: Rect, rotated: bool, dock: tilebar::
     }
 }
 
+/// The bands between `outer` and `inner`, skipping the ones with no area.
+///
+/// Where a picture on a surface of its own does not fill the screen, these are
+/// the rectangles beside it: the wall paints nothing there (the picture's view
+/// is placed at `inner` and the wall's frame is behind it), so something above
+/// the picture has to. The same rectangles cover the picture's view when it is
+/// scaled past that box, which is what a pinch does to it.
+fn bands_around(outer: Rect, inner: Rect) -> Vec<Rect> {
+    let inner = inner.intersect(outer);
+    [
+        Rect::from_min_max(outer.min, egui::pos2(outer.max.x, inner.min.y)),
+        Rect::from_min_max(egui::pos2(outer.min.x, inner.max.y), outer.max),
+        Rect::from_min_max(
+            egui::pos2(outer.min.x, inner.min.y),
+            egui::pos2(inner.min.x, inner.max.y),
+        ),
+        Rect::from_min_max(
+            egui::pos2(inner.max.x, inner.min.y),
+            egui::pos2(outer.max.x, inner.max.y),
+        ),
+    ]
+    .into_iter()
+    .filter(|band| band.width() > 0.5 && band.height() > 0.5)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4073,5 +4099,26 @@ mod tests {
             detail: "SETUP failed: 401 Unauthorized (digest authentication)".to_string(),
         });
         assert_eq!(channel.switching_from, None, "nothing is coming to replace it");
+    }
+
+    /// A picture that fills the screen leaves no bands; a letterboxed one leaves
+    /// the two beside it, which are what the overlay has to paint.
+    #[test]
+    fn bands_beside_a_letterboxed_picture() {
+        let screen = Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 400.0));
+        assert!(bands_around(screen, screen).is_empty(), "stretched: nothing beside it");
+
+        let fitted = Rect::from_min_max(pos2(100.0, 0.0), pos2(700.0, 400.0));
+        let bands = bands_around(screen, fitted);
+        assert_eq!(bands.len(), 2, "one band each side, none above or below");
+        assert_eq!(bands[0], Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 400.0)));
+        assert_eq!(bands[1], Rect::from_min_max(pos2(700.0, 0.0), pos2(800.0, 400.0)));
+
+        // A picture taller than the screen is the other pair of bands, and one
+        // pushed in past the screen edge gives the corner rectangles back too.
+        let tall = Rect::from_min_max(pos2(0.0, 50.0), pos2(800.0, 350.0));
+        assert_eq!(bands_around(screen, tall).len(), 2);
+        let pushed = Rect::from_min_max(pos2(-200.0, -100.0), pos2(1000.0, 500.0));
+        assert!(bands_around(screen, pushed).is_empty(), "the picture covers the screen");
     }
 }

@@ -135,6 +135,16 @@ impl XgViewApp {
         self.picture_rect
     }
 
+    /// What the magnified picture is showing of itself: the whole of it, or the
+    /// window a pinch has left it at.
+    ///
+    /// The wall's own frames draw it as a crop of the texture; the surface path
+    /// sends it on as a scale of the view, and both are the same window. See
+    /// [`PictureZoom`] and `android::set_video_zoom`.
+    pub fn picture_zoom(&self) -> PictureZoom {
+        self.picture_zoom
+    }
+
     /// Whether the magnified viewport's bar is up.
     pub fn bar_open(&self) -> bool {
         self.tile_bar.is_open()
@@ -246,6 +256,20 @@ impl XgViewApp {
             .fixed_pos(strip.min)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
+                // A picture pushed in is its view scaled past the box it was
+                // given, and that view is above the wall: what it spills over the
+                // bands beside the box would be drawn over them. This surface is
+                // above the picture, so the bands are painted here, opaque and in
+                // the wall's own colour - and the spill is covered rather than
+                // clipped, which a surface cannot be.
+                if self.picture_zoom.magnified() {
+                    if let Some(box_) = self.picture_rect {
+                        let box_ = box_.translate(picture.min - strip.min);
+                        for band in bands_around(strip, box_) {
+                            ui.painter().rect_filled(band, egui::CornerRadius::ZERO, theme::CANVAS);
+                        }
+                    }
+                }
                 // The corner display first, in the place the wall would put it.
                 // The wall draws it too, and that copy is the one nobody sees:
                 // the picture is on a surface above it, and the wall's frame is
@@ -488,17 +512,13 @@ impl XgViewApp {
         // frame's own input: while the magnification stands there is one picture
         // over the whole wall, and no tile beside it to catch a drag as one. See
         // `PictureZoom`.
-        // A picture the wall does not draw has no window to push in. On the
-        // surface path the magnified picture is the codec's own surface, full
-        // screen under this window, and the compositor scans it out: a window
-        // this side moves changes nothing on screen. It is not free, either -
-        // a picture left magnified takes the drag away from the only gesture
-        // that still has something to do up here, which is stepping to the next
-        // channel. So the window is kept whole and the fingers are left to the
-        // drag. See `picture_on_layer`.
-        if self.picture_on_layer() {
-            self.picture_zoom = PictureZoom::FULL;
-        }
+        //
+        // A picture on a surface of its own is the same window, sent to the view
+        // that draws it: `android_surface` turns it into a scale of that view,
+        // about the same box. It used to be kept whole here - the window moved a
+        // rectangle the wall painted nowhere, and cost the drag its only gesture -
+        // and a picture the surface draws is now one the surface can show a part
+        // of. See `picture_on_layer`.
         // The box the picture occupies on the screen, for the view that is
         // showing it. Where a tile's picture lands inside its cell is the fit
         // switch's answer, and a surface of its own has to be given the same
@@ -512,10 +532,7 @@ impl XgViewApp {
             true => self.magnified_area(&cameras, &view, wall, dx),
             false => None,
         };
-        let pinched = match self.picture_on_layer() {
-            true => None,
-            false => ui.ctx().input(|input| pinch_frame(input, area)),
-        };
+        let pinched = ui.ctx().input(|input| pinch_frame(input, area));
         // Unless it is over the strip: two fingers there are asking for a wider
         // or narrower timeline, and the picture keeps the window it has.
         let pinched =
@@ -526,10 +543,7 @@ impl XgViewApp {
         // scrolls elsewhere, and the magnified viewport is the one place where
         // there is nothing to scroll. See `wheel_frame`.
         let speed = ui.ctx().options(|options| options.input_options.scroll_zoom_speed);
-        let wheeled = match self.picture_on_layer() {
-            true => None,
-            false => ui.ctx().input(|input| wheel_frame(input, speed, area)),
-        };
+        let wheeled = ui.ctx().input(|input| wheel_frame(input, speed, area));
         // The fingers are the wall's on the same terms as the keys: while
         // something else owns them - a panel, a window, or the black - a gesture
         // made over the wall is the panel's to answer, and the picture keeps the
@@ -553,7 +567,21 @@ impl XgViewApp {
                     // Pushing the picture in or out is the viewer at the same
                     // picture: the strip keeps its place while it happens.
                     self.picture_zoom = self.picture_zoom.zoomed(delta, at, dest);
-                } else if self.picture_zoom.magnified() {
+                    // On a surface of its own, two fingers are the only way the
+                    // picture can be moved: a one-finger drag up here is the step
+                    // to the next channel, because there is no page under it to
+                    // turn. See `picture_on_layer`.
+                    if self.picture_on_layer() {
+                        if let Some(moved) = ui
+                            .ctx()
+                            .input(|input| input.multi_touch().map(|touch| touch.translation_delta))
+                        {
+                            if moved != egui::Vec2::ZERO {
+                                self.picture_zoom = self.picture_zoom.panned(moved, dest);
+                            }
+                        }
+                    }
+                } else if self.picture_zoom.magnified() && !self.picture_on_layer() {
                     // A drag on the picture moves it; one that starts on the bar
                     // is the bar's. A finger's tap carries a little movement, and
                     // taking that as a pan would move the picture under the
@@ -593,15 +621,21 @@ impl XgViewApp {
         // the frame the second finger lands: the pointer follows the first one,
         // and letting this through would turn a page under the fingers. See
         // `step_zoom`.
+        //
+        // Not where a surface of its own draws the picture: up there the drag is
+        // the step to the next channel - the one gesture that still has something
+        // to do with it - and a picture left pushed in must not take it away. See
+        // `picture_on_layer`.
         // A finger on the timeline is not a finger on the page: what it is
         // dragging is a recording, and the picture must not slide out from under
         // it or the page turn over when it lets go. Read before the bar is
         // answered, because this frame's release is the bar's to act on and not
         // the wall's.
         let scrubbing = self.playback.as_ref().is_some_and(|playback| playback.scrubbing);
-        if self.scheduler.is_zoomed()
-            && (pinched.is_some() || self.picture_zoom.magnified() || scrubbing)
-        {
+        let keeps_the_page = pinched.is_some()
+            || scrubbing
+            || (self.picture_zoom.magnified() && !self.picture_on_layer());
+        if self.scheduler.is_zoomed() && keeps_the_page {
             self.slide.dragging = false;
             self.slide.drag = 0.0;
             actions.drag_started = false;
