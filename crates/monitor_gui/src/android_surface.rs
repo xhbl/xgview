@@ -174,8 +174,16 @@ pub fn push_touch(phase: i32, id: i32, x: f32, y: f32, force: f32) {
         pressed,
         modifiers,
     };
-    if before <= 1 && after == 1 {
-        // One finger, and it is the only one: it is the pointer.
+    if before <= 1 {
+        // One finger, and it is the only one - or it is the one being lifted.
+        // The lift is the reason this cannot ask for `after == 1`: a finger
+        // coming up leaves none behind, so `after` is 0, and the release below
+        // was the one event that never arrived. A wall told nothing is a wall
+        // that still has the pointer down: it keeps the page where the drag
+        // left it - half a swipe, with the outgoing page showing on one side -
+        // and it answers no further press, because the finger it believes is
+        // on the glass is still there. That is exactly what a swipe did on a
+        // phone, and it looked like touch had stopped working.
         match phase {
             egui::TouchPhase::Start => {
                 push_event(egui::Event::PointerMoved(pos));
