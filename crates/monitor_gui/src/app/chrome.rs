@@ -325,7 +325,28 @@ impl XgViewApp {
         self.chrome.visible
     }
 
+    /// The toast, on the layer that is on top.
+    ///
+    /// Two layers carry frames once a magnified picture is scanned out of a
+    /// surface of its own: the wall's, and the overlay over the picture. Only
+    /// the upper one is seen - the picture's surface is above the wall - so a
+    /// toast the wall paints while that picture is up is a toast nobody sees,
+    /// which is what the fit switch's own name was: drawn every frame, invisible
+    /// every frame. The wall therefore paints it only while nothing is over it,
+    /// and the overlay (`draw_overlay_only`) paints it otherwise. One copy, on
+    /// the layer that is on top.
     pub(super) fn draw_toast(&self, ctx: &egui::Context) {
+        if self.picture_on_layer() {
+            return;
+        }
+        self.paint_toast(ctx);
+    }
+
+    /// The toast itself, wherever it is being drawn.
+    ///
+    /// The place it takes is the whole screen's, in either context: the
+    /// overlay's frame is the screen too, see `android_surface`.
+    pub(super) fn paint_toast(&self, ctx: &egui::Context) {
         let Some(toast) = &self.toast else {
             return;
         };

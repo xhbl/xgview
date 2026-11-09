@@ -194,9 +194,9 @@ impl XgViewApp {
     }
 
     /// Draws everything the wall would put over the picture, into a context of
-    /// its own: the corner display, and the bar with its timeline.
+    /// its own: the corner display, the bar with its timeline, and the toast.
     ///
-    /// Both need a surface of their own, over the picture, and a surface is a
+    /// They need a surface of their own, over the picture, and a surface is a
     /// rectangle: what egui draws in it is all that shows. So this is that
     /// frame - the same corners and the same controls, in the same places,
     /// doing the same things - laid out against the picture rather than against
@@ -256,20 +256,31 @@ impl XgViewApp {
             .fixed_pos(strip.min)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                // A picture pushed in is its view scaled past the box it was
-                // given, and that view is above the wall: what it spills over the
-                // bands beside the box would be drawn over them. This surface is
-                // above the picture, so the bands are painted here, opaque and in
-                // the wall's own colour - and the spill is covered rather than
-                // clipped, which a surface cannot be.
-                if self.picture_zoom.magnified() {
-                    if let Some(box_) = self.picture_rect {
-                        let box_ = box_.translate(picture.min - strip.min);
-                        for band in bands_around(strip, box_) {
-                            ui.painter().rect_filled(band, egui::CornerRadius::ZERO, theme::CANVAS);
-                        }
+                // The wall paints the whole of its area in `GRID_LINE` and then
+                // lays the tile one point inside it, so a magnified picture has
+                // a one-point frame around it; `live_canvas` paints the rest of
+                // the tile in `CANVAS`, which is what shows beside a letterboxed
+                // picture. Both are the wall's own frame, and that frame is
+                // under the picture here - so both have to be painted on this
+                // layer instead, or the picture comes up inside a black band
+                // with no frame at all.
+                //
+                // The bands cover the box's outside only: a pinch scales the
+                // view past its box, and the spill is covered rather than
+                // clipped, which a surface cannot be. Without a pinch they are
+                // the letterbox's own bars, in the same colour the wall used.
+                if let Some(box_) = self.picture_rect {
+                    let box_ = box_.translate(picture.min - strip.min);
+                    for band in bands_around(strip, box_) {
+                        ui.painter().rect_filled(band, egui::CornerRadius::ZERO, theme::CANVAS);
                     }
                 }
+                ui.painter().rect_stroke(
+                    picture,
+                    egui::CornerRadius::ZERO,
+                    egui::Stroke::new(grid::LINE, theme::GRID_LINE),
+                    egui::StrokeKind::Inside,
+                );
                 // The corner display first, in the place the wall would put it.
                 // The wall draws it too, and that copy is the one nobody sees:
                 // the picture is on a surface above it, and the wall's frame is
@@ -317,6 +328,13 @@ impl XgViewApp {
                     }
                 }
             });
+        // And the toast, which is not the bar's: a projection, an error, or the
+        // name of the fit the switch has just moved to - this frame's news, in
+        // the middle of the screen or at the foot of it. The wall paints the
+        // same toast for every frame in which no picture is over it; while one
+        // is, the wall's copy is under that picture and this is the copy that
+        // can be seen. See `draw_toast`.
+        self.paint_toast(ctx);
     }
 
     /// One tile of the wall, as everything that paints it needs it.
