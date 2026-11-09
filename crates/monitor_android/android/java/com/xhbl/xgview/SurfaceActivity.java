@@ -117,7 +117,8 @@ public class SurfaceActivity extends Activity {
 
         final FrameLayout root = new FrameLayout(this);
 
-        // The picture, first, so the wall is drawn over it.
+        // The picture's view, created before the wall's but added after it, so
+        // the picture is drawn over the wall. See where `root` gets its views.
         video = new SurfaceView(this);
         video.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
@@ -191,14 +192,20 @@ public class SurfaceActivity extends Activity {
             public void surfaceCreated(SurfaceHolder holder) {
                 if (EXTRA_SURFACES) {
                     Log.i(TAG, "bar surface created");
-                    nativeStartBar(holder.getSurface(), bar.getWidth(), bar.getHeight());
+                    final android.graphics.Rect frame = holder.getSurfaceFrame();
+                    nativeStartBar(holder.getSurface(), frame.width(), frame.height());
                 }
             }
 
             @Override
             public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
                 if (EXTRA_SURFACES) {
-                    nativeStartBar(holder.getSurface(), bar.getWidth(), bar.getHeight());
+                    // The callback's figures are the surface's own size. The
+                    // view's getWidth() can still answer the layout from before
+                    // a turn, and the bar is laid out against the whole screen:
+                    // a stale size left the overlay in a corner and painted its
+                    // opaque bands over the picture it is meant to sit on.
+                    nativeStartBar(holder.getSurface(), width, height);
                 }
             }
 
@@ -455,6 +462,10 @@ public class SurfaceActivity extends Activity {
      * <p>The layout is moved rather than the picture scaled, for this step: a
      * relayout resizes the surface the codec renders into, which is a thing to
      * do when the picture's shape changes and not while a pinch is moving.
+     *
+     * <p>A picture turned a quarter turn is not sent here: the surface path is
+     * suspended for it, and the wall draws the frames itself. See
+     * {@code monitor_codec::amediacodec::set_surface_suspended}.
      */
     public static void setVideoRect(final float x, final float y, final float width, final float height) {
         final SurfaceActivity self = instance;

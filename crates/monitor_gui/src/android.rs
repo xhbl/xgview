@@ -171,6 +171,10 @@ pub fn set_video_visible(visible: bool) {
 /// window a pinch pushes in is a crop of the picture, and moving in and out of
 /// it will be a scale of this view - not another box, because a relayout
 /// resizes the surface the codec is rendering into.
+///
+/// A picture turned a quarter turn does not come here at all: the surface path
+/// is suspended for it and the wall draws the frames itself. See
+/// `monitor_codec::amediacodec::set_surface_suspended`.
 pub fn set_video_rect(x: f32, y: f32, width: f32, height: f32) {
     let (Some(class), Some(mut env)) = (class(), attach()) else {
         return;

@@ -159,9 +159,37 @@ pub fn set_surface_window(window: *mut c_void) {
     );
 }
 
+/// Whether the wall needs the pictures back as bytes while a surface is up.
+///
+/// A magnified picture turned a quarter turn on an upright wall is drawn by
+/// sampling a texture sideways; a codec rendering straight into a surface has
+/// no texture to turn, and rotating the view does not rotate the frames the
+/// compositor scans out. While such a picture is up the surface path is
+/// suspended: the codec hands frames back, the wall draws them with the same
+/// turned mesh it has always used, and the view is hidden. A television has no
+/// portrait to turn to, so the box this surface path exists for never suspends.
+static SURFACE_SUSPENDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Suspends or resumes rendering into the activity's surface.
+///
+/// Both directions make every open codec close and reopen on the other kind of
+/// output, so the change is not instant: a few access units go by before the
+/// wall has a frame to draw, or the surface has a picture in it. The wall and
+/// the view decide what is on screen from [`surface_presenting`], not from this
+/// flag, so nothing is left blank in between.
+pub fn set_surface_suspended(suspended: bool) {
+    SURFACE_SUSPENDED.store(suspended, std::sync::atomic::Ordering::Release);
+}
+
+fn surface_suspended() -> bool {
+    SURFACE_SUSPENDED.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Whether there is a surface a picture could be rendered into right now.
 pub fn video_layer_active() -> bool {
-    !SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire).is_null()
+    !surface_suspended()
+        && !SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire).is_null()
 }
 
 /// Sessions actually rendering into that surface, right now.
@@ -182,7 +210,8 @@ static SURFACE_SESSIONS: std::sync::atomic::AtomicUsize =
 
 /// Whether a codec session is rendering pictures into the activity's surface.
 pub fn surface_presenting() -> bool {
-    SURFACE_SESSIONS.load(std::sync::atomic::Ordering::Acquire) > 0
+    !surface_suspended()
+        && SURFACE_SESSIONS.load(std::sync::atomic::Ordering::Acquire) > 0
 }
 
 /// How many pictures the decoder's pace is measured over.
@@ -239,6 +268,13 @@ pub struct AMediaCodecDecoder {
     /// both kinds side by side - nine sub streams on byte buffers and the one
     /// magnified picture on a surface of its own.
     on_surface: bool,
+    /// The value of [`SURFACE_SUSPENDED`] this session was opened under.
+    ///
+    /// A codec cannot change the kind of output it was configured with, so a
+    /// suspension or a resumption has to close it and let the next access unit
+    /// open it again on the other path. Comparing this with the flag is what
+    /// says whether that has happened yet.
+    suspended: bool,
     /// Whether this decoder counted itself in `SURFACE_SESSIONS`. `close` takes
     /// it out again, and the flag is what makes that happen exactly once.
     ///
@@ -347,6 +383,7 @@ impl AMediaCodecDecoder {
         if self.handle.is_some() {
             return Ok(());
         }
+        self.suspended = surface_suspended();
         let config = self.config.clone();
         let mime = CString::new(config.codec.mime())
             .map_err(|err| CodecError::Configure(err.to_string()))?;
@@ -943,6 +980,22 @@ impl VideoDecoder for AMediaCodecDecoder {
         // Only from one window to another: a window that is *gone* is no window
         // to reopen on, and the app is usually not on screen then. That case
         // falls to the same picture staying black, invisibly, until it returns.
+        //
+        // A suspension is not a window going away. The turn that asked for it
+        // needs this picture as bytes, and undoing the turn needs it back in
+        // the surface; neither is a change a configured codec can make, so the
+        // session is dropped and the next access unit opens it on the other
+        // path. `surface_presenting` answers for the frames in between.
+        if self.suspended != surface_suspended() {
+            tracing::info!(
+                target: "xgview::codec",
+                suspended = surface_suspended(),
+                "the surface path was suspended or resumed; reopening the decoder"
+            );
+            self.close();
+            self.on_surface = false;
+            self.opened_on = std::ptr::null_mut();
+        }
         if self.on_surface {
             let current = SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire)
                 as *mut std::ffi::c_void;

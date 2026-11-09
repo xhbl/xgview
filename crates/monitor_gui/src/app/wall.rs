@@ -135,6 +135,31 @@ impl XgViewApp {
         self.picture_rect
     }
 
+    /// Whether the magnified picture is drawn a quarter turn.
+    ///
+    /// The wall draws it by sampling its texture sideways (see
+    /// [`grid::picture_area`] and `grid::turned_canvas`). A picture scanned out
+    /// of a surface has no texture to sample, and turning the view does not
+    /// turn the frames: the surface loop reads this and suspends the surface
+    /// path for as long as the turn is up, so the codec hands the frames back
+    /// and the wall draws them itself. See
+    /// `monitor_codec::amediacodec::set_surface_suspended`.
+    pub fn picture_turned(&self) -> bool {
+        self.magnified_rotated()
+    }
+
+    /// The tile the magnified picture belongs to, in wall points.
+    ///
+    /// Not the screen: the wall leaves a gutter for a navigation bar it keeps,
+    /// and its bars claim their own bands, so the tile is what is left of the
+    /// screen. The corners, the frame and the magnified bar are laid out
+    /// against this rectangle in the wall's frame; the overlay has to lay its
+    /// copy out against the very same one, or the two drift apart by the width
+    /// of a gutter. See [`Self::draw_overlay_only`].
+    pub fn magnified_tile(&self) -> Option<egui::Rect> {
+        self.magnified_rect
+    }
+
     /// What the magnified picture is showing of itself: the whole of it, or the
     /// window a pinch has left it at.
     ///
@@ -208,13 +233,18 @@ impl XgViewApp {
     /// and the ring the remote puts on a control is mirrored into this context
     /// by the caller, which is the one thing painting alone cannot supply.
     ///
-    /// `picture` is the picture's rectangle **in the strip's own coordinates** -
-    /// the screen's size, shifted up by the strip's height so that the bottom
-    /// edge of the picture is the bottom edge of the strip. It is laid out
-    /// against rather than the strip itself so that the bar is drawn in exactly
-    /// the place the wall's copy of it takes presses: the two are one layout
-    /// seen twice, not two layouts that happen to agree.
-    pub fn draw_overlay_only(&self, ctx: &egui::Context, picture: egui::Rect) {
+    /// `picture` is the wall's screen **in the strip's own coordinates** - the
+    /// screen's size, shifted by the difference between the two surfaces'
+    /// heights. Wall-space rectangles reach this frame by that shift.
+    ///
+    /// `body` is the magnified tile, in those same coordinates, with the gutters
+    /// a kept navigation bar claims and the bands the wall's own bars claim
+    /// already taken out. It, and not the whole strip, is what the corners, the
+    /// frame and the controls are laid out against: the wall lays its copy out
+    /// against its tile, and a layout against the screen would put every corner
+    /// and every button under the system bar whenever a gutter was kept - seen
+    /// here, taking presses over there.
+    pub fn draw_overlay_only(&self, ctx: &egui::Context, picture: egui::Rect, body: egui::Rect) {
         // Only while the wall's own frame is being dropped by the compositor:
         // then the corners and the bar have nowhere else to be drawn. When the
         // wall is on screen it draws both itself, and a second copy here would
@@ -233,14 +263,24 @@ impl XgViewApp {
         let break_after = self.tile_bar_break();
         let margin = self.tile_bar_margin();
         let dock = self.tile_bar.dock();
-        // The strip is given a timeline on the same terms the picture is: only
-        // a recording has one to draw, and only a panel that fits in the strip
-        // is a strip of controls. Which is asked of the strip, because the strip
-        // is what has to hold it; where it goes is asked of the picture, because
+        // The tile is given a timeline on the same terms the picture is: only a
+        // recording has one to draw, and only a panel that fits the tile is a
+        // strip of controls. Which is asked of the tile, because the tile is
+        // what has to hold it; where it goes is asked of the tile too, because
         // that is where the bar belongs.
+        //
+        // Turned, the strip runs down the side of the picture and its glyphs
+        // turn with it. The wall lays out and draws its copy with `rotated`, so
+        // this copy must use the same answer; a turn suspends the surface path
+        // and leaves the wall's own frame as the one that is seen, but the frames
+        // on either side of the switch still have to agree.
+        let rotated = self.magnified_rotated();
         let playing = self.scheduler.zoom().is_some_and(|slot| self.is_playing_back(slot));
-        let timeline = playing && tilebar::fits_timeline(strip, false, margin, &widths, break_after);
-        let layout = tilebar::layout(picture, false, dock, margin, &widths, break_after, timeline);
+        let timeline = playing
+            && tilebar::fits_timeline(body, rotated, margin, &widths, break_after);
+        let layout = tilebar::layout(
+            body, rotated, dock, margin, &widths, break_after, timeline,
+        );
         let controls: Vec<tilebar::Control> = entries.iter().map(|(control, _)| *control).collect();
         let muted: Vec<bool> = entries
             .iter()
@@ -271,12 +311,12 @@ impl XgViewApp {
                 // the letterbox's own bars, in the same colour the wall used.
                 if let Some(box_) = self.picture_rect {
                     let box_ = box_.translate(picture.min - strip.min);
-                    for band in bands_around(strip, box_) {
+                    for band in bands_around(body, box_) {
                         ui.painter().rect_filled(band, egui::CornerRadius::ZERO, theme::CANVAS);
                     }
                 }
                 ui.painter().rect_stroke(
-                    picture,
+                    body,
                     egui::CornerRadius::ZERO,
                     egui::Stroke::new(grid::LINE, theme::GRID_LINE),
                     egui::StrokeKind::Inside,
@@ -305,21 +345,19 @@ impl XgViewApp {
                         true,
                         self.ring_shown(),
                     );
-                    grid::osd(ui.painter(), picture, &tile);
-                    // The cursor, on the tile: the ring the wall draws on the
-                    // same rectangle, in the strip's own coordinates. It is here
-                    // and not there for the reason the corners are - the picture
-                    // is over the wall - and on a letterboxed picture the wall's
-                    // copy shows only where the two bands are, which reads as a
-                    // frame with its top and bottom run through.
+                    grid::osd(ui.painter(), body, &tile);
+                    // The cursor, on the tile: the ring the wall draws on that
+                    // same rectangle. It is here and not there for the reason
+                    // the corners are - the picture is over the wall - and on a
+                    // letterboxed picture the wall's copy shows only where the
+                    // two bands are, which reads as a frame with its top and
+                    // bottom run through.
                     if tile.focused {
-                        if let Some(tile_rect) = self.magnified_rect {
-                            grid::ring(ui.painter(), tile_rect.translate(picture.min.to_vec2()));
-                        }
+                        grid::ring(ui.painter(), body);
                     }
                 }
                 if open {
-                    tilebar::draw(ui, &mut nav, &layout, false, &controls, &muted, &tips);
+                    tilebar::draw(ui, &mut nav, &layout, rotated, &controls, &muted, &tips);
                     // What the recording holds, in the row the strip's own
                     // geometry put there. The wall draws the same thing over the
                     // picture; this is the copy that can be seen.

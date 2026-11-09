@@ -106,12 +106,15 @@
 
         <!-- The transparent entry point. It reads the remembered orientation
              from xgvconfig.json and starts the matching fixed-orientation
-             activity below, then finishes. This is what keeps the wall from
-             coming up one way and turning to the other: Android fixes the
+             surface activity below, then finishes. This is what keeps the wall
+             from coming up one way and turning to the other: Android fixes the
              window orientation from the manifest at creation time, before any
-             code runs, so the only way to start already turned is to have two
-             activities - one landscape, one portrait - and pick the right one
-             before any native rendering begins. -->
+             code runs, so the only way to start already turned is to have one
+             activity per direction - SurfaceActivity and
+             SurfaceActivityPortrait - and pick the right one before any native
+             rendering begins. A switch while the wall is up is a
+             setRequestedOrientation on the activity that is already running;
+             that one rotation is what the viewer asked for. -->
         <activity
             android:name=".LauncherActivity"
             android:exported="true"
@@ -146,10 +149,12 @@
         <!-- The wall on surfaces of its own: the picture is decoded straight
              into a `SurfaceView` under the wall and the controls are drawn into
              a strip over it, so nothing is read back and a 1080p camera plays at
-             its own rate. This is the landscape entry point now; `MainActivity`
-             below is what portrait still uses, and what landscape falls back to
-             if this arrangement is ever withdrawn. See `SurfaceActivity` and
-             `priv/docs/android-surface-plan.md`. -->
+             its own rate. Both directions use this front end now - the two
+             activities differ only in the orientation the window starts in,
+             and either can be turned to the other from the toolbar.
+             `MainActivity` below is the older NativeActivity path, kept as the
+             fallback if this arrangement is ever withdrawn. See
+             `SurfaceActivity` and `priv/docs/android-surface-plan.md`. -->
         <activity
             android:name=".SurfaceActivity"
             android:exported="true"
@@ -157,6 +162,18 @@
             android:launchMode="singleTask"
             android:resizeableActivity="false"
             android:screenOrientation="userLandscape" />
+
+        <!-- The same wall, upright. A separate activity only so the window is
+             already portrait at creation; nothing about the three surfaces or
+             the codec's window is different. See SurfaceActivityPortrait. -->
+        <activity
+            android:name=".SurfaceActivityPortrait"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false"
+            android:screenOrientation="userPortrait"
+            android:windowSoftInputMode="stateAlwaysHidden" />
 
         <!-- The wall, landscape. `userLandscape` allows both landscape
              directions and follows the device sensor, while still respecting
@@ -182,10 +199,9 @@
                 android:value="monitor_android" />
         </activity>
 
-        <!-- The wall, portrait. The same MainActivity class with a
-             portrait-fixed orientation, so the window comes up already
-             turned. Launched by LauncherActivity when the remembered
-             orientation is portrait. -->
+        <!-- The older NativeActivity path, portrait. Kept for the fallback in
+             which the surface arrangement is withdrawn; LauncherActivity starts
+             SurfaceActivityPortrait instead while the surfaces are in use. -->
         <activity
             android:name=".MainActivityPortrait"
             android:exported="false"

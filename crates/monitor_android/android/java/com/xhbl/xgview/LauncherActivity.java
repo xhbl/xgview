@@ -18,10 +18,12 @@ import java.nio.charset.StandardCharsets;
  * <p>Android fixes an activity's window orientation from the manifest at
  * creation time, before any code runs, so changing it from {@code onCreate}
  * always produces a visible rotation. To come up already turned the right way,
- * two fixed-orientation activities are declared in the manifest - one
+ * two fixed-orientation surface activities are declared in the manifest - one
  * landscape, one portrait - and this launcher reads the remembered preference
- * from {@code xgvconfig.json} and starts the matching one. It has no UI and
- * finishes at once, so the only thing the viewer sees is the wall in the right
+ * from {@code xgvconfig.json} and starts the matching one. Both are the same
+ * wall on surfaces of its own; the toolbar turns the running one to the other
+ * direction without involving this launcher. It has no UI and finishes at
+ * once, so the only thing the viewer sees is the wall in the right
  * orientation.
  */
 public class LauncherActivity extends Activity {
@@ -49,12 +51,16 @@ public class LauncherActivity extends Activity {
         if (running != null) {
             target = running.getClass().getName();
         } else if (surface != null) {
-            target = "com.xhbl.xgview.SurfaceActivity";
+            // Both directions run on the same front end now, but they are two
+            // activities. Name the one that is up: a CLEAR_TOP launch of the
+            // other class would create a second wall beside it.
+            target = surface.getClass().getName();
         } else if (portrait) {
-            // Upright, the wall keeps the `NativeActivity` it has always had:
-            // the three-surface arrangement is the landscape one, and a phone
-            // held upright has a picture that fits its window without help.
-            target = "com.xhbl.xgview.MainActivityPortrait";
+            // Upright is the same three-surface arrangement, started in a
+            // window that is already portrait. The picture is decoded straight
+            // into a `SurfaceView` in either direction; the older
+            // `NativeActivity` is only a fallback now.
+            target = "com.xhbl.xgview.SurfaceActivityPortrait";
         } else {
             // Landscape goes to the wall on surfaces of its own. The picture is
             // decoded straight into a `SurfaceView` and never read back, which

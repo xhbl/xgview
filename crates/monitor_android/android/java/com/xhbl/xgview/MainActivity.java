@@ -862,24 +862,20 @@ public class MainActivity extends NativeActivity {
      *
      * <p>Both are the {@code USER_} variants, so the user's rotation lock is
      * honoured: locked means a fixed upright view, unlocked lets the device be
-     * turned over. The activity is not recreated - the manifest lists
-     * {@code orientation} among its config changes - so the wall simply
-     * re-lays-out on the resize.
+     * turned over. The activity is not recreated - both front ends list
+     * {@code orientation} among their config changes - so the wall simply
+     * re-lays-out on the resize, whichever of them is on screen.
      *
      * <p>Returns whether there was an activity to ask. The caller uses the
      * answer to decide whether the request has been handed over: a call that
      * found no activity is one to try again, not one to remember as sent.
      */
     public static boolean setOrientation(final boolean portrait) {
-        final MainActivity self = instance;
-        if (self == null) {
-            // The wall on surfaces of its own is landscape by construction. A
-            // request for landscape is one it already honours - answered `true`
-            // so the native side stops asking every frame - and a request for
-            // portrait is one it cannot take.
-            return !portrait && SurfaceActivity.current() != null;
+        final Activity host = wall();
+        if (host == null) {
+            return false;
         }
-        self.runOnUiThread(() -> self.setRequestedOrientation(portrait
+        host.runOnUiThread(() -> host.setRequestedOrientation(portrait
                 ? ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
                 : ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE));
         return true;
@@ -935,15 +931,16 @@ public class MainActivity extends NativeActivity {
      * Whether this device can stand upright: it has a touch screen and is not a
      * television. A television and a fixed-orientation panel have no portrait
      * to turn to, so the wall offers no way to ask.
+     *
+     * <p>The answer is about the device, not about which front end is drawing
+     * the wall. Both stand upright now: the three surfaces and the codec's
+     * window follow the window's shape, and the activity asks
+     * {@code setRequestedOrientation} for the other direction when the viewer
+     * presses the switch.
      */
     public static boolean supportsPortrait() {
         final Activity self = wall();
-        if (!(self instanceof MainActivity)) {
-            // The wall on surfaces of its own comes up landscape and stays
-            // there: its manifest fixes the orientation before any code runs,
-            // and the three surfaces and the picture's window are laid out for
-            // that shape. There is no portrait arrangement to turn to, so the
-            // switch is not offered rather than offered and ignored.
+        if (self == null) {
             return false;
         }
         final PackageManager packages = self.getPackageManager();

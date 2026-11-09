@@ -324,6 +324,10 @@ fn run() -> anyhow::Result<()> {
     // Starts hidden: the wall comes up on the grid, and the picture's view has
     // nothing to show until a viewport is magnified.
     let mut video_shown = false;
+    // A turned picture has no surface of its own: the wall draws it from a
+    // texture it turns itself, so the codec has to hand frames back as bytes
+    // while one is up. Asked once per change, not once per frame.
+    let mut surface_suspended = false;
     // The rectangle the picture's view was last given, in physical pixels. A
     // relayout is not free - it resizes the surface the codec renders into - so
     // the rectangle is only sent when the wall's answer changes, and forgotten
@@ -571,6 +575,18 @@ fn run() -> anyhow::Result<()> {
             events,
             ..Default::default()
         };
+        // A turned picture is the one the surface cannot draw: rotating the
+        // view does not rotate the frames the compositor scans out of it, and
+        // there is no texture for the wall's turned mesh to sample. Suspend the
+        // surface path for as long as the turn is up and the codec gives the
+        // frames back to the wall, which draws them exactly as the older front
+        // end always has. See `monitor_codec::amediacodec::set_surface_suspended`.
+        let turned = app.picture_turned();
+        if turned != surface_suspended {
+            surface_suspended = turned;
+            monitor_codec::amediacodec::set_surface_suspended(turned);
+            tracing::info!(target: "xgview", suspended = turned, "the surface path was suspended");
+        }
         let output = context.run(input, |ctx| app.frame(ctx));
 
         // The picture's view is shown by the same answer that makes the wall
@@ -767,6 +783,26 @@ fn run() -> anyhow::Result<()> {
                     }
                 }
             }
+        } else if let Some((bar_surface, bar_config, _)) = bar.as_mut() {
+            // A turn changes the window's shape without replacing the Surface
+            // object, so `bar_attached` still matches and the branch above does
+            // not run. The wall's own surface reconfigures on every resize;
+            // this one has to as well, or its swapchain keeps the landscape
+            // rectangle and the overlay lays its opaque bands out against a
+            // screen that no longer exists - a black picture with its controls
+            // in a corner. See `resize` for the wall's side of the same turn.
+            let (width, height) = (
+                BAR_WIDTH.load(Ordering::Acquire),
+                BAR_HEIGHT.load(Ordering::Acquire),
+            );
+            if width > 0
+                && height > 0
+                && (width != bar_config.width || height != bar_config.height)
+            {
+                bar_config.width = width;
+                bar_config.height = height;
+                bar_surface.configure(&render_state.device, bar_config);
+            }
         }
         // Something to say, or one frame left to say nothing in: the bar that
         // was up has to be painted away, and after that the surface is left
@@ -820,26 +856,30 @@ fn run() -> anyhow::Result<()> {
                             );
                         }
                     }
-                    // The picture's rectangle in the strip's own coordinates: the
-                    // screen's size, shifted up by the strip's height so that the
-                    // picture's bottom edge is the strip's. The bar is laid out
-                    // against it, which is where the wall lays it out too - so
-                    // what is drawn here is in the place the wall's copy takes
-                    // presses.
-                    //
-                    // The *screen*, not the picture the fit switch leaves inside
-                    // it: the corners and the bar are laid out against the tile,
-                    // here and in the wall's own copy, and the wall is what reads
-                    // the presses. Laid out against a letterboxed picture, the bar
-                    // would be drawn where no press could reach it.
+                    // The wall's screen in the strip's own coordinates: the two
+                    // surfaces differ by the strip's height, so a rectangle the
+                    // wall measured reaches this frame shifted by that much.
+                    // Wall-space rectangles - the picture's box, the focus ring -
+                    // are translated by `shift` below.
                     let screen_w = WIDTH.load(Ordering::Acquire) as f32 / pixels_per_point;
                     let screen_h = HEIGHT.load(Ordering::Acquire) as f32 / pixels_per_point;
                     let strip_h = bar_config.height as f32 / pixels_per_point;
-                    let picture = egui::Rect::from_min_size(
+                    let shift = egui::vec2(0.0, strip_h - screen_h);
+                    let screen = egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
                         egui::vec2(screen_w, screen_h),
-                    )
-                    .translate(egui::vec2(0.0, strip_h - screen_h));
+                    );
+                    let picture = screen.translate(shift);
+                    // What the wall actually laid its corners, frame and bar
+                    // out against: its tile, with the gutter a kept navigation
+                    // bar claims and the bands of its own bars left out. The
+                    // screen is not that rectangle when a gutter is kept, and a
+                    // bar laid out against the screen then sits under the
+                    // system bar while the wall takes presses higher up.
+                    let body = app
+                        .magnified_tile()
+                        .unwrap_or(screen)
+                        .translate(shift);
                     let open = app.bar_open();
                     if open != bar_open {
                         bar_open = open;
@@ -850,8 +890,8 @@ fn run() -> anyhow::Result<()> {
                             "the bar's own frame"
                         );
                     }
-                    let bar_output =
-                        bar_context.run(bar_input, |ctx| app.draw_overlay_only(ctx, picture));
+                    let bar_output = bar_context
+                        .run(bar_input, |ctx| app.draw_overlay_only(ctx, picture, body));
                     let bar_jobs =
                         bar_context.tessellate(bar_output.shapes, bar_output.pixels_per_point);
                     let bar_screen = egui_wgpu::ScreenDescriptor {
