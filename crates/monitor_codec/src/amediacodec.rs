@@ -461,7 +461,7 @@ impl AMediaCodecDecoder {
                         Self::open_session(&mime, &csd, size, COLOR_FORMAT_FLEXIBLE, Some(window))
                     }
                 };
-                return match opened {
+                match opened {
                     Ok(codec) => {
                         self.handle = Some(codec);
                         self.started = true;
@@ -472,10 +472,23 @@ impl AMediaCodecDecoder {
                             info.width = width;
                             info.height = height;
                         }
-                        Ok(())
+                        return Ok(());
                     }
-                    Err(err) => Err(err),
-                };
+                    // A codec that will not render into this window is not a
+                    // stream that cannot be decoded: the reader below is the
+                    // path every other stream on this device already takes, and
+                    // it is slower rather than broken. Falling through to it is
+                    // the difference between a picture at three quarters of its
+                    // rate and no picture at all - which is what a device whose
+                    // decoder refuses the window would otherwise get, since the
+                    // window is offered to every stream wide enough to be worth
+                    // it.
+                    Err(err) => tracing::warn!(
+                        target: "xgview::codec",
+                        %err,
+                        "the codec would not render into the activity's surface; reading pictures back instead"
+                    ),
+                }
             }
         }
 

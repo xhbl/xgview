@@ -640,6 +640,22 @@ fn run() -> anyhow::Result<()> {
                             format = ?config.format,
                             "the bar has a surface of its own"
                         );
+                        // The overlay is drawn over the picture, so it is only
+                        // an overlay if it can be see-through. A device whose
+                        // surfaces offer nothing but `Opaque` would paint a
+                        // black rectangle over the picture instead - the one
+                        // failure this arrangement cannot absorb - and it says
+                        // so here, because nothing else on that device would.
+                        if caps
+                            .alpha_modes
+                            .iter()
+                            .all(|mode| *mode == wgpu::CompositeAlphaMode::Opaque)
+                        {
+                            tracing::warn!(
+                                target: "xgview",
+                                "this surface cannot be see-through: the overlay will cover the picture"
+                            );
+                        }
                         let renderer = egui_wgpu::Renderer::new(
                             &render_state.device,
                             config.format,
