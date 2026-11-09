@@ -53,7 +53,6 @@ const AMEDIA_OK: c_int = 0;
 /// `AMEDIACODEC_BUFFER_FLAG_KEY_FRAME`
 const BUFFER_FLAG_KEY_FRAME: u32 = 1;
 /// `AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM`
-#[cfg_attr(not(feature = "surface"), allow(dead_code))]
 const BUFFER_FLAG_END_OF_STREAM: u32 = 4;
 /// `INFO_OUTPUT_FORMAT_CHANGED`
 const INFO_OUTPUT_FORMAT_CHANGED: isize = -2;
@@ -135,29 +134,23 @@ extern "C" {
 type ANativeWindow = c_void;
 
 /// Opaque `AImageReader*`.
-#[cfg(feature = "surface")]
 type AImageReader = c_void;
 /// Opaque `AImage*`.
-#[cfg(feature = "surface")]
 type AImage = c_void;
 
 /// `media_status_t` - `AMEDIA_OK` is 0, the rest are non-zero.
-#[cfg(feature = "surface")]
 type media_status_t = c_int;
 
 /// `AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE` - `AMEDIA_IMGREADER_ERROR_BASE`
 /// (`-30000`) minus one. The ordinary "nothing has been rendered yet", as
 /// opposed to a reader that failed.
-#[cfg(feature = "surface")]
 const IMGREADER_NO_BUFFER_AVAILABLE: media_status_t = -30001;
 
 /// `AIMAGE_FORMAT_YUV_420_888` - the multi-plane Android YUV format the
 /// AImageReader hands over when a decoder renders into its Surface. Three
 /// planes: Y, U, V, each with its own row stride and pixel stride.
-#[cfg(feature = "surface")]
 const AIMAGE_FORMAT_YUV_420_888: i32 = 0x23;
 
-#[cfg(feature = "surface")]
 #[link(name = "mediandk")]
 extern "C" {
     fn AImageReader_new(
@@ -211,13 +204,13 @@ extern "C" {
 }
 
 /// Opaque `ASurfaceControl*` - one compositor layer.
-#[cfg(all(feature = "surface", feature = "probe"))]
+#[cfg(feature = "probe")]
 type ASurfaceControl = c_void;
 /// Opaque `ASurfaceTransaction*`.
-#[cfg(all(feature = "surface", feature = "probe"))]
+#[cfg(feature = "probe")]
 type ASurfaceTransaction = c_void;
 /// Opaque `AHardwareBuffer*`.
-#[cfg(all(feature = "surface", feature = "probe"))]
+#[cfg(feature = "probe")]
 type AHardwareBuffer = c_void;
 
 // The compositor path, which is the one every Android video player uses and
@@ -227,7 +220,7 @@ type AHardwareBuffer = c_void;
 // It is behind `probe` because it is a measurement, not a feature: what it
 // answers is whether the box can show 1080p at its own rate when nothing asks
 // for the pixels, and what a layer above the wall's own window costs.
-#[cfg(all(feature = "surface", feature = "probe"))]
+#[cfg(feature = "probe")]
 #[link(name = "android")]
 extern "C" {
     fn ANativeWindow_getWidth(window: *mut ANativeWindow) -> i32;
@@ -278,7 +271,7 @@ extern "C" {
 }
 
 /// The compositor layer, once it has been made.
-#[cfg(all(feature = "surface", feature = "probe"))]
+#[cfg(feature = "probe")]
 static OVERLAY_CONTROL: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(ptr::null_mut());
 
@@ -311,7 +304,7 @@ pub fn set_surface_window(window: *mut c_void) {
 /// compositor's, not the view hierarchy's, so nothing has to blend. It answered
 /// null for a `NativeActivity`'s window, which is what stopped it being used;
 /// whether an ordinary activity's window differs is the question this asks.
-#[cfg(all(feature = "surface", feature = "probe"))]
+#[cfg(feature = "probe")]
 pub fn create_overlay(window: *mut c_void) -> bool {
     if window.is_null() {
         return false;
@@ -354,20 +347,20 @@ pub fn video_layer_active() -> bool {
 ///
 /// Superseded: the wall now has a surface of its own to hand a decoder, and this
 /// is what the older probe used before that existed.
-#[cfg(all(feature = "surface", feature = "probe"))]
+#[cfg(feature = "probe")]
 pub fn overlay_wants_surface() -> bool {
     probe::number("debug.xgview.surface.overlay", 0) == 3
 }
 
 /// Whether the probe's window has to be see-through
 /// (`debug.xgview.surface.hole = 1`).
-#[cfg(all(feature = "surface", feature = "probe"))]
+#[cfg(feature = "probe")]
 pub fn probe_translucent() -> bool {
     probe::number("debug.xgview.surface.hole", 0) == 1
 }
 
 /// False where there is no probe.
-#[cfg(not(all(feature = "surface", feature = "probe")))]
+#[cfg(not(feature = "probe"))]
 pub fn probe_translucent() -> bool {
     false
 }
@@ -558,7 +551,6 @@ pub struct AMediaCodecDecoder {
     handle: Option<*mut AMediaCodec>,
     /// The image reader the codec renders into, when the `surface` feature is
     /// enabled. `None` in byte-buffer mode and before the session is opened.
-    #[cfg(feature = "surface")]
     reader: Option<*mut AImageReader>,
     /// Pictures the codec has rendered into the surface but that have not been
     /// acquired yet, as `(pts_us, keyframe)` in the order they were rendered.
@@ -568,13 +560,12 @@ pub struct AMediaCodecDecoder {
     /// `dequeueOutputBuffer`, and the two are separate calls: this is what
     /// pairs them back up. The queue is FIFO because the reader hands images
     /// over in the order the codec rendered them.
-    #[cfg(feature = "surface")]
     pending: std::collections::VecDeque<(i64, bool)>,
     /// The compositor layer the probe presents into, once it has one.
     /// `debug.xgview.surface.overlay`: 0 read back as before, 1 hand the
     /// picture to the compositor, 2 take it and drop it - the last one is what
     /// the pixels cost when nothing at all asks for them.
-    #[cfg(all(feature = "surface", feature = "probe"))]
+    #[cfg(feature = "probe")]
     overlay_mode: i32,
     /// How many pictures the compositor was given. Reported beside `packed`
     /// so a session that is presenting rather than reading back still shows a
@@ -605,9 +596,7 @@ pub struct AMediaCodecDecoder {
     /// Byte-buffer mode only: a picture handed over as a buffer has the codec's
     /// padding around it, and these are what it is stripped with. An `AImage`
     /// carries its own row stride per plane, so surface mode never reads them.
-    #[cfg_attr(feature = "surface", allow(dead_code))]
     stride: u32,
-    #[cfg_attr(feature = "surface", allow(dead_code))]
     slice_height: u32,
     started: bool,
     /// Whether this session was configured with a surface to render into - a
@@ -624,7 +613,6 @@ pub struct AMediaCodecDecoder {
     /// Byte-buffer mode only: with a surface the codec reports
     /// `COLOR_FormatSurface`, which is not a picture layout and is not warned
     /// about.
-    #[cfg_attr(feature = "surface", allow(dead_code))]
     format_reported: bool,
     /// How long to wait for an input buffer before giving the access unit up.
     ///
@@ -640,7 +628,6 @@ pub struct AMediaCodecDecoder {
     /// The `color-format` the codec announced, `None` until it did.
     ///
     /// Byte-buffer mode only - see [`Self::format_reported`].
-    #[cfg_attr(feature = "surface", allow(dead_code))]
     colour_format: Option<i32>,
     /// How this session's colour is laid out, decided on its first picture.
     ///
@@ -651,7 +638,6 @@ pub struct AMediaCodecDecoder {
     /// colour changes from frame to frame.
     ///
     /// Byte-buffer mode only - see [`Self::stride`].
-    #[cfg_attr(feature = "surface", allow(dead_code))]
     layout: Option<(Layout, usize)>,
     /// Whether the geometry of this session's pictures has been logged.
     ///
@@ -758,7 +744,7 @@ impl AMediaCodecDecoder {
         {
             self.cache_output = probe::number("debug.xgview.codec.cacheout", 0) != 0;
         }
-        #[cfg(all(feature = "surface", feature = "probe"))]
+        #[cfg(feature = "probe")]
         {
             self.overlay_mode = probe::number("debug.xgview.surface.overlay", 0);
         }
@@ -838,7 +824,6 @@ impl AMediaCodecDecoder {
             }
         }
 
-        #[cfg(feature = "surface")]
         let (codec, reader) = {
             let (width, height) = size.unwrap_or((0, 0));
             let reader = Self::create_reader(width, height)?;
@@ -872,21 +857,8 @@ impl AMediaCodecDecoder {
                 }
             }
         };
-        #[cfg(not(feature = "surface"))]
-        let codec = match Self::open_session(&mime, &csd, size, COLOR_FORMAT_SEMI_PLANAR, None) {
-            Ok(codec) => codec,
-            Err(err) => {
-                tracing::debug!(
-                    target: "xgview::codec",
-                    %err,
-                    "the codec would not take a named layout, asking for a flexible one"
-                );
-                Self::open_session(&mime, &csd, size, COLOR_FORMAT_FLEXIBLE, None)?
-            }
-        };
 
         self.handle = Some(codec);
-        #[cfg(feature = "surface")]
         {
             // A reader is a surface too: the codec renders into it, and the
             // pictures come back as images rather than as byte buffers.
@@ -900,17 +872,10 @@ impl AMediaCodecDecoder {
             info.width = width;
             info.height = height;
         }
-        #[cfg(feature = "surface")]
         tracing::debug!(
             target: "xgview::codec",
             codec = config.codec.as_str(),
             "AMediaCodec session open, decoding into AImageReader Surface"
-        );
-        #[cfg(not(feature = "surface"))]
-        tracing::debug!(
-            target: "xgview::codec",
-            codec = config.codec.as_str(),
-            "AMediaCodec session open, decoding into byte buffers"
         );
         Ok(())
     }
@@ -921,7 +886,6 @@ impl AMediaCodecDecoder {
     /// a time for this pipeline's decode-then-read cadence, and a larger pool
     /// just holds memory. Five is the same count the framework's own
     /// `ImageReader` defaults to for a video-decode consumer.
-    #[cfg(feature = "surface")]
     fn create_reader(width: u32, height: u32) -> Result<*mut AImageReader> {
         let mut reader: *mut AImageReader = ptr::null_mut();
         // The size the stream describes may not be known yet (width/height can
@@ -1140,7 +1104,6 @@ impl AMediaCodecDecoder {
         // Only byte-buffer mode has a colour format this reads: a codec given a
         // surface reports `COLOR_FormatSurface`, which is not a picture layout
         // at all - the images come out of the reader in `YUV_420_888` instead.
-        #[cfg(not(feature = "surface"))]
         {
             let nv12 = !has_colour
                 || colour_format == COLOR_FORMAT_FLEXIBLE
@@ -1203,7 +1166,6 @@ impl AMediaCodecDecoder {
                         // surface hands over no image at all, so nothing is
                         // remembered for it - a queue that grew for pictures
                         // nobody will take is a leak.
-                        #[cfg(feature = "surface")]
                         if self.reader.is_some() && info.flags & BUFFER_FLAG_END_OF_STREAM == 0 {
                             self.pending.push_back((
                                 info.presentation_time_us,
@@ -1282,7 +1244,6 @@ impl AMediaCodecDecoder {
         }
         // The release above is what puts the picture into the reader, so the
         // images can only be taken once every buffer has been handed back.
-        #[cfg(feature = "surface")]
         self.acquire_images(frames);
     }
 
@@ -1293,7 +1254,6 @@ impl AMediaCodecDecoder {
     /// surface yet. An image that cannot be read as NV12 is deleted and dropped,
     /// which returns its buffer to the reader's pool - leaving one acquired
     /// would starve the reader after `max_images` frames.
-    #[cfg(feature = "surface")]
     fn acquire_images(&mut self, frames: &mut Vec<DecodedFrame>) {
         let Some(reader) = self.reader else {
             return;
@@ -1327,7 +1287,7 @@ impl AMediaCodecDecoder {
             // it never reaches this code. A session that does have one still
             // reads its pictures back, which is how the wall's tiles keep their
             // pictures while the magnified viewport is on the video layer.
-            #[cfg(all(feature = "surface", feature = "probe"))]
+            #[cfg(feature = "probe")]
             if self.overlay_mode == 1 || self.overlay_mode == 2 {
                 if self.overlay_mode == 1 {
                     self.present_overlay(image);
@@ -1357,7 +1317,7 @@ impl AMediaCodecDecoder {
     ///
     /// The image is kept alive until the transaction has been applied - the
     /// buffer handle belongs to it - so the caller deletes it afterwards.
-    #[cfg(all(feature = "surface", feature = "probe"))]
+    #[cfg(feature = "probe")]
     fn present_overlay(&mut self, image: *mut AImage) {
         let control = OVERLAY_CONTROL.load(std::sync::atomic::Ordering::Acquire);
         if control.is_null() {
@@ -1392,7 +1352,6 @@ impl AMediaCodecDecoder {
     /// that hands over semi-planar colour has 2 with the two planes
     /// overlapping. Reading either as the other is a picture with its colour
     /// swapped or striped.
-    #[cfg(feature = "surface")]
     fn pack_image(&mut self, image: *mut AImage) -> Option<DecodedFrame> {
         // Taken first, so a picture this cannot read still consumes the entry
         // that belongs to it and the queue stays lined up with the images.
@@ -1578,7 +1537,6 @@ impl AMediaCodecDecoder {
     /// Byte-buffer mode only: with a surface the picture never reaches a buffer
     /// this could read, and [`Self::pack_image`] does the same job from an
     /// `AImage`.
-    #[cfg_attr(feature = "surface", allow(dead_code))]
     fn pack(
         &mut self,
         buffer: *const u8,
@@ -1718,7 +1676,6 @@ impl AMediaCodecDecoder {
         }
         // The reader owns the `ANativeWindow` the codec was configured with, so
         // it outlives the codec and is deleted after it.
-        #[cfg(feature = "surface")]
         if let Some(reader) = self.reader.take() {
             unsafe { AImageReader_delete(reader) };
         }
@@ -1749,7 +1706,6 @@ impl VideoDecoder for AMediaCodecDecoder {
         self.wait = crate::wait::WAIT_MIN;
         self.geometry_logged = false;
         self.layout = None;
-        #[cfg(feature = "surface")]
         self.pending.clear();
         // A new session is a new codec, and its buffers are not the last one's.
         #[cfg(feature = "probe")]
@@ -1845,7 +1801,6 @@ impl VideoDecoder for AMediaCodecDecoder {
                 presented = self.stat_presented,
                 pictures = self.pictures,
                 total_ms = self.stat_total.as_millis() as u64,
-                surface = cfg!(feature = "surface"),
                 "the decoder's pace"
             );
             self.stat_dequeue = Duration::ZERO;
@@ -1927,7 +1882,6 @@ impl AMediaCodecDecoder {
         }
         // A flush discards whatever the codec had not rendered, so the entries
         // remembered for those pictures no longer have one coming.
-        #[cfg(feature = "surface")]
         self.pending.clear();
         // And a flushed codec may hand back different buffers.
         #[cfg(feature = "probe")]

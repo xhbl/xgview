@@ -80,7 +80,7 @@ pub fn set_window_geometry(width: i32, height: i32) {
 /// one thing only this side can reach. It does not exist when `run_android`
 /// starts - the activity creates its surface later - so this is called from the
 /// frame loop and stops asking as soon as it has one.
-#[cfg(all(feature = "probe", feature = "surface"))]
+#[cfg(feature = "probe")]
 pub fn publish_overlay_window() {
     use std::sync::atomic::AtomicBool;
     static PUBLISHED: AtomicBool = AtomicBool::new(false);
@@ -113,7 +113,7 @@ pub fn publish_overlay_window() {
 /// it as its output, and nothing about the picture ever comes back to this
 /// process. A null surface means the view went away, and the decoder falls back
 /// to whatever the next session opens with.
-#[cfg(all(feature = "probe", feature = "surface"))]
+#[cfg(feature = "probe")]
 pub fn set_probe_surface(env: &mut JNIEnv, surface: &jni::objects::JObject) {
     #[link(name = "android")]
     extern "C" {
@@ -133,18 +133,18 @@ pub fn set_probe_surface(env: &mut JNIEnv, surface: &jni::objects::JObject) {
 /// The same, in a build without the probe: the activity's `SurfaceView` is
 /// never asked for, so nothing ever calls this, and a call that did would have
 /// nowhere to put the window.
-#[cfg(not(all(feature = "probe", feature = "surface")))]
+#[cfg(not(feature = "probe"))]
 pub fn set_probe_surface(_env: &mut JNIEnv, _surface: &jni::objects::JObject) {}
 
 /// Whether this build's window has to be see-through, which the activity asks
 /// before it creates its surface. See `monitor_codec`'s `probe_translucent`.
-#[cfg(all(feature = "probe", feature = "surface"))]
+#[cfg(feature = "probe")]
 pub fn probe_translucent() -> bool {
     monitor_codec::amediacodec::probe_translucent()
 }
 
 /// False in every build without the probe: the window stays opaque.
-#[cfg(not(all(feature = "probe", feature = "surface")))]
+#[cfg(not(feature = "probe"))]
 pub fn probe_translucent() -> bool {
     false
 }
@@ -182,13 +182,13 @@ pub fn install_activity(env: &mut JNIEnv, class: &jni::objects::JClass, activity
 
 /// Asks the compositor for a layer under the given window, and says whether it
 /// came. See `monitor_codec`'s `create_overlay`.
-#[cfg(all(feature = "probe", feature = "surface"))]
+#[cfg(feature = "probe")]
 pub fn create_overlay(window: *mut std::ffi::c_void) -> bool {
     monitor_codec::amediacodec::create_overlay(window)
 }
 
 /// False where there is no probe.
-#[cfg(not(all(feature = "probe", feature = "surface")))]
+#[cfg(not(feature = "probe"))]
 pub fn create_overlay(_window: *mut std::ffi::c_void) -> bool {
     false
 }

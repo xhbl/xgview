@@ -328,7 +328,7 @@ fn run() -> anyhow::Result<()> {
     // that would let the picture sit under the wall without either of them
     // having to be see-through. It is asked here rather than in the JNI entry
     // because the log subscriber is installed just above.
-    #[cfg(all(feature = "probe", feature = "surface"))]
+    #[cfg(feature = "probe")]
     {
         let window = WINDOW.load(Ordering::Acquire);
         let made = crate::android::create_overlay(window);

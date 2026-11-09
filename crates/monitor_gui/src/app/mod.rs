@@ -2157,7 +2157,7 @@ impl XgViewApp {
     pub fn frame(&mut self, ctx: &egui::Context) {
         // The activity's window does not exist when the process starts, and the
         // decoder's compositor probe needs it; this asks until it has one.
-        #[cfg(all(target_os = "android", feature = "probe", feature = "surface"))]
+        #[cfg(all(target_os = "android", feature = "probe"))]
         crate::android::publish_overlay_window();
         let start = self.begin_frame(ctx);
         self.pump_background(ctx);

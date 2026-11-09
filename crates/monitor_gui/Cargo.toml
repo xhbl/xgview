@@ -52,13 +52,6 @@ monitor_i18n = { path = "../monitor_i18n" }
 egui-file-dialog = "0.11"
 
 [features]
-# Experimental, Android only: decode into an `AImageReader`'s Surface instead of
-# reading pictures back through byte buffers. It is the measurement the box of
-# `priv/docs/playback-decode-cost.md` needs - whether the 14-20 ms a 1080p
-# picture spends in `AMediaCodec_releaseOutputBuffer` goes away when the codec
-# renders into a Surface - and nothing else. Off by default: the shipped build
-# stays on byte buffers until that measurement says otherwise.
-surface = ["monitor_codec/surface"]
 # Measurement knobs for the decoder, off in every shipped build. See
 # `monitor_codec`'s `probe`.
 probe = ["monitor_codec/probe"]
