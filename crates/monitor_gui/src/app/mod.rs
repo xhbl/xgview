@@ -1701,6 +1701,53 @@ impl XgViewApp {
         self.focus_names.insert(response.id, name);
     }
 
+    /// Whether something is floating over the picture rather than beside it.
+    ///
+    /// The surface path cares about the difference. A panel takes layout space,
+    /// so the wall shrinks and the picture shrinks with it, and the panel is on
+    /// screen whatever the picture is doing. A window or a modal takes none: it
+    /// is drawn over the picture's rectangle, and the picture is on a surface
+    /// above the wall, so it is covered whole - not drawn where nobody can see
+    /// it, but unpressable, because the presses go to the picture's view.
+    /// While one of those is up the surface path is suspended, the codec hands
+    /// its frames back, and the wall draws everything.
+    ///
+    /// The settings panel is *not* in this list, on purpose. It is a
+    /// `SidePanel` and already moves the picture out of its way, and suspending
+    /// costs a codec reopen at each end - a price worth paying for a dialog
+    /// that covers the picture, not for one that sits beside it.
+    pub fn floating_layer_open(&self, ctx: &egui::Context) -> bool {
+        if self.discovery.open
+            || self.layout_picker.is_open()
+            || self.portrait_aspect_picker.is_open()
+            || self.combined_info_picker.is_open()
+            || self.passphrase.is_open()
+            || self.camera_edit.is_open()
+            || self.remove_confirm.is_open()
+            || self.system_confirm.is_open()
+        {
+            return true;
+        }
+        // The soft keyboard's box is pinned to the top of the screen rather
+        // than following its field, so a field in a panel can still have its
+        // box over the picture. Only while it is actually up: `editing` is the
+        // field the viewer confirmed for editing, and the mirror is what the
+        // box is drawn from. See `input_overlay`.
+        #[cfg(target_os = "android")]
+        {
+            if self.editing.is_some()
+                && ctx
+                    .data(|data| data.get_temp::<dialogs::Mirror>(Id::new(dialogs::MIRROR)))
+                    .is_some_and(|mirror| self.editing == Some(mirror.id))
+            {
+                return true;
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = ctx;
+        false
+    }
+
     /// Uploads the pictures decoded since the last repaint.
     ///
     /// Only the newest frame of a channel is uploaded: the [`FrameStore`]

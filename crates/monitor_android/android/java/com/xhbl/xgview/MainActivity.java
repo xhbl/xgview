@@ -168,6 +168,27 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
+     * Tells the native side the wall is on screen again.
+     *
+     * <p>Both front ends call this from {@code onResume}, because both can be
+     * resumed: the channels may have spent the time in the background growing
+     * their backoff, and the window may have been left in whatever orientation
+     * the system settled on rather than the one the wall is laid out for. Both
+     * are repaired from the native side, which is the side that knows the
+     * answers - see {@code monitor_gui::android::request_resume} and
+     * {@code reset_orientation}.
+     *
+     * <p>Static, like {@link #wall()}: a JNI call knows a class and nothing else,
+     * and {@link #nativeResumed} is declared on this one whichever activity was
+     * actually resumed.
+     */
+    static void notifyResumed() {
+        if (nativeLoaded) {
+            nativeResumed();
+        }
+    }
+
+    /**
      * Whether the navigation bar keeps its strip, or the wall hides it and draws
      * full screen. Set from the native side; see {@link #setReserveNavigationBar}
      * and {@link #applySystemBars}.
@@ -896,9 +917,7 @@ public class MainActivity extends NativeActivity {
         // while the viewer was elsewhere, has to be repeated now. Rather than
         // replaying a remembered boolean - which can itself be stale - the
         // native side is asked to send the orientation it is laying out for.
-        if (nativeLoaded) {
-            nativeResumed();
-        }
+        notifyResumed();
     }
 
     /**

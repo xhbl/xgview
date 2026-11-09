@@ -341,6 +341,11 @@ public class SurfaceActivity extends Activity {
     protected void onResume() {
         super.onResume();
         boot.onResume();
+        // The same two repairs the other front end asks for on every resume: a
+        // backoff grown while the process was in the background, and a window
+        // the system may have left in an orientation the wall is not laid out
+        // for. Both live on the native side, so this is the whole of the call.
+        MainActivity.notifyResumed();
     }
 
     @Override

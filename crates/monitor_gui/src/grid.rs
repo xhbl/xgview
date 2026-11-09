@@ -285,6 +285,113 @@ pub struct TileActions {
     pub hover_pos: Option<egui::Pos2>,
 }
 
+/// Paints what a cell says when its picture is not simply playing: the failure
+/// panel, the suspended panel, the wait before a first frame, and the band a
+/// stream switch leaves over the picture it is holding.
+///
+/// It never draws the picture. A cell that has one - a live stream, a recording
+/// being seeked, a channel that was parked and is being opened again - has been
+/// drawn by the caller, and this goes over it.
+///
+/// Split out of [`paint`] for the magnified picture: that one is scanned out of
+/// a surface that sits above the wall, so the wall's copy of this is covered
+/// whole, and `XgViewApp::draw_overlay_only` has to draw it again on the layer
+/// that is seen. Two copies of the wording would drift, so there is one.
+pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: ConnectionState) {
+    let tier = Tier::of(body.size());
+    let dim = |color: Color32| if tile.dim { color.gamma_multiply(0.5) } else { color };
+    let detail = tile.channel.map(|channel| channel.detail.as_str()).unwrap_or("");
+    // Whether the picture on screen is being held while a stream is on its way:
+    // a switch, a seek, or a channel that was parked and is being opened again.
+    // A held picture is not covered: it is the thing the viewer is being left
+    // looking at, and a panel over it would say the same thing worse.
+    let holding = holds_last_picture(state, tile.recording.is_some(), tile.video.is_some());
+    match state {
+        // A recording that has played to its end keeps the last picture it
+        // drew, exactly as a stalled live stream does: there is nothing to
+        // report and nothing to cover it with. The picture is the caller's.
+        ConnectionState::Streaming | ConnectionState::Stalled | ConnectionState::Finished => {}
+        ConnectionState::Failed => {
+            painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS_FAILED));
+            painter.text(body.center() - vec2(0.0, 16.0), Align2::CENTER_CENTER, "!", FontId::proportional(26.0), theme::ERROR);
+            painter.text(body.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, monitor_i18n::tr("grid-stream-failed"), FontId::proportional(14.0), theme::ERROR);
+            if tier != Tier::Minimal && !detail.is_empty() {
+                painter.text(
+                    body.center() + vec2(0.0, 32.0),
+                    Align2::CENTER_CENTER,
+                    theme::truncate(detail, 46),
+                    FontId::proportional(11.0),
+                    theme::TEXT_DIM,
+                );
+            }
+        }
+        ConnectionState::Suspended => {
+            painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS));
+            painter.text(body.center(), Align2::CENTER_CENTER, monitor_i18n::tr("grid-suspended"), FontId::proportional(13.0), dim(theme::TEXT_DIM));
+        }
+        ConnectionState::Idle | ConnectionState::Connecting | ConnectionState::Reconnecting => {
+            if !holding {
+                painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS_PENDING));
+                spinner(painter, body.center() - vec2(0.0, 16.0), 12.0, tile.time, theme::ACCENT);
+                painter.text(body.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, monitor_i18n::tr(state.label()), FontId::proportional(14.0), theme::TEXT);
+                if tier != Tier::Minimal && !detail.is_empty() {
+                    painter.text(
+                        body.center() + vec2(0.0, 34.0),
+                        Align2::CENTER_CENTER,
+                        theme::truncate(detail, 52),
+                        FontId::proportional(11.0),
+                        theme::TEXT_DIM,
+                    );
+                }
+            }
+        }
+    }
+
+    // Stream switch overlay: the last frame of the previous stream is held until
+    // the new stream delivers its first frames, so the viewport never shows a
+    // black or green frame. It is drawn whether or not the picture is live -
+    // a switch is what the band is about - so it is not part of the match above.
+    if let Some(channel) = tile.channel {
+        if let Some(from) = channel.switching_from {
+            let width = (body.width() - theme::space::L).clamp(120.0, 430.0);
+            let band = Rect::from_center_size(body.center(), vec2(width, 54.0));
+            painter.rect_filled(band, CornerRadius::ZERO, Color32::from_black_alpha(205));
+            spinner(painter, band.left_center() + vec2(22.0, 0.0), 10.0, tile.time, theme::FOCUS);
+            let target = channel.stream.unwrap_or(StreamKind::Main);
+            painter.text(
+                band.left_center() + vec2(42.0, -10.0),
+                Align2::LEFT_CENTER,
+                monitor_i18n::tr_args("grid-switching-to", &[("stream", monitor_i18n::tr(target.label()).into())]),
+                FontId::proportional(13.0),
+                theme::FOCUS,
+            );
+            painter.text(
+                band.left_center() + vec2(42.0, 10.0),
+                Align2::LEFT_CENTER,
+                monitor_i18n::tr_args("grid-holding-last", &[("tag", monitor_i18n::tr(from.tag()).into())]),
+                FontId::proportional(11.0),
+                theme::TEXT_DIM,
+            );
+        } else if holding && matches!(state, ConnectionState::Connecting | ConnectionState::Reconnecting) {
+            // The same wait without a stream to name: a channel that was parked
+            // and is being opened again holds the last picture it had, and says
+            // nothing about it - a still picture with no reason given, which
+            // reads as a camera that has stopped rather than one being fetched.
+            let width = (body.width() - theme::space::L).clamp(120.0, 430.0);
+            let band = Rect::from_center_size(body.center(), vec2(width, 34.0));
+            painter.rect_filled(band, CornerRadius::ZERO, Color32::from_black_alpha(205));
+            spinner(painter, band.left_center() + vec2(22.0, 0.0), 10.0, tile.time, theme::FOCUS);
+            painter.text(
+                band.left_center() + vec2(42.0, 0.0),
+                Align2::LEFT_CENTER,
+                monitor_i18n::tr(state.label()),
+                FontId::proportional(13.0),
+                theme::FOCUS,
+            );
+        }
+    }
+}
+
 /// Paints one cell and reports the user interaction.
 pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
     // Clickable and draggable, but deliberately *not* focusable. egui walks the
@@ -313,101 +420,20 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
     let tier = Tier::of(body.size());
     painter.rect_filled(body, CornerRadius::ZERO, dim(theme::TILE_CANVAS));
 
-    // Body: either video placeholder, spinner or error panel.
+    // Body: the picture where there is one, and whatever the state has to say
+    // where there is not. Both halves ask the same question about the picture,
+    // because the answer decides whether a panel is drawn over it or instead of
+    // it. See `state_layer`, which is also the copy the magnified picture's own
+    // layer draws.
     let state = tile.channel.map(|channel| channel.state).unwrap_or(ConnectionState::Idle);
-    let detail = tile.channel.map(|channel| channel.detail.as_str()).unwrap_or("");
-    // Whether the picture on screen is being held while a stream is on its way:
-    // a switch, a seek, or a channel that was parked and is being opened again.
-    let holding = holds_last_picture(state, tile.recording.is_some(), tile.video.is_some());
-    match state {
-        // A recording that has played to its end keeps the last picture it
-        // drew, exactly as a stalled live stream does: there is nothing to
-        // report and nothing to cover it with.
-        ConnectionState::Streaming | ConnectionState::Stalled | ConnectionState::Finished => {
-            live_canvas(&painter, body, tile, tier)
-        }
-        ConnectionState::Failed => {
-            painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS_FAILED));
-            painter.text(body.center() - vec2(0.0, 16.0), Align2::CENTER_CENTER, "!", FontId::proportional(26.0), theme::ERROR);
-            painter.text(body.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, monitor_i18n::tr("grid-stream-failed"), FontId::proportional(14.0), theme::ERROR);
-            if tier != Tier::Minimal && !detail.is_empty() {
-                painter.text(
-                    body.center() + vec2(0.0, 32.0),
-                    Align2::CENTER_CENTER,
-                    theme::truncate(detail, 46),
-                    FontId::proportional(11.0),
-                    theme::TEXT_DIM,
-                );
-            }
-        }
-        ConnectionState::Suspended => {
-            painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS));
-            painter.text(body.center(), Align2::CENTER_CENTER, monitor_i18n::tr("grid-suspended"), FontId::proportional(13.0), dim(theme::TEXT_DIM));
-        }
-        ConnectionState::Idle | ConnectionState::Connecting | ConnectionState::Reconnecting => {
-            if holding {
-                // A recording being seeked: the picture is the window being
-                // left, and the next one is a request away.
-                live_canvas(&painter, body, tile, tier);
-            } else {
-                painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS_PENDING));
-                spinner(&painter, body.center() - vec2(0.0, 16.0), 12.0, tile.time, theme::ACCENT);
-                painter.text(body.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, monitor_i18n::tr(state.label()), FontId::proportional(14.0), theme::TEXT);
-                if tier != Tier::Minimal && !detail.is_empty() {
-                    painter.text(
-                        body.center() + vec2(0.0, 34.0),
-                        Align2::CENTER_CENTER,
-                        theme::truncate(detail, 52),
-                        FontId::proportional(11.0),
-                        theme::TEXT_DIM,
-                    );
-                }
-            }
-        }
+    if matches!(
+        state,
+        ConnectionState::Streaming | ConnectionState::Stalled | ConnectionState::Finished
+    ) || holds_last_picture(state, tile.recording.is_some(), tile.video.is_some())
+    {
+        live_canvas(&painter, body, tile, tier);
     }
-
-    // Stream switch overlay: the last frame of the previous stream is held until
-    // the new stream delivers its first frames, so the viewport never shows a
-    // black or green frame.
-    if let Some(channel) = tile.channel {
-        if let Some(from) = channel.switching_from {
-            let width = (rect.width() - theme::space::L).clamp(120.0, 430.0);
-            let band = Rect::from_center_size(rect.center(), vec2(width, 54.0));
-            painter.rect_filled(band, CornerRadius::ZERO, Color32::from_black_alpha(205));
-            spinner(&painter, band.left_center() + vec2(22.0, 0.0), 10.0, tile.time, theme::FOCUS);
-            let target = channel.stream.unwrap_or(StreamKind::Main);
-            painter.text(
-                band.left_center() + vec2(42.0, -10.0),
-                Align2::LEFT_CENTER,
-                monitor_i18n::tr_args("grid-switching-to", &[("stream", monitor_i18n::tr(target.label()).into())]),
-                FontId::proportional(13.0),
-                theme::FOCUS,
-            );
-            painter.text(
-                band.left_center() + vec2(42.0, 10.0),
-                Align2::LEFT_CENTER,
-                monitor_i18n::tr_args("grid-holding-last", &[("tag", monitor_i18n::tr(from.tag()).into())]),
-                FontId::proportional(11.0),
-                theme::TEXT_DIM,
-            );
-        } else if holding && matches!(state, ConnectionState::Connecting | ConnectionState::Reconnecting) {
-            // The same wait without a stream to name: a channel that was parked
-            // and is being opened again holds the last picture it had, and says
-            // nothing about it - a still picture with no reason given, which
-            // reads as a camera that has stopped rather than one being fetched.
-            let width = (rect.width() - theme::space::L).clamp(120.0, 430.0);
-            let band = Rect::from_center_size(rect.center(), vec2(width, 34.0));
-            painter.rect_filled(band, CornerRadius::ZERO, Color32::from_black_alpha(205));
-            spinner(&painter, band.left_center() + vec2(22.0, 0.0), 10.0, tile.time, theme::FOCUS);
-            painter.text(
-                band.left_center() + vec2(42.0, 0.0),
-                Align2::LEFT_CENTER,
-                monitor_i18n::tr(state.label()),
-                FontId::proportional(13.0),
-                theme::FOCUS,
-            );
-        }
-    }
+    state_layer(&painter, body, tile, state);
 
     // The on-screen display, in the corners the settings panel chose. It goes
     // over whatever the state left on the tile, so that a stream that failed

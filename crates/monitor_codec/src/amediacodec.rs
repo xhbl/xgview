@@ -209,8 +209,18 @@ static SURFACE_SESSIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 /// Whether a codec session is rendering pictures into the activity's surface.
+///
+/// A session counts itself in only after the window it was opened for has
+/// rendered a picture, but the window can go away again while the session keeps
+/// its count: the activity detaches the surface, `decode` leaves the codec alone
+/// rather than reopening it, and the session only leaves the count when it is
+/// dropped. Between those two moments the count says a picture is on a surface
+/// that no longer exists, and both the wall and the view would keep their
+/// distance from a picture that is nowhere - a black hole until the codec is
+/// reopened. The window is part of the answer for that reason.
 pub fn surface_presenting() -> bool {
     !surface_suspended()
+        && !SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire).is_null()
         && SURFACE_SESSIONS.load(std::sync::atomic::Ordering::Acquire) > 0
 }
 

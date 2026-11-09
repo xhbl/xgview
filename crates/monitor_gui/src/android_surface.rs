@@ -213,7 +213,19 @@ pub fn push_touch(phase: i32, id: i32, x: f32, y: f32, force: f32) {
                 push_event(button(true));
             }
             egui::TouchPhase::Move => push_event(egui::Event::PointerMoved(pos)),
-            egui::TouchPhase::End | egui::TouchPhase::Cancel => push_event(button(false)),
+            egui::TouchPhase::End | egui::TouchPhase::Cancel => {
+                push_event(button(false));
+                // A finger that lifts takes the pointer with it, and egui is
+                // told so by the platform layer it was written for. Without
+                // this the wall keeps the last position hovered: the control
+                // under it stays lit, its tooltip stays up, and a lit row in a
+                // picker stays lit, until the next touch somewhere else. Only
+                // when nothing is left on the glass - a second finger still
+                // down has a position of its own to report.
+                if after == 0 {
+                    push_event(egui::Event::PointerGone);
+                }
+            }
         }
     } else if before == 1 && after == 2 {
         // A second finger arrived: the press is no longer a tap but half a
@@ -343,6 +355,12 @@ fn run() -> anyhow::Result<()> {
         None;
     let mut bar_attached: *mut c_void = std::ptr::null_mut();
     let mut last_focus: Option<egui::Id> = None;
+    // What the strip's frame was last told about the pointer. It is carried
+    // across because the strip paints and does not read: the wall's context is
+    // the one the events arrive in, and without a copy of the pointer the
+    // controls there are drawn idle however hard they are being pressed.
+    let mut last_pointer: Option<egui::Pos2> = None;
+    let mut last_pointer_down = false;
     let mut bar_open = false;
     // Whether the overlay had something to say last frame; see the bar's own
     // block below.
@@ -628,7 +646,16 @@ fn run() -> anyhow::Result<()> {
         // see-through layer over the picture, the wall is the only place the
         // OSD and the bar can be drawn, and it can only draw them if the codec
         // hands its frames back.
-        let suspend = app.picture_turned() || OPAQUE_ONLY.load(Ordering::Acquire);
+        //
+        // A window that floats over the picture asks for it as well. It takes
+        // no layout space, so the picture does not move out of its way, and
+        // because the picture's view is above the wall the window would be
+        // covered whole - invisible and unpressable at once. Suspending is what
+        // puts the wall back in charge of the screen; see
+        // `XgViewApp::floating_layer_open` for what counts as one.
+        let suspend = app.picture_turned()
+            || OPAQUE_ONLY.load(Ordering::Acquire)
+            || app.floating_layer_open(&context);
         if suspend != surface_suspended {
             surface_suspended = suspend;
             monitor_codec::amediacodec::set_surface_suspended(suspend);
@@ -839,6 +866,12 @@ fn run() -> anyhow::Result<()> {
                         // one has never been given. See `bar_screen`.
                         bar_context = bar_screen(bar_pixels);
                         last_focus = None;
+                        // A new context knows nothing, so what the last one was
+                        // told is forgotten with it: the next frame says it
+                        // again rather than assuming it is still known, or a
+                        // control under a stationary finger would stay unlit.
+                        last_pointer = None;
+                        last_pointer_down = false;
                     }
                 }
             }
@@ -879,9 +912,7 @@ fn run() -> anyhow::Result<()> {
                     let view = bar_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
                     let mut encoder =
                         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    // The bar's own frame. It reads no input - the presses are
-                    // found in the wall's frame, where the pointer and the
-                    // remote already are - so this is a paint, not an update.
+                    // The bar's own frame.
                     let bar_rect = egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
                         egui::vec2(
@@ -889,9 +920,64 @@ fn run() -> anyhow::Result<()> {
                             bar_config.height as f32 / pixels_per_point,
                         ),
                     );
+                    // The wall's screen in the strip's own coordinates: the two
+                    // surfaces differ by the strip's height, so a rectangle the
+                    // wall measured reaches this frame shifted by that much.
+                    // Wall-space rectangles - the picture's box, the pointer,
+                    // the focus ring - are translated by `shift` below.
+                    let screen_w = WIDTH.load(Ordering::Acquire) as f32 / pixels_per_point;
+                    let screen_h = HEIGHT.load(Ordering::Acquire) as f32 / pixels_per_point;
+                    let strip_h = bar_config.height as f32 / pixels_per_point;
+                    let shift = egui::vec2(0.0, strip_h - screen_h);
+                    let screen = egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(screen_w, screen_h),
+                    );
+                    let picture = screen.translate(shift);
+                    // What the wall actually laid its corners, frame and bar
+                    // out against: its tile, with the gutter a kept navigation
+                    // bar claims and the bands of its own bars left out. The
+                    // screen is not that rectangle when a gutter is kept, and a
+                    // bar laid out against the screen then sits under the
+                    // system bar while the wall takes presses higher up.
+                    let body = app
+                        .magnified_tile()
+                        .unwrap_or(screen)
+                        .translate(shift);
+                    // This frame is a paint, not an update: the presses are
+                    // found in the wall's frame, where the pointer and the
+                    // remote already are. What a paint cannot work out for
+                    // itself is carried across - the focus ring below, and the
+                    // pointer here. Without the pointer every control is drawn
+                    // idle, so a button that is being held down looks untouched
+                    // until the state it changed shows up, which on a box with
+                    // a mouse or a finger reads as "the click did nothing".
+                    let (pointer_pos, pointer_down) = context.input(|input| {
+                        (input.pointer.latest_pos(), input.pointer.primary_down())
+                    });
+                    let mut bar_events = Vec::new();
+                    if pointer_pos != last_pointer {
+                        last_pointer = pointer_pos;
+                        bar_events.push(match pointer_pos {
+                            Some(pos) => egui::Event::PointerMoved(pos + shift),
+                            None => egui::Event::PointerGone,
+                        });
+                    }
+                    if pointer_down != last_pointer_down {
+                        last_pointer_down = pointer_down;
+                        if let Some(pos) = pointer_pos {
+                            bar_events.push(egui::Event::PointerButton {
+                                pos: pos + shift,
+                                button: egui::PointerButton::Primary,
+                                pressed: pointer_down,
+                                modifiers: egui::Modifiers::default(),
+                            });
+                        }
+                    }
                     let bar_input = egui::RawInput {
                         screen_rect: Some(bar_rect),
                         time: Some(started.elapsed().as_secs_f64()),
+                        events: bar_events,
                         ..Default::default()
                     };
                     // The ring the remote puts on a control is the one thing a
@@ -915,30 +1001,6 @@ fn run() -> anyhow::Result<()> {
                             );
                         }
                     }
-                    // The wall's screen in the strip's own coordinates: the two
-                    // surfaces differ by the strip's height, so a rectangle the
-                    // wall measured reaches this frame shifted by that much.
-                    // Wall-space rectangles - the picture's box, the focus ring -
-                    // are translated by `shift` below.
-                    let screen_w = WIDTH.load(Ordering::Acquire) as f32 / pixels_per_point;
-                    let screen_h = HEIGHT.load(Ordering::Acquire) as f32 / pixels_per_point;
-                    let strip_h = bar_config.height as f32 / pixels_per_point;
-                    let shift = egui::vec2(0.0, strip_h - screen_h);
-                    let screen = egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(screen_w, screen_h),
-                    );
-                    let picture = screen.translate(shift);
-                    // What the wall actually laid its corners, frame and bar
-                    // out against: its tile, with the gutter a kept navigation
-                    // bar claims and the bands of its own bars left out. The
-                    // screen is not that rectangle when a gutter is kept, and a
-                    // bar laid out against the screen then sits under the
-                    // system bar while the wall takes presses higher up.
-                    let body = app
-                        .magnified_tile()
-                        .unwrap_or(screen)
-                        .translate(shift);
                     let open = app.bar_open();
                     if open != bar_open {
                         bar_open = open;

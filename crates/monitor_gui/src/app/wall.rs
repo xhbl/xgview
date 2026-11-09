@@ -345,6 +345,16 @@ impl XgViewApp {
                         true,
                         self.ring_shown(),
                     );
+                    // What the cell says when its picture is not simply
+                    // playing - a failure panel, a suspended panel, the wait
+                    // before a first frame, the band a stream switch leaves -
+                    // for the reason the corners below are here: the wall draws
+                    // it, and the picture is over the wall. Without this the
+                    // screen is a frozen picture saying nothing, which is what
+                    // the older front end never did.
+                    if let Some(channel) = tile.channel {
+                        grid::state_layer(ui.painter(), body, &tile, channel.state);
+                    }
                     grid::osd(ui.painter(), body, &tile);
                     // The cursor, on the tile: the ring the wall draws on that
                     // same rectangle. It is here and not there for the reason
