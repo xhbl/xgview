@@ -270,11 +270,12 @@ pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeWallFocus(
     monitor_gui::android_surface::set_focused(focused != 0);
 }
 
-/// One key, pressed or released, with the modifiers held at the time.
+/// One key, pressed or released, with the modifiers held at the time and the
+/// character the device's key map made of it (`KeyEvent.getUnicodeChar()`).
 ///
 /// The codes are Android's (`KeyEvent.KEYCODE_*`); the translation to egui's
-/// keys is here rather than in Java so that the one place that knows what the
-/// interface listens for is the side that draws it.
+/// keys and text is here rather than in Java so that the one place that knows
+/// what the interface listens for is the side that draws it.
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeKey(
@@ -284,12 +285,14 @@ pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeKey(
     pressed: jni::sys::jboolean,
     repeat: jni::sys::jboolean,
     meta: jni::sys::jint,
+    unicode: jni::sys::jint,
 ) -> jni::sys::jboolean {
     u8::from(monitor_gui::android_surface::push_key(
         code,
         pressed != 0,
         repeat != 0,
         meta,
+        unicode,
     ))
 }
 

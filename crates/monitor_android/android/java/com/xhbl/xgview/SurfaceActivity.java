@@ -251,29 +251,36 @@ public class SurfaceActivity extends Activity {
     }
 
     /**
-     * Keys go straight to the native side, which translates them for egui.
-     *
-     * <p>Returning true for both directions keeps the activity from also
-     * treating a key as navigation, which would move the focus twice.
-     */
-    /**
      * Keys the interface knows are taken; the rest are left to the system.
      *
+     * <p>A hardware key is a control <em>and</em> a character. The control is
+     * its key code; the character is what the device's key map makes of that
+     * code with the modifiers held, which is the only way a Shift, a non-Latin
+     * layout or a numpad arrives correctly. Both go to the native side, which
+     * decides whether the character is text a field should take. The soft
+     * keyboard has its own path ({@code sendKeyEvent} below): a key the input
+     * method consumes is committed there and never reaches this method, while
+     * one it lets through is handled here. Either way a character is typed
+     * once, not twice.
+     *
      * <p>Answering {@code true} for everything would be simpler and is wrong:
-     * the wall maps the remote's own buttons and a keyboard's letters, and
-     * nothing else - so a key it does not map would stop there, and the volume
-     * keys, the media keys and the language switch would do nothing at all. The
-     * native side answers whether it took the key, and that answer is what this
-     * returns.
+     * the wall maps the remote's own buttons and a keyboard's keys, and nothing
+     * else - so a key it does not map would stop there, and the volume keys, the
+     * media keys and the language switch would do nothing at all. The native
+     * side answers whether it took the key, and that answer is what this
+     * returns. Returning true for both directions also keeps the activity from
+     * treating a key as navigation, which would move the focus twice.
      */
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        return nativeKey(keyCode, true, event.getRepeatCount() > 0, event.getMetaState());
+        return nativeKey(keyCode, true, event.getRepeatCount() > 0,
+                event.getMetaState(), event.getUnicodeChar());
     }
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        return nativeKey(keyCode, false, false, event.getMetaState());
+        return nativeKey(keyCode, false, false,
+                event.getMetaState(), event.getUnicodeChar());
     }
 
     /**
@@ -881,7 +888,7 @@ public class SurfaceActivity extends Activity {
     private static native void nativeWallFocus(boolean focused);
 
     private static native boolean nativeKey(
-            int keyCode, boolean pressed, boolean repeat, int meta);
+            int keyCode, boolean pressed, boolean repeat, int meta, int unicode);
 
     private static native void nativeTouch(
             int phase, int id, float x, float y, float force);

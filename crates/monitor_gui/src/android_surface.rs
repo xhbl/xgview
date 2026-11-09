@@ -93,36 +93,23 @@ pub fn set_focused(focused: bool) {
     FOCUSED.store(focused, Ordering::Release);
 }
 
-/// Translates one Android key and hands it to the next frame.
+/// Translates one Android key and hands its events to the next frame.
 ///
-/// `meta` is `KeyEvent.getMetaState()`; only the three modifiers the interface
-/// can act on are read. A key this does not know is left alone rather than
-/// guessed at, because a wrong guess is a control that does something else.
+/// `meta` is `KeyEvent.getMetaState()` and `unicode` is
+/// `KeyEvent.getUnicodeChar()`. The translation - both the control and the
+/// text a key types - is [`crate::keymap::key_events`], where it can be tested
+/// without a device; this is only the queue it lands in.
 ///
 /// Returns whether the interface took it. One it did not is one the system
 /// should still see - volume, the media keys, the language switch - and the
 /// activity answers the key event with this, so that it does.
-pub fn push_key(code: i32, pressed: bool, repeat: bool, meta: i32) -> bool {
-    // `KeyEvent.META_*_ON`
-    const SHIFT: i32 = 0x01;
-    const ALT: i32 = 0x02;
-    const CTRL: i32 = 0x1000;
-    let Some(key) = crate::keymap::from_android(code) else {
+pub fn push_key(code: i32, pressed: bool, repeat: bool, meta: i32, unicode: i32) -> bool {
+    let Some(events) = crate::keymap::key_events(code, pressed, repeat, meta, unicode) else {
         return false;
     };
-    push_event(egui::Event::Key {
-        key,
-        physical_key: None,
-        pressed,
-        repeat,
-        modifiers: egui::Modifiers {
-            alt: meta & ALT != 0,
-            ctrl: meta & CTRL != 0,
-            shift: meta & SHIFT != 0,
-            mac_cmd: false,
-            command: meta & CTRL != 0,
-        },
-    });
+    for event in events {
+        push_event(event);
+    }
     true
 }
 
