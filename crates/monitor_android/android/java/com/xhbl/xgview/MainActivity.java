@@ -834,7 +834,11 @@ public class MainActivity extends NativeActivity {
     public static boolean setOrientation(final boolean portrait) {
         final MainActivity self = instance;
         if (self == null) {
-            return false;
+            // The wall on surfaces of its own is landscape by construction. A
+            // request for landscape is one it already honours - answered `true`
+            // so the native side stops asking every frame - and a request for
+            // portrait is one it cannot take.
+            return !portrait && SurfaceActivity.current() != null;
         }
         self.runOnUiThread(() -> self.setRequestedOrientation(portrait
                 ? ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
@@ -895,7 +899,12 @@ public class MainActivity extends NativeActivity {
      */
     public static boolean supportsPortrait() {
         final Activity self = wall();
-        if (self == null) {
+        if (!(self instanceof MainActivity)) {
+            // The wall on surfaces of its own comes up landscape and stays
+            // there: its manifest fixes the orientation before any code runs,
+            // and the three surfaces and the picture's window are laid out for
+            // that shape. There is no portrait arrangement to turn to, so the
+            // switch is not offered rather than offered and ignored.
             return false;
         }
         final PackageManager packages = self.getPackageManager();
