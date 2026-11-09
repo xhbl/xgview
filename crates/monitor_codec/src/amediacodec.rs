@@ -133,65 +133,6 @@ extern "C" {
 /// `None` is what asks for byte buffers.
 type ANativeWindow = c_void;
 
-/// Opaque `AImageReader*`.
-type AImageReader = c_void;
-/// Opaque `AImage*`.
-type AImage = c_void;
-
-/// `media_status_t` - `AMEDIA_OK` is 0, the rest are non-zero.
-type media_status_t = c_int;
-
-/// `AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE` - `AMEDIA_IMGREADER_ERROR_BASE`
-/// (`-30000`) minus one. The ordinary "nothing has been rendered yet", as
-/// opposed to a reader that failed.
-const IMGREADER_NO_BUFFER_AVAILABLE: media_status_t = -30001;
-
-/// `AIMAGE_FORMAT_YUV_420_888` - the multi-plane Android YUV format the
-/// AImageReader hands over when a decoder renders into its Surface. Three
-/// planes: Y, U, V, each with its own row stride and pixel stride.
-const AIMAGE_FORMAT_YUV_420_888: i32 = 0x23;
-
-#[link(name = "mediandk")]
-extern "C" {
-    fn AImageReader_new(
-        width: i32,
-        height: i32,
-        format: i32,
-        max_images: i32,
-        reader: *mut *mut AImageReader,
-    ) -> media_status_t;
-    fn AImageReader_delete(reader: *mut AImageReader);
-    fn AImageReader_getWindow(
-        reader: *mut AImageReader,
-        window: *mut *mut ANativeWindow,
-    ) -> media_status_t;
-    fn AImageReader_acquireNextImage(
-        reader: *mut AImageReader,
-        image: *mut *mut AImage,
-    ) -> media_status_t;
-    fn AImage_delete(image: *mut AImage);
-    fn AImage_getWidth(image: *const AImage, width: *mut i32) -> media_status_t;
-    fn AImage_getHeight(image: *const AImage, height: *mut i32) -> media_status_t;
-    fn AImage_getNumberOfPlanes(image: *const AImage, num_planes: *mut i32) -> media_status_t;
-    fn AImage_getPlaneRowStride(
-        image: *const AImage,
-        plane_idx: i32,
-        row_stride: *mut i32,
-    ) -> media_status_t;
-    fn AImage_getPlanePixelStride(
-        image: *const AImage,
-        plane_idx: i32,
-        pixel_stride: *mut i32,
-    ) -> media_status_t;
-    fn AImage_getPlaneData(
-        image: *const AImage,
-        plane_idx: i32,
-        data: *mut *mut u8,
-        data_length: *mut i32,
-    ) -> media_status_t;
-    fn AImage_getTimestamp(image: *const AImage, timestamp_ns: *mut i64) -> media_status_t;
-}
-
 /// The `ANativeWindow` the activity gave us for a decoded picture, once it
 /// exists.
 ///
@@ -236,18 +177,6 @@ const PACE_FRAMES: u32 = 60;
 pub struct AMediaCodecDecoder {
     /// The codec, alive from the first access unit to the end of the session.
     handle: Option<*mut AMediaCodec>,
-    /// The image reader the codec renders into, when the `surface` feature is
-    /// enabled. `None` in byte-buffer mode and before the session is opened.
-    reader: Option<*mut AImageReader>,
-    /// Pictures the codec has rendered into the surface but that have not been
-    /// acquired yet, as `(pts_us, keyframe)` in the order they were rendered.
-    ///
-    /// In surface mode the picture arrives through the reader while the flag
-    /// and the presentation time it was queued with arrive through
-    /// `dequeueOutputBuffer`, and the two are separate calls: this is what
-    /// pairs them back up. The queue is FIFO because the reader hands images
-    /// over in the order the codec rendered them.
-    pending: std::collections::VecDeque<(i64, bool)>,
     /// Pictures the codec has produced, counted whether or not they came back.
     ///
     /// A codec given a surface hands its pictures to the compositor and returns
@@ -492,47 +421,27 @@ impl AMediaCodecDecoder {
             }
         }
 
-        let (codec, reader) = {
-            let (width, height) = size.unwrap_or((0, 0));
-            let reader = Self::create_reader(width, height)?;
-            let mut window: *mut ANativeWindow = ptr::null_mut();
-            let status = unsafe { AImageReader_getWindow(reader, &mut window) };
-            if status != AMEDIA_OK || window.is_null() {
-                unsafe { AImageReader_delete(reader) };
-                return Err(CodecError::Configure(format!(
-                    "AImageReader_getWindow failed: status {status}"
-                )));
-            }
-            let opened =
-                match Self::open_session(&mime, &csd, size, COLOR_FORMAT_SEMI_PLANAR, Some(window)) {
-                    Ok(codec) => Ok(codec),
-                    Err(err) => {
-                        tracing::debug!(
-                            target: "xgview::codec",
-                            %err,
-                            "the codec would not take a named layout, asking for a flexible one"
-                        );
-                        Self::open_session(&mime, &csd, size, COLOR_FORMAT_FLEXIBLE, Some(window))
-                    }
-                };
-            match opened {
-                Ok(codec) => (codec, Some(reader)),
-                Err(err) => {
-                    // The reader owns the window the codec was offered, and a
-                    // codec that never took it leaves nothing else holding it.
-                    unsafe { AImageReader_delete(reader) };
-                    return Err(err);
-                }
+        // Byte buffers, which is what every stream that is not on the
+        // activity's surface uses. An `AImageReader` was tried here - the codec
+        // renders into the reader's window and the pictures come back as images
+        // - and it was taken out again: on a SHIELD the buffers cannot be locked
+        // for CPU access at all (`AImage_getPlaneData: failed to lock buffer for
+        // CPU access`, -30003), so every picture was lost, and on another box the
+        // lock aborts inside the platform's own gralloc mapper. Reading a picture
+        // back costs the same either way; the reader only ever made it possible
+        // to *not* read it back, which is what the activity's surface does.
+        let codec = match Self::open_session(&mime, &csd, size, COLOR_FORMAT_SEMI_PLANAR, None) {
+            Ok(codec) => codec,
+            Err(err) => {
+                tracing::debug!(
+                    target: "xgview::codec",
+                    %err,
+                    "the codec would not take a named layout, asking for a flexible one"
+                );
+                Self::open_session(&mime, &csd, size, COLOR_FORMAT_FLEXIBLE, None)?
             }
         };
-
         self.handle = Some(codec);
-        {
-            // A reader is a surface too: the codec renders into it, and the
-            // pictures come back as images rather than as byte buffers.
-            self.on_surface = reader.is_some();
-            self.reader = reader;
-        }
         self.started = true;
         // The size the stream describes is the one to report, not the one the
         // session guessed at before any of it arrived.
@@ -543,43 +452,9 @@ impl AMediaCodecDecoder {
         tracing::debug!(
             target: "xgview::codec",
             codec = config.codec.as_str(),
-            "AMediaCodec session open, decoding into AImageReader Surface"
+            "AMediaCodec session open, decoding into byte buffers"
         );
         Ok(())
-    }
-
-    /// Creates an `AImageReader` for `YUV_420_888` pictures of the given size.
-    ///
-    /// `max_images` is kept small: the codec only needs one buffer in flight at
-    /// a time for this pipeline's decode-then-read cadence, and a larger pool
-    /// just holds memory. Five is the same count the framework's own
-    /// `ImageReader` defaults to for a video-decode consumer.
-    fn create_reader(width: u32, height: u32) -> Result<*mut AImageReader> {
-        let mut reader: *mut AImageReader = ptr::null_mut();
-        // The size the stream describes may not be known yet (width/height can
-        // be 0 when the SDP carried nothing and the first AU has not been
-        // parsed). Fall back to a generic size; the codec overrides the
-        // reader's default once it announces its output format.
-        let w = if width > 0 { width as i32 } else { 1920 };
-        let h = if height > 0 { height as i32 } else { 1080 };
-        // `AImageReader_new` asks for `CPU_READ_OFTEN`, and that is the only
-        // way this is created. The five other `usage` combinations were measured
-        // once - the copy out of these buffers runs at 33 MB/s against the
-        // codec's own 850 MB/s, and no combination changed it - and the property
-        // that chose between them is gone with the rest of that scaffolding.
-        let status = unsafe { AImageReader_new(w, h, AIMAGE_FORMAT_YUV_420_888, 5, &mut reader) };
-        if status != AMEDIA_OK || reader.is_null() {
-            return Err(CodecError::Configure(format!(
-                "AImageReader_new failed: status {status}"
-            )));
-        }
-        tracing::debug!(
-            target: "xgview::codec",
-            width = w,
-            height = h,
-            "AImageReader created for YUV_420_888"
-        );
-        Ok(reader)
     }
 
     /// Creates, configures and starts one codec session, handing back the codec.
@@ -782,18 +657,6 @@ impl AMediaCodecDecoder {
                         // them. What is not a picture is the end-of-stream
                         // marker, and that is skipped.
                         //
-                        // The entry remembered here pairs the flag and the
-                        // moment with the image that will arrive through the
-                        // reader. A codec rendering into the activity's own
-                        // surface hands over no image at all, so nothing is
-                        // remembered for it - a queue that grew for pictures
-                        // nobody will take is a leak.
-                        if self.reader.is_some() && info.flags & BUFFER_FLAG_END_OF_STREAM == 0 {
-                            self.pending.push_back((
-                                info.presentation_time_us,
-                                info.flags & BUFFER_FLAG_KEY_FRAME != 0,
-                            ));
-                        }
                     } else {
                         if info.size > 0 {
                             let mut capacity = 0usize;
@@ -837,238 +700,6 @@ impl AMediaCodecDecoder {
                 _ => break,
             }
         }
-        // The release above is what puts the picture into the reader, so the
-        // images can only be taken once every buffer has been handed back.
-        self.acquire_images(frames);
-    }
-
-    /// Takes every image the codec has rendered into the reader.
-    ///
-    /// Called after the output buffers have all been released, because a buffer
-    /// that has not been released with `render = true` has not reached the
-    /// surface yet. An image that cannot be read as NV12 is deleted and dropped,
-    /// which returns its buffer to the reader's pool - leaving one acquired
-    /// would starve the reader after `max_images` frames.
-    fn acquire_images(&mut self, frames: &mut Vec<DecodedFrame>) {
-        let Some(reader) = self.reader else {
-            return;
-        };
-        loop {
-            let mut image: *mut AImage = ptr::null_mut();
-            let acquiring = Instant::now();
-            let status = unsafe { AImageReader_acquireNextImage(reader, &mut image) };
-            self.stat_acquire += acquiring.elapsed();
-            if status != AMEDIA_OK || image.is_null() {
-                // `AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE` is the ordinary "not
-                // yet" and every other status is a reader this cannot use;
-                // either way there is nothing more to take this round.
-                if status != IMGREADER_NO_BUFFER_AVAILABLE && status != AMEDIA_OK {
-                    tracing::debug!(
-                        target: "xgview::codec",
-                        status,
-                        "the image reader handed back no image"
-                    );
-                }
-                break;
-            }
-            let reading = Instant::now();
-            let frame = self.pack_image(image);
-            self.stat_image += reading.elapsed();
-            self.stat_packed += 1;
-            unsafe { AImage_delete(image) };
-            if let Some(frame) = frame {
-                frames.push(frame);
-            }
-        }
-    }
-
-    /// Turns one `AImage` into the padded NV12 planes the renderer takes.
-    ///
-    /// `YUV_420_888` is three planes - Y, U, V - each with a row stride of the
-    /// device's choosing and a pixel stride that says whether the colour is
-    /// interleaved. The renderer wants NV12: the luma as it comes, and one plane
-    /// of U,V pairs. So the luma is copied row by row past its padding, and the
-    /// two colour planes are walked together into one.
-    ///
-    /// The row and pixel strides are asked for rather than assumed: a device
-    /// that hands over planar colour has a pixel stride of 1 on each, and one
-    /// that hands over semi-planar colour has 2 with the two planes
-    /// overlapping. Reading either as the other is a picture with its colour
-    /// swapped or striped.
-    fn pack_image(&mut self, image: *mut AImage) -> Option<DecodedFrame> {
-        // Taken first, so a picture this cannot read still consumes the entry
-        // that belongs to it and the queue stays lined up with the images.
-        //
-        // The moment comes from the image itself when the device reports one -
-        // that is the presentation time the codec was given, carried on the
-        // buffer - because it cannot drift: a picture the codec dropped leaves
-        // no image behind, and a moment read from a queue that expected one
-        // would be off for every picture after it. The queue is the fallback
-        // for a device that reports no timestamp, and it is what carries the
-        // key-frame flag either way - that only arrives on the buffer.
-        let mut timestamp_ns: i64 = 0;
-        let stamping = Instant::now();
-        unsafe { AImage_getTimestamp(image, &mut timestamp_ns) };
-        self.stat_stamp += stamping.elapsed();
-        let remembered = self.pending.pop_front();
-        let keyframe = remembered.map(|(_, key)| key).unwrap_or(false);
-        let pts_us = if timestamp_ns != 0 {
-            timestamp_ns / 1000
-        } else {
-            remembered.map(|(pts, _)| pts).unwrap_or(0)
-        };
-
-        let planes_started = Instant::now();
-        let mut width: i32 = 0;
-        let mut height: i32 = 0;
-        let mut planes: i32 = 0;
-        // Safety: `image` is live for the whole call - the caller deletes it
-        // after this returns - and each call only writes its out parameter.
-        unsafe {
-            AImage_getWidth(image, &mut width);
-            AImage_getHeight(image, &mut height);
-            AImage_getNumberOfPlanes(image, &mut planes);
-        }
-        if width <= 0 || height <= 0 || planes < 3 {
-            self.stat_plane += planes_started.elapsed();
-            return None;
-        }
-        let (width, height) = (width as usize, height as usize);
-
-        let mut data = [ptr::null_mut::<u8>(); 3];
-        let mut lengths = [0i32; 3];
-        let mut row_strides = [0i32; 3];
-        let mut pixel_strides = [0i32; 3];
-        for plane in 0..3 {
-            unsafe {
-                AImage_getPlaneData(image, plane, &mut data[plane as usize], &mut lengths[plane as usize]);
-                AImage_getPlaneRowStride(image, plane, &mut row_strides[plane as usize]);
-                AImage_getPlanePixelStride(image, plane, &mut pixel_strides[plane as usize]);
-            }
-        }
-        self.stat_plane += planes_started.elapsed();
-        let copying = Instant::now();
-        // Safety: each plane's pointer and length come from the same image and
-        // are valid until it is deleted; the slices live only for this call.
-        let slice_of = |plane: usize| -> Option<&[u8]> {
-            let pointer = data[plane];
-            let length = lengths[plane];
-            if pointer.is_null() || length <= 0 {
-                return None;
-            }
-            Some(unsafe { std::slice::from_raw_parts(pointer, length as usize) })
-        };
-        let (luma, u_plane, v_plane) = (slice_of(0)?, slice_of(1)?, slice_of(2)?);
-
-        if !self.geometry_logged {
-            self.geometry_logged = true;
-            // The numbers that decide whether this is interleaved or planar
-            // colour, and whether a row has padding - the two things a picture
-            // that is striped or tinted is a difference in.
-            tracing::debug!(
-                target: "xgview::codec",
-                width,
-                height,
-                planes,
-                y_row_stride = row_strides[0],
-                y_pixel_stride = pixel_strides[0],
-                u_row_stride = row_strides[1],
-                u_pixel_stride = pixel_strides[1],
-                v_row_stride = row_strides[2],
-                v_pixel_stride = pixel_strides[2],
-                y_len = lengths[0],
-                u_len = lengths[1],
-                v_len = lengths[2],
-                "the geometry of an AImage picture"
-            );
-        }
-
-        let padded = plane_stride(width);
-        let luma_row = if row_strides[0] > 0 { row_strides[0] as usize } else { width };
-        let luma_pixel = if pixel_strides[0] > 0 { pixel_strides[0] as usize } else { 1 };
-
-        let mut y = vec![0u8; padded * height];
-        for row in 0..height {
-            let start = row * luma_row;
-            let out = y.get_mut(row * padded..row * padded + width)?;
-            if luma_pixel == 1 {
-                let source = luma.get(start..start + width)?;
-                out.copy_from_slice(source);
-            } else {
-                // A luma plane with a pixel stride above one is not a layout
-                // this reads; it would need a walk per sample.
-                let source = luma.get(start..start + width * luma_pixel)?;
-                for (column, byte) in out.iter_mut().enumerate() {
-                    *byte = source[column * luma_pixel];
-                }
-            }
-        }
-
-        let chroma_width = width.div_ceil(2);
-        let chroma_height = height.div_ceil(2);
-        let u_row = if row_strides[1] > 0 { row_strides[1] as usize } else { chroma_width };
-        let v_row = if row_strides[2] > 0 { row_strides[2] as usize } else { chroma_width };
-        let u_pixel = if pixel_strides[1] > 0 { pixel_strides[1] as usize } else { 1 };
-        let v_pixel = if pixel_strides[2] > 0 { pixel_strides[2] as usize } else { 1 };
-
-        // The shape Android almost always hands over: U and V in one buffer, V
-        // one byte after U, two bytes per sample. That is *already* an NV12
-        // row, so a row is one contiguous copy - and it matters more than it
-        // looks. The interleaved walk below reads one byte per bus transaction,
-        // and a decoder's buffers are not cheap to touch: on the Amlogic box it
-        // measured 184 ms for one 1080p picture, against 3.6 ms for the codec's
-        // own byte buffer. A contiguous copy of the same bytes is a memcpy.
-        let semi_planar = u_pixel == 2
-            && v_pixel == 2
-            && data[2] as usize == data[1] as usize + 1;
-
-        let mut uv = vec![0u8; padded * chroma_height];
-        for row in 0..chroma_height {
-            let out = uv.get_mut(row * padded..row * padded + chroma_width * 2)?;
-            let u_start = row * u_row;
-            if semi_planar {
-                // The plane's reported length is one byte short of a whole
-                // number of rows: the last U sample ends where the last V
-                // sample begins, so the extent the framework reports for the U
-                // plane stops one byte before the row does. Asking for the full
-                // row there fails, and a `?` on it would drop every picture of
-                // the session - which is exactly what it did before this was
-                // clamped.
-                let available = u_plane.len().saturating_sub(u_start).min(chroma_width * 2);
-                let source = u_plane.get(u_start..u_start + available)?;
-                out.get_mut(..available)?.copy_from_slice(source);
-                continue;
-            }
-            let v_start = row * v_row;
-            // The last chroma row of some devices is shorter than the rows
-            // above it, so the walk stops at what the plane actually holds
-            // rather than reading past it.
-            let u_end = (u_start + chroma_width * u_pixel).min(u_plane.len());
-            let v_end = (v_start + chroma_width * v_pixel).min(v_plane.len());
-            let u_slice = u_plane.get(u_start..u_end)?;
-            let v_slice = v_plane.get(v_start..v_end)?;
-            for column in 0..chroma_width {
-                let u_at = column * u_pixel;
-                let v_at = column * v_pixel;
-                let (Some(u), Some(v)) = (u_slice.get(u_at), v_slice.get(v_at)) else {
-                    break;
-                };
-                out[column * 2] = *u;
-                out[column * 2 + 1] = *v;
-            }
-        }
-        self.stat_copy += copying.elapsed();
-
-        Some(DecodedFrame {
-            width: width as u32,
-            height: height as u32,
-            format: PixelFormat::Nv12,
-            colorspace: self.colorspace,
-            pts_us,
-            keyframe,
-            buffer: None,
-            planes: vec![y, uv],
-        })
     }
 
     /// Turns one output buffer into the padded NV12 planes the renderer takes.
@@ -1217,11 +848,6 @@ impl AMediaCodecDecoder {
             }
             unsafe { AMediaCodec_delete(codec) };
         }
-        // The reader owns the `ANativeWindow` the codec was configured with, so
-        // it outlives the codec and is deleted after it.
-        if let Some(reader) = self.reader.take() {
-            unsafe { AImageReader_delete(reader) };
-        }
     }
 }
 
@@ -1249,7 +875,6 @@ impl VideoDecoder for AMediaCodecDecoder {
         self.wait = crate::wait::WAIT_MIN;
         self.geometry_logged = false;
         self.layout = None;
-        self.pending.clear();
         Ok(())
     }
 
@@ -1420,8 +1045,6 @@ impl AMediaCodecDecoder {
             unsafe { AMediaCodec_flush(codec) };
         }
         // A flush discards whatever the codec had not rendered, so the entries
-        // remembered for those pictures no longer have one coming.
-        self.pending.clear();
     }
 }
 /// Android `AMediaCodec` decoder for the compressed audio codecs - AAC above
