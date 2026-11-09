@@ -294,7 +294,17 @@ impl XgViewApp {
         }
         // No live cameras: the wall is empty, and hiding the bars would leave
         // the viewer with no way to reach the settings or the device window.
-        if self.scheduler.current().and_then(|s| s.live().next()).is_none() {
+        //
+        // A recording is not an empty wall. Its channel is not a live one, so
+        // this branch used to keep both bars up for as long as it played, and
+        // they claim their strip as panels over the central one: a magnified
+        // recording lost 56 points of height, and its 4:3 picture came up at
+        // 1208x906 where the live picture it replaced had filled 1440x1080.
+        // The controls a recording needs are the viewport's own bar, which
+        // `end_frame` holds up for it and which claims no room.
+        if self.playback.is_none()
+            && self.scheduler.current().and_then(|s| s.live().next()).is_none()
+        {
             self.chrome.visible = true;
             self.chrome.hide_now = false;
             return true;
