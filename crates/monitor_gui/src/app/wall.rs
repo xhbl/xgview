@@ -263,7 +263,7 @@ impl XgViewApp {
             // The one picture the decoder's probe is scanning out of the
             // activity's surface. It is the magnified viewport, which is
             // the only view with a single cell.
-            on_video_layer: cells == 1 && crate::probe_video_layer_active(),
+            on_video_layer: cells == 1 && crate::picture_on_its_own_surface(),
             // The ring is a cursor, and a wall nobody is operating is just a
             // picture: it is drawn from the last key or press on and goes
             // once the wall has been left alone for the shorter of the ring's
@@ -404,7 +404,7 @@ impl XgViewApp {
         // Not while the picture is being scanned out under this window: that
         // fill would be opaque over it. A magnified view has one cell, so the
         // area being left alone is the picture's own.
-        if !(view.cells.len() == 1 && crate::probe_video_layer_active()) {
+        if !(view.cells.len() == 1 && crate::picture_on_its_own_surface()) {
             ui.painter().rect_filled(area, egui::CornerRadius::ZERO, theme::GRID_LINE);
         }
         let wall = area.shrink(grid::LINE);

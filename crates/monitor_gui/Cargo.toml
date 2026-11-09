@@ -52,9 +52,6 @@ monitor_i18n = { path = "../monitor_i18n" }
 egui-file-dialog = "0.11"
 
 [features]
-# Measurement knobs for the decoder, off in every shipped build. See
-# `monitor_codec`'s `probe`.
-probe = ["monitor_codec/probe"]
 
 # Desktop keeps the rest of eframe's defaults: the accessibility support and the
 # glow backend it would otherwise turn on itself.

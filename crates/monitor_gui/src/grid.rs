@@ -123,7 +123,7 @@ pub struct Tile<'a> {
     ///
     /// Only ever true for the one picture the decoder's probe is presenting,
     /// which is the magnified viewport or a recording. See
-    /// `monitor_gui::probe_video_layer_active`.
+    /// `monitor_gui::picture_on_its_own_surface`.
     pub on_video_layer: bool,
     /// Draw the focus ring.
     pub focused: bool,

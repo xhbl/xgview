@@ -189,82 +189,6 @@ pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeResumed(
     // background; the application retries them on the next frame.
     monitor_gui::android::request_resume();
 }
-
-/// The probe surface a decoder can render into, or null when it went away.
-///
-/// `ANativeWindow_fromSurface` gives a window this side owns; the decoder takes
-/// it as its output, so the compositor scans the picture out and it never
-/// returns to this process. See `MainActivity.startOverlaySurface` and
-/// `monitor_gui::android::set_probe_surface`.
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeOverlaySurface(
-    mut env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-    surface: jni::objects::JObject,
-) {
-    monitor_gui::android::set_probe_surface(&mut env, &surface);
-}
-
-/// Whether this build carries the decoder's compositor probe.
-///
-/// The activity asks before it creates its window: the probe's video layer is a
-/// child view of that window and shows through it, so the window has to be
-/// translucent - and that has to be decided before the surface exists. Every
-/// shipped build answers no.
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "system" fn Java_com_xhbl_xgview_MainActivity_nativeProbeTranslucent(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) -> jni::sys::jboolean {
-    u8::from(monitor_gui::android::probe_translucent())
-}
-
-/// The probe activity's own surface, which the renderer draws into.
-///
-/// The question this answers is whether wgpu can present to a `SurfaceView` the
-/// app owns rather than to a `NativeActivity`'s window - the arrangement the
-/// wall would need to have a video layer of its own. See
-/// `monitor_gui::probe_render` and `ProbeActivity`.
-#[cfg(all(target_os = "android", feature = "probe"))]
-#[no_mangle]
-pub extern "system" fn Java_com_xhbl_xgview_ProbeActivity_nativeStart(
-    env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-    surface: jni::objects::JObject,
-) {
-    if surface.is_null() {
-        return;
-    }
-    let window = unsafe {
-        ANativeWindow_fromSurface(env.get_native_interface(), surface.as_raw())
-    };
-    monitor_gui::probe_render::start(window);
-}
-
-/// The probe surface's new size, in pixels.
-#[cfg(all(target_os = "android", feature = "probe"))]
-#[no_mangle]
-pub extern "system" fn Java_com_xhbl_xgview_ProbeActivity_nativeResize(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-    width: jni::sys::jint,
-    height: jni::sys::jint,
-) {
-    monitor_gui::probe_render::resize(width, height);
-}
-
-/// The probe surface went away: stop drawing into it.
-#[cfg(all(target_os = "android", feature = "probe"))]
-#[no_mangle]
-pub extern "system" fn Java_com_xhbl_xgview_ProbeActivity_nativeStop(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) {
-    monitor_gui::probe_render::stop();
-}
-
 // `ANativeWindow_fromSurface`, which gives a window this side owns.
 #[cfg(target_os = "android")]
 #[link(name = "android")]
@@ -388,37 +312,6 @@ pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeScroll(
 ) {
     monitor_gui::android_surface::push_scroll(dx, dy);
 }
-
-/// The window's own surface, given to the renderer.
-///
-/// The one arrangement that would let a control bar float over the picture: the
-/// picture is a `SurfaceView` below, the bar is drawn here, and the window is
-/// translucent so the picture shows through where the bar is not. See
-/// `LayerProbeActivity` and `monitor_gui::probe_render`.
-#[cfg(all(target_os = "android", feature = "probe"))]
-#[no_mangle]
-pub extern "system" fn Java_com_xhbl_xgview_LayerProbeActivity_nativeStartUi(
-    env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-    surface: jni::objects::JObject,
-) {
-    if surface.is_null() {
-        return;
-    }
-    let window = unsafe { ANativeWindow_fromSurface(env.get_native_interface(), surface.as_raw()) };
-    monitor_gui::probe_render::start(window);
-}
-
-/// The window's surface went away.
-#[cfg(all(target_os = "android", feature = "probe"))]
-#[no_mangle]
-pub extern "system" fn Java_com_xhbl_xgview_LayerProbeActivity_nativeStopUi(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) {
-    monitor_gui::probe_render::stop();
-}
-
 /// The bar's own surface, over the picture.
 ///
 /// A rectangle of its own, opaque, on top of the picture - which is how a

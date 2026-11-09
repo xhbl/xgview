@@ -323,22 +323,6 @@ fn run() -> anyhow::Result<()> {
 
     // Diagnostic: `ASurfaceControl_createFromWindow` answered null for a
     // `NativeActivity`'s window, which is what stopped a compositor layer from
-    // being used at all. This is an ordinary activity, so the question is worth
-    // asking again - a layer of the compositor's own is the one arrangement
-    // that would let the picture sit under the wall without either of them
-    // having to be see-through. It is asked here rather than in the JNI entry
-    // because the log subscriber is installed just above.
-    #[cfg(feature = "probe")]
-    {
-        let window = WINDOW.load(Ordering::Acquire);
-        let made = crate::android::create_overlay(window);
-        tracing::info!(
-            target: "xgview",
-            made,
-            "the compositor layer from a SurfaceView window"
-        );
-    }
-
     let Some((internal, external)) = DIRECTORIES.lock().ok().and_then(|d| d.clone()) else {
         anyhow::bail!("the activity never handed its directories over");
     };

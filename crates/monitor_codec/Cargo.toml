@@ -35,12 +35,6 @@ h264 = ["dep:openh264", "dep:openh264-sys2"]
 # building, and the matching runtime libraries next to the executable at run
 # time.
 ffmpeg = ["dep:ffmpeg-next"]
-# Measurement knobs, off in every shipped build: the reader's usage flags, the
-# codec's `low-latency`, and a one-shot read-bandwidth calibration. They are
-# read from `debug.xgview.*` system properties at run time so one APK can be
-# asked several questions - `adb shell setprop` and a restart is the whole
-# cycle. See `priv/docs/playback-decode-cost.md` §11.
-probe = []
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"

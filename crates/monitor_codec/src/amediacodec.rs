@@ -203,78 +203,6 @@ extern "C" {
     fn AImage_getTimestamp(image: *const AImage, timestamp_ns: *mut i64) -> media_status_t;
 }
 
-/// Opaque `ASurfaceControl*` - one compositor layer.
-#[cfg(feature = "probe")]
-type ASurfaceControl = c_void;
-/// Opaque `ASurfaceTransaction*`.
-#[cfg(feature = "probe")]
-type ASurfaceTransaction = c_void;
-/// Opaque `AHardwareBuffer*`.
-#[cfg(feature = "probe")]
-type AHardwareBuffer = c_void;
-
-// The compositor path, which is the one every Android video player uses and
-// this backend never did: the decoded picture is handed to a layer of its own
-// instead of being read back into the process.
-//
-// It is behind `probe` because it is a measurement, not a feature: what it
-// answers is whether the box can show 1080p at its own rate when nothing asks
-// for the pixels, and what a layer above the wall's own window costs.
-#[cfg(feature = "probe")]
-#[link(name = "android")]
-extern "C" {
-    fn ANativeWindow_getWidth(window: *mut ANativeWindow) -> i32;
-    fn ANativeWindow_getHeight(window: *mut ANativeWindow) -> i32;
-    fn AImage_getHardwareBuffer(
-        image: *const AImage,
-        buffer: *mut *mut AHardwareBuffer,
-    ) -> media_status_t;
-    fn ASurfaceControl_createFromWindow(
-        parent: *mut ANativeWindow,
-        debug_name: *const c_char,
-    ) -> *mut ASurfaceControl;
-    // The layer lives as long as the process does - every channel presents
-    // into the same one - so nothing releases it and this declaration is only
-    // here for the sake of a caller that ever wants to.
-    #[allow(dead_code)]
-    fn ASurfaceControl_release(control: *mut ASurfaceControl);
-    fn ASurfaceTransaction_create() -> *mut ASurfaceTransaction;
-    fn ASurfaceTransaction_delete(transaction: *mut ASurfaceTransaction);
-    fn ASurfaceTransaction_apply(transaction: *mut ASurfaceTransaction);
-    fn ASurfaceTransaction_setVisibility(
-        transaction: *mut ASurfaceTransaction,
-        control: *mut ASurfaceControl,
-        visibility: i8,
-    );
-    fn ASurfaceTransaction_setZOrder(
-        transaction: *mut ASurfaceTransaction,
-        control: *mut ASurfaceControl,
-        z_order: i32,
-    );
-    fn ASurfaceTransaction_setPosition(
-        transaction: *mut ASurfaceTransaction,
-        control: *mut ASurfaceControl,
-        x: i32,
-        y: i32,
-    );
-    fn ASurfaceTransaction_setBufferTransparency(
-        transaction: *mut ASurfaceTransaction,
-        control: *mut ASurfaceControl,
-        transparency: i8,
-    );
-    fn ASurfaceTransaction_setBuffer(
-        transaction: *mut ASurfaceTransaction,
-        control: *mut ASurfaceControl,
-        buffer: *mut AHardwareBuffer,
-        acquire_fence_fd: i32,
-    );
-}
-
-/// The compositor layer, once it has been made.
-#[cfg(feature = "probe")]
-static OVERLAY_CONTROL: std::sync::atomic::AtomicPtr<c_void> =
-    std::sync::atomic::AtomicPtr::new(ptr::null_mut());
-
 /// The `ANativeWindow` the activity gave us for a decoded picture, once it
 /// exists.
 ///
@@ -297,72 +225,9 @@ pub fn set_surface_window(window: *mut c_void) {
     );
 }
 
-/// Makes a compositor layer under the given window, and says whether it could.
-///
-/// This is the one arrangement that would let a decoded picture sit *under* the
-/// wall without either surface having to be see-through: the layer is the
-/// compositor's, not the view hierarchy's, so nothing has to blend. It answered
-/// null for a `NativeActivity`'s window, which is what stopped it being used;
-/// whether an ordinary activity's window differs is the question this asks.
-#[cfg(feature = "probe")]
-pub fn create_overlay(window: *mut c_void) -> bool {
-    if window.is_null() {
-        return false;
-    }
-    let control = unsafe {
-        ASurfaceControl_createFromWindow(window as *mut ANativeWindow, c"xgview".as_ptr())
-    };
-    if control.is_null() {
-        tracing::warn!(
-            target: "xgview::codec",
-            "this window offered no compositor layer"
-        );
-        return false;
-    }
-    let transaction = unsafe { ASurfaceTransaction_create() };
-    unsafe {
-        // SHOW, opaque, above the wall's own layer.
-        ASurfaceTransaction_setVisibility(transaction, control, 1);
-        ASurfaceTransaction_setBufferTransparency(transaction, control, 2);
-        ASurfaceTransaction_setZOrder(transaction, control, 1_000_000);
-        ASurfaceTransaction_setPosition(transaction, control, 0, 0);
-        ASurfaceTransaction_apply(transaction);
-        ASurfaceTransaction_delete(transaction);
-    }
-    OVERLAY_CONTROL.store(control, std::sync::atomic::Ordering::Release);
-    tracing::info!(
-        target: "xgview::codec",
-        "this window offered a compositor layer"
-    );
-    true
-}
-
 /// Whether there is a surface a picture could be rendered into right now.
 pub fn video_layer_active() -> bool {
     !SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire).is_null()
-}
-
-/// Whether the probe was asked for its own compositor layer
-/// (`debug.xgview.surface.overlay = 3`).
-///
-/// Superseded: the wall now has a surface of its own to hand a decoder, and this
-/// is what the older probe used before that existed.
-#[cfg(feature = "probe")]
-pub fn overlay_wants_surface() -> bool {
-    probe::number("debug.xgview.surface.overlay", 0) == 3
-}
-
-/// Whether the probe's window has to be see-through
-/// (`debug.xgview.surface.hole = 1`).
-#[cfg(feature = "probe")]
-pub fn probe_translucent() -> bool {
-    probe::number("debug.xgview.surface.hole", 0) == 1
-}
-
-/// False where there is no probe.
-#[cfg(not(feature = "probe"))]
-pub fn probe_translucent() -> bool {
-    false
 }
 
 /// How many pictures the decoder's pace is measured over.
@@ -372,173 +237,6 @@ pub fn probe_translucent() -> bool {
 /// picture back, and they are the same numbers on every device - which is what
 /// makes two of them comparable. See `priv/docs/playback-decode-cost.md`.
 const PACE_FRAMES: u32 = 60;
-
-/// Measurement knobs, read from `debug.xgview.*` system properties.
-///
-/// Every one of them is a question the experiment has to ask, and asking it
-/// through a property rather than a build is what makes the answer affordable:
-/// one APK, `adb shell setprop`, restart, read the log. Nothing here is read in
-/// a build without the `probe` feature, and nothing it does changes a shipped
-/// decoder.
-#[cfg(feature = "probe")]
-mod probe {
-    use std::ffi::{c_char, c_int, c_void, CStr, CString};
-    use std::ptr;
-    use std::sync::Once;
-    use std::time::Instant;
-
-    extern "C" {
-        fn __system_property_get(name: *const c_char, value: *mut c_char) -> c_int;
-    }
-
-    /// Reads one `debug.xgview.*` property as a number, `fallback` when unset.
-    pub fn number(name: &str, fallback: i32) -> i32 {
-        let Ok(key) = CString::new(name) else {
-            return fallback;
-        };
-        // `PROP_VALUE_MAX` is 92, and the call never writes more than that.
-        let mut buffer = [0 as c_char; 92];
-        let written = unsafe { __system_property_get(key.as_ptr(), buffer.as_mut_ptr()) };
-        if written <= 0 {
-            return fallback;
-        }
-        let text = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy();
-        text.trim().parse().unwrap_or(fallback)
-    }
-
-    /// `AHardwareBuffer_Desc`.
-    #[repr(C)]
-    #[derive(Clone, Copy, Default)]
-    struct BufferDesc {
-        width: u32,
-        height: u32,
-        layers: u32,
-        format: u32,
-        usage: u64,
-        stride: u32,
-        rfu0: u32,
-        rfu1: u64,
-    }
-
-    /// Opaque `AHardwareBuffer*`.
-    type Buffer = c_void;
-
-    #[link(name = "android")]
-    extern "C" {
-        fn AHardwareBuffer_allocate(desc: *const BufferDesc, out: *mut *mut Buffer) -> c_int;
-        fn AHardwareBuffer_describe(buffer: *const Buffer, out: *mut BufferDesc);
-        fn AHardwareBuffer_lock(
-            buffer: *mut Buffer,
-            usage: u64,
-            fence: c_int,
-            rect: *const c_void,
-            out: *mut *mut c_void,
-        ) -> c_int;
-        fn AHardwareBuffer_unlock(buffer: *mut Buffer, fence: *mut c_int) -> c_int;
-        fn AHardwareBuffer_release(buffer: *mut Buffer);
-    }
-
-    /// `AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_420`
-    const FORMAT_YUV420: u32 = 0x23;
-    /// `AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN`
-    const CPU_READ_OFTEN: u64 = 3;
-
-    /// Times a copy out of a gralloc buffer this process allocated itself, and
-    /// the same copy between two ordinary heap vectors.
-    ///
-    /// The pair is the whole point. The decoder's own buffer is one particular
-    /// gralloc allocation on one particular device, and a number from it says
-    /// nothing about which of the two - gralloc, or this device's reader - is
-    /// slow. A buffer allocated here is the plainest gralloc there is; the heap
-    /// copy is what the CPU can do when nothing is in the way. Between them
-    /// they say whether 33 MB/s is the floor or an accident.
-    pub fn read_bandwidth() {
-        static ONCE: Once = Once::new();
-        ONCE.call_once(run);
-    }
-
-    fn run() {
-        const WIDTH: usize = 1920;
-        const HEIGHT: usize = 1080;
-
-        // The control: an ordinary heap copy of the same number of bytes.
-        let bytes = WIDTH * HEIGHT * 3 / 2;
-        let source = vec![7u8; bytes];
-        let mut target = vec![0u8; bytes];
-        let started = Instant::now();
-        target.copy_from_slice(&source);
-        let heap_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let heap_sink = std::hint::black_box(target[bytes / 2]);
-
-        // And the same copy out of a gralloc buffer of our own.
-        let desc = BufferDesc {
-            width: WIDTH as u32,
-            height: HEIGHT as u32,
-            layers: 1,
-            format: FORMAT_YUV420,
-            usage: CPU_READ_OFTEN,
-            stride: 0,
-            rfu0: 0,
-            rfu1: 0,
-        };
-        let mut buffer: *mut Buffer = ptr::null_mut();
-        let allocated = unsafe { AHardwareBuffer_allocate(&desc, &mut buffer) };
-        if allocated != 0 || buffer.is_null() {
-            tracing::debug!(
-                target: "xgview::codec",
-                status = allocated,
-                "the probe could not allocate a buffer"
-            );
-            return;
-        }
-        let mut actual = BufferDesc::default();
-        unsafe { AHardwareBuffer_describe(buffer, &mut actual) };
-
-        let mut address: *mut c_void = ptr::null_mut();
-        let locked =
-            unsafe { AHardwareBuffer_lock(buffer, CPU_READ_OFTEN, -1, ptr::null(), &mut address) };
-        let (buffer_ms, buffer_bytes) = if locked == 0 && !address.is_null() {
-            // A YUV 4:2:0 buffer is the luma plane plus half of it again, and
-            // `stride` is in pixels.
-            let length = actual.stride as usize * actual.height as usize * 3 / 2;
-            let source = unsafe { std::slice::from_raw_parts(address as *const u8, length) };
-            let mut target = vec![0u8; length];
-            let started = Instant::now();
-            target.copy_from_slice(source);
-            let took = started.elapsed().as_secs_f64() * 1000.0;
-            std::hint::black_box(target[length / 2]);
-            unsafe { AHardwareBuffer_unlock(buffer, ptr::null_mut()) };
-            (Some(took), length)
-        } else {
-            tracing::debug!(
-                target: "xgview::codec",
-                status = locked,
-                "the probe could not lock its own buffer"
-            );
-            (None, 0)
-        };
-        unsafe { AHardwareBuffer_release(buffer) };
-
-        let rate = |ms: f64, bytes: usize| -> u64 {
-            if ms <= 0.0 {
-                return 0;
-            }
-            (bytes as f64 / 1_000_000.0 / (ms / 1000.0)) as u64
-        };
-        tracing::debug!(
-            target: "xgview::codec",
-            heap_bytes = bytes,
-            heap_ms = heap_ms,
-            heap_mb_s = rate(heap_ms, bytes),
-            buffer_bytes = buffer_bytes,
-            buffer_ms = buffer_ms.unwrap_or(-1.0),
-            buffer_mb_s = buffer_ms.map(|ms| rate(ms, buffer_bytes)).unwrap_or(0),
-            stride = actual.stride,
-            sink = heap_sink,
-            "the probe: how fast this box reads memory"
-        );
-    }
-}
 
 /// `AMediaCodec` decoder.
 ///
@@ -561,16 +259,6 @@ pub struct AMediaCodecDecoder {
     /// pairs them back up. The queue is FIFO because the reader hands images
     /// over in the order the codec rendered them.
     pending: std::collections::VecDeque<(i64, bool)>,
-    /// The compositor layer the probe presents into, once it has one.
-    /// `debug.xgview.surface.overlay`: 0 read back as before, 1 hand the
-    /// picture to the compositor, 2 take it and drop it - the last one is what
-    /// the pixels cost when nothing at all asks for them.
-    #[cfg(feature = "probe")]
-    overlay_mode: i32,
-    /// How many pictures the compositor was given. Reported beside `packed`
-    /// so a session that is presenting rather than reading back still shows a
-    /// rate; it stays zero on every path that does not present.
-    stat_presented: u32,
     /// Pictures the codec has produced, counted whether or not they came back.
     ///
     /// A codec given a surface hands its pictures to the compositor and returns
@@ -655,15 +343,6 @@ pub struct AMediaCodecDecoder {
     ///
     /// `AMediaCodec_getOutputBuffer` costs as much per picture as the release
     /// does on the Amlogic box, and the address it answers with for a given
-    /// index is the codec's own buffer - the same memory every time that index
-    /// comes round. Asking once per index rather than once per picture is worth
-    /// 16 ms a frame there. The pool is thrown away whenever the codec says its
-    /// output format changed, which is the one thing that reallocates it.
-    #[cfg(feature = "probe")]
-    output_buffers: std::collections::HashMap<usize, (usize, usize)>,
-    /// Whether to keep those pointers - `debug.xgview.codec.cacheout`.
-    #[cfg(feature = "probe")]
-    cache_output: bool,
     stat_dequeue: Duration,
     stat_output: Duration,
     /// Time spent in `AMediaCodec_getOutputBuffer` alone.
@@ -734,19 +413,6 @@ impl AMediaCodecDecoder {
     fn open(&mut self, access_unit: &[u8]) -> Result<()> {
         if self.handle.is_some() {
             return Ok(());
-        }
-        // Once per process, and before the first session: what this box's CPU
-        // can read, and what it can read out of a gralloc buffer it allocated
-        // itself. See [`probe`].
-        #[cfg(feature = "probe")]
-        probe::read_bandwidth();
-        #[cfg(feature = "probe")]
-        {
-            self.cache_output = probe::number("debug.xgview.codec.cacheout", 0) != 0;
-        }
-        #[cfg(feature = "probe")]
-        {
-            self.overlay_mode = probe::number("debug.xgview.surface.overlay", 0);
         }
         let config = self.config.clone();
         let mime = CString::new(config.codec.mime())
@@ -898,11 +564,8 @@ impl AMediaCodecDecoder {
         // flags, and the copy out of them measured 33 MB/s against the codec's
         // own 850 MB/s - so the flags are worth asking about. Variant 0 is the
         // shipped behaviour (`AImageReader_new`, which means `CPU_READ_OFTEN`);
-        // the rest are reachable only through the `probe` feature and a
+        // the rest were reachable only through the measurement build and a
         // `debug.xgview.surface.usage` property.
-        #[cfg(feature = "probe")]
-        let variant = probe::number("debug.xgview.surface.usage", 0);
-        #[cfg(not(feature = "probe"))]
         let variant = 0;
         const CPU_READ_RARELY: u64 = 2;
         const CPU_READ_OFTEN: u64 = 3;
@@ -1002,14 +665,6 @@ impl AMediaCodecDecoder {
             if window.is_none() {
                 AMediaFormat_setInt32(format, c"color-format".as_ptr(), colour_format);
             }
-            // Asked for only when a probe asks: a decoder that will not take it
-            // fails the whole configuration rather than ignoring it, which is
-            // why it is never on in a shipped build. On this stream - no
-            // B-frames - the reordering it gives up cannot bite.
-            #[cfg(feature = "probe")]
-            if probe::number("debug.xgview.codec.lowlatency", 0) != 0 {
-                AMediaFormat_setInt32(format, c"low-latency".as_ptr(), 1);
-            }
         }
 
         tracing::debug!(
@@ -1071,11 +726,6 @@ impl AMediaCodecDecoder {
                 )
             };
         unsafe { AMediaFormat_delete(format) };
-
-        // A new output format is a new buffer pool, so every address kept for
-        // the old one is stale.
-        #[cfg(feature = "probe")]
-        self.output_buffers.clear();
 
         if has_width && width > 0 {
             self.width = width as u32;
@@ -1174,39 +824,12 @@ impl AMediaCodecDecoder {
                         }
                     } else {
                         if info.size > 0 {
-                            #[cfg(feature = "probe")]
-                            let known = if self.cache_output {
-                                self.output_buffers.get(&(index as usize)).copied()
-                            } else {
-                                None
+                            let mut capacity = 0usize;
+                            let fetching = Instant::now();
+                            let buffer = unsafe {
+                                AMediaCodec_getOutputBuffer(codec, index as usize, &mut capacity)
                             };
-                            #[cfg(not(feature = "probe"))]
-                            let known: Option<(usize, usize)> = None;
-                            let (buffer, capacity) = match known {
-                                Some((address, capacity)) => {
-                                    // Not timed: there is no call to time, and
-                                    // that is the whole point of the cache.
-                                    (address as *mut u8, capacity)
-                                }
-                                None => {
-                                    let mut capacity = 0usize;
-                                    let fetching = Instant::now();
-                                    let buffer = unsafe {
-                                        AMediaCodec_getOutputBuffer(
-                                            codec,
-                                            index as usize,
-                                            &mut capacity,
-                                        )
-                                    };
-                                    self.stat_get += fetching.elapsed();
-                                    #[cfg(feature = "probe")]
-                                    if self.cache_output && !buffer.is_null() {
-                                        self.output_buffers
-                                            .insert(index as usize, (buffer as usize, capacity));
-                                    }
-                                    (buffer, capacity)
-                                }
-                            };
+                            self.stat_get += fetching.elapsed();
                             if !buffer.is_null() {
                                 let packing = Instant::now();
                                 let frame = self.pack(
@@ -1277,27 +900,6 @@ impl AMediaCodecDecoder {
                 break;
             }
             let reading = Instant::now();
-            // The probe's two no-readback modes. Mode 1 hands the picture to a
-            // compositor layer, mode 2 drops it on the floor; the difference
-            // between them and the normal path is the whole cost of asking the
-            // CPU for pixels.
-            //
-            // Mode 3 is not one of them: it is the *session* that renders into
-            // the activity's surface, and such a session has no reader at all -
-            // it never reaches this code. A session that does have one still
-            // reads its pictures back, which is how the wall's tiles keep their
-            // pictures while the magnified viewport is on the video layer.
-            #[cfg(feature = "probe")]
-            if self.overlay_mode == 1 || self.overlay_mode == 2 {
-                if self.overlay_mode == 1 {
-                    self.present_overlay(image);
-                }
-                self.pending.pop_front();
-                self.stat_packed += 1;
-                self.stat_image += reading.elapsed();
-                unsafe { AImage_delete(image) };
-                continue;
-            }
             let frame = self.pack_image(image);
             self.stat_image += reading.elapsed();
             self.stat_packed += 1;
@@ -1306,37 +908,6 @@ impl AMediaCodecDecoder {
                 frames.push(frame);
             }
         }
-    }
-
-    /// Hands one decoded picture to a compositor layer of its own.
-    ///
-    /// The layer is a child of the activity's window and is created the first
-    /// time a picture arrives. Nothing is copied: the `AHardwareBuffer` the
-    /// codec wrote into is the buffer the compositor scans out, which is what
-    /// every Android video player does and what this backend never did.
-    ///
-    /// The image is kept alive until the transaction has been applied - the
-    /// buffer handle belongs to it - so the caller deletes it afterwards.
-    #[cfg(feature = "probe")]
-    fn present_overlay(&mut self, image: *mut AImage) {
-        let control = OVERLAY_CONTROL.load(std::sync::atomic::Ordering::Acquire);
-        if control.is_null() {
-            return;
-        }
-        let control = control as *mut ASurfaceControl;
-
-        let mut buffer: *mut AHardwareBuffer = ptr::null_mut();
-        let status = unsafe { AImage_getHardwareBuffer(image, &mut buffer) };
-        if status != AMEDIA_OK || buffer.is_null() {
-            return;
-        }
-        let transaction = unsafe { ASurfaceTransaction_create() };
-        unsafe {
-            ASurfaceTransaction_setBuffer(transaction, control, buffer, -1);
-            ASurfaceTransaction_apply(transaction);
-            ASurfaceTransaction_delete(transaction);
-        }
-        self.stat_presented += 1;
     }
 
     /// Turns one `AImage` into the padded NV12 planes the renderer takes.
@@ -1707,9 +1278,6 @@ impl VideoDecoder for AMediaCodecDecoder {
         self.geometry_logged = false;
         self.layout = None;
         self.pending.clear();
-        // A new session is a new codec, and its buffers are not the last one's.
-        #[cfg(feature = "probe")]
-        self.output_buffers.clear();
         Ok(())
     }
 
@@ -1798,7 +1366,6 @@ impl VideoDecoder for AMediaCodecDecoder {
                 stamp_ms = self.stat_stamp.as_millis() as u64,
                 plane_ms = self.stat_plane.as_millis() as u64,
                 copy_ms = self.stat_copy.as_millis() as u64,
-                presented = self.stat_presented,
                 pictures = self.pictures,
                 total_ms = self.stat_total.as_millis() as u64,
                 "the decoder's pace"
@@ -1883,9 +1450,6 @@ impl AMediaCodecDecoder {
         // A flush discards whatever the codec had not rendered, so the entries
         // remembered for those pictures no longer have one coming.
         self.pending.clear();
-        // And a flushed codec may hand back different buffers.
-        #[cfg(feature = "probe")]
-        self.output_buffers.clear();
     }
 }
 /// Android `AMediaCodec` decoder for the compressed audio codecs - AAC above

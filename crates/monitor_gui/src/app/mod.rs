@@ -2155,10 +2155,6 @@ impl XgViewApp {
     /// desktop, and - on Android - the loop in `crate::android_surface`, which
     /// owns a `SurfaceView`'s surface instead of an activity window.
     pub fn frame(&mut self, ctx: &egui::Context) {
-        // The activity's window does not exist when the process starts, and the
-        // decoder's compositor probe needs it; this asks until it has one.
-        #[cfg(all(target_os = "android", feature = "probe"))]
-        crate::android::publish_overlay_window();
         let start = self.begin_frame(ctx);
         self.pump_background(ctx);
         self.collect_events(ctx);
@@ -2183,7 +2179,7 @@ impl eframe::App for XgViewApp {
     /// other frame clears to the wall's own background, which is also what a
     /// window that cannot be see-through falls back to.
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-        if crate::probe_video_layer_active() {
+        if crate::picture_on_its_own_surface() {
             return [0.0, 0.0, 0.0, 0.0];
         }
         visuals.panel_fill.to_normalized_gamma_f32()
@@ -2946,7 +2942,7 @@ impl XgViewApp {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(if crate::probe_video_layer_active() {
+            .frame(egui::Frame::default().fill(if crate::picture_on_its_own_surface() {
                 // See-through, so the picture scanned out under this window
                 // shows where the wall paints nothing.
                 egui::Color32::TRANSPARENT

@@ -27,6 +27,3 @@ monitor_core = { path = "../monitor_core" }
 monitor_gui = { path = "../monitor_gui" }
 
 [features]
-# Measurement knobs for the decoder, off in every shipped build. See
-# `monitor_gui`'s `probe`.
-probe = ["monitor_gui/probe"]

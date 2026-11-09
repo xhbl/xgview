@@ -40,8 +40,6 @@ pub mod android;
 pub mod android_surface;
 #[cfg(target_os = "android")]
 pub mod keyboard;
-#[cfg(all(target_os = "android", feature = "probe"))]
-pub mod probe_render;
 pub mod mic;
 pub mod nav;
 pub mod theme;
@@ -488,14 +486,13 @@ fn init_android_logging() {
         .try_init();
 }
 
-/// Whether the decoder's compositor probe is showing a picture under this
-/// window.
+/// Whether a decoded picture is being scanned out of a surface of its own,
+/// under this window.
 ///
 /// When it is, the wall has to leave that picture's area unpainted: the video
-/// layer is a child view of the window and its surface is below the window's
-/// own, so the picture is what shows through wherever the wall draws nothing.
-/// Always false in a build without the probe.
-pub fn probe_video_layer_active() -> bool {
+/// surface is below the wall's, so the picture is what shows through wherever
+/// the wall draws nothing. See `SurfaceActivity` and `android_surface`.
+pub fn picture_on_its_own_surface() -> bool {
     #[cfg(target_os = "android")]
     {
         monitor_codec::amediacodec::video_layer_active()
