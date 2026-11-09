@@ -428,6 +428,15 @@ impl XgViewApp {
                 if response.drag_started() {
                     actions.drag_started = true;
                 }
+                // This needs no guard against the frame a finger lands on, the
+                // way `drag_frame` does: a tile senses a click as well as a drag,
+                // and `egui` postpones that decision until `is_decidedly_dragging`
+                // - which is false on any frame a button went down (`any_pressed`).
+                // So `dragged` cannot be true before the pointer has moved away
+                // from where it landed, and the distance between two touches never
+                // arrives as a page's travel. A tile that ever sensed *only* a
+                // drag would be marked dragged on the press frame and would need
+                // the same guard; see `drag_frame`.
                 if response.dragged() {
                     actions.drag_delta += response.drag_delta().x;
                 }
