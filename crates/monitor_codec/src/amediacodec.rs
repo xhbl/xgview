@@ -248,6 +248,15 @@ pub struct AMediaCodecDecoder {
     /// on the strength of a window existing shows that instead - which is a
     /// frame of the previous camera, on a channel step.
     presenting: bool,
+    /// The window this codec was opened on, while it is rendering into one.
+    ///
+    /// A codec is pointed at a window when it is configured and cannot be
+    /// pointed at another, so this is what says whether the one it has is still
+    /// the one the activity is showing. It is not: a `SurfaceView` destroys its
+    /// surface when the window goes away and makes a new one when it comes back,
+    /// and the codec would go on rendering into the old one - a picture nobody
+    /// owns, which is a black rectangle on the screen. See `decode`.
+    opened_on: *mut std::ffi::c_void,
     /// Set once an output format this cannot read as NV12 has been reported.
     ///
     /// Byte-buffer mode only: with a surface the codec reports
@@ -411,6 +420,7 @@ impl AMediaCodecDecoder {
                         // one. The count is taken in `drain`, on the first
                         // picture actually rendered.
                         self.on_surface = true;
+                        self.opened_on = window;
                         if let (Some((width, height)), Some(info)) = (size, self.info.as_mut()) {
                             info.width = width;
                             info.height = height;
@@ -915,6 +925,37 @@ impl VideoDecoder for AMediaCodecDecoder {
         keyframe: bool,
     ) -> Result<Vec<DecodedFrame>> {
         let whole = Instant::now();
+        // A codec renders into the window it was opened on, and cannot be
+        // pointed at another. The activity's picture surface is destroyed when
+        // the window goes away - leaving the app, or anything else that stops
+        // it - and a new one is made when it comes back, so the window this
+        // codec holds is by then a surface nobody owns: the picture it renders
+        // goes nowhere, the view shows nothing, and the wall leaves the area
+        // unpainted because a session still counts itself as presenting. That
+        // is a black rectangle that stays until the stream is reopened for some
+        // other reason.
+        //
+        // So the decoder is dropped and the next access unit opens a new one on
+        // the window that exists now. The session prepends the parameter sets it
+        // cached, so this reopens on whatever arrives; the first units are
+        // dropped as non-keyframes and the picture is back on the next one.
+        //
+        // Only from one window to another: a window that is *gone* is no window
+        // to reopen on, and the app is usually not on screen then. That case
+        // falls to the same picture staying black, invisibly, until it returns.
+        if self.on_surface {
+            let current = SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire)
+                as *mut std::ffi::c_void;
+            if !current.is_null() && self.opened_on != current {
+                tracing::info!(
+                    target: "xgview::codec",
+                    "the surface a picture is rendered into was replaced; reopening the decoder"
+                );
+                self.close();
+                self.on_surface = false;
+                self.opened_on = std::ptr::null_mut();
+            }
+        }
         let opening = Instant::now();
         if self.handle.is_none() {
             self.open(access_unit)?;

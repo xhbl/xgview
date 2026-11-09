@@ -237,6 +237,19 @@ fn block_on<F: std::future::Future>(future: F) -> Option<F::Output> {
     Some(runtime.block_on(future))
 }
 
+/// A fresh `egui::Context` for the bar's own surface: the same theme, the same
+/// faces, the same pixels per point as the wall's, on a different screen.
+///
+/// One function because the context and the renderer that draws it are one pair
+/// - see where the bar's surface is made in the loop.
+fn bar_screen(pixels_per_point: f32) -> egui::Context {
+    let context = egui::Context::default();
+    context.set_pixels_per_point(pixels_per_point);
+    crate::theme::install(&context);
+    crate::fonts::install_for(&context, &monitor_i18n::current_language());
+    context
+}
+
 /// Starts the wall on `window`, on a thread of its own.
 ///
 /// `internal` and `external` are the two directories the activity hands out: the
@@ -326,11 +339,17 @@ fn run() -> anyhow::Result<()> {
     // The bar has a screen of its own: a surface is a rectangle, so the only way
     // it can show the bar is for the bar to be all that is drawn in it. Same
     // theme, same faces, same pixels per point - a different screen.
-    let bar_context = egui::Context::default();
+    //
+    // Rebuilt whenever its renderer is, and for the same reason: a context and a
+    // renderer are one pair here. `egui` sends a texture's whole atlas once, on
+    // the frame it makes it, and nothing but the deltas after that - so a new
+    // renderer under an old context is a renderer with no atlas, and the first
+    // delta it is handed is a partial update of a texture it never allocated.
+    // That panics, and the panic is fatal: it aborted the process on the way
+    // back from the background, where the bar's surface is destroyed and made
+    // again while the wall keeps running.
     let bar_pixels = DENSITY.load(Ordering::Acquire) as f32 / 1000.0;
-    bar_context.set_pixels_per_point(bar_pixels);
-    crate::theme::install(&bar_context);
-    crate::fonts::install_for(&bar_context, &monitor_i18n::current_language());
+    let mut bar_context = bar_screen(bar_pixels);
 
     let started = Instant::now();
     let mut last = Instant::now();
@@ -739,6 +758,12 @@ fn run() -> anyhow::Result<()> {
                         );
                         bar = Some((fresh, config, renderer));
                         bar_attached = bar_window;
+                        // The context goes with the renderer: the one that was
+                        // here belonged to the renderer that has just been
+                        // dropped, and the atlas it had drawn is a texture this
+                        // one has never been given. See `bar_screen`.
+                        bar_context = bar_screen(bar_pixels);
+                        last_focus = None;
                     }
                 }
             }
