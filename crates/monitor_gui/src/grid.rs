@@ -425,7 +425,16 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
         osd(&painter, body, tile);
     }
 
-    if tile.focused {
+    // And the ring, which is on the whole tile rather than on the picture - a
+    // cursor for the remote, not part of the picture's own frame.
+    //
+    // Not on the same path the corners just came off: a letterboxed picture
+    // covers the middle of this tile's top and bottom edges, so the ring drawn
+    // here arrives on screen as two sides and two stubs. The overlay is above
+    // the picture and draws the whole rectangle; see `draw_overlay_only`. Only
+    // the copy that can be seen is worth painting, and leaving this one out is
+    // also what lets the compositor drop the wall's frame entirely.
+    if tile.focused && !tile.on_video_layer {
         ring(&painter, rect);
     }
 
@@ -1160,7 +1169,7 @@ fn waiting_for_video(painter: &egui::Painter, rect: Rect, tier: Tier) {
     );
 }
 
-fn ring(painter: &egui::Painter, rect: Rect) {
+pub(crate) fn ring(painter: &egui::Painter, rect: Rect) {
     painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(theme::FOCUS_WIDTH, theme::FOCUS), StrokeKind::Inside);
 }
 

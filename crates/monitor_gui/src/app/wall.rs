@@ -283,17 +283,29 @@ impl XgViewApp {
                     // `dim` is the page sliding out, and half a brightness here
                     // would be a corner display that is dimmer than the one the
                     // wall draws on the same picture. Nothing is pressed on this
-                    // copy - the presses are the wall's - and `ring` is false so
-                    // it carries no cursor either.
+                    // copy - the presses are the wall's - but the ring is the
+                    // wall's too, and it is drawn here because this is the only
+                    // layer that is not under the picture.
                     let tile = self.tile_of(
                         Id::new("xgview-overlay-tile"),
                         Some(index),
                         &cameras,
                         1,
                         true,
-                        false,
+                        self.ring_shown(),
                     );
                     grid::osd(ui.painter(), picture, &tile);
+                    // The cursor, on the tile: the ring the wall draws on the
+                    // same rectangle, in the strip's own coordinates. It is here
+                    // and not there for the reason the corners are - the picture
+                    // is over the wall - and on a letterboxed picture the wall's
+                    // copy shows only where the two bands are, which reads as a
+                    // frame with its top and bottom run through.
+                    if tile.focused {
+                        if let Some(tile_rect) = self.magnified_rect {
+                            grid::ring(ui.painter(), tile_rect.translate(picture.min.to_vec2()));
+                        }
+                    }
                 }
                 if open {
                     tilebar::draw(ui, &mut nav, &layout, false, &controls, &muted, &tips);
@@ -539,6 +551,21 @@ impl XgViewApp {
         // rather than as another rectangle. See `picture_zoom`.
         self.picture_rect = match self.picture_on_layer() {
             true => self.magnified_area(&cameras, &view, wall, dx),
+            false => None,
+        };
+        // And the tile itself, which is where the ring goes - not the picture's
+        // box: the ring is a cursor on the tile, and the tile is the whole wall
+        // whether the picture is letterboxed inside it or not. `paint_view` is
+        // given the same three numbers below - the inset wall, the layout, the
+        // slide - so the overlay draws the ring on exactly the rectangle the
+        // wall would have. See `magnified_rect`.
+        self.magnified_rect = match self.picture_on_layer() {
+            true => Some(grid::tile_rect(
+                wall.translate(vec2(dx, 0.0)),
+                view.layout,
+                0,
+                grid::LINE,
+            )),
             false => None,
         };
         let pinched = ui.ctx().input(|input| pinch_frame(input, area));

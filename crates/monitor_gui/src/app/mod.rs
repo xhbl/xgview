@@ -1113,6 +1113,18 @@ pub struct XgViewApp {
     /// tile, not against this: they belong to the wall's frame, and the wall is
     /// what reads the presses on them.
     picture_rect: Option<egui::Rect>,
+    /// The rectangle the magnified tile is painted in, in wall points - which is
+    /// the rectangle its ring goes on.
+    ///
+    /// Kept for the overlay, on the same terms as [`Self::picture_rect`]: the
+    /// ring is drawn by the wall, and the wall is *under* the picture, so its
+    /// top and bottom edges are covered by the picture's view wherever that view
+    /// is narrower than the tile - which is every picture the fit switch has
+    /// letterboxed, and the ring then reads as three sides and two stubs instead
+    /// of a rectangle. The copy that can be seen is the overlay's. Recomputed in
+    /// `draw_grid` from the same rectangle the tile is painted in, so the two
+    /// cannot disagree - including while a channel step slides the tile.
+    magnified_rect: Option<egui::Rect>,
     /// When the magnification that is up lets the rest of the page go, or
     /// `None` when nothing is magnified.
     ///
@@ -1567,6 +1579,7 @@ impl XgViewApp {
             tap_open_at: None,
             picture_zoom: PictureZoom::FULL,
             picture_rect: None,
+            magnified_rect: None,
             zoom_park_at: None,
             tile_bar: tilebar::Bar::new(),
             sound_on,
