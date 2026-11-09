@@ -108,6 +108,22 @@ impl XgViewApp {
         self.scheduler.is_zoomed()
     }
 
+    /// Whether the wall leaves the picture's area unpainted because the decoder
+    /// is scanning it out of a surface of its own.
+    ///
+    /// Only a **magnification** asks for that. A one-cell grid is not one: it
+    /// pulls the cheap sub stream, and its pictures come back as frames for the
+    /// wall to draw. `android_surface` shows the picture's view for exactly
+    /// `magnified()`, so the two have to agree - leave the area blank while the
+    /// view is hidden and there is nothing on screen at all.
+    ///
+    /// `picture_on_its_own_surface` answers a different question: whether a
+    /// window exists. On the wall that has surfaces of its own it always does,
+    /// including on a grid, so it cannot be the whole answer.
+    pub(super) fn picture_on_layer(&self) -> bool {
+        self.magnified() && crate::picture_on_its_own_surface()
+    }
+
     /// Whether the magnified viewport's bar is up.
     pub fn bar_open(&self) -> bool {
         self.tile_bar.is_open()
@@ -261,10 +277,10 @@ impl XgViewApp {
             // control does not blank the viewport.
             channel: index.and_then(|index| self.view_channel(index)),
             video: index.and_then(|index| self.view_texture(index)).map(|entry| entry.surface),
-            // The one picture the decoder's probe is scanning out of the
-            // activity's surface. It is the magnified viewport, which is
-            // the only view with a single cell.
-            on_video_layer: cells == 1 && crate::picture_on_its_own_surface(),
+            // The one picture scanned out of the activity's surface: the
+            // magnified viewport. A single cell alone is not enough - a 1x1
+            // grid has one too, and it paints its own picture from a frame.
+            on_video_layer: cells == 1 && self.picture_on_layer(),
             // The ring is a cursor, and a wall nobody is operating is just a
             // picture: it is drawn from the last key or press on and goes
             // once the wall has been left alone for the shorter of the ring's
@@ -404,8 +420,9 @@ impl XgViewApp {
         //
         // Not while the picture is being scanned out under this window: that
         // fill would be opaque over it. A magnified view has one cell, so the
-        // area being left alone is the picture's own.
-        if !(view.cells.len() == 1 && crate::picture_on_its_own_surface()) {
+        // area being left alone is the picture's own. A one-cell grid is not
+        // magnified and keeps its lines like every other grid.
+        if !(view.cells.len() == 1 && self.picture_on_layer()) {
             ui.painter().rect_filled(area, egui::CornerRadius::ZERO, theme::GRID_LINE);
         }
         let wall = area.shrink(grid::LINE);

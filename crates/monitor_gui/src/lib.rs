@@ -490,9 +490,10 @@ fn init_android_logging() {
 /// Whether a decoded picture is being scanned out of a surface of its own,
 /// under this window.
 ///
-/// When it is, the wall has to leave that picture's area unpainted: the video
-/// surface is below the wall's, so the picture is what shows through wherever
-/// the wall draws nothing. See `SurfaceActivity` and `android_surface`.
+/// This says a window exists, not that a picture is in it: on the wall that
+/// has surfaces of its own the window is there on a grid too. The wall asks
+/// `XgViewApp::picture_on_layer` before leaving an area unpainted. See
+/// `SurfaceActivity` and `android_surface`.
 pub fn picture_on_its_own_surface() -> bool {
     #[cfg(target_os = "android")]
     {

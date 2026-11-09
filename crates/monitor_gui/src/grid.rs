@@ -121,9 +121,10 @@ pub struct Tile<'a> {
     /// activity's own surface underneath this window - so this tile must leave
     /// its area unpainted and let the compositor show it.
     ///
-    /// Only ever true for the one picture the decoder's probe is presenting,
-    /// which is the magnified viewport or a recording. See
-    /// `monitor_gui::picture_on_its_own_surface`.
+    /// Only ever true for the magnified viewport or a recording, and only
+    /// while the decoder really is presenting it. A one-cell grid is not one:
+    /// it has one cell but draws its own picture. See
+    /// `XgViewApp::picture_on_layer`.
     pub on_video_layer: bool,
     /// Draw the focus ring.
     pub focused: bool,
