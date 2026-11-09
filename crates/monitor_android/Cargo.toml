@@ -2,7 +2,7 @@
 name = "monitor_android"
 version.workspace = true
 authors.workspace = true
-description = "XGView Android entry point: NativeActivity bootstrap and boot-completed auto start"
+description = "XGView Android entry point: the NativeActivity and SurfaceView front ends, and boot-completed auto start"
 license.workspace = true
 repository.workspace = true
 edition.workspace = true
@@ -25,5 +25,3 @@ jni = "0.21"
 
 monitor_core = { path = "../monitor_core" }
 monitor_gui = { path = "../monitor_gui" }
-
-[features]

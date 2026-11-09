@@ -6260,7 +6260,7 @@ lands on.
 
 ## 71. A picture on a surface of its own
 
-*Landed 2026-11-08, in 2.2.11 to 2.2.13.*
+*Landed 2026-11-08, in 2.2.11 to 2.2.26.*
 
 A 1080p camera on the onn 4K Plus played at 18.6 fps and the speed control did
 nothing. The wall's nine 640x480 pictures were fine. Everything about that points
@@ -6382,8 +6382,18 @@ timestamp is moving before believing an fps number.**
 `NdkMediaError.h`, and the wrong value means every ordinary "not yet" is treated as
 a broken reader.
 
-**What is still open.** The wall is not composited at all in the magnified view -
-`dumpsys SurfaceFlinger` lists two layers, the picture and the bar - because
-`on_video_layer` leaves its frame fully transparent. So the timestamp in that
-picture's top-left corner is the camera's own, burned into the stream; ours is lost.
-Moving the corner display into the bar is the next piece.
+**What the magnified view costs the wall.** The wall is not composited at all in the
+magnified view - `dumpsys SurfaceFlinger` lists two layers, the picture and the
+overlay - because the picture's own layer is full screen and opaque, so it covers the
+wall completely. Everything the wall would draw over the picture therefore has to be
+drawn by the overlay instead, and it is: `draw_overlay_only` paints `grid::osd` from
+the same tile, in the same place on the picture, whether or not the bar is up. That
+includes the `DateTime` corner, which reads `tile.clock` - so the camera's own
+timestamp burned into the stream's top-left is no longer the only one on screen, and
+ours lands in whichever corner the OSD layout puts it in.
+
+**Still open.** A device whose surfaces offer nothing but `Opaque` gets a black
+rectangle where the overlay is: one warning at the moment it is configured, and no
+second arrangement behind it. The rotation switch does not exist on this front end,
+whose manifest fixes landscape. And pinch and drag zoom do nothing on a picture that
+is scanned out of its own surface. See `priv/docs/android-surface-plan.md` §25.

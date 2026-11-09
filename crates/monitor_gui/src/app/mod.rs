@@ -2184,11 +2184,19 @@ impl eframe::App for XgViewApp {
     ///
     /// Transparent while a magnified picture is being scanned out of a surface
     /// under this window: wherever the wall paints nothing, the picture is what
-    /// shows. Every other frame clears to the wall's own background.
+    /// shows. Every other frame clears to the wall's own background - the colour
+    /// its panels paint, rather than eframe's own default of `12, 12, 12` at
+    /// alpha 180, which is a near-black that belonged to no wall.
     ///
     /// The Android loop in `crate::android_surface` does not ask this - it owns
     /// its render pass and clears to its own colour - so on a television this is
-    /// the desktop's answer only.
+    /// the desktop's answer only, and `picture_on_layer` is false off Android, so
+    /// the transparent branch cannot be reached there.
+    ///
+    /// **Opaque on purpose.** `native_options` builds an opaque window, so alpha
+    /// is unused; a window that ever asks for `with_transparent` needs this
+    /// method back at eframe's default, or the desktop becomes opaque again with
+    /// nothing gained.
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         if self.picture_on_layer() {
             return [0.0, 0.0, 0.0, 0.0];

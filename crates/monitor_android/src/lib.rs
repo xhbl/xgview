@@ -1,8 +1,13 @@
-//! Android entry point (NativeActivity) for XGView.
+//! Android entry point for XGView.
 //!
-//! On Android the crate is compiled as a `cdylib` loaded by the activity
-//! declared in `android/AndroidManifest.xml`. The boot receiver defined there
-//! relaunches the activity after `BOOT_COMPLETED`.
+//! On Android the crate is compiled as a `cdylib` loaded by the activity the
+//! launcher starts, and it exports the JNI symbols those activities call back
+//! into. Two front ends share it: `MainActivity`, the `NativeActivity` whose
+//! window is the whole screen, and `SurfaceActivity`, an ordinary activity
+//! where the picture and the overlay are surfaces of their own - see
+//! `monitor_gui::android_surface`. The boot receiver defined in
+//! `android/AndroidManifest.xml` relaunches whichever of them the shape it was
+//! started in asks for after `BOOT_COMPLETED`.
 
 /// Starts the eframe application from the Android activity.
 ///
