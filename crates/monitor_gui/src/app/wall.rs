@@ -152,6 +152,10 @@ impl XgViewApp {
             if owner.is_some() {
                 monitor_codec::amediacodec::begin_surface_picture();
             }
+            // The views are told in the same frame the step is noticed, before
+            // `picture_on_layer` can hide one. A null owner means the viewport
+            // is gone: that is what clears the kept frames off the grid.
+            crate::android::set_video_owner(owner.as_deref());
         }
         if self.surface_awaiting_first
             && monitor_codec::amediacodec::surface_holds_picture()

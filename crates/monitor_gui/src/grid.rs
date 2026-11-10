@@ -1164,13 +1164,80 @@ fn live_canvas(painter: &egui::Painter, rect: Rect, tile: &Tile<'_>, tier: Tier)
     if size.x > 0.0 && size.y > 0.0 {
         let whole = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         let window = tile.picture_zoom.map_or(whole, PictureZoom::window);
-        let dest = picture_area(size, rect, tile.aspect, tile.rotated);
+        // While a Main stream is opening, the only picture the wall has is
+        // the last Sub frame, held over from whichever stream was showing
+        // before: the magnified viewport stepping to the next camera, the
+        // first step into magnification, or a grid tile promoted to Main.
+        // On most cameras that 640x480 texture holds a 16:9 picture squeezed
+        // into 4:3, so it has to be pulled back out to the shape the main
+        // frame will have; on a camera whose main stream is itself 4:3 it is
+        // already right and must be left alone.
+        //
+        // The *whole* texture is sampled into that box. Cropping it to the new
+        // shape would instead throw away a quarter of the picture and enlarge
+        // what is still deformed.
+        //
+        // Where it goes is the fit's answer. `Stretch` and the fixed ratios
+        // never read the source size, so a waiting Sub frame is stretched
+        // whole into the fit's box from its very first frame: no main-stream
+        // size, and no waiting state, is needed there. `Original` is the one
+        // fit that takes its shape from the stream, and the only one with a
+        // gap - until the Main session reports its size, the wall cannot know
+        // the box its first frame will land in. What it does know is the size
+        // the Main session last reported, kept on the channel after it goes
+        // back to Sub; the channel's current `width`/`height` describe the
+        // Sub frame still on screen and would say 640x480.
+        //
+        // A live grid tile, a turned picture and a device whose frames come
+        // back as bytes keep their own rules.
+        let shape = if tile.aspect == TileAspect::Original && !tile.rotated {
+            let waiting = !tile.on_video_layer
+                && (tile.picture_zoom.is_some()
+                    || tile.channel.is_some_and(holds_sub_while_main_opens));
+            if waiting {
+                tile.channel
+                    .and_then(|channel| channel.main_size)
+                    .and_then(|(width, height)| {
+                        waiting_main_shape(size, vec2(width as f32, height as f32))
+                    })
+                    .unwrap_or(size)
+            } else {
+                size
+            }
+        } else {
+            size
+        };
+        let dest = picture_area(shape, rect, tile.aspect, tile.rotated);
         if tile.rotated {
             turned_canvas(painter, dest, window, surface);
         } else {
             painter.image(surface.id, dest, window, Color32::WHITE);
         }
     }
+}
+
+/// Whether this channel is showing the last Sub frame while a Main stream
+/// opens, whichever tile asked for it. The magnified viewport always is - it
+/// is the wall's one Main consumer - but a grid tile can be promoted to Main
+/// too, and that switch has to be treated the same way: `switching_from`
+/// names the stream being left, and a Main session that has not counted a
+/// frame yet is still waiting for its first picture.
+fn holds_sub_while_main_opens(channel: &ChannelUi) -> bool {
+    channel.switching_from == Some(StreamKind::Sub)
+        || (channel.stream == Some(StreamKind::Main) && channel.total_frames == 0)
+}
+
+/// The shape a tile should be laid out for while its main stream is
+/// opening: the main stream's shape, when the held Sub texture has another
+/// one, so the whole texture is stretched back into the box the main frame
+/// will use. `None` means the two already agree - a 4:3 camera, or a
+/// byte-buffer device whose texture is a main frame - and the texture keeps
+/// its own box.
+fn waiting_main_shape(texture: Vec2, main: Vec2) -> Option<Vec2> {
+    if texture.x <= 0.0 || texture.y <= 0.0 || main.x <= 0.0 || main.y <= 0.0 {
+        return None;
+    }
+    ((texture.x / texture.y - main.x / main.y).abs() > 0.01).then_some(main)
 }
 
 /// Draws the video rotated 90° clockwise. The source dimensions swap, a fixed
@@ -1632,5 +1699,70 @@ mod tests {
             camera: "gate".to_string(),
         };
         assert!(!recording_address(&secret).contains("hunter2"));
+    }
+
+    /// A Sub frame held while Main opens is the same picture whether it is
+    /// the magnified viewport or a grid tile that was just promoted: the
+    /// switch, not the zoom, is what makes it a waiting frame.
+    #[test]
+    fn a_grid_tile_switching_to_main_is_waiting_too() {
+        let mut channel = ChannelUi::default();
+        assert!(!holds_sub_while_main_opens(&channel), "a live sub tile is not waiting");
+
+        channel.switching_from = Some(StreamKind::Sub);
+        assert!(holds_sub_while_main_opens(&channel), "the switch is named");
+
+        channel.switching_from = None;
+        channel.stream = Some(StreamKind::Main);
+        assert!(holds_sub_while_main_opens(&channel), "a main session with no frames yet");
+
+        channel.total_frames = 1;
+        assert!(!holds_sub_while_main_opens(&channel), "its picture has arrived");
+
+        channel.stream = Some(StreamKind::Sub);
+        channel.total_frames = 0;
+        assert!(!holds_sub_while_main_opens(&channel), "a sub stream is not a main wait");
+    }
+
+    /// Waiting for a main stream, the wall has a 640x480 texture holding a
+    /// 16:9 picture squeezed into 4:3. It is laid out in the main stream's
+    /// box with the *whole* texture sampled. A camera whose main stream is
+    /// really 4:3 keeps its own shape - stretching that one is the mistake.
+    #[test]
+    fn a_waiting_picture_is_stretched_whole_into_the_main_streams_shape() {
+        let sub = vec2(640.0, 480.0);
+        let main_16x9 = vec2(1920.0, 1080.0);
+        let main_4x3 = vec2(2560.0, 1920.0);
+
+        assert_eq!(waiting_main_shape(sub, main_16x9), Some(main_16x9));
+        assert_eq!(waiting_main_shape(sub, main_4x3), None, "a 4:3 camera is left alone");
+        assert_eq!(waiting_main_shape(main_16x9, main_16x9), None,
+            "a byte-buffer main frame is not stretched");
+        assert_eq!(waiting_main_shape(vec2(0.0, 0.0), main_16x9), None);
+
+        // Original is the only fit that takes the stream's shape; the others
+        // put the picture in the box the fit asks for, whatever size it is.
+        let tile = Rect::from_min_size(egui::pos2(0.0, 0.0), main_16x9);
+        assert_eq!(picture_area(main_16x9, tile, TileAspect::Original, false), tile);
+        assert!((picture_area(sub, tile, TileAspect::Original, false).width()
+            - 1440.0).abs() < 1e-5, "4:3 is letterboxed at 1920x1080");
+        assert_eq!(fitted(sub, tile, TileAspect::Stretch), tile);
+        assert_eq!(fitted(sub, tile, TileAspect::Ratio16x9),
+            fitted(main_16x9, tile, TileAspect::Ratio16x9));
+        assert_eq!(fitted(sub, tile, TileAspect::Ratio4x3),
+            fitted(main_4x3, tile, TileAspect::Ratio4x3),
+            "a fixed fit is the same box whichever stream is named");
+        assert_eq!(picture_area(sub, tile, TileAspect::Ratio16x9, false),
+            picture_area(main_16x9, tile, TileAspect::Ratio16x9, false),
+            "a fixed fit needs no main size, even before one is reported");
+
+        // The UV window is never narrowed by the shape correction, even when
+        // the view is pushed in: the whole texture is what gets stretched.
+        let whole = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        assert_eq!(PictureZoom::FULL.window(), whole);
+        let pushed = PictureZoom { scale: 2.0, center: vec2(0.5, 0.5) };
+        assert_eq!(pushed.window(), Rect::from_center_size(egui::pos2(0.5, 0.5), Vec2::splat(0.5)));
+        assert!((pushed.window().width() / pushed.window().height() - 1.0).abs() < 1e-5,
+            "a pinch keeps its window instead of cropping to 16:9");
     }
 }

@@ -1292,6 +1292,14 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
+     * Which camera the picture's view belongs to. Handed on like the others;
+     * the NativeActivity has no such view, so its calls have nothing to act on.
+     */
+    public static void setVideoOwner(final String owner) {
+        SurfaceActivity.setVideoOwner(owner);
+    }
+
+    /**
      * Places the view the picture is scanned out of.
      *
      * <p>Handed on for the same reason {@link #setVideoVisible} is - the calls

@@ -185,6 +185,13 @@ pub struct ChannelUi {
     pub audio: bool,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// The size the **Main** stream last reported, kept after the channel goes
+    /// back to Sub. A session names its size in its first sample, before any
+    /// picture, so while Main is opening the wall can already put the Sub
+    /// frame it is holding into Main's box. `width`/`height` above describe
+    /// whichever stream is arriving now and revert to 640x480 in the grid;
+    /// this one does not.
+    pub main_size: Option<(u32, u32)>,
     pub fps: f32,
     pub bitrate_kbps: f32,
     pub total_frames: u64,
@@ -208,6 +215,7 @@ impl Default for ChannelUi {
             audio: false,
             width: None,
             height: None,
+            main_size: None,
             fps: 0.0,
             bitrate_kbps: 0.0,
             total_frames: 0,
@@ -281,6 +289,14 @@ impl ChannelUi {
         }
         if stats.height.is_some() {
             self.height = stats.height;
+        }
+        // A Main session's first sample carries the size from the stream's
+        // description, before its first picture. Keep it for the Sub frame
+        // held while that picture is on its way; see `main_size`.
+        if stats.stream == StreamKind::Main {
+            if let (Some(width), Some(height)) = (stats.width, stats.height) {
+                self.main_size = Some((width, height));
+            }
         }
         self.fps = stats.fps;
         self.bitrate_kbps = stats.bitrate_kbps;
@@ -4179,6 +4195,42 @@ mod tests {
         assert_eq!(channel.switching_from, Some(StreamKind::Sub), "the held frame is still held");
         assert_eq!(channel.fps, 0.0);
         assert_eq!(channel.stream, Some(StreamKind::Main), "and the channel is still on the new stream");
+    }
+
+    /// A Main session names its size before its first picture, and the Sub
+    /// frame held while it opens needs that shape. The channel's own width and
+    /// height go back to describing Sub in the grid, but the Main shape is not
+    /// forgotten.
+    #[test]
+    fn a_main_streams_size_survives_the_return_to_sub() {
+        let main = StreamStats {
+            index: 0,
+            camera_id: "cam".to_string(),
+            stream: StreamKind::Main,
+            codec: Some("H264".to_string()),
+            width: Some(1920),
+            height: Some(1080),
+            hardware: true,
+            audio: false,
+            fps: 0.0,
+            bitrate_kbps: 0.0,
+            total_frames: 0,
+        };
+        let mut sub = main.clone();
+        sub.stream = StreamKind::Sub;
+        sub.width = Some(640);
+        sub.height = Some(480);
+
+        let mut channel = ChannelUi::default();
+        channel.apply_stats(1, &sub);
+        assert_eq!(channel.main_size, None, "a sub stream names no main shape");
+
+        channel.apply_stats(2, &main);
+        assert_eq!(channel.main_size, Some((1920, 1080)));
+
+        channel.apply_stats(3, &sub);
+        assert_eq!(channel.width, Some(640), "the current numbers are sub's again");
+        assert_eq!(channel.main_size, Some((1920, 1080)), "but the main shape is kept");
     }
 
     /// The held frame is a promise that a new one is coming. A channel that has

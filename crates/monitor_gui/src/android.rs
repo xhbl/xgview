@@ -165,6 +165,46 @@ pub fn set_video_visible(visible: bool) {
     call_void_bool("setVideoVisible", visible);
 }
 
+/// Tells the picture's views which camera the surface is being asked to show.
+///
+/// The surface path keeps the view of a camera that was stepped away from, so
+/// stepping back can show the frame it left rather than the wall's small
+/// sub-stream texture. A device whose pictures come back as bytes never shows
+/// any of those views, so it is not told about a camera at all. Leaving the
+/// magnification is *always* reported, even when the window has gone away:
+/// that is the signal that takes the views off the grid again.
+pub fn set_video_owner(owner: Option<&str>) {
+    if owner.is_some() && !monitor_codec::amediacodec::video_layer_active() {
+        return;
+    }
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return;
+    };
+    // An empty string is the "no camera" answer; a null jobject would need a
+    // second signature and buys nothing here.
+    let Ok(string) = env.new_string(owner.unwrap_or("")) else {
+        return;
+    };
+    let called = env.call_static_method(
+        class,
+        "setVideoOwner",
+        "(Ljava/lang/String;)V",
+        &[JValue::Object(&string)],
+    );
+    if let Err(error) = &called {
+        // A missing bridge used to be swallowed here: the views then never
+        // learned which camera they belonged to, and every step showed the
+        // wall's sub-stream frame. Say so instead.
+        tracing::warn!(target: "xgview", %error, "the picture's views were not told their camera");
+        env.exception_describe().ok();
+    } else {
+        tracing::info!(target: "xgview", owner = ?owner, "the picture's views were told their camera");
+    }
+    // Cleared, as everywhere else here: an exception left pending aborts the
+    // process on the next JNI call.
+    clear_exception(&mut env);
+}
+
 /// Places the view the picture is scanned out of, in physical pixels.
 ///
 /// The view is a full-screen `SurfaceView` until this says otherwise, and a

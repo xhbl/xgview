@@ -52,8 +52,24 @@ public class SurfaceActivity extends Activity {
     private static final String TAG = "xgview-surface";
 
     private SurfaceView canvas;
-    /** The decoded picture, between the wall and the bar. */
+    /**
+     * Two views for the decoded picture, between the wall and the bar.
+     *
+     * <p>A {@code SurfaceView} keeps the last frame it was given. Stepping out
+     * of a camera and back should show the frame that camera left, not the
+     * small sub-stream texture the wall has, so the view holding it is kept
+     * aside while another one takes the next session. Only {@link #video} is
+     * bound to the decoder; the other one is left alone with its picture.
+     */
+    private static final int VIDEO_SLOTS = 2;
+    private final SurfaceView[] videoViews = new SurfaceView[VIDEO_SLOTS];
+    private final String[] videoOwners = new String[VIDEO_SLOTS];
+    private final boolean[] videoFilled = new boolean[VIDEO_SLOTS];
+    private int videoSlot = 0;
+    /** The decoded picture, between the wall and the bar: the active one. */
     private SurfaceView video;
+    /** The camera native is asking the surface for; null outside a magnification. */
+    private String videoOwner;
     /** The controls, over the picture. */
     private SurfaceView bar;
     /** Whether the picture's view is on screen; see {@link #setVideoVisible}. */
@@ -126,31 +142,37 @@ public class SurfaceActivity extends Activity {
 
         // The picture's view, created before the wall's but added after it, so
         // the picture is drawn over the wall. See where `root` gets its views.
-        video = new SurfaceView(this);
-        video.getHolder().addCallback(new SurfaceHolder.Callback() {
-            @Override
-            public void surfaceCreated(SurfaceHolder holder) {
-                if (EXTRA_SURFACES) {
-                    Log.i(TAG, "video surface created");
-                    nativeStartVideo(holder.getSurface());
+        for (int slot = 0; slot < VIDEO_SLOTS; slot++) {
+            videoViews[slot] = new SurfaceView(this);
+            videoViews[slot].getHolder().addCallback(new SurfaceHolder.Callback() {
+                @Override
+                public void surfaceCreated(SurfaceHolder holder) {
+                    // Only the view the decoder is bound to reports a window.
+                    // The other one is keeping a camera's last frame; binding
+                    // it here would let the next session paint over that frame.
+                    if (EXTRA_SURFACES && isActiveVideo(holder)) {
+                        Log.i(TAG, "video surface created");
+                        nativeStartVideo(holder.getSurface());
+                    }
                 }
-            }
 
-            @Override
-            public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-                if (EXTRA_SURFACES) {
-                    nativeStartVideo(holder.getSurface());
+                @Override
+                public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                    if (EXTRA_SURFACES && isActiveVideo(holder)) {
+                        nativeStartVideo(holder.getSurface());
+                    }
                 }
-            }
 
-            @Override
-            public void surfaceDestroyed(SurfaceHolder holder) {
-                if (EXTRA_SURFACES) {
-                    Log.i(TAG, "video surface destroyed");
-                    nativeStopVideo();
+                @Override
+                public void surfaceDestroyed(SurfaceHolder holder) {
+                    if (EXTRA_SURFACES && isActiveVideo(holder)) {
+                        Log.i(TAG, "video surface destroyed");
+                        nativeStopVideo();
+                    }
                 }
-            }
-        });
+            });
+        }
+        video = videoViews[videoSlot];
         canvas = new SurfaceView(this);
         canvas.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
@@ -183,9 +205,11 @@ public class SurfaceActivity extends Activity {
         // picture has to cover the area the wall leaves for it. The bar is added
         // after this one, which puts it over both.
         if (EXTRA_SURFACES) {
-            root.addView(video, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT));
+            for (int slot = 0; slot < VIDEO_SLOTS; slot++) {
+                root.addView(videoViews[slot], new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT));
+            }
         }
         // The bar, last, so it is drawn over the picture.
         bar = new SurfaceView(this);
@@ -486,8 +510,87 @@ public class SurfaceActivity extends Activity {
             // drawn after a return to the grid. A translation leaves the surface
             // alive and only takes it off the screen.
             self.videoShown = visible;
+            if (visible && self.videoOwner != null) {
+                // A picture really has been rendered for this camera: the view
+                // now holds a frame worth keeping when the viewer steps away.
+                self.videoOwners[self.videoSlot] = self.videoOwner;
+                self.videoFilled[self.videoSlot] = true;
+            }
+            Log.i(TAG, "video visible=" + visible + " owner=" + self.videoOwner
+                    + " slot=" + self.videoSlot + " filled=" + self.videoFilled[self.videoSlot]);
             self.applyVideoPlacement();
         });
+    }
+
+    /**
+     * Says which camera the magnified viewport is asking the surface for.
+     *
+     * <p>An empty string means the viewport is gone. That is the important
+     * answer: it puts every view out of the way and forgets the frames they
+     * kept, so going back to the grid behaves exactly as it did with one view.
+     */
+    public static void setVideoOwner(final String owner) {
+        final SurfaceActivity self = instance;
+        if (self == null || self.video == null) {
+            return;
+        }
+        self.runOnUiThread(() -> self.selectVideoOwner(owner));
+    }
+
+    /** Whether a holder belongs to the one view the decoder is bound to. */
+    private boolean isActiveVideo(SurfaceHolder holder) {
+        return video != null && holder == video.getHolder();
+    }
+
+    private void selectVideoOwner(String owner) {
+        final String wanted = (owner == null || owner.isEmpty()) ? null : owner;
+        videoOwner = wanted;
+        if (wanted == null) {
+            // Leaving the magnification: the kept frames are of no use over a
+            // grid, and a view left standing would cover it with a still.
+            for (int slot = 0; slot < VIDEO_SLOTS; slot++) {
+                videoOwners[slot] = null;
+                videoFilled[slot] = false;
+            }
+            applyVideoPlacement();
+            return;
+        }
+        int chosen = -1;
+        for (int slot = 0; slot < VIDEO_SLOTS; slot++) {
+            if (wanted.equals(videoOwners[slot]) && videoFilled[slot]) {
+                // Step back to a camera already seen: its view still holds the
+                // frame it left, and that is the first picture of this step.
+                chosen = slot;
+                break;
+            }
+        }
+        if (chosen < 0) {
+            // A camera not seen before. An empty view is preferred over one
+            // that is holding another camera's last frame.
+            int empty = -1;
+            for (int slot = 0; slot < VIDEO_SLOTS; slot++) {
+                if (!videoFilled[slot]) {
+                    empty = slot;
+                    break;
+                }
+            }
+            chosen = empty >= 0 ? empty : (videoSlot + 1) % VIDEO_SLOTS;
+            videoOwners[chosen] = wanted;
+            videoFilled[chosen] = false;
+        }
+        if (chosen != videoSlot) {
+            videoSlot = chosen;
+            video = videoViews[videoSlot];
+            final android.view.Surface surface = video.getHolder().getSurface();
+            if (surface != null && surface.isValid()) {
+                nativeStartVideo(surface);
+            }
+        }
+        videoOwners[videoSlot] = wanted;
+        Log.i(TAG, "video owner=" + wanted + " slot=" + videoSlot
+                + " filled=" + videoFilled[videoSlot]
+                + " slots=" + java.util.Arrays.toString(videoOwners));
+        applyVideoPlacement();
     }
 
     /**
@@ -520,9 +623,14 @@ public class SurfaceActivity extends Activity {
             return;
         }
         self.runOnUiThread(() -> {
-            final FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(w, h);
-            params.setMargins(left, top, 0, 0);
-            self.video.setLayoutParams(params);
+            // Both views keep the same box: the one brought back for a camera
+            // already seen must show its last frame at the shape that camera
+            // had, before the next session gets around to placing it again.
+            for (int slot = 0; slot < VIDEO_SLOTS; slot++) {
+                final FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(w, h);
+                params.setMargins(left, top, 0, 0);
+                self.videoViews[slot].setLayoutParams(params);
+            }
             self.applyVideoPlacement();
         });
     }
@@ -551,11 +659,15 @@ public class SurfaceActivity extends Activity {
             self.videoDx = dx;
             self.videoDy = dy;
             // About the corner the offsets are measured from, so that `dx`/`dy`
-            // are the whole of where the picture starts.
-            self.video.setPivotX(0f);
-            self.video.setPivotY(0f);
-            self.video.setScaleX(self.videoScale);
-            self.video.setScaleY(self.videoScale);
+            // are the whole of where the picture starts. Both views take the
+            // same pinch, so a view brought back is not left at the zoom of
+            // the camera that was magnified before it.
+            for (int slot = 0; slot < VIDEO_SLOTS; slot++) {
+                self.videoViews[slot].setPivotX(0f);
+                self.videoViews[slot].setPivotY(0f);
+                self.videoViews[slot].setScaleX(self.videoScale);
+                self.videoViews[slot].setScaleY(self.videoScale);
+            }
             self.applyVideoPlacement();
         });
     }
@@ -586,8 +698,21 @@ public class SurfaceActivity extends Activity {
                 ? ((FrameLayout.LayoutParams) raw).topMargin
                 : 0;
         final float scale = Math.max(videoScale, 1f);
-        video.setTranslationX(videoShown ? videoDx : 0f);
-        video.setTranslationY(videoShown ? videoDy : -(top + height * scale));
+        // A view holding this camera's last frame stays in its box while the
+        // new session connects: that frame *is* the first picture of the step
+        // back. An empty view - or any view once the viewport is gone - must
+        // move away, or it covers the wall with nothing or with a still.
+        final boolean keep = videoOwner != null && videoFilled[videoSlot];
+        final boolean shown = videoShown || keep;
+        for (int slot = 0; slot < VIDEO_SLOTS; slot++) {
+            final SurfaceView view = videoViews[slot];
+            if (view == null) {
+                continue;
+            }
+            final boolean up = slot == videoSlot && shown;
+            view.setTranslationX(up ? videoDx : 0f);
+            view.setTranslationY(up ? videoDy : -(top + height * scale));
+        }
     }
 
     private android.os.PowerManager.WakeLock wakeLock;
