@@ -1062,26 +1062,40 @@ public class MainActivity extends NativeActivity {
      * it is not meant to outlive the driver that justified it.
      */
     private void applyVulkanGate() {
-        final SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        final String env = Build.FINGERPRINT + " #" + appVersion();
+        applyVulkanGate(this);
+    }
+
+    /**
+     * The same question asked of any activity's context.
+     *
+     * <p>Both front ends have to ask it, and neither may wait for the other: the
+     * gate is a file the native side reads once, before it builds its renderer,
+     * and the surfaces front end starts that renderer from its own activity. A
+     * gate applied only by the {@code NativeActivity} would leave the other one
+     * trying Vulkan on the very drivers this exists to keep off it. See
+     * `SurfaceActivity.onCreate`.
+     */
+    static void applyVulkanGate(final Context context) {
+        final SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        final String env = Build.FINGERPRINT + " #" + appVersion(context);
         if (!env.equals(prefs.getString(KEY_ENV, null))) {
-            if (deleteMarker(VULKAN_ATTEMPT_MARKER)) {
+            if (deleteMarker(context, VULKAN_ATTEMPT_MARKER)) {
                 android.util.Log.i("xgview",
                         "this is a different build or ROM; the Vulkan attempt marker is cleared");
             }
             prefs.edit().putString(KEY_ENV, env).commit();
         }
 
-        final PackageManager packages = getPackageManager();
+        final PackageManager packages = context.getPackageManager();
         final boolean vulkan11 = packages != null
                 && packages.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION, VULKAN_1_1);
         if (vulkan11) {
-            deleteMarker(VULKAN_GATE_MARKER);
+            deleteMarker(context, VULKAN_GATE_MARKER);
             return;
         }
         android.util.Log.i("xgview",
                 "no Vulkan 1.1 on this device; the GL backend is marked for this launch");
-        final File marker = new File(getFilesDir(), VULKAN_GATE_MARKER);
+        final File marker = new File(context.getFilesDir(), VULKAN_GATE_MARKER);
         try {
             final File dir = marker.getParentFile();
             if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
@@ -1097,10 +1111,10 @@ public class MainActivity extends NativeActivity {
     }
 
     /** The version name the platform reports, or a stand-in when it will not say. */
-    private String appVersion() {
+    private static String appVersion(final Context context) {
         try {
-            final String name = getPackageManager()
-                    .getPackageInfo(getPackageName(), 0).versionName;
+            final String name = context.getPackageManager()
+                    .getPackageInfo(context.getPackageName(), 0).versionName;
             return name == null ? "unknown" : name;
         } catch (PackageManager.NameNotFoundException impossible) {
             return "unknown";
@@ -1108,8 +1122,8 @@ public class MainActivity extends NativeActivity {
     }
 
     /** Deletes one of the markers beside the configuration; true when one went. */
-    private boolean deleteMarker(final String name) {
-        final File marker = new File(getFilesDir(), name);
+    private static boolean deleteMarker(final Context context, final String name) {
+        final File marker = new File(context.getFilesDir(), name);
         if (!marker.exists()) {
             return false;
         }

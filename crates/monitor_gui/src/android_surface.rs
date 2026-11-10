@@ -20,6 +20,7 @@ use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::app::XgViewApp;
+use crate::backend;
 use crate::RunOptions;
 use monitor_core::config::AppConfig;
 
@@ -287,6 +288,142 @@ fn bar_screen(pixels_per_point: f32) -> egui::Context {
     context
 }
 
+/// This launch's hold on the Vulkan attempt marker, and the backend it chose.
+///
+/// The same mechanism `run_android` runs, and for the same reason: some old
+/// Vulkan drivers - Adreno on Android 8.x - hand out a device and then lose it
+/// while the first pipeline is built, which aborts the process before anything
+/// is drawn. Nothing can be asked about that in advance, so the attempt is the
+/// test: the marker is written before Vulkan is used, survives such an abort,
+/// and sends the next launch to GL.
+///
+/// Owned rather than written at the top and cleared at the bottom, because this
+/// loop has many ways out - a surface that cannot be configured, an adapter
+/// that cannot be had - and the marker's whole value is that a launch which did
+/// not draw left it behind. `Drop` is the only place every one of those paths
+/// passes through.
+///
+/// The other half is the rule [`backend::failed_start_clears_marker`] carries: a
+/// launch that the marker itself sent to GL and which then failed would pin the
+/// device to a backend that cannot serve it - the SHIELD's GL cannot start at
+/// all - so that marker goes with it.
+struct Attempt {
+    /// Where the marker lives, when the configuration directory is known.
+    path: Option<PathBuf>,
+    /// What this launch is drawing with; see [`backend::decide`].
+    backend: backend::Backend,
+    /// The marker has been dealt with: kept for a failed attempt, or taken away
+    /// by a frame that got through.
+    done: bool,
+}
+
+impl Attempt {
+    /// Reads the three markers, writes or drops what this launch owns, and says
+    /// which backend to build.
+    ///
+    /// `gated` is the file `MainActivity.applyVulkanGate` wrote before the
+    /// native thread started, and `forced` the `force-vulkan` file a transfer
+    /// can put in the shared directory.
+    fn claim(marker: Option<PathBuf>, gated: bool, forced: bool) -> Self {
+        let decision = backend::decide(
+            marker.as_deref().is_some_and(|path| path.exists()),
+            gated,
+            forced,
+        );
+
+        // The gate is a reason of its own, and one that does not go away, so an
+        // attempt marker sitting under it says nothing true. Dropping it keeps
+        // the log honest and leaves a forced run repeatable.
+        if decision.clear_attempt_marker {
+            if let Some(path) = &marker {
+                let _ = std::fs::remove_file(path);
+                tracing::info!(
+                    target: "xgview",
+                    "the version gate supersedes the previous attempt; its marker is cleared"
+                );
+            }
+        }
+        if decision.forced_past_gate {
+            tracing::warn!(
+                target: "xgview",
+                "force-vulkan is present; trying Vulkan although this device has no Vulkan 1.1"
+            );
+        }
+        match decision.backend {
+            backend::Backend::Gl(reason) => match reason {
+                backend::GlReason::Gate => tracing::warn!(
+                    target: "xgview",
+                    "this device has no Vulkan 1.1; using the GL backend"
+                ),
+                backend::GlReason::PreviousAttempt => tracing::warn!(
+                    target: "xgview",
+                    "the previous launch did not reach its first frame; using the GL backend"
+                ),
+            },
+            backend::Backend::Vulkan => {
+                if let Some(path) = &marker {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    let _ = std::fs::write(path, b"");
+                    tracing::info!(
+                        target: "xgview",
+                        "marked this launch as a Vulkan attempt; the mark is cleared once the wall draws"
+                    );
+                }
+            }
+        }
+        Attempt { path: marker, backend: decision.backend, done: false }
+    }
+
+    /// The backend to build the wgpu instance with.
+    fn backend(&self) -> backend::Backend {
+        self.backend
+    }
+
+    /// A frame got through: this launch is not a failed start, whatever it is
+    /// drawing with.
+    ///
+    /// A Vulkan attempt that reached a frame did not fail, so its marker has
+    /// done its job and goes - waiting for the process to end instead would
+    /// leave it behind for a run that drew perfectly well. A GL launch never
+    /// wrote one; the marker it was sent here by is the right answer for this
+    /// device and stays, which is what `done` says to `Drop`.
+    fn settled(&mut self) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        if !self.backend.tries_vulkan() {
+            return;
+        }
+        if let Some(path) = self.path.as_deref().filter(|path| path.exists()) {
+            let _ = std::fs::remove_file(path);
+            tracing::info!(
+                target: "xgview",
+                "the wall is drawing on Vulkan; its attempt marker is cleared"
+            );
+        }
+    }
+}
+
+impl Drop for Attempt {
+    fn drop(&mut self) {
+        // Left alone for a Vulkan attempt: the marker is what sends the next
+        // launch to GL, and this launch is the evidence that it should.
+        if self.done || !backend::failed_start_clears_marker(self.backend) {
+            return;
+        }
+        if let Some(path) = self.path.as_deref().filter(|path| path.exists()) {
+            let _ = std::fs::remove_file(path);
+            tracing::warn!(
+                target: "xgview",
+                "the GL fallback could not start either; the next launch tries Vulkan again"
+            );
+        }
+    }
+}
+
 /// Starts the wall on `window`, on a thread of its own.
 ///
 /// `internal` and `external` are the two directories the activity hands out: the
@@ -346,7 +483,30 @@ fn run() -> anyhow::Result<()> {
         extra_lang_dir: Some(external.join("langs")),
     };
 
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    // Held for the life of this loop: it writes the marker before Vulkan is
+    // tried, takes it away on the first frame that gets through, and leaves it
+    // for the next launch if this one never draws. See `Attempt`.
+    let mut attempt = Attempt::claim(
+        crate::vulkan_attempt_marker(),
+        crate::vulkan_gate_marker().is_some_and(|path| path.exists()),
+        crate::force_vulkan_in(&external),
+    );
+
+    let instance = {
+        // Which backend, from the same three markers the older front end reads:
+        // the gate the activity wrote before this thread started, an attempt
+        // marker a launch that never drew left behind, and the `force-vulkan`
+        // file. Picked before the instance is built because an instance cannot
+        // be asked for another backend afterwards. See `Attempt` and `backend`.
+        let mut descriptor = wgpu::InstanceDescriptor::default();
+        if !attempt.backend().tries_vulkan() {
+            // Asked for in the descriptor rather than through `WGPU_BACKEND`:
+            // setting that means `std::env::set_var`, which the standard
+            // library does not promise is safe once the process has threads.
+            descriptor.backends = wgpu::Backends::GL;
+        }
+        wgpu::Instance::new(&descriptor)
+    };
     // Everything that outlives a surface. The activity's `SurfaceView` hands one
     // over, loses it, and gets another; the wall, its device and its textures
     // stay put across all of it.
@@ -797,6 +957,9 @@ fn run() -> anyhow::Result<()> {
             }
         }
         frame.present();
+        // The first frame that reached the screen: a Vulkan attempt this far is
+        // one that can draw, so its marker has done its job. No-op afterwards.
+        attempt.settled();
 
         // The bar and the corner display, over the picture. Their own surface
         // and their own swapchain, presented only while there is something to

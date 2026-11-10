@@ -904,7 +904,7 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
 /// It sits beside the configuration and is only ever a marker; its contents are
 /// not read.
 #[cfg(target_os = "android")]
-fn vulkan_attempt_marker() -> Option<PathBuf> {
+pub(crate) fn vulkan_attempt_marker() -> Option<PathBuf> {
     AppConfig::default_path().parent().map(|dir| dir.join("wgpu-no-vulkan"))
 }
 
@@ -922,7 +922,7 @@ fn vulkan_attempt_marker() -> Option<PathBuf> {
 /// It sits beside the configuration and is only ever a marker; its contents are
 /// not read.
 #[cfg(target_os = "android")]
-fn vulkan_gate_marker() -> Option<PathBuf> {
+pub(crate) fn vulkan_gate_marker() -> Option<PathBuf> {
     AppConfig::default_path()
         .parent()
         .map(|dir| dir.join("wgpu-vulkan-unsupported"))
@@ -943,8 +943,18 @@ fn vulkan_gate_marker() -> Option<PathBuf> {
 #[cfg(target_os = "android")]
 fn force_vulkan_requested(app: &android_activity::AndroidApp) -> bool {
     app.external_data_path()
-        .map(|dir| dir.join("force-vulkan").exists())
-        .unwrap_or(false)
+        .is_some_and(|dir| force_vulkan_in(&dir))
+}
+
+/// The switch itself, asked of a directory: `force-vulkan` beside the
+/// configuration's shared volume.
+///
+/// Shared with the surfaces front end (`android_surface`), which has no
+/// `AndroidApp` to ask and is handed the same directory by the activity. See
+/// [`force_vulkan_requested`].
+#[cfg(target_os = "android")]
+pub(crate) fn force_vulkan_in(dir: &std::path::Path) -> bool {
+    dir.join("force-vulkan").exists()
 }
 
 /// Copies the language packs shipped as APK assets to the configuration

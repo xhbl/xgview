@@ -102,6 +102,13 @@ public class SurfaceActivity extends Activity {
             MainActivity.markAutostart();
             boot.arm();
         }
+        // The same gate the other front end applies, and the same moment: the
+        // file it writes is read once by the native side, when it builds the
+        // renderer, and this activity starts that renderer from a surface
+        // callback - well after here. A device whose Vulkan driver is older than
+        // 1.1 loses its device while the first pipeline is made, so asking
+        // first is the difference between a working wall and a crash loop.
+        MainActivity.applyVulkanGate(this);
         // This activity is started on its own, so nothing else has loaded the
         // library for it. The native methods the window insets are reported
         // through live on `MainActivity`, whose class loader this load serves
@@ -866,6 +873,15 @@ public class SurfaceActivity extends Activity {
     /**
      * Copies the language packs out of the APK into the configuration directory.
      *
+     * <p>The packs sit at the **root** of the assets, not in a {@code langs/}
+     * folder: the build points `assets.srcDirs` at the repository's `langs`
+     * directory and its contents become the root (see
+     * `android/app/build.gradle.kts`). {@code extract_lang_assets} on the
+     * {@code NativeActivity} path reads them the same way - list the root, take
+     * what ends in {@code .ftl}. A {@code langs} prefix here finds nothing and
+     * returns silently, which is a wall in English on a clean install and looks
+     * like a working copy on a device the other front end has already run on.
+     *
      * <p>Silent on failure: a missing pack costs a language, not the wall, and
      * English is compiled in.
      */
@@ -873,7 +889,7 @@ public class SurfaceActivity extends Activity {
         final AssetManager assets = getAssets();
         final File dest = new File(getFilesDir(), "langs");
         try {
-            final String[] names = assets.list("langs");
+            final String[] names = assets.list("");
             if (names == null || names.length == 0) {
                 return;
             }
@@ -885,7 +901,7 @@ public class SurfaceActivity extends Activity {
                 if (!name.endsWith(".ftl")) {
                     continue;
                 }
-                try (InputStream in = assets.open("langs/" + name);
+                try (InputStream in = assets.open(name);
                      OutputStream out = new FileOutputStream(new File(dest, name))) {
                     final byte[] buffer = new byte[8192];
                     int read;
