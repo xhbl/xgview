@@ -120,8 +120,33 @@ impl XgViewApp {
     /// `picture_on_its_own_surface` is the other half: a session really is
     /// rendering into that surface. A window alone is not enough - it exists on
     /// a grid too, and a codec that fell back to byte buffers leaves it empty.
+    ///
+    /// A seek that has asked for a recording is the third: its range is read
+    /// over the network before a decoder is even opened, so the gap can outlast
+    /// the codec's handover grace. The surface still holds its last picture
+    /// throughout, and the wall's only fallback texture is the camera's, frozen
+    /// when playback opened - the frame every seek used to flash. The wait ends
+    /// with `Playback::pending`, cleared by the first picture of the new
+    /// session, so no clock has to guess how long a box may take to answer.
     pub fn picture_on_layer(&self) -> bool {
-        self.magnified() && crate::picture_on_its_own_surface()
+        if !self.magnified() {
+            return false;
+        }
+        if crate::picture_on_its_own_surface() {
+            return true;
+        }
+        #[cfg(target_os = "android")]
+        {
+            if self
+                .playback
+                .as_ref()
+                .is_some_and(|playback| playback.pending.is_some())
+                && monitor_codec::amediacodec::surface_holds_picture()
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// The rectangle the magnified picture occupies, in wall points, while a
@@ -184,8 +209,16 @@ impl XgViewApp {
     /// main one, say - and the box the picture is given would be that stream's
     /// shape. What the session reports it is decoding is the answer there, and it
     /// is not the texture's: `ChannelUi` is fed by the stream's own statistics.
+    ///
+    /// [`Self::picture_on_layer`] and not `picture_on_its_own_surface`: the
+    /// latter drops to false while a seek waits for its new session, but the
+    /// view is still up holding the last picture. Asking the wall's texture for
+    /// a shape then is asking the camera's sub stream, frozen when playback
+    /// opened - a 4:3 box for a 16:9 picture - and the view is resized to it
+    /// for the length of the wait. The squeezed picture was the frame a seek
+    /// used to flash.
     fn picture_size(&self, index: usize) -> Option<egui::Vec2> {
-        if crate::picture_on_its_own_surface() {
+        if self.picture_on_layer() {
             if let Some(size) = self.channels.get(&index).and_then(|channel| {
                 match (channel.width, channel.height) {
                     (Some(width), Some(height)) if width > 0 && height > 0 => {

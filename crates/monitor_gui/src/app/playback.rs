@@ -208,6 +208,17 @@ pub(super) struct Playback {
     /// What came of looking past the hole a recording stopped at. See
     /// [`AfterHole`].
     pub(super) after_hole: Option<AfterHole>,
+    /// The last automatic hop past a hole: the moment the picture was on, and
+    /// the stretch it was carried on to.
+    ///
+    /// Kept apart from [`Self::after_hole`] because a seek clears that one, and
+    /// a hop begins with a seek - so a guard in `after_hole` is gone by the time
+    /// the hop's own session stops. A session that ends without putting a frame
+    /// on the screen leaves the picture's moment where it was; its stop then
+    /// names the same stretch again, and the hop restarts every few tens of
+    /// milliseconds. A frame that arrives clears it. See
+    /// [`XgViewApp::picture_arrived`] and `hole_hop_replayed`.
+    pub(super) hole_hop: Option<(i64, i64)>,
     /// The stretches of time the box has been asked about, in order and merged.
     ///
     /// The segment list is what has been *read*, not what has been recorded: a
@@ -289,6 +300,35 @@ pub(super) struct Held {
     pub(super) since: std::time::Instant,
     /// When it last stepped.
     pub(super) stepped: std::time::Instant,
+    /// When the key was last seen up, `None` while it is down.
+    ///
+    /// Some front ends give one press a frame of its own, so its down and its
+    /// up arrive apart; some remotes report a held key as a run of down/up
+    /// pairs. Neither gap is a new press. The hold survives a short release so
+    /// that its clocks do, and [`REPEAT_DELAY`] still separates a press from a
+    /// hold. See [`Held::restarted`].
+    pub(super) released: Option<std::time::Instant>,
+}
+
+impl Held {
+    /// Whether the arrow is down right now, rather than in the short grace
+    /// after it came up. `XgViewApp::recording_stopped` lets a held arrow's own
+    /// steps keep their moment, but answers a stop once the finger is off.
+    fn is_down(&self) -> bool {
+        self.released.is_none()
+    }
+
+    /// Whether an arrow that has gone down again begins a new press.
+    ///
+    /// A change of direction always does. So does a release that has outlasted
+    /// [`RELEASE_GRACE`] - that is a finger that has lifted and come back. A
+    /// release inside the grace is the gap between two frames of one press.
+    fn restarted(&self, forward: bool, now: std::time::Instant) -> bool {
+        self.forward != forward
+            || self
+                .released
+                .is_some_and(|at| now.saturating_duration_since(at) >= RELEASE_GRACE)
+    }
 }
 
 /// One day of the calendar.
@@ -566,6 +606,7 @@ impl XgViewApp {
             events_wanted: None,
             jump_ask: None,
             after_hole: None,
+            hole_hop: None,
             // What opening actually heard back, so that the first drag does not
             // read the strip it is already holding. See [`answered`].
             covered,
@@ -737,6 +778,43 @@ impl XgViewApp {
         if playback.to_seek.is_some() {
             return;
         }
+        // An arrow held down is a run of steps, each opening a session of its
+        // own. The stops of the ones a later step replaced arrive out of order,
+        // and this one is not the picture reaching a hole: clearing `pending`
+        // would put the cursor back on the frame the step left - which across a
+        // hole is still a frame from the stretch before it. Then `next_stretch`
+        // answers with the same stretch every time, and `step_landing` measures
+        // every step from that same old frame. The strip shuttles between two
+        // days instead of walking on, and can never reach the later ones. Let
+        // the newest step's moment stand, and let its own session answer.
+        //
+        // A key that has come up is the other case, including the short grace
+        // that follows it: that one stop does belong to the picture, and the
+        // recording carries on past its hole as it always did.
+        if playback.held.is_some_and(|held| held.is_down()) {
+            return;
+        }
+        // A stop that names the same frame and the same next stretch as the last
+        // hop is that hop replaying itself: the session it started ended without
+        // putting a frame on the screen, so the picture's moment never moved.
+        // Neither the cursor nor the picture is touched again - this is the loop
+        // that restarted a session every 20-60 ms and held the strip shuttling
+        // between two days, on quick repeated presses as much as on a hold. A
+        // frame that arrived, or a different stretch, is a different hop.
+        let replay = {
+            let Some(playback) = self.playback.as_ref() else {
+                return;
+            };
+            let stop = self.pictured(index).unwrap_or(playback.opened);
+            hole_hop_replayed(
+                playback.hole_hop,
+                stop,
+                next_stretch(&playback.segments, &playback.covered, stop),
+            )
+        };
+        if replay {
+            return;
+        }
         // The moment a seek was waiting for is not coming: the session that
         // would have taken the picture there is the one that has just stopped.
         // What is on screen is the stretch being left, and the moment to act on
@@ -763,6 +841,9 @@ impl XgViewApp {
         let next = next_stretch(&playback.segments, &playback.covered, stop);
         let carries = carries_on(&playback.segments, stop);
         if let Some(next) = next {
+            if let Some(playback) = self.playback.as_mut() {
+                playback.hole_hop = Some((stop, next));
+            }
             tracing::debug!(target: "xgview::app", at = next, "the recording carries on past a hole");
             self.move_to(next);
             return;
@@ -2035,10 +2116,29 @@ impl XgViewApp {
                 } else if right_press {
                     self.move_day_cursor(row, true);
                 }
-            } else if left || right {
-                self.walk_timeline(right);
+            } else if left || right || left_press || right_press {
+                // A front end that drains every queued event into one frame can
+                // deliver a press's down and up together. egui has then taken
+                // the key out of `keys_down` before the strip reads it, so
+                // `key_down` says nothing while `key_pressed` says the press
+                // came. Either way this is one call: `fresh` and the repeat
+                // clock are what decide whether it steps.
+                self.walk_timeline(right || right_press);
             } else if let Some(playback) = self.playback.as_mut() {
-                playback.held = None;
+                // Not the end of the hold yet: a release that is part of one
+                // press is only a gap between two frames, and throwing the
+                // hold away here would make its next down a fresh press. It
+                // goes when the grace has run out instead.
+                let now = std::time::Instant::now();
+                let lapsed = playback.held.as_ref().is_some_and(|held| {
+                    held.released
+                        .is_some_and(|at| now.saturating_duration_since(at) >= RELEASE_GRACE)
+                });
+                if lapsed {
+                    playback.held = None;
+                } else if let Some(held) = playback.held.as_mut() {
+                    held.released.get_or_insert(now);
+                }
             }
         }
 
@@ -2395,10 +2495,21 @@ impl XgViewApp {
         };
         let base = (playback.zoom / 20).max(1);
         // A press - or a change of direction - steps at once, and starts both
-        // clocks: the hold's, which the step grows with, and the repeat's.
-        let fresh = playback.held.map_or(true, |held| held.forward != forward);
+        // clocks: the hold's, which the step grows with, and the repeat's. A
+        // release inside [`RELEASE_GRACE`] is the same press, so neither clock
+        // moves and the repeat goes on waiting on the one it already had.
+        let fresh = playback
+            .held
+            .map_or(true, |held| held.restarted(forward, now));
         if fresh {
-            playback.held = Some(Held { forward, since: now, stepped: now });
+            playback.held = Some(Held {
+                forward,
+                since: now,
+                stepped: now,
+                released: None,
+            });
+        } else if let Some(held) = playback.held.as_mut() {
+            held.released = None;
         }
         let Some(held) = playback.held else {
             return;
@@ -3400,6 +3511,14 @@ impl XgViewApp {
             return;
         };
         let index = playback.index;
+        // This seek opens a new session, and its first picture must be reported
+        // as an arrival even when it is dated exactly where the last session
+        // stopped - which is what happens at the live edge, where the next
+        // stretch begins at the moment the previous one ended. The surface
+        // path reports a moment only when it changes, so the old one would
+        // otherwise swallow that first picture, leaving `pending` set and the
+        // strip pinned to a moment the picture has long since played past.
+        self.surface_moments.remove(&index);
         // A moment the list does not reach is not a refusal, it is a read: a
         // drag or a jump goes anywhere the recording does, and the list is what
         // has been asked for so far. Asking for the stretch around it and coming
@@ -3585,6 +3704,11 @@ impl XgViewApp {
                 if !left_behind && caught_up(at, pending) {
                     playback.pending = None;
                     playback.pending_from = None;
+                    // A frame really arrived, so the picture's moment has
+                    // moved on. The hop that brought it here is settled, and a
+                    // later stop is about a different frame. See
+                    // `Playback::hole_hop`.
+                    playback.hole_hop = None;
                 }
             }
         }
@@ -3937,6 +4061,16 @@ fn hold_step(base: i64, held: std::time::Duration) -> (i64, std::time::Duration)
 /// taken for a second step. The delay is what separates a press from a hold:
 /// below it, one press is one step however long the finger takes to lift.
 const REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
+/// How long a hold outlives its release.
+///
+/// A front end that gives each input event a frame of its own reports a press
+/// as a down frame followed by an up frame, and a remote that repeats by
+/// sending down/up pairs reports a hold the same way. Reading every gap as the
+/// end of the hold would make each pair a fresh press - one that steps at once
+/// and never reaches [`REPEAT_DELAY`], so a held arrow walks a step per event
+/// instead of a step per repeat. Short enough that two deliberate presses are
+/// still two presses.
+const RELEASE_GRACE: std::time::Duration = std::time::Duration::from_millis(120);
 /// How often a held arrow steps: at first, after half a second, and after one
 /// and a half.
 const REPEAT_SLOW: std::time::Duration = std::time::Duration::from_millis(160);
@@ -4643,6 +4777,17 @@ fn next_stretch(segments: &[Segment], covered: &[(i64, i64)], stop: i64) -> Opti
         .find(|start| *start > stop && covered_between(covered, stop, *start))
 }
 
+/// Whether a stop is the last automatic hop past a hole replaying itself.
+///
+/// The picture's moment is the frame it stopped on, and `next` is the stretch
+/// that frame would be carried on to. A session that ended without showing a
+/// frame leaves both unchanged, so making the same hop again would only start
+/// another session that ends the same way. Once the picture arrives somewhere
+/// new, `Playback::hole_hop` is cleared and a fresh hop is possible.
+fn hole_hop_replayed(hop: Option<(i64, i64)>, stop: i64, next: Option<i64>) -> bool {
+    next.is_some_and(|next| hop == Some((stop, next)))
+}
+
 /// The moment the recording carries on from a stop, when the recording goes on
 /// there.
 ///
@@ -5087,6 +5232,49 @@ fn epoch_now() -> i64 {
 mod tests {
     use super::*;
     use monitor_core::discovery::frigate::Fragment;
+
+    /// A hold is not a new press just because a front end reported its down
+    /// and its up in different frames: the short release keeps the clocks, so
+    /// the repeat delay still separates a press from a hold.
+    #[test]
+    fn a_short_release_does_not_restart_a_hold() {
+        let since = std::time::Instant::now();
+        let held = |forward, released| Held { forward, since, stepped: since, released };
+
+        let down = held(true, None);
+        assert!(down.is_down(), "the arrow is down");
+        assert!(!down.restarted(true, since), "the key is still down");
+        assert!(down.restarted(false, since), "the other arrow is a new press");
+
+        let released = held(true, Some(since));
+        assert!(!released.is_down(), "a released arrow is no longer held");
+        assert!(
+            !released.restarted(true, since + RELEASE_GRACE / 2),
+            "a gap between two frames of one press"
+        );
+        assert!(
+            released.restarted(true, since + RELEASE_GRACE),
+            "a finger that lifted and came back"
+        );
+        assert!(
+            released.restarted(false, since + RELEASE_GRACE / 2),
+            "a change of direction never waits for the grace"
+        );
+    }
+
+    /// A hop that has just been made from one frame to one stretch is not made
+    /// again from the same pair: a session that never put a frame on the screen
+    /// would otherwise name that pair for ever, restarting every few tens of
+    /// milliseconds. A frame that moved, or a different stretch, is a new hop.
+    #[test]
+    fn a_hole_hop_is_not_replayed_from_the_same_frame() {
+        let hop = Some((100, 400));
+        assert!(hole_hop_replayed(hop, 100, Some(400)), "the same stop");
+        assert!(!hole_hop_replayed(hop, 100, None), "nothing to hop to");
+        assert!(!hole_hop_replayed(None, 100, Some(400)), "no hop yet");
+        assert!(!hole_hop_replayed(hop, 101, Some(400)), "the picture moved on");
+        assert!(!hole_hop_replayed(hop, 100, Some(500)), "a different stretch");
+    }
 
     /// A recording that stopped at a hole carries on at the next stretch.
     ///

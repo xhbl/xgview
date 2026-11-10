@@ -155,6 +155,13 @@ pub fn set_video_surface(window: *mut std::ffi::c_void) {
 /// the app's - so the view goes away instead, and comes back when the magnified
 /// viewport does.
 pub fn set_video_visible(visible: bool) {
+    if !visible {
+        // The view is translated off the screen, not destroyed, so the frame
+        // in its surface survives. Whatever magnification comes next must not
+        // be told the surface is still holding its picture: that frame belongs
+        // to the camera being left. See `amediacodec::forget_surface_picture`.
+        monitor_codec::amediacodec::forget_surface_picture();
+    }
     call_void_bool("setVideoVisible", visible);
 }
 

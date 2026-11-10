@@ -937,8 +937,18 @@ fn run() -> anyhow::Result<()> {
         // change the wall's mind and nothing on the screen. Rounded to a pixel,
         // and sent only when the answer changes: this resizes the surface the
         // codec is drawing into, which is not something to do every frame.
+        //
+        // Nor during a seek's handover. There is no session rendering then, but
+        // the view is still up holding the last picture at the geometry it was
+        // given; re-placing it from a box measured off the wall's stale camera
+        // texture would resize the surface under that picture and squeeze it
+        // into the wrong aspect for the length of the wait. See
+        // `XgViewApp::picture_size`.
         if on_layer {
-            if let Some(rect) = app.picture_rect() {
+            if let Some(rect) = app
+                .picture_rect()
+                .filter(|_| crate::picture_on_its_own_surface())
+            {
                 let left = (rect.min.x * pixels_per_point).round();
                 let top = (rect.min.y * pixels_per_point).round();
                 let right = (rect.max.x * pixels_per_point).round();

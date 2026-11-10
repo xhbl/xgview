@@ -922,6 +922,11 @@ pub struct XgViewApp {
     talk_route: HashMap<String, TalkRoute>,
     /// Decoded pictures currently on the GPU, keyed by channel index.
     textures: HashMap<usize, ChannelTexture>,
+    /// The moment last reported as an arrival for a channel whose picture comes
+    /// from a surface, keyed the same way. Such a session publishes its moment
+    /// on every repaint without handing back a frame, and only a *change* in it
+    /// is an arrival. See [`Self::upload_frames`].
+    surface_moments: HashMap<usize, Option<f64>>,
     /// Uploads the decoded planes and turns them into those pictures.
     video: VideoRenderer,
     /// The machine's memory, processor load and operating system, read while the
@@ -1519,6 +1524,7 @@ impl XgViewApp {
             audio_inputs,
             talk_route: HashMap::new(),
             textures: HashMap::new(),
+            surface_moments: HashMap::new(),
             video,
             vitals: monitor_core::vitals::Vitals::new(),
             started: Instant::now(),
@@ -1766,6 +1772,7 @@ impl XgViewApp {
             // nobody. Its last one stays where it is, which is what the
             // viewport falls back to when the recording has nothing yet.
             if self.view_index(index) != index {
+                self.surface_moments.remove(&index);
                 continue;
             }
             let Some(frame) = self.manager.frames().latest(index) else {
@@ -1774,7 +1781,18 @@ impl XgViewApp {
                 // and hands nothing back. A seek waiting for it still ends on
                 // it - see `Playback::pending`.
                 let arrived = self.manager.frames().moment(index);
-                self.picture_arrived(index, arrived);
+                // That moment is published again on *every* repaint, whether
+                // the picture moved or not. Reporting each one re-runs the
+                // arrival test against the frame the seek left: while steps
+                // come faster than pictures, every new `pending` is answered
+                // by that same old frame, the cursor goes back to where the
+                // step began, and the strip jitters between the two. One
+                // report per moment is enough - the next moment is the picture
+                // that actually arrived.
+                if self.surface_moments.get(&index) != Some(&arrived) {
+                    self.surface_moments.insert(index, arrived);
+                    self.picture_arrived(index, arrived);
+                }
                 continue;
             };
             let current = self.textures.get(&index).map(|entry| entry.sequence);
@@ -1795,6 +1813,7 @@ impl XgViewApp {
             // that goes to a surface has a moment and no frame at all. See
             // `Playback::pending`.
             let arrived = self.manager.frames().moment(index);
+            self.surface_moments.insert(index, arrived);
             self.picture_arrived(index, arrived);
         }
         self.video.flush();
