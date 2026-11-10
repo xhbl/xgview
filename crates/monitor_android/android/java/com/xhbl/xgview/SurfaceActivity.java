@@ -1010,16 +1010,22 @@ public class SurfaceActivity extends Activity {
      * directory and its contents become the root (see
      * `android/app/build.gradle.kts`). {@code extract_lang_assets} on the
      * {@code NativeActivity} path reads them the same way - list the root, take
-     * what ends in {@code .ftl}. A {@code langs} prefix here finds nothing and
-     * returns silently, which is a wall in English on a clean install and looks
-     * like a working copy on a device the other front end has already run on.
+     * what ends in {@code .ftl} - and writes them to the same place this does.
+     *
+     * <p>That place is the catalogue's configuration directory: {@code
+     * config_dir()} on Android is {@code <files>/xgview}, so the packs must land
+     * in {@code <files>/xgview/langs} - the directory the Rust side scans when it
+     * builds the language catalogue (see `XgViewApp::new`). A destination without
+     * the {@code xgview} segment puts them where nothing looks, which is a wall
+     * in English on a clean install and looks like a working copy on a device the
+     * other front end has already run on.
      *
      * <p>Silent on failure: a missing pack costs a language, not the wall, and
      * English is compiled in.
      */
     private void copyLanguagePacks() {
         final AssetManager assets = getAssets();
-        final File dest = new File(getFilesDir(), "langs");
+        final File dest = new File(getFilesDir(), "xgview/langs");
         try {
             final String[] names = assets.list("");
             if (names == null || names.length == 0) {

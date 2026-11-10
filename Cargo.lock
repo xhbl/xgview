@@ -5698,7 +5698,7 @@ checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
 
 [[package]]
 name = "xgview"
-version = "2.2.54"
+version = "2.2.55"
 dependencies = [
  "anyhow",
  "embed-resource",

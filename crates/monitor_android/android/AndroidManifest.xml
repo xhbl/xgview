@@ -64,6 +64,25 @@
          otherwise the WS-Discovery probe never leaves the device. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!-- Android 11+ package visibility: without this, the app's own
+         `queryIntentActivities(ACTION_OPEN_DOCUMENT)` cannot see the system
+         document picker - `com.google.android.documentsui` on phones and
+         tablets - so `MainActivity.hasDocumentPicker()` wrongly returns false
+         and import falls back to the built-in dialog (egui inside the window),
+         which starts in the app's private `external_files_dir` and can never
+         reach the public `Download/xgview` folder the export writes to.
+         Declaring the intent restores visibility where a picker ships.
+         Television boxes that only answer the intent with
+         `com.android.tv.frameworkpackagestubs` are still excluded by name in
+         `hasDocumentPicker`, so they keep using the built-in fallback. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT" />
+            <category android:name="android.intent.category.OPENABLE" />
+            <data android:mimeType="*/*" />
+        </intent>
+    </queries>
+
     <!-- Talk-back captures the viewer's voice. Declared rather than implied:
          without it Oboe refuses to open an input stream at all, and the
          magnified bar's microphone would show and do nothing. The grant is a

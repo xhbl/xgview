@@ -1977,7 +1977,10 @@ public class MainActivity extends NativeActivity {
         final ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, name);
         values.put(MediaStore.Downloads.RELATIVE_PATH, folder);
-        values.put(MediaStore.Downloads.MIME_TYPE, SEALED_MIME_TYPE);
+        // The clear-JSON export (xgvconfig.json) carries `application/json`, not
+        // the sealed type; only the passphrase-sealed file (xgvconfig.seal) is
+        // `application/vnd.xgview.seal`. See `export_config` for the names.
+        values.put(MediaStore.Downloads.MIME_TYPE, mimeFor(name));
         // Pending until the bytes are all there, so a reader never sees half a
         // configuration.
         values.put(MediaStore.Downloads.IS_PENDING, 1);
@@ -2010,6 +2013,16 @@ public class MainActivity extends NativeActivity {
         // unique: "config (1).age". That is the name the viewer is told about,
         // and the one the next export has to look for; see `findDownload`.
         return EXPORT_FOLDER + "/" + downloadName(resolver, target, name);
+    }
+
+    /**
+     * The MIME type to record for an export named {@code name}: the sealed type
+     * for the passphrase-sealed file (xgvconfig.seal), plain JSON for the clear
+     * export (xgvconfig.json). A wrong type would send the wrong entry to the
+     * system picker's filter and mislabel the file in Downloads.
+     */
+    private static String mimeFor(String name) {
+        return name.endsWith(".json") ? "application/json" : SEALED_MIME_TYPE;
     }
 
     /** The name `MediaStore` gave an entry, or `fallback` when it will not say. */
