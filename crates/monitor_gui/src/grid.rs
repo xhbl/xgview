@@ -285,6 +285,86 @@ pub struct TileActions {
     pub hover_pos: Option<egui::Pos2>,
 }
 
+/// A point of a turned panel - its `x` down the screen, its `y` left from the
+/// tile's right edge - on the screen. The mapping [`crate::tilebar::to_screen`]
+/// gives the strip and [`osd_corner_rotated`] gives the corners.
+fn turned_at(body: Rect, p: egui::Pos2) -> egui::Pos2 {
+    egui::pos2(body.right() - p.y, body.top() + p.x)
+}
+
+/// The rectangle a cell's state is laid out in, and the way it is drawn.
+///
+/// Level, that is the tile itself. Over a picture drawn a quarter turn it is the
+/// same rectangle with its sides traded - the picture's own frame, whose `x` runs
+/// down the screen and whose `y` runs left, the mapping [`crate::tilebar::to_screen`]
+/// gives the strip and [`osd_corner_rotated`] gives the corners - and every line
+/// is drawn turned with it, so a viewer who has turned the device reads it
+/// upright instead of sideways.
+///
+/// Local coordinates start at the panel's own top-left whatever way it is drawn,
+/// which is what lets the wording below be written once: the offsets in it are
+/// the ones a reader sees, not the ones the screen has.
+struct Panel<'a> {
+    painter: &'a egui::Painter,
+    /// The tile, on the screen.
+    body: Rect,
+    /// The panel's own size: the tile's, or the tile's sides traded when turned.
+    size: Vec2,
+    turned: bool,
+}
+
+impl<'a> Panel<'a> {
+    fn new(painter: &'a egui::Painter, body: Rect, turned: bool) -> Self {
+        let size = if turned { vec2(body.height(), body.width()) } else { body.size() };
+        Self { painter, body, size, turned }
+    }
+
+    fn rect(&self) -> Rect {
+        Rect::from_min_size(egui::Pos2::ZERO, self.size)
+    }
+
+    fn centre(&self) -> egui::Pos2 {
+        self.rect().center()
+    }
+
+    /// A point of the panel, on the screen.
+    fn at(&self, p: egui::Pos2) -> egui::Pos2 {
+        if self.turned {
+            turned_at(self.body, p)
+        } else {
+            self.body.min + p.to_vec2()
+        }
+    }
+
+    fn area(&self, r: Rect) -> Rect {
+        Rect::from_two_pos(self.at(r.min), self.at(r.max))
+    }
+
+    fn fill(&self, r: Rect, color: Color32) {
+        self.painter.rect_filled(self.area(r), CornerRadius::ZERO, color);
+    }
+
+    /// A line of text, anchored where [`egui::Painter::text`] would anchor it.
+    fn text(&self, pos: egui::Pos2, align: Align2, text: impl ToString, font: FontId, color: Color32) {
+        let galley = self.painter.layout_no_wrap(text.to_string(), font, color);
+        let block = align.anchor_size(pos, galley.size());
+        if !self.turned {
+            self.painter.galley(block.min, galley, color);
+            return;
+        }
+        // A turned line starts at its own top-left and reads down the screen, so
+        // the anchor is the block's top-right corner on the screen: it occupies
+        // `(x - h, y)` to `(x, y + w)`. See `osd_corner_rotated`.
+        let at = turned_at(self.body, block.min);
+        self.painter.add(TextShape::new(at, galley, color).with_angle(std::f32::consts::FRAC_PI_2));
+    }
+
+    /// A spinner, which is a circle and needs only its centre placed.
+    fn spinner(&self, at: egui::Pos2, radius: f32, time: f64, color: Color32) {
+        spinner(self.painter, self.at(at), radius, time, color);
+    }
+}
+
 /// Paints what a cell says when its picture is not simply playing: the failure
 /// panel, the suspended panel, the wait before a first frame, and the band a
 /// stream switch leaves over the picture it is holding.
@@ -297,7 +377,10 @@ pub struct TileActions {
 /// a surface that sits above the wall, so the wall's copy of this is covered
 /// whole, and `XgViewApp::draw_overlay_only` has to draw it again on the layer
 /// that is seen. Two copies of the wording would drift, so there is one.
+///
+/// Over a turned picture the panel is laid out and drawn turned; see [`Panel`].
 pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: ConnectionState) {
+    let panel = Panel::new(painter, body, tile.rotated);
     let tier = Tier::of(body.size());
     let dim = |color: Color32| if tile.dim { color.gamma_multiply(0.5) } else { color };
     let detail = tile.channel.map(|channel| channel.detail.as_str()).unwrap_or("");
@@ -306,18 +389,19 @@ pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: 
     // A held picture is not covered: it is the thing the viewer is being left
     // looking at, and a panel over it would say the same thing worse.
     let holding = holds_last_picture(state, tile.recording.is_some(), tile.video.is_some());
+    let centre = panel.centre();
     match state {
         // A recording that has played to its end keeps the last picture it
         // drew, exactly as a stalled live stream does: there is nothing to
         // report and nothing to cover it with. The picture is the caller's.
         ConnectionState::Streaming | ConnectionState::Stalled | ConnectionState::Finished => {}
         ConnectionState::Failed => {
-            painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS_FAILED));
-            painter.text(body.center() - vec2(0.0, 16.0), Align2::CENTER_CENTER, "!", FontId::proportional(26.0), theme::ERROR);
-            painter.text(body.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, monitor_i18n::tr("grid-stream-failed"), FontId::proportional(14.0), theme::ERROR);
+            panel.fill(panel.rect(), dim(theme::CANVAS_FAILED));
+            panel.text(centre - vec2(0.0, 16.0), Align2::CENTER_CENTER, "!", FontId::proportional(26.0), theme::ERROR);
+            panel.text(centre + vec2(0.0, 12.0), Align2::CENTER_CENTER, monitor_i18n::tr("grid-stream-failed"), FontId::proportional(14.0), theme::ERROR);
             if tier != Tier::Minimal && !detail.is_empty() {
-                painter.text(
-                    body.center() + vec2(0.0, 32.0),
+                panel.text(
+                    centre + vec2(0.0, 32.0),
                     Align2::CENTER_CENTER,
                     theme::truncate(detail, 46),
                     FontId::proportional(11.0),
@@ -326,17 +410,17 @@ pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: 
             }
         }
         ConnectionState::Suspended => {
-            painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS));
-            painter.text(body.center(), Align2::CENTER_CENTER, monitor_i18n::tr("grid-suspended"), FontId::proportional(13.0), dim(theme::TEXT_DIM));
+            panel.fill(panel.rect(), dim(theme::CANVAS));
+            panel.text(centre, Align2::CENTER_CENTER, monitor_i18n::tr("grid-suspended"), FontId::proportional(13.0), dim(theme::TEXT_DIM));
         }
         ConnectionState::Idle | ConnectionState::Connecting | ConnectionState::Reconnecting => {
             if !holding {
-                painter.rect_filled(body, CornerRadius::ZERO, dim(theme::CANVAS_PENDING));
-                spinner(painter, body.center() - vec2(0.0, 16.0), 12.0, tile.time, theme::ACCENT);
-                painter.text(body.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, monitor_i18n::tr(state.label()), FontId::proportional(14.0), theme::TEXT);
+                panel.fill(panel.rect(), dim(theme::CANVAS_PENDING));
+                panel.spinner(centre - vec2(0.0, 16.0), 12.0, tile.time, theme::ACCENT);
+                panel.text(centre + vec2(0.0, 14.0), Align2::CENTER_CENTER, monitor_i18n::tr(state.label()), FontId::proportional(14.0), theme::TEXT);
                 if tier != Tier::Minimal && !detail.is_empty() {
-                    painter.text(
-                        body.center() + vec2(0.0, 34.0),
+                    panel.text(
+                        centre + vec2(0.0, 34.0),
                         Align2::CENTER_CENTER,
                         theme::truncate(detail, 52),
                         FontId::proportional(11.0),
@@ -353,19 +437,19 @@ pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: 
     // a switch is what the band is about - so it is not part of the match above.
     if let Some(channel) = tile.channel {
         if let Some(from) = channel.switching_from {
-            let width = (body.width() - theme::space::L).clamp(120.0, 430.0);
-            let band = Rect::from_center_size(body.center(), vec2(width, 54.0));
-            painter.rect_filled(band, CornerRadius::ZERO, Color32::from_black_alpha(205));
-            spinner(painter, band.left_center() + vec2(22.0, 0.0), 10.0, tile.time, theme::FOCUS);
+            let width = (panel.size.x - theme::space::L).clamp(120.0, 430.0);
+            let band = Rect::from_center_size(centre, vec2(width, 54.0));
+            panel.fill(band, Color32::from_black_alpha(205));
+            panel.spinner(band.left_center() + vec2(22.0, 0.0), 10.0, tile.time, theme::FOCUS);
             let target = channel.stream.unwrap_or(StreamKind::Main);
-            painter.text(
+            panel.text(
                 band.left_center() + vec2(42.0, -10.0),
                 Align2::LEFT_CENTER,
                 monitor_i18n::tr_args("grid-switching-to", &[("stream", monitor_i18n::tr(target.label()).into())]),
                 FontId::proportional(13.0),
                 theme::FOCUS,
             );
-            painter.text(
+            panel.text(
                 band.left_center() + vec2(42.0, 10.0),
                 Align2::LEFT_CENTER,
                 monitor_i18n::tr_args("grid-holding-last", &[("tag", monitor_i18n::tr(from.tag()).into())]),
@@ -377,11 +461,11 @@ pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: 
             // and is being opened again holds the last picture it had, and says
             // nothing about it - a still picture with no reason given, which
             // reads as a camera that has stopped rather than one being fetched.
-            let width = (body.width() - theme::space::L).clamp(120.0, 430.0);
-            let band = Rect::from_center_size(body.center(), vec2(width, 34.0));
-            painter.rect_filled(band, CornerRadius::ZERO, Color32::from_black_alpha(205));
-            spinner(painter, band.left_center() + vec2(22.0, 0.0), 10.0, tile.time, theme::FOCUS);
-            painter.text(
+            let width = (panel.size.x - theme::space::L).clamp(120.0, 430.0);
+            let band = Rect::from_center_size(centre, vec2(width, 34.0));
+            panel.fill(band, Color32::from_black_alpha(205));
+            panel.spinner(band.left_center() + vec2(22.0, 0.0), 10.0, tile.time, theme::FOCUS);
+            panel.text(
                 band.left_center() + vec2(42.0, 0.0),
                 Align2::LEFT_CENTER,
                 monitor_i18n::tr(state.label()),
@@ -1228,6 +1312,30 @@ pub fn empty_state(ui: &mut Ui, area: Rect, message: &str, hint: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A state panel over a turned picture is the picture's frame: a block the
+    /// reader sees centred stays centred, and its sides trade on the screen -
+    /// which is what makes the wording read down the screen rather than across
+    /// a sideways picture.
+    #[test]
+    fn a_turned_state_panel_is_laid_out_in_the_picture_frame() {
+        // A portrait tile with a landscape picture turned to fill it.
+        let body = Rect::from_min_size(egui::pos2(0.0, 97.0), vec2(360.0, 700.0));
+        // The panel's own size, as `Panel::new` takes it: the tile's sides traded.
+        let panel = Rect::from_min_size(egui::Pos2::ZERO, vec2(body.height(), body.width()));
+
+        // A line as the reader sees it - 120 points across, 26 deep - in the
+        // middle of the picture, where the connecting panel puts it.
+        let block = Rect::from_center_size(panel.center(), vec2(120.0, 26.0));
+        let on_screen = Rect::from_two_pos(turned_at(body, block.min), turned_at(body, block.max));
+
+        assert!((on_screen.center() - body.center()).length() < 0.01, "{on_screen:?}");
+        // Turned with the picture: the line is 26 wide and 120 tall on screen.
+        assert!((on_screen.width() - 26.0).abs() < 0.01, "{on_screen:?}");
+        assert!((on_screen.height() - 120.0).abs() < 0.01, "{on_screen:?}");
+        // And it is still inside the tile it belongs to.
+        assert!(body.contains_rect(on_screen), "{on_screen:?}");
+    }
 
     #[test]
     fn cells_of_every_layout_paint_inside_the_wall_without_overlap() {
