@@ -653,8 +653,30 @@ fn run() -> anyhow::Result<()> {
             }))
             .ok_or_else(|| anyhow::anyhow!("no runtime for the adapter request"))?
             .map_err(|error| anyhow::anyhow!("no adapter for the activity's surface: {error}"))?;
-            let (device, queue) =
-                block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+            // What the device is asked for, on the same terms eframe asks: the
+            // GL backend on an old phone offers GLES 3.1, whose limits are the
+            // WebGL 2 floor - 4 storage buffers per shader stage against the
+            // 8 a default request demands - and a request above what the
+            // adapter has is refused outright, which is a wall that never
+            // draws. A device that reaches the gate's GL fallback is exactly
+            // the sort to have limits like that; see `Attempt`.
+            let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                wgpu::Limits::downlevel_webgl2_defaults()
+            } else {
+                wgpu::Limits::default()
+            };
+            let descriptor = wgpu::DeviceDescriptor {
+                label: Some("xgview wall"),
+                required_limits: wgpu::Limits {
+                    // The picture's texture and the wall are both drawn into a
+                    // surface this size, and a 4K screen wants more than the
+                    // downlevel floor allows.
+                    max_texture_dimension_2d: 8192,
+                    ..base_limits
+                },
+                ..Default::default()
+            };
+            let (device, queue) = block_on(adapter.request_device(&descriptor))
                     .ok_or_else(|| anyhow::anyhow!("no runtime for the device request"))?
                     .map_err(|error| {
                         anyhow::anyhow!("no device for the activity's surface: {error}")
