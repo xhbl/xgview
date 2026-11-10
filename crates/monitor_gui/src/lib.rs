@@ -643,10 +643,15 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
     let extra_lang_dir = app.external_data_path().map(|dir| dir.join("langs"));
     let config_path = AppConfig::default_path();
     let config = AppConfig::load_or_default(&config_path);
+    // Full screen unless the viewer asked for the wall's own bars to stay up
+    // the last time; see `AppConfig::android_pin_bars`. The window is the
+    // activity's and stays full screen either way, so this decides only whether
+    // the wall's bars may hide when idle.
+    let fullscreen = !config.android_pin_bars;
     let options = RunOptions {
         config,
         config_path: Some(config_path.clone()),
-        fullscreen: true,
+        fullscreen,
         // Placeholder: on Android the launch intent - not this flag - says
         // whether the boot receiver started us, so `App::new` asks the activity.
         from_autostart: false,

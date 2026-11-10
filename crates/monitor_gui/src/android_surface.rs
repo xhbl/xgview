@@ -332,10 +332,15 @@ fn run() -> anyhow::Result<()> {
 
     let config_path = AppConfig::default_path();
     let config = AppConfig::load_or_default(&config_path);
+    // Full screen unless the viewer asked for the wall's own bars to stay up
+    // the last time; see `AppConfig::android_pin_bars`. The window is the
+    // activity's and stays full screen either way - the system's bars are never
+    // shown - so this decides only whether the wall's bars may hide when idle.
+    let fullscreen = !config.android_pin_bars;
     let options = RunOptions {
         config,
         config_path: Some(config_path.clone()),
-        fullscreen: true,
+        fullscreen,
         from_autostart: false,
         supervised: false,
         extra_lang_dir: Some(external.join("langs")),

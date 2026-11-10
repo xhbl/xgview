@@ -292,13 +292,23 @@ impl XgViewApp {
     }
 
     pub(super) fn set_fullscreen(&mut self, ctx: &egui::Context, enabled: bool) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enabled));
+        // On Android this is not about the window at all. The activity owns it
+        // and keeps it full screen - the system's own bars are never shown
+        // there - so leaving full screen asks only that the wall keep its two
+        // bars up. The viewport commands below would reach no window manager on
+        // the surfaces front end and, on the older one, would take the system
+        // bars back out of hiding; skipped rather than sent and ignored.
+        let window = !cfg!(target_os = "android");
+        if window {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enabled));
+        }
         self.fullscreen = enabled;
         // A window created full screen was never given a windowed size - asking
         // for one at creation is what drops it back out of full screen, see
         // `native_options` - so the first time full screen is left it is handed
         // one rather than coming back at whatever size it happens to be.
-        if !enabled && std::mem::take(&mut self.windowed_size_pending) {
+        let resized = std::mem::take(&mut self.windowed_size_pending);
+        if window && !enabled && resized {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                 crate::WINDOWED_SIZE[0],
                 crate::WINDOWED_SIZE[1],
@@ -313,6 +323,19 @@ impl XgViewApp {
         self.chrome.visible = !hide;
         self.chrome.hide_now = hide;
         self.chrome.last_input = Instant::now();
+        // On Android the choice is about the wall's own bars rather than a
+        // viewport's, and a wall that is not a kiosk should come back the way
+        // the viewer left it - the launch after this one reads it. Written only
+        // when it changes: the first frame calls this with the state the window
+        // was created in, which is not a choice the viewer made.
+        #[cfg(target_os = "android")]
+        {
+            let pinned = !enabled;
+            if self.config.android_pin_bars != pinned {
+                self.config.android_pin_bars = pinned;
+                self.mark_dirty();
+            }
+        }
         // The option to stay on top is about the wall that has the screen to
         // itself, so entering and leaving full screen is when it moves.
         self.apply_window_level(ctx);

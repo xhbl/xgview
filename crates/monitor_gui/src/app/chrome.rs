@@ -4,6 +4,9 @@
 //! The bars' controls are in `bars`; this is their life - which one the remote is
 //! walking, when they fade, and what replaces them for a moment.
 
+use egui::epaint::TextShape;
+use egui::Color32;
+
 use super::*;
 
 impl XgViewApp {
@@ -287,6 +290,10 @@ impl XgViewApp {
             self.chrome.last_input = Instant::now();
             return true;
         }
+        // Not full screen: the bars are the point of the mode. On Android that
+        // is all the mode is - the window is full screen either way, and this
+        // is the viewer asking for their own toolbar and status bar to stay
+        // put; see `AppConfig::android_pin_bars`.
         if !self.fullscreen {
             self.chrome.visible = true;
             self.chrome.hide_now = false;
@@ -364,6 +371,14 @@ impl XgViewApp {
             return;
         }
         let color = if toast.kind == ToastKind::Error { theme::ERROR } else { theme::LIVE };
+        // A picture drawn a quarter turn takes the screen with it: the corners
+        // and the strip are read in the picture's frame, and news about that
+        // picture has to be too. Level text over a sideways picture is text the
+        // viewer has to turn their head for.
+        if let (true, Some(tile)) = (self.magnified_rotated(), self.magnified_tile()) {
+            paint_toast_turned(ctx, &toast.text, color, toast.center, tile);
+            return;
+        }
         let (anchor, offset) = if toast.center {
             (egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
         } else {
@@ -410,5 +425,98 @@ impl XgViewApp {
                         ui.label(RichText::new(monitor_i18n::tr("exit-hint")).size(18.0).strong());
                     });
             });
+    }
+}
+
+/// A toast over a picture that is drawn a quarter turn.
+///
+/// The picture's frame is the screen turned clockwise: its `x` runs down the
+/// screen and its `y` runs left, which is the mapping `tilebar::to_screen` gives
+/// the strip and `grid::osd_corner_rotated` gives the corners. The toast is
+/// placed in that frame - the middle of it, or its foot 56 points up, the two
+/// places the level toast uses - and then drawn turned, so a viewer who has
+/// turned the device to look at the picture reads it upright.
+///
+/// Painted rather than shown as an `Area`: egui turns no layer, so the frame and
+/// the text are both laid out here. The frame is `Frame::popup`'s own fill and
+/// stroke, taken from the style, so the turned toast and the level one are the
+/// same box.
+fn paint_toast_turned(
+    ctx: &egui::Context,
+    text: &str,
+    color: Color32,
+    centered: bool,
+    tile: egui::Rect,
+) {
+    let style = ctx.style();
+    let font = style.text_styles[&egui::TextStyle::Body].clone();
+    let galley = ctx.fonts(|fonts| fonts.layout_no_wrap(text.to_owned(), font, color));
+    let frame = egui::Frame::popup(&style);
+    let pad = frame.inner_margin.sum();
+    let box_ = turned_toast_box(tile, galley.size() + pad * 2.0, centered);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        Id::new("xgview-toast-turned"),
+    ));
+    painter.rect(
+        box_,
+        frame.corner_radius,
+        frame.fill,
+        frame.stroke,
+        egui::StrokeKind::Inside,
+    );
+    // A turned text shape is drawn from its top-left corner and extends left of
+    // it and down, so the corner it starts at is the box's top-right, less the
+    // padding - which the turn has swapped: the padding that was across the text
+    // is now down the screen, and the one that was above it is across.
+    let at = egui::pos2(box_.max.x - pad.y, box_.min.y + pad.x);
+    painter.add(TextShape::new(at, galley, color).with_angle(std::f32::consts::FRAC_PI_2));
+}
+
+/// Where a toast's box lands on the screen over a picture drawn a quarter turn.
+///
+/// The picture's own frame has its sides traded - what the tile is tall across is
+/// wide down - so the box is placed in that frame and then mapped: `x` runs down
+/// the screen, `y` runs left from the tile's right edge, which is the mapping
+/// `tilebar::to_screen` gives the strip and `grid::osd_corner_rotated` gives the
+/// corners. The middle of the picture is the middle of the screen either way; the
+/// foot of it is the screen's left edge.
+fn turned_toast_box(tile: egui::Rect, size: egui::Vec2, centered: bool) -> egui::Rect {
+    let local = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(tile.height(), tile.width()));
+    let (anchor, offset) = if centered {
+        (egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+    } else {
+        (egui::Align2::CENTER_BOTTOM, vec2(0.0, -56.0))
+    };
+    let block = anchor.align_size_within_rect(size, local).translate(offset);
+    let to_screen =
+        |pos: egui::Pos2| egui::pos2(tile.right() - pos.y, tile.top() + pos.x);
+    egui::Rect::from_two_pos(to_screen(block.min), to_screen(block.max))
+}
+
+#[cfg(test)]
+mod turned_toast_tests {
+    use super::*;
+
+    /// The two places the level toast uses, read in the picture's frame.
+    #[test]
+    fn a_turned_toast_is_laid_out_in_the_picture_frame() {
+        // A portrait screen with a landscape picture turned to fill it.
+        let tile = egui::Rect::from_min_size(egui::pos2(0.0, 97.0), vec2(360.0, 700.0));
+        let size = vec2(120.0, 34.0);
+
+        let middle = turned_toast_box(tile, size, true);
+        assert!((middle.center().x - tile.center().x).abs() < 0.01, "{middle:?}");
+        assert!((middle.center().y - tile.center().y).abs() < 0.01, "{middle:?}");
+        // Turned with the picture: the sides have traded.
+        assert!((middle.width() - size.y).abs() < 0.01, "{middle:?}");
+        assert!((middle.height() - size.x).abs() < 0.01, "{middle:?}");
+
+        // At the foot of the picture, which the turn puts along the screen's
+        // left edge - and inside the picture, not off it.
+        let foot = turned_toast_box(tile, size, false);
+        assert!(tile.contains_rect(foot), "{foot:?}");
+        assert!(foot.left() < tile.left() + 60.0, "{foot:?}");
+        assert!((foot.right() - (foot.left() + size.y)).abs() < 0.01, "{foot:?}");
     }
 }

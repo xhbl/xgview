@@ -284,6 +284,20 @@ public class SurfaceActivity extends Activity {
     }
 
     /**
+     * Where the wall's surface starts inside the window, in pixels.
+     *
+     * <p>The window's corner is not always the picture's: a display cutout this
+     * activity lays out around - or any front end that keeps a system bar -
+     * puts the surface below or beside the window's own origin, while the
+     * events that reach {@link #onTouchEvent} are measured from the window's.
+     * The native side works in the picture's own coordinates - egui's screen
+     * begins at the surface's top-left - so the difference is taken off here.
+     * It is zero in the ordinary full screen case, which is why this was not
+     * needed until the window could be laid out any other way.
+     */
+    private final int[] contentOrigin = new int[2];
+
+    /**
      * Fingers, one call per pointer.
      *
      * <p>The native side works in egui's points, not pixels, so nothing is
@@ -292,18 +306,25 @@ public class SurfaceActivity extends Activity {
      */
     @Override
     public boolean onTouchEvent(android.view.MotionEvent event) {
+        // See `contentOrigin`: everything below is in the picture's coordinates,
+        // and the window's are one status bar lower when the bars are kept.
+        if (canvas != null) {
+            canvas.getLocationInWindow(contentOrigin);
+        }
+        final float dx = contentOrigin[0];
+        final float dy = contentOrigin[1];
         switch (event.getActionMasked()) {
             case android.view.MotionEvent.ACTION_DOWN:
             case android.view.MotionEvent.ACTION_POINTER_DOWN: {
                 final int index = event.getActionIndex();
                 nativeTouch(0, event.getPointerId(index),
-                        event.getX(index), event.getY(index), event.getPressure(index));
+                        event.getX(index) - dx, event.getY(index) - dy, event.getPressure(index));
                 return true;
             }
             case android.view.MotionEvent.ACTION_MOVE: {
                 for (int i = 0; i < event.getPointerCount(); i++) {
                     nativeTouch(1, event.getPointerId(i),
-                            event.getX(i), event.getY(i), event.getPressure(i));
+                            event.getX(i) - dx, event.getY(i) - dy, event.getPressure(i));
                 }
                 return true;
             }
@@ -311,13 +332,13 @@ public class SurfaceActivity extends Activity {
             case android.view.MotionEvent.ACTION_POINTER_UP: {
                 final int index = event.getActionIndex();
                 nativeTouch(2, event.getPointerId(index),
-                        event.getX(index), event.getY(index), event.getPressure(index));
+                        event.getX(index) - dx, event.getY(index) - dy, event.getPressure(index));
                 return true;
             }
             case android.view.MotionEvent.ACTION_CANCEL: {
                 for (int i = 0; i < event.getPointerCount(); i++) {
                     nativeTouch(3, event.getPointerId(i),
-                            event.getX(i), event.getY(i), event.getPressure(i));
+                            event.getX(i) - dx, event.getY(i) - dy, event.getPressure(i));
                 }
                 return true;
             }

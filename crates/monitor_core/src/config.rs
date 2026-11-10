@@ -610,6 +610,18 @@ pub struct AppConfig {
     /// on a device that cannot stand upright (a television), and on the other
     /// platforms, which have no orientation to ask for.
     pub android_orientation: Orientation,
+    /// Android: keep the wall's own toolbar and status bar up rather than let
+    /// them hide when idle, the way the viewer last left it.
+    ///
+    /// The window is full screen either way. The system's bars - the status bar
+    /// with the clock and the signal, the navigation bar - are never shown on
+    /// this platform, so this decides nothing about the window and everything
+    /// about the wall's own two bars. Written by the full screen switch in the
+    /// settings panel and by the toolbar's own button; the wall lets its bars
+    /// hide until one of them is used, which is what a television and a kiosk
+    /// want. Ignored on the other platforms, which remember the same choice
+    /// with `start_fullscreen`.
+    pub android_pin_bars: bool,
     /// Keep the machine awake while the wall is up, so a system that sleeps
     /// does not cut the streams. See [`crate::power`] for what each platform
     /// does with it, and for the platforms where it is not available.
@@ -712,6 +724,7 @@ impl Default for AppConfig {
             single_instance: true,
             reserve_navigation_bar: false,
             android_orientation: Orientation::default(),
+            android_pin_bars: false,
             prevent_sleep: true,
             keep_screen_on: true,
             language: "auto".to_string(),

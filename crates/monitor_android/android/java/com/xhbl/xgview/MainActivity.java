@@ -710,11 +710,31 @@ public class MainActivity extends NativeActivity {
             }
             return view.onApplyWindowInsets(insets);
         });
+        // The navigation bar keeps its strip in the mode that reserves it, and
+        // its colour comes from the theme only when the window is asked to draw
+        // the bar's background - which the theme this activity inherits does not
+        // ask for. Left alone it arrives light: a white strip under a black
+        // wall. The value is `theme::PANEL`, the strip the wall draws its own
+        // status bar in, so the two read as one.
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        window.setNavigationBarColor(0xFF13161C);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             // Android 11 and newer. The window extends under the bars.
+            //
+            // Under the bars, and deliberately not under the cut-out: on
+            // Android 9 and newer the system lays the window out below it by
+            // itself, which is what keeps the wall's toolbar out from under a
+            // punch hole. Do not "fix" that by setting a cut-out mode here or by
+            // reporting the cut-out's inset - it takes the strip twice and puts
+            // the toolbar under the hole. See `docs/DevMemo.md` §31, including
+            // its SM-S711U1 row.
             window.setDecorFitsSystemWindows(false);
             final WindowInsetsController controller = window.getInsetsController();
             if (controller != null) {
+                // Light icons: the system would otherwise keep the dark ones it
+                // picked for the light bar this replaces.
+                controller.setSystemBarsAppearance(0,
+                        WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
                 if (reserveNavigationBar) {
                     // Only the status bar goes. The navigation bar has to be
                     // asked back explicitly: it was hidden by the immersive mode

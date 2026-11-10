@@ -127,10 +127,10 @@ impl XgViewApp {
     /// The rectangle the magnified picture occupies, in wall points, while a
     /// surface of its own is showing it.
     ///
-    /// `None` when the wall draws the picture itself - on every platform that
-    /// has no such surface, and on this one when the decode fell back to
-    /// buffers. The caller that places the other view reads this; nothing on
-    /// the wall's own side does.
+    /// `None` when nothing is magnified. Set whether or not a surface is
+    /// drawing the picture: the caller that places that view reads it, and so
+    /// does the toast, which is laid out in this tile's frame when the picture
+    /// in it is drawn turned. See `paint_toast`.
     pub fn picture_rect(&self) -> Option<egui::Rect> {
         self.picture_rect
     }
@@ -625,15 +625,16 @@ impl XgViewApp {
         // given the same three numbers below - the inset wall, the layout, the
         // slide - so the overlay draws the ring on exactly the rectangle the
         // wall would have. See `magnified_rect`.
-        self.magnified_rect = match self.picture_on_layer() {
-            true => Some(grid::tile_rect(
-                wall.translate(vec2(dx, 0.0)),
-                view.layout,
-                0,
-                grid::LINE,
-            )),
-            false => None,
-        };
+        //
+        // Recorded whether or not a surface is drawing the picture there: the
+        // overlay needs it while one is, and the toast needs it while the wall
+        // is drawing a turned picture itself - a toast over a turned picture is
+        // laid out in that picture's frame, which is this tile. See
+        // `paint_toast`.
+        self.magnified_rect = self
+            .scheduler
+            .is_zoomed()
+            .then(|| grid::tile_rect(wall.translate(vec2(dx, 0.0)), view.layout, 0, grid::LINE));
         let pinched = ui.ctx().input(|input| pinch_frame(input, area));
         // Unless it is over the strip: two fingers there are asking for a wider
         // or narrower timeline, and the picture keeps the window it has.
