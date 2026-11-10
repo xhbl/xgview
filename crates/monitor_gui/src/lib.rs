@@ -508,7 +508,7 @@ pub fn picture_on_its_own_surface() -> bool {
 
 /// The message a panic payload carries, or a stand-in when it carries none.
 #[cfg(target_os = "android")]
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
         .map(|text| (*text).to_string())
@@ -559,7 +559,7 @@ static RENDERER_CAME_UP: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// still inside a driver call can block there or crash a second time. `_exit` is
 /// the syscall itself.
 #[cfg(target_os = "android")]
-fn exit_now() -> ! {
+pub(crate) fn exit_now() -> ! {
     extern "C" {
         fn _exit(status: std::ffi::c_int) -> !;
     }

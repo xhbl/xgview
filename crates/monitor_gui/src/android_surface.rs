@@ -77,6 +77,14 @@ static WINDOW: std::sync::atomic::AtomicPtr<c_void> =
 /// Whether the drawing thread has been started. There is one for the process.
 static STARTED: AtomicBool = AtomicBool::new(false);
 
+/// Which backend the launch picked, and whether a frame ever reached the screen.
+///
+/// Read after an unwind or a failed start, when everything `run` held is gone:
+/// `backend::panic_action` needs both to say whether a fresh process is worth
+/// having. Set once each, and never cleared - a process serves one launch.
+static ON_GL: AtomicBool = AtomicBool::new(false);
+static DREW: AtomicBool = AtomicBool::new(false);
+
 /// Whether the overlay's surface can only be opaque.
 ///
 /// An overlay that cannot be seen through would paint a black rectangle over
@@ -443,9 +451,53 @@ pub fn start(window: *mut c_void, internal: String, external: String, density: f
     WINDOW.store(window, Ordering::Release);
     if !STARTED.swap(true, Ordering::AcqRel) {
         std::thread::spawn(|| {
-            if let Err(error) = run() {
-                tracing::error!(target: "xgview", %error, "the wall could not start on its surface");
+            // A failure here does not take the activity with it: this thread
+            // ends, the surfaces stay on screen, and nothing draws - a black
+            // wall nobody can press. The older front end never showed that,
+            // because returning from `android_main` finishes its activity.
+            //
+            // So both ways out are answered the way `run_android` answers them:
+            // a lost launch goes to a fresh process (`restart_soon`, which the
+            // activity refuses once it has seen too many), and one with no
+            // backend left to come back on is left down rather than replayed.
+            // `Attempt` has already dealt with the marker by the time this
+            // runs - a Vulkan attempt that died leaves it for the next launch,
+            // a GL one it chose takes it away on the way out.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+            let message = match &outcome {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => error.to_string(),
+                Err(payload) => crate::panic_message(payload.as_ref()),
+            };
+            let drew = DREW.load(Ordering::Relaxed);
+            let on_gl = ON_GL.load(Ordering::Relaxed);
+            tracing::error!(target: "xgview", %message, drew, on_gl, "the wall stopped");
+            match backend::panic_action(drew, on_gl) {
+                backend::PanicAction::GiveUp => tracing::error!(
+                    target: "xgview",
+                    "the GL fallback could not start either, and there is nothing left to try; the wall stays down"
+                ),
+                backend::PanicAction::Restart => {
+                    if !crate::android::restart_soon() {
+                        tracing::warn!(
+                            target: "xgview",
+                            "no restart was scheduled; the wall stays down until the next launch"
+                        );
+                    }
+                }
+                backend::PanicAction::MarkAndRestart => {
+                    if !crate::android::restart_soon() {
+                        tracing::warn!(
+                            target: "xgview",
+                            "no restart was scheduled; the next launch reads the marker and uses GL"
+                        );
+                    }
+                }
             }
+            // The process goes either way: one whose renderer has failed has
+            // nothing left to serve, and the alarm `restart_soon` set is held
+            // by the system, so it survives this exit. See `run_android`.
+            crate::exit_now();
         });
     }
     wake();
@@ -491,6 +543,9 @@ fn run() -> anyhow::Result<()> {
         crate::vulkan_gate_marker().is_some_and(|path| path.exists()),
         crate::force_vulkan_in(&external),
     );
+    // For the thread that owns this one: a panic unwinds out of `run` with its
+    // locals, and the answer to it depends on where the launch got to.
+    ON_GL.store(!attempt.backend().tries_vulkan(), Ordering::Relaxed);
 
     let instance = {
         // Which backend, from the same three markers the older front end reads:
@@ -981,6 +1036,7 @@ fn run() -> anyhow::Result<()> {
         frame.present();
         // The first frame that reached the screen: a Vulkan attempt this far is
         // one that can draw, so its marker has done its job. No-op afterwards.
+        DREW.store(true, Ordering::Relaxed);
         attempt.settled();
 
         // The bar and the corner display, over the picture. Their own surface
