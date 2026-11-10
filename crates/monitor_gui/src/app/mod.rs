@@ -927,6 +927,15 @@ pub struct XgViewApp {
     /// on every repaint without handing back a frame, and only a *change* in it
     /// is an arrival. See [`Self::upload_frames`].
     surface_moments: HashMap<usize, Option<f64>>,
+    /// The camera whose picture the activity's surface is answering, and
+    /// whether this camera's first frame has reached it yet.
+    ///
+    /// The surface keeps its last frame, so a step to another camera must not
+    /// leave the wall standing aside for a frame of the camera being left.
+    /// See [`Self::track_surface_picture`] and [`Self::picture_on_layer`].
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    surface_picture_owner: Option<String>,
+    surface_awaiting_first: bool,
     /// Uploads the decoded planes and turns them into those pictures.
     video: VideoRenderer,
     /// The machine's memory, processor load and operating system, read while the
@@ -1525,6 +1534,8 @@ impl XgViewApp {
             talk_route: HashMap::new(),
             textures: HashMap::new(),
             surface_moments: HashMap::new(),
+            surface_picture_owner: None,
+            surface_awaiting_first: false,
             video,
             vitals: monitor_core::vitals::Vitals::new(),
             started: Instant::now(),
@@ -2257,6 +2268,9 @@ impl XgViewApp {
     /// owns a `SurfaceView`'s surface instead of an activity window.
     pub fn frame(&mut self, ctx: &egui::Context) {
         let start = self.begin_frame(ctx);
+        // Before anything asks whether the picture is on its own layer: a step
+        // to another camera has to be noticed in the same frame it happens.
+        self.track_surface_picture();
         self.pump_background(ctx);
         self.collect_events(ctx);
         // The strip a recording draws is kept as wide as it is drawn here,

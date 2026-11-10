@@ -575,12 +575,19 @@ public class SurfaceActivity extends Activity {
             return;
         }
         final ViewGroup.LayoutParams raw = video.getLayoutParams();
-        final int height = raw != null && raw.height > 0 ? raw.height : video.getHeight();
+        int height = raw != null && raw.height > 0 ? raw.height : video.getHeight();
+        if (height <= 0) {
+            // Before the first layout the view has no measured height, and a
+            // hidden view moved by nothing is a full-screen black rectangle
+            // over the wall while the first camera connects.
+            height = getResources().getDisplayMetrics().heightPixels;
+        }
         final int top = raw instanceof FrameLayout.LayoutParams
                 ? ((FrameLayout.LayoutParams) raw).topMargin
                 : 0;
+        final float scale = Math.max(videoScale, 1f);
         video.setTranslationX(videoShown ? videoDx : 0f);
-        video.setTranslationY(videoShown ? videoDy : -(top + height * videoScale));
+        video.setTranslationY(videoShown ? videoDy : -(top + height * scale));
     }
 
     private android.os.PowerManager.WakeLock wakeLock;

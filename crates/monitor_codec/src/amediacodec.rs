@@ -158,8 +158,10 @@ pub fn set_surface_window(window: *mut c_void) {
     // picture is still in its buffers, and a seek in flight needs it to stay
     // there. See `SURFACE_HAS_PICTURE`.
     if window_replaced(previous, window) {
-        LAST_PRESENTED.store(0, std::sync::atomic::Ordering::Release);
-        SURFACE_HAS_PICTURE.store(false, std::sync::atomic::Ordering::Release);
+        // A new window is also a new request for a picture: a session opened
+        // for the old one may still be draining its last frames, and those must
+        // not put the memory of a picture back on a surface that is empty.
+        begin_surface_picture();
         tracing::info!(
             target: "xgview::codec",
             present = !window.is_null(),
@@ -334,6 +336,38 @@ pub fn forget_surface_picture() {
     SURFACE_HAS_PICTURE.store(false, std::sync::atomic::Ordering::Release);
 }
 
+/// Which picture the surface has last been asked for.
+///
+/// A `SurfaceView` keeps the last frame it was given, and stepping to another
+/// camera asks for a picture from a different one. The old session can still be
+/// draining its last frames while the new session connects - on the wall those
+/// are the frames of the camera being left, and they must not say the new
+/// picture has arrived. A session opened under an earlier request is filtered
+/// out in `drain`.
+static SURFACE_REQUEST: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Asks the surface for a new picture, forgetting the one it holds.
+///
+/// Called when the surface itself is replaced (`set_surface_window`) and when
+/// the wall steps to another camera (`XgViewApp::track_surface_picture`).
+/// Hiding the view is not such a request - its surface and its session survive
+/// the move - so that one uses `forget_surface_picture` alone.
+pub fn begin_surface_picture() {
+    SURFACE_REQUEST.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    forget_surface_picture();
+}
+
+fn surface_request() -> u64 {
+    SURFACE_REQUEST.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Whether a session opened under `session` still answers the request the
+/// surface is holding now.
+fn answers_current_request(session: u64, current: u64) -> bool {
+    session == current
+}
+
 /// Whether a handover is still young enough that the surface's last picture is
 /// the one a viewer should be left looking at. Zero means this window has never
 /// held a picture; a clock that went backwards says nothing about a gap either.
@@ -404,6 +438,11 @@ pub struct AMediaCodecDecoder {
     /// open it again on the other path. Comparing this with the flag is what
     /// says whether that has happened yet.
     suspended: bool,
+    /// [`SURFACE_REQUEST`] as it stood when this session was opened. A decoder
+    /// opened for a picture that has since been asked of another camera must not
+    /// put its late frames back into the surface's memory: the wall would keep
+    /// away from an area showing the camera that was just left. See `drain`.
+    request: u64,
     /// Whether this decoder counted itself in `SURFACE_SESSIONS`. `close` takes
     /// it out again, and the flag is what makes that happen exactly once.
     ///
@@ -513,6 +552,7 @@ impl AMediaCodecDecoder {
             return Ok(());
         }
         self.suspended = surface_suspended();
+        self.request = surface_request();
         let config = self.config.clone();
         let mime = CString::new(config.codec.mime())
             .map_err(|err| CodecError::Configure(err.to_string()))?;
@@ -888,7 +928,17 @@ impl AMediaCodecDecoder {
                         // Every rendered picture, not just the first: a session
                         // can play for hours between two seeks, and the moment a
                         // handover is measured from is the last one.
-                        if render {
+                        //
+                        // But a frame drained from the camera a step has just
+                        // left is not a picture of the one being asked for. Such
+                        // a session was opened under an earlier request; letting
+                        // it set these flags would say the new picture had
+                        // arrived while the surface still held the old camera.
+                        let current = answers_current_request(
+                            self.request,
+                            SURFACE_REQUEST.load(std::sync::atomic::Ordering::Acquire),
+                        );
+                        if render && current {
                             LAST_PRESENTED.store(
                                 millis_now(),
                                 std::sync::atomic::Ordering::Release,
@@ -899,7 +949,7 @@ impl AMediaCodecDecoder {
                         // surface stops being the previous camera's: the render
                         // above queued it, so whatever shows this view from here
                         // on shows *this* stream. See `presenting`.
-                        if render && !self.presenting {
+                        if render && current && !self.presenting {
                             self.presenting = true;
                             SURFACE_SESSIONS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                             tracing::info!(
@@ -1447,7 +1497,9 @@ impl Drop for AmcAudioDecoder {
 
 #[cfg(test)]
 mod tests {
-    use super::{holds_picture, window_replaced, within_handover};
+    use super::{
+        answers_current_request, holds_picture, window_replaced, within_handover,
+    };
     use std::ffi::c_void;
 
     /// A seek's gap keeps the last picture on the surface; a window that never
@@ -1470,6 +1522,16 @@ mod tests {
         assert!(!holds_picture(false, true, false), "the window never drew");
         assert!(!holds_picture(false, false, true), "the window went away");
         assert!(!holds_picture(true, true, true), "the surface is suspended");
+    }
+
+    /// A step to another camera asks the surface for a new picture. Frames
+    /// still draining from the session opened for the old one belong to that
+    /// request, and must not say the new picture has arrived.
+    #[test]
+    fn a_new_request_accepts_only_its_own_sessions() {
+        assert!(answers_current_request(3, 3), "this camera's first frame");
+        assert!(!answers_current_request(2, 3), "the camera being left");
+        assert!(!answers_current_request(4, 3), "a session from the future");
     }
 
     /// A change of picture size hands the same surface back. Only a surface

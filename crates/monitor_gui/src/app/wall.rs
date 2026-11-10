@@ -128,8 +128,51 @@ impl XgViewApp {
     /// when playback opened - the frame every seek used to flash. The wait ends
     /// with `Playback::pending`, cleared by the first picture of the new
     /// session, so no clock has to guess how long a box may take to answer.
+    /// Watches which camera the magnified picture is asking of the surface.
+    ///
+    /// A `SurfaceView` keeps the last frame it was given. Stepping to another
+    /// camera asks for a different picture, but the old session can still be
+    /// draining frames while the new one connects; the wall must not leave the
+    /// area unpainted for those, or the viewer watches the camera just left
+    /// (on a surface that holds it) or a black rectangle (on one that does not).
+    /// Both are what a channel step showed on the devices. `begin_surface_picture`
+    /// makes those late frames answer an older request, and the wall stands
+    /// aside again only once a frame of *this* camera has arrived.
+    #[cfg(target_os = "android")]
+    pub(super) fn track_surface_picture(&mut self) {
+        let cameras = self.config.active_cameras();
+        let owner = self
+            .scheduler
+            .zoom()
+            .and_then(|index| cameras.get(index))
+            .map(|camera| camera.id.clone());
+        if owner != self.surface_picture_owner {
+            self.surface_picture_owner = owner.clone();
+            self.surface_awaiting_first = owner.is_some();
+            if owner.is_some() {
+                monitor_codec::amediacodec::begin_surface_picture();
+            }
+        }
+        if self.surface_awaiting_first
+            && monitor_codec::amediacodec::surface_holds_picture()
+        {
+            self.surface_awaiting_first = false;
+        }
+    }
+
+    /// The surface is the activity's own answer, not a desktop concern.
+    #[cfg(not(target_os = "android"))]
+    pub(super) fn track_surface_picture(&mut self) {}
+
     pub fn picture_on_layer(&self) -> bool {
         if !self.magnified() {
+            return false;
+        }
+        // The picture the surface holds belongs to the camera being left.
+        // The wall paints the wait - the canvas, the spinner, the "connecting"
+        // panel - until the new session's first frame arrives. See
+        // [`Self::track_surface_picture`].
+        if self.surface_awaiting_first {
             return false;
         }
         if crate::picture_on_its_own_surface() {
@@ -386,7 +429,14 @@ impl XgViewApp {
                     // screen is a frozen picture saying nothing, which is what
                     // the older front end never did.
                     if let Some(channel) = tile.channel {
-                        grid::state_layer(ui.painter(), body, &tile, channel.state);
+                        // The wall's copy of this panel is laid out against the
+                        // letterboxed picture, not the whole tile. This copy
+                        // uses the same box, carried into the strip's frame.
+                        let state_frame = tile
+                            .state_frame
+                            .map(|frame| frame.translate(picture.min - strip.min))
+                            .unwrap_or(body);
+                        grid::state_layer(ui.painter(), state_frame, &tile, channel.state);
                     }
                     grid::osd(ui.painter(), body, &tile);
                     // The cursor, on the tile: the ring the wall draws on that
@@ -484,6 +534,16 @@ impl XgViewApp {
             // nothing else is given one.
             picture_zoom: (index.is_some() && index == self.scheduler.zoom())
                 .then_some(self.picture_zoom),
+            // The magnified picture is letterboxed, and a panel centred on the
+            // whole tile lands above it - exactly what a viewer sees while the
+            // next camera connects on a portrait wall. See `grid::state_layer`.
+            // Only a magnified wall has a letterboxed picture, and its tile
+            // does not always carry the slot's index - the page view asks for
+            // a picture without one. The magnification is the answer here.
+            state_frame: self
+                .magnified()
+                .then_some(self.picture_rect)
+                .flatten(),
             // A recording keeps its picture through a seek, which reports
             // the state a live stream reports when it has nothing to show.
             // Everything the corners say about one comes with it: where it

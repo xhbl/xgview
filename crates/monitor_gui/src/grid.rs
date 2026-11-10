@@ -149,6 +149,14 @@ pub struct Tile<'a> {
     ///
     /// Every other tile shows all of it. See [`PictureZoom`].
     pub picture_zoom: Option<PictureZoom>,
+    /// The box the picture itself occupies, when it is not the whole tile.
+    ///
+    /// A magnified picture is letterboxed: its box sits in the middle of a
+    /// taller tile, while the tile's own centre is higher because of the bars.
+    /// A panel laid out on the tile then says "connecting" above the picture it
+    /// is about. `state_layer` uses this box instead when the magnified tile
+    /// has one; every other tile keeps using its whole body.
+    pub state_frame: Option<Rect>,
     /// What this tile is showing of a recording, where it is showing one.
     ///
     /// `Some` is also the answer to "is this a recording": a recording that is
@@ -349,7 +357,14 @@ impl<'a> Panel<'a> {
         let galley = self.painter.layout_no_wrap(text.to_string(), font, color);
         let block = align.anchor_size(pos, galley.size());
         if !self.turned {
-            self.painter.galley(block.min, galley, color);
+            // `pos` is a point of the panel, whose origin is the tile's own
+            // top-left - not the screen's. `fill` and `spinner` go through
+            // `at()`; a line of text must too, or it sits above the panel it
+            // belongs to by exactly the tile's `min`. On a portrait wall that
+            // is the top band kept clear of the notch, which is why the
+            // "connecting" words appeared above the picture while its spinner
+            // stayed in the middle of it.
+            self.painter.galley(self.at(block.min), galley, color);
             return;
         }
         // A turned line starts at its own top-left and reads down the screen, so
@@ -517,7 +532,10 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
     {
         live_canvas(&painter, body, tile, tier);
     }
-    state_layer(&painter, body, tile, state);
+    // A magnified picture is letterboxed inside its tile: the wait for a first
+    // frame belongs over the picture's box, not over the whole tile with its
+    // bars. See `Tile::state_frame`.
+    state_layer(&painter, tile.state_frame.unwrap_or(body), tile, state);
 
     // The on-screen display, in the corners the settings panel chose. It goes
     // over whatever the state left on the tile, so that a stream that failed
