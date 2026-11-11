@@ -2,6 +2,7 @@ package com.xhbl.xgview;
 
 import android.app.Activity;
 import android.content.res.AssetManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -874,8 +875,21 @@ public class SurfaceActivity extends Activity {
             self.keyboardMultiline = multiline;
             self.imeSeenVisible = false;
             self.inputView.removeCallbacks(self.imePoll);
+            Log.i(TAG, "keyboard wanted=" + wanted + " multiline=" + multiline);
             if (wanted) {
-                self.inputView.postDelayed(self.imePoll, 600);
+                // The insets listener is what says whether the keyboard is on
+                // screen on Android 11 and newer, and it is the only thing that
+                // can: asking the input method for its height is a hidden call
+                // that answers 0 on plenty of devices - on this box it answers
+                // 0 while the keyboard is up. Taken as "not showing" it reads as
+                // the viewer having put the keyboard away, and the keyboard is
+                // pulled down a poll after it came up. The two must not both
+                // speak, so the poll is only for the releases whose insets carry
+                // no keyboard source. See `MainActivity.setKeyboardWanted`,
+                // which has always had this rule.
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                    self.inputView.postDelayed(self.imePoll, 600);
+                }
                 self.inputView.setFocusable(true);
                 self.inputView.setFocusableInTouchMode(true);
                 self.inputView.requestFocus();
