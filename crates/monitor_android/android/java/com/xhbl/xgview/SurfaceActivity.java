@@ -74,11 +74,18 @@ public class SurfaceActivity extends Activity {
     private SurfaceView bar;
     /** Whether the picture's view is on screen; see {@link #setVideoVisible}. */
     private boolean videoShown = true;
+    /** Whether the surface path is suspended; see {@link #setVideoSuspended}. */
+    private boolean videoSuspended;
+    /** The last placement reported, so only a change of it reaches the log. */
+    private boolean placedShown = true;
+    private int placedSlot;
     /** How much bigger than its box the picture is drawn; see {@link #setVideoZoom}. */
     private float videoScale = 1f;
     /** Where that drawing starts, relative to the box's corner, in pixels. */
     private float videoDx = 0f;
     private float videoDy = 0f;
+    /** How far a moving page has taken the view, in pixels; see {@link #setVideoShift}. */
+    private float videoShift;
 
     /**
      * Whether the picture and the bar get surfaces of their own.
@@ -523,6 +530,68 @@ public class SurfaceActivity extends Activity {
     }
 
     /**
+     * Says whether the surface path is suspended, which is not the same answer
+     * as "the view is hidden".
+     *
+     * <p>Two quite different things make the picture's view be hidden, and only
+     * one of them may leave the view standing with the frame it holds:
+     *
+     * <ul>
+     *   <li>a <em>new session</em> is about to fill it (a step to another
+     *       camera, a seek) - the frame in it is the first picture of the step,
+     *       so it stays in the box until the new session paints over it;</li>
+     *   <li>the surface path is <em>suspended</em> - the picture turned a
+     *       quarter turn, an opaque-only overlay, or a window floating over the
+     *       picture. The codec stops rendering into this surface, so the view
+     *       keeps the pre-turn frame for ever, and because it is above the wall
+     *       that frame sits in the middle of the wall's turned picture.</li>
+     * </ul>
+     *
+     * <p>{@link #setVideoVisible} cannot tell the two apart - both arrive as
+     * {@code false} - so the native side says this as well. Without it a turned
+     * portrait picture keeps the upright frame it was turned away from.
+     */
+    public static void setVideoSuspended(final boolean suspended) {
+        final SurfaceActivity self = instance;
+        if (self == null) {
+            return;
+        }
+        self.runOnUiThread(() -> {
+            if (self.videoSuspended == suspended) {
+                return;
+            }
+            self.videoSuspended = suspended;
+            Log.i(TAG, "video suspended=" + suspended);
+            self.applyVideoPlacement();
+        });
+    }
+
+    /**
+     * Moves the picture's view along with the page it is on, in pixels.
+     *
+     * <p>A page's travel changes every frame, and moving this view by its
+     * rectangle would mean a layout pass per frame - resizing the surface the
+     * codec renders into, and landing a frame or two behind the page. The
+     * picture then trails its own page, and the frame left behind reads as a
+     * second copy of the picture at a slightly different offset. A translation
+     * is applied by the compositor instead, so the box stays where the page will
+     * settle and only the offset moves. Zero once the page is at rest.
+     */
+    public static void setVideoShift(final float shift) {
+        final SurfaceActivity self = instance;
+        if (self == null || self.video == null) {
+            return;
+        }
+        self.runOnUiThread(() -> {
+            if (self.videoShift == shift) {
+                return;
+            }
+            self.videoShift = shift;
+            self.applyVideoPlacement();
+        });
+    }
+
+    /**
      * Says which camera the magnified viewport is asking the surface for.
      *
      * <p>An empty string means the viewport is gone. That is the important
@@ -698,20 +767,34 @@ public class SurfaceActivity extends Activity {
                 ? ((FrameLayout.LayoutParams) raw).topMargin
                 : 0;
         final float scale = Math.max(videoScale, 1f);
-        // A view holding this camera's last frame stays in its box while the
-        // new session connects: that frame *is* the first picture of the step
-        // back. An empty view - or any view once the viewport is gone - must
-        // move away, or it covers the wall with nothing or with a still.
-        final boolean keep = videoOwner != null && videoFilled[videoSlot];
-        final boolean shown = videoShown || keep;
+        // One of the two draws the picture, never both. The native side says
+        // whether the wall is leaving this view's area blank - that is the only
+        // question, and `true` here means it is. A view left up for anything
+        // else stacks a second copy of the picture over the wall's own: the
+        // frame this one is holding, at the shape and place of the camera before
+        // the step, over the one the wall is painting at the shape and place of
+        // the camera being stepped to. That double picture was what a fast swipe
+        // between two cameras looked like. It is the suspension that has to
+        // override this, not a kept frame: while the surface path is suspended
+        // nothing renders into this view again, so the frame in it would stay
+        // for ever over the wall's turned picture.
+        final boolean shown = videoShown && !videoSuspended;
         for (int slot = 0; slot < VIDEO_SLOTS; slot++) {
             final SurfaceView view = videoViews[slot];
             if (view == null) {
                 continue;
             }
             final boolean up = slot == videoSlot && shown;
-            view.setTranslationX(up ? videoDx : 0f);
+            view.setTranslationX(up ? videoDx + videoShift : 0f);
             view.setTranslationY(up ? videoDy : -(top + height * scale));
+        }
+        // Only when the answer changes: a swipe re-places the view every frame,
+        // and a line per frame would bury everything else in the log.
+        if (shown != placedShown || videoSlot != placedSlot) {
+            placedShown = shown;
+            placedSlot = videoSlot;
+            Log.i(TAG, "placement shown=" + shown + " suspended=" + videoSuspended
+                    + " slot=" + videoSlot + " top=" + top + " height=" + height);
         }
     }
 

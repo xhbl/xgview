@@ -602,6 +602,10 @@ fn run() -> anyhow::Result<()> {
     // drawing starts, as last sent. Same terms as the box: a transform is free
     // to repeat but pointless to.
     let mut video_zoom: Option<(f32, f32, f32)> = None;
+    // How far the moving page has taken the view, in pixels, as last sent.
+    // Unlike the box this is a translation, so it costs nothing to repeat - but
+    // it is still only sent when it changes.
+    let mut video_shift: Option<f32> = None;
     crate::android::set_video_visible(false);
 
     // The bar has a screen of its own: a surface is a rectangle, so the only way
@@ -898,9 +902,17 @@ fn run() -> anyhow::Result<()> {
         let suspend = app.picture_turned()
             || OPAQUE_ONLY.load(Ordering::Acquire)
             || app.floating_layer_open(&context);
+        // The Java side is told as well, not just the codec: a view hidden while
+        // the surface path is suspended keeps the frame it was last given, and
+        // that frame is no longer being replaced by anything. Left standing it
+        // would sit over the wall's own picture - which is exactly what a
+        // portrait picture turned a quarter turn looked like: the pre-turn
+        // frame in the middle of the rotated picture. See
+        // `android::set_video_suspended`.
         if suspend != surface_suspended {
             surface_suspended = suspend;
             monitor_codec::amediacodec::set_surface_suspended(suspend);
+            crate::android::set_video_suspended(suspend);
             tracing::info!(target: "xgview", suspended = suspend, "the surface path was suspended");
         }
         let output = context.run(input, |ctx| app.frame(ctx));
@@ -921,15 +933,16 @@ fn run() -> anyhow::Result<()> {
         // paints its own picture covers it - and one shown while empty is a
         // black rectangle over everything.
         let on_layer = app.picture_on_layer();
-        if on_layer != video_shown {
-            video_shown = on_layer;
-            tracing::info!(target: "xgview", visible = on_layer, "the picture's view");
-            crate::android::set_video_visible(on_layer);
-            // Shown again, the view is placed again: the rectangle it was left
+        let changed = on_layer != video_shown;
+        if changed {
+            // Placed again before it is shown again: the rectangle it was left
             // at belongs to whatever was magnified then, which may have been
-            // another camera with another shape.
+            // another camera with another shape. See the call below, which is
+            // made after the box so that the first frame the view is seen in is
+            // already the right one.
             video_rect = None;
             video_zoom = None;
+            video_shift = None;
         }
         // Where the picture is. The view the codec renders into is full screen
         // until it is told otherwise, and a full-screen surface stretches the
@@ -945,8 +958,33 @@ fn run() -> anyhow::Result<()> {
         // into the wrong aspect for the length of the wait. See
         // `XgViewApp::picture_size`.
         if on_layer {
+            // A page a finger is dragging takes the view with it. The box is
+            // where the page will come to rest and the travel is a translation:
+            // moving a `SurfaceView` by its rectangle means a layout pass per
+            // frame, which resizes the surface the codec draws into and lands
+            // the picture a frame behind its page. See `picture_slide`.
+            //
+            // Only the drag: a page *settling* after a swipe is two cameras on
+            // screen at once, and the view is hidden for the length of it. See
+            // `XgViewApp::picture_on_layer`.
+            let sliding = app.picture_sliding();
+            let shift = match sliding {
+                true => (app.picture_slide() * pixels_per_point).round(),
+                false => 0.0,
+            };
+            if video_shift != Some(shift) {
+                video_shift = Some(shift);
+                crate::android::set_video_shift(shift);
+            }
+            // The box the page comes to rest in - the travel is the translation
+            // above, so it is taken back out here and the box changes only when
+            // the *shape* does: once per step, not once per frame. A step to a
+            // camera of another shape changes it, and the view has to know: left
+            // at the old camera's box, its picture is squeezed into a shape it
+            // never had.
             if let Some(rect) = app
                 .picture_rect()
+                .map(|rect| rect.translate(egui::vec2(-app.picture_slide(), 0.0)))
                 .filter(|_| crate::picture_on_its_own_surface())
             {
                 let left = (rect.min.x * pixels_per_point).round();
@@ -991,7 +1029,15 @@ fn run() -> anyhow::Result<()> {
                 }
             }
         }
-
+        // Shown, hidden - and only ever told after the box and the travel above,
+        // so that a view coming back is never seen for a frame at the geometry
+        // of the camera before the step: one such frame is a second picture of
+        // the new camera squeezed into the old one's shape.
+        if changed {
+            video_shown = on_layer;
+            tracing::info!(target: "xgview", visible = on_layer, "the picture's view");
+            crate::android::set_video_visible(on_layer);
+        }
         let jobs = context.tessellate(output.shapes, output.pixels_per_point);
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [surface_config.width, surface_config.height],

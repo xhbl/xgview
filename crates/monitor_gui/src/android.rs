@@ -165,6 +165,47 @@ pub fn set_video_visible(visible: bool) {
     call_void_bool("setVideoVisible", visible);
 }
 
+/// Says whether the surface path is suspended - so the picture's view must go
+/// away rather than stand there with the frame it is holding.
+///
+/// This is a different question from [`set_video_visible`], and the difference
+/// is what used to leave a stale picture on the screen. A view hidden because a
+/// *new session* is about to fill it is worth keeping up: the frame it holds is
+/// the first picture of the step. A view hidden because the surface path is
+/// suspended is not - the codec is not drawing into it any more, so it keeps
+/// the pre-turn frame for ever, above the wall's turned picture. The Java side
+/// cannot tell those two apart from `visible=false` alone, so it is told.
+///
+/// Suspension covers more than the turn: an opaque-only overlay and a window
+/// floating over the picture ask for the same thing, and all three want the
+/// view gone for the same reason.
+pub fn set_video_suspended(suspended: bool) {
+    // Reported rather than dropped: this call is what takes a stale frame off
+    // the screen, and a call that never lands is indistinguishable from a turn
+    // that did nothing. The two front ends reach it through different classes,
+    // so a method missing from one of them is a real way for this to fail.
+    if !call_void_bool("setVideoSuspended", suspended) {
+        tracing::warn!(
+            target: "xgview",
+            suspended,
+            "the activity did not take the suspension; the picture's view keeps its frame"
+        );
+    }
+}
+
+/// Slides the picture's view along with the page it belongs to, in pixels.
+///
+/// A page's travel changes every frame, and moving a `SurfaceView` by its
+/// rectangle means a layout pass per frame: the surface the codec draws into is
+/// resized, the picture arrives a frame or two behind its page, and the two
+/// copies of it - the live one and the page leaving - sit beside each other at
+/// slightly different offsets, which reads as the animation crossing itself.
+/// A translation is applied by the compositor, so the box stays where the page
+/// will come to rest and only the offset moves.
+pub fn set_video_shift(shift: f32) {
+    call_void_float("setVideoShift", shift);
+}
+
 /// Tells the picture's views which camera the surface is being asked to show.
 ///
 /// The surface path keeps the view of a camera that was stepped away from, so
@@ -572,6 +613,17 @@ fn class() -> Option<&'static GlobalRef> {
     crate::keyboard::activity_class()
 }
 
+/// Calls a Java static method taking one `float`, reporting whether it ran.
+fn call_void_float(method: &str, value: f32) -> bool {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return false;
+    };
+    let called = env
+        .call_static_method(class, method, "(F)V", &[JValue::Float(value)])
+        .is_ok();
+    clear_exception(&mut env);
+    called
+}
 fn attach() -> Option<JNIEnv<'static>> {
     // Permanently, not `attach_current_thread`: this runs on the UI thread,
     // which the runtime owns. See `keyboard::set_wanted` for what the plain

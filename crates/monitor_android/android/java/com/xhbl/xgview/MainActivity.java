@@ -1300,6 +1300,25 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
+     * Whether the surface path is suspended. Handed on like the others - and it
+     * has to be here, not only on {@link SurfaceActivity}: the native side's
+     * calls are this class's, so a method that exists only on the wall that
+     * draws into a `SurfaceView` is never reached (the call fails silently and
+     * the view keeps its pre-turn frame).
+     */
+    public static void setVideoSuspended(final boolean suspended) {
+        SurfaceActivity.setVideoSuspended(suspended);
+    }
+
+    /**
+     * Slides the picture's view along with the page it is on. Handed on like all
+     * the rest: the native side's calls are this class's.
+     */
+    public static void setVideoShift(final float shift) {
+        SurfaceActivity.setVideoShift(shift);
+    }
+
+    /**
      * Places the view the picture is scanned out of.
      *
      * <p>Handed on for the same reason {@link #setVideoVisible} is - the calls

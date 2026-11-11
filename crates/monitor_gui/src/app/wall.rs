@@ -172,6 +172,20 @@ impl XgViewApp {
         if !self.magnified() {
             return false;
         }
+        // A page settling after a swipe is two cameras on the screen at once -
+        // the one leaving and the one arriving - and a surface can stand over
+        // one of them only. Left up, it holds whatever the session before the
+        // step was drawing, at the box the *new* camera's shape asks for: one
+        // half of the picture squeezed into the other's shape, over the wall's
+        // own copy of it sliding by at its proper size. So the wall paints both
+        // pages from its textures for the length of the settle, and the view
+        // comes back when the page is at rest - one picture, one place.
+        //
+        // Only the settle, not the drag: a finger moving a page has not chosen
+        // a camera yet, so the view still belongs to the one it shows.
+        if self.slide.offset != 0.0 {
+            return false;
+        }
         // The picture the surface holds belongs to the camera being left.
         // The wall paints the wait - the canvas, the spinner, the "connecting"
         // panel - until the new session's first frame arrives. See
@@ -205,6 +219,22 @@ impl XgViewApp {
     /// in it is drawn turned. See `paint_toast`.
     pub fn picture_rect(&self) -> Option<egui::Rect> {
         self.picture_rect
+    }
+
+    /// Whether a page is moving - dragged by a finger, or settling after one.
+    ///
+    /// Dragged, the picture's view travels with the page as a translation and
+    /// keeps the box it will come to rest in: a box per frame is a layout pass
+    /// per frame, which resizes the surface the codec draws into and lands the
+    /// picture behind its own page. Settling, the view is hidden for the length
+    /// of it - two cameras are on screen then. See [`Self::picture_on_layer`].
+    pub fn picture_sliding(&self) -> bool {
+        self.slide.is_animating() || self.slide.dragging
+    }
+
+    /// How far the moving page is from settled, in wall points.
+    pub fn picture_slide(&self) -> f32 {
+        self.picture_slide
     }
 
     /// Whether the magnified picture is drawn a quarter turn.
@@ -503,7 +533,18 @@ impl XgViewApp {
             // The one picture scanned out of the activity's surface: the
             // magnified viewport. A single cell alone is not enough - a 1x1
             // grid has one too, and it paints its own picture from a frame.
-            on_video_layer: cells == 1 && self.picture_on_layer(),
+            //
+            // Nor is "a magnified viewport is up" enough: a page being slid
+            // away is painted beside the one the view is showing, and the view
+            // can only stand over one of them. Left on the layer, that second
+            // page draws nothing at all - the wall leaves its cell blank and
+            // the black slab slides out with the animation. So only the tile
+            // the view is actually showing is left to it; the page leaving is
+            // painted from its own frame, the way it was before the view
+            // existed. See `picture_rect`, which follows the same tile.
+            on_video_layer: cells == 1
+                && self.picture_on_layer()
+                && index == self.scheduler.zoom(),
             // The ring is a cursor, and a wall nobody is operating is just a
             // picture: it is drawn from the last key or press on and goes
             // once the wall has been left alone for the shorter of the ring's
@@ -716,6 +757,10 @@ impl XgViewApp {
             true => self.magnified_area(&cameras, &view, wall, dx),
             false => None,
         };
+        // How far the page is from settled, for the view that shows the picture:
+        // its box is placed by a layout pass and the travel is a translation, so
+        // the two arrive in time with different costs. See `picture_slide`.
+        self.picture_slide = dx;
         // And the tile itself, which is where the ring goes - not the picture's
         // box: the ring is a cursor on the tile, and the tile is the whole wall
         // whether the picture is letterboxed inside it or not. `paint_view` is

@@ -1143,6 +1143,16 @@ pub struct XgViewApp {
     /// tile, not against this: they belong to the wall's frame, and the wall is
     /// what reads the presses on them.
     picture_rect: Option<egui::Rect>,
+    /// How far the page is from settled, in wall points - the distance the
+    /// picture's view is translated by while a page slides.
+    ///
+    /// A `SurfaceView` is placed by a layout pass, and a page's travel changes
+    /// every frame of an animation; re-laying it out per frame is both slow and
+    /// a frame behind, which leaves the live picture sitting where its page used
+    /// to be - beside a copy of itself. A translation is applied by the
+    /// compositor with no layout at all, so the view follows the page exactly.
+    /// See `picture_slide` and `android::set_video_shift`.
+    picture_slide: f32,
     /// The rectangle the magnified tile is painted in, in wall points - which is
     /// the rectangle its ring goes on.
     ///
@@ -1612,6 +1622,7 @@ impl XgViewApp {
             tap_open_at: None,
             picture_zoom: PictureZoom::FULL,
             picture_rect: None,
+            picture_slide: 0.0,
             magnified_rect: None,
             zoom_park_at: None,
             tile_bar: tilebar::Bar::new(),
