@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::android::SurfaceTicket;
 use crate::app::XgViewApp;
 use crate::backend;
 use crate::RunOptions;
@@ -74,6 +75,16 @@ static DENSITY: AtomicU32 = AtomicU32::new(2000);
 static WINDOW: std::sync::atomic::AtomicPtr<c_void> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
+/// Which activity's view `WINDOW` belongs to; see [`crate::android::SurfaceTicket`].
+///
+/// Two activities of this process can be alive at once, and a `surfaceDestroyed`
+/// from the one that is going must not detach the other's wall. Every hand-over
+/// takes a number, and the resize and the stop that follow carry it.
+static WALL_TICKET: SurfaceTicket = SurfaceTicket::new();
+
+/// The same, for the bar's surface.
+static BAR_TICKET: SurfaceTicket = SurfaceTicket::new();
+
 /// Whether the drawing thread has been started. There is one for the process.
 static STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -105,8 +116,27 @@ static BAR_WINDOW: std::sync::atomic::AtomicPtr<c_void> =
 static BAR_WIDTH: AtomicU32 = AtomicU32::new(1920);
 static BAR_HEIGHT: AtomicU32 = AtomicU32::new(140);
 
-/// Takes the surface the bar is drawn into, or null when it went away.
-pub fn set_bar_window(window: *mut c_void, width: i32, height: i32) {
+/// Takes the surface the bar is drawn into and answers its identity.
+///
+/// A null window is refused: a view with no surface has nothing to identify,
+/// and the activity keeps the token from the last one it did get.
+pub fn start_bar(window: *mut c_void, width: i32, height: i32) -> u64 {
+    if window.is_null() {
+        return 0;
+    }
+    let token = BAR_TICKET.take();
+    attach_bar(window, width, height);
+    token
+}
+
+/// The bar's surface went away, and only this identity of it.
+pub fn stop_bar(token: u64) {
+    if BAR_TICKET.retire(token) {
+        attach_bar(std::ptr::null_mut(), 0, 0);
+    }
+}
+
+fn attach_bar(window: *mut c_void, width: i32, height: i32) {
     if width > 0 {
         BAR_WIDTH.store(width as u32, Ordering::Release);
     }
@@ -256,8 +286,11 @@ pub fn push_scroll(dx: f32, dy: f32) {
     });
 }
 
-/// Records the surface's new size, in pixels.
-pub fn resize(width: i32, height: i32) {
+/// Records the surface's new size, in pixels, if its identity is still up.
+pub fn resize(token: u64, width: i32, height: i32) {
+    if !WALL_TICKET.holds(token) {
+        return;
+    }
     if width > 0 {
         WIDTH.store(width as u32, Ordering::Release);
     }
@@ -267,12 +300,20 @@ pub fn resize(width: i32, height: i32) {
     wake();
 }
 
-/// Detaches the loop from its surface.
+/// Detaches the loop from its surface, if its identity is still up.
 ///
 /// The app keeps running: a surface that goes away is usually a relayout on its
 /// way back, and rebuilding the wall - its channels, its runtime, its audio -
 /// for that would drop every camera for a second.
-pub fn stop() {
+///
+/// The token is what makes this safe to call twice, and safe to call from an
+/// activity that is already gone: `surfaceDestroyed` and `onDestroy` both stop
+/// the wall, and the old activity's `onDestroy` arrives after the new one has
+/// started its own. See [`SurfaceTicket`].
+pub fn stop(token: u64) {
+    if !WALL_TICKET.retire(token) {
+        return;
+    }
     WINDOW.store(std::ptr::null_mut(), Ordering::Release);
     wake();
 }
@@ -438,9 +479,11 @@ impl Drop for Attempt {
 /// private one the configuration lives in, and the shared one a transfer can put
 /// a language pack in. They come from Java because there is no `AndroidApp` here
 /// to ask.
-pub fn start(window: *mut c_void, internal: String, external: String, density: f32) {
+/// Hands back the identity of the surface, which the activity keeps for its
+/// later resize and stop. A null window answers `0`: nobody's.
+pub fn start(window: *mut c_void, internal: String, external: String, density: f32) -> u64 {
     if window.is_null() {
-        return;
+        return 0;
     }
     if density > 0.0 {
         DENSITY.store((density * 1000.0) as u32, Ordering::Release);
@@ -448,6 +491,7 @@ pub fn start(window: *mut c_void, internal: String, external: String, density: f
     if let Ok(mut directories) = DIRECTORIES.lock() {
         *directories = Some((PathBuf::from(internal), PathBuf::from(external)));
     }
+    let token = WALL_TICKET.take();
     WINDOW.store(window, Ordering::Release);
     if !STARTED.swap(true, Ordering::AcqRel) {
         std::thread::spawn(|| {
@@ -501,7 +545,9 @@ pub fn start(window: *mut c_void, internal: String, external: String, density: f
         });
     }
     wake();
+    token
 }
+
 fn run() -> anyhow::Result<()> {
     crate::init_android_logging();
     crate::install_panic_hook();
@@ -588,6 +634,16 @@ fn run() -> anyhow::Result<()> {
     // Starts hidden: the wall comes up on the grid, and the picture's view has
     // nothing to show until a viewport is magnified.
     let mut video_shown = false;
+    // How many more frames the wall keeps painting after the view has been
+    // asked to come back. Moving a `SurfaceView` is a UI-thread traversal and
+    // then a compositor frame, and on a run of fast swipes both can slip past
+    // not just the frame the request was made in but the next one or two: the
+    // UI thread is busiest exactly when the viewer is stepping through
+    // cameras. One frame of grace was enough for a single swipe and not for
+    // three in a row. Three more is a twentieth of a second, during which the
+    // wall paints the sub-stream picture under a view that may already be up.
+    const VIDEO_RAISE_FRAMES: u8 = 3;
+    let mut raise_hold: u8 = 0;
     // A turned picture has no surface of its own: the wall draws it from a
     // texture it turns itself, so the codec has to hand frames back as bytes
     // while one is up. Asked once per change, not once per frame.
@@ -915,6 +971,19 @@ fn run() -> anyhow::Result<()> {
             crate::android::set_video_suspended(suspend);
             tracing::info!(target: "xgview", suspended = suspend, "the surface path was suspended");
         }
+        // The activity moves its view on the UI thread, a frame or more after
+        // the request reaches it. `video_shown` is the answer this loop gave
+        // the activity at the end of the *previous* frame, so while it is false
+        // the view is still off screen; `raise_hold` then covers the frames the
+        // UI thread and the compositor take to catch up. Throughout both the
+        // wall goes on painting its sub-stream picture. Asking for the view
+        // and standing aside in the same frame was a frame with neither
+        // picture on it - the dark flash between the low-resolution wait and
+        // the first main-stream frame.
+        app.set_picture_layer_held(!video_shown || raise_hold > 0);
+        if raise_hold > 0 {
+            raise_hold -= 1;
+        }
         let output = context.run(input, |ctx| app.frame(ctx));
         // egui's answer to "when next?". Every frame the application asks for
         // 33 ms while a live picture or an animation is running, or half a
@@ -926,13 +995,16 @@ fn run() -> anyhow::Result<()> {
             .min()
             .unwrap_or(Duration::MAX);
 
-        // The picture's view is shown by the same answer that makes the wall
-        // leave its area blank: a magnified viewport with a session really
-        // rendering into that view. A `SurfaceView` keeps the last frame it was
-        // given and is drawn over the wall, so one left visible while the wall
-        // paints its own picture covers it - and one shown while empty is a
-        // black rectangle over everything.
-        let on_layer = app.picture_on_layer();
+        // The picture's view is asked for by what the frame wants, not by what
+        // the wall did: a magnified viewport with a session really rendering
+        // into that view. The wall's own answer is held back one frame (see
+        // `set_picture_layer_held` above), so the request is made first and the
+        // view has a frame to arrive before the wall leaves its area blank.
+        // A `SurfaceView` keeps the last frame it was given and is drawn over
+        // the wall, so one left visible while the wall paints its own picture
+        // covers it - and one shown while empty is a black rectangle over
+        // everything.
+        let on_layer = app.picture_layer_wanted();
         let changed = on_layer != video_shown;
         if changed {
             // Placed again before it is shown again: the rectangle it was left
@@ -1038,6 +1110,9 @@ fn run() -> anyhow::Result<()> {
         // the new camera squeezed into the old one's shape.
         if changed {
             video_shown = on_layer;
+            if on_layer {
+                raise_hold = VIDEO_RAISE_FRAMES;
+            }
             tracing::info!(target: "xgview", visible = on_layer, "the picture's view");
             crate::android::set_video_visible(on_layer);
         }

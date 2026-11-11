@@ -89,6 +89,23 @@ public class SurfaceActivity extends Activity {
     private float videoShift;
 
     /**
+     * Which hand-over of each surface is the one this activity last made.
+     *
+     * <p>There is one wall per process but not one activity: turning from
+     * landscape to portrait starts the other surface activity beside this one,
+     * and until the old one is destroyed both are getting surface callbacks.
+     * The native side keeps only one window for the wall, one for the picture
+     * and one for the bar, so a {@code surfaceDestroyed} - or the {@code onDestroy}
+     * that follows it - from an activity that has already been replaced must not
+     * detach the new one's. Each hand-over is given a number; a resize or a stop
+     * carries the number it was given and is refused when it is no longer up.
+     * Zero means this view has never had a surface.
+     */
+    private long wallToken;
+    private long videoToken;
+    private long barToken;
+
+    /**
      * Whether the picture and the bar get surfaces of their own.
      *
      * <p>On, and the arrangement under test: three opaque surfaces stacked -
@@ -98,6 +115,16 @@ public class SurfaceActivity extends Activity {
      * means.
      */
     private static final boolean EXTRA_SURFACES = true;
+
+    /**
+     * What one hand-over of the picture's surface is. The native side sees two
+     * non-null `ANativeWindow*` in both a re-bind and a step to the other view,
+     * so it cannot tell them apart - and confusing them is what made a channel
+     * step forget the picture and flash the wall's 480p fallback.
+     */
+    private static final int VIDEO_SURFACE_REBOUND = 0;
+    private static final int VIDEO_SURFACE_SWITCHED = 1;
+    private static final int VIDEO_SURFACE_NEW = 2;
 
     /**
      * What the surface over the picture carries.
@@ -155,19 +182,32 @@ public class SurfaceActivity extends Activity {
             videoViews[slot].getHolder().addCallback(new SurfaceHolder.Callback() {
                 @Override
                 public void surfaceCreated(SurfaceHolder holder) {
+                    // A callback from an activity the launcher has already
+                    // replaced must not take a new identity: it would claim the
+                    // wall's single window for a view that is going away. The
+                    // stop that follows is left alone - see `superseded`.
+                    if (superseded()) {
+                        return;
+                    }
                     // Only the view the decoder is bound to reports a window.
                     // The other one is keeping a camera's last frame; binding
                     // it here would let the next session paint over that frame.
                     if (EXTRA_SURFACES && isActiveVideo(holder)) {
                         Log.i(TAG, "video surface created");
-                        nativeStartVideo(holder.getSurface());
+                        videoToken = nativeStartVideo(holder.getSurface(), VIDEO_SURFACE_NEW);
                     }
                 }
 
                 @Override
                 public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                    if (superseded()) {
+                        return;
+                    }
                     if (EXTRA_SURFACES && isActiveVideo(holder)) {
-                        nativeStartVideo(holder.getSurface());
+                        // The same surface re-bound, whatever size the new
+                        // picture is: the decoder stays on it and the picture
+                        // it holds is not forgotten.
+                        videoToken = nativeStartVideo(holder.getSurface(), VIDEO_SURFACE_REBOUND);
                     }
                 }
 
@@ -175,7 +215,8 @@ public class SurfaceActivity extends Activity {
                 public void surfaceDestroyed(SurfaceHolder holder) {
                     if (EXTRA_SURFACES && isActiveVideo(holder)) {
                         Log.i(TAG, "video surface destroyed");
-                        nativeStopVideo();
+                        nativeStopVideo(videoToken);
+                        videoToken = 0;
                     }
                 }
             });
@@ -185,8 +226,11 @@ public class SurfaceActivity extends Activity {
         canvas.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
+                if (superseded()) {
+                    return;
+                }
                 Log.i(TAG, "surface created");
-                nativeStartWall(
+                wallToken = nativeStartWall(
                         holder.getSurface(),
                         getFilesDir().getAbsolutePath(),
                         externalFilesDir(),
@@ -197,12 +241,16 @@ public class SurfaceActivity extends Activity {
 
             @Override
             public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-                nativeResizeWall(width, height);
+                if (superseded()) {
+                    return;
+                }
+                nativeResizeWall(wallToken, width, height);
             }
 
             @Override
             public void surfaceDestroyed(SurfaceHolder holder) {
-                nativeStopWall();
+                nativeStopWall(wallToken);
+                wallToken = 0;
             }
         });
         root.addView(canvas, new FrameLayout.LayoutParams(
@@ -229,22 +277,28 @@ public class SurfaceActivity extends Activity {
         bar.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
+                if (superseded()) {
+                    return;
+                }
                 if (EXTRA_SURFACES) {
                     Log.i(TAG, "bar surface created");
                     final android.graphics.Rect frame = holder.getSurfaceFrame();
-                    nativeStartBar(holder.getSurface(), frame.width(), frame.height());
+                    barToken = nativeStartBar(holder.getSurface(), frame.width(), frame.height());
                 }
             }
 
             @Override
             public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                if (superseded()) {
+                    return;
+                }
                 if (EXTRA_SURFACES) {
                     // The callback's figures are the surface's own size. The
                     // view's getWidth() can still answer the layout from before
                     // a turn, and the bar is laid out against the whole screen:
                     // a stale size left the overlay in a corner and painted its
                     // opaque bands over the picture it is meant to sit on.
-                    nativeStartBar(holder.getSurface(), width, height);
+                    barToken = nativeStartBar(holder.getSurface(), width, height);
                 }
             }
 
@@ -252,7 +306,8 @@ public class SurfaceActivity extends Activity {
             public void surfaceDestroyed(SurfaceHolder holder) {
                 if (EXTRA_SURFACES) {
                     Log.i(TAG, "bar surface destroyed");
-                    nativeStopBar();
+                    nativeStopBar(barToken);
+                    barToken = 0;
                 }
             }
         });
@@ -420,7 +475,24 @@ public class SurfaceActivity extends Activity {
             instance = null;
         }
         releaseWakeLock();
-        nativeStopWall();
+        // The same three stops the surface callbacks make, for a view hierarchy
+        // that is taken apart without them: `finish()` and a system recycle
+        // need not dispatch `surfaceDestroyed`. The tokens are what make this
+        // safe both here and there - a second stop, or a late one from an
+        // activity the launcher has already replaced, is refused on the native
+        // side rather than detaching the wall that is up now.
+        if (wallToken != 0) {
+            nativeStopWall(wallToken);
+            wallToken = 0;
+        }
+        if (videoToken != 0) {
+            nativeStopVideo(videoToken);
+            videoToken = 0;
+        }
+        if (barToken != 0) {
+            nativeStopBar(barToken);
+            barToken = 0;
+        }
         super.onDestroy();
     }
 
@@ -495,6 +567,27 @@ public class SurfaceActivity extends Activity {
     /** The wall on screen in this process, or {@code null}. */
     public static SurfaceActivity current() {
         return instance;
+    }
+
+    /**
+     * Whether another surface wall has taken this process over.
+     *
+     * <p>Turning the wall starts the other orientation's activity beside this
+     * one, and the two overlap: the new one sets {@link #instance} in its
+     * {@code onCreate}, while the old one's surface callbacks are still queued.
+     * A late <em>start</em> from the old one would claim the process's single
+     * set of windows for views that are going away, so those callbacks answer
+     * here. The native ticket is the second line of defence - it also covers a
+     * callback that was already in flight when {@code instance} changed.
+     *
+     * <p>A <em>stop</em> is deliberately not gated. Its token says which
+     * surface it belongs to: before the new wall has attached, detaching the
+     * old surface is the right answer; afterwards the token no longer matches
+     * and the call is refused. Gating it would leave the renderer drawing into
+     * a surface the system has already destroyed.
+     */
+    private boolean superseded() {
+        return instance != this;
     }
 
     /**
@@ -653,7 +746,12 @@ public class SurfaceActivity extends Activity {
             video = videoViews[videoSlot];
             final android.view.Surface surface = video.getHolder().getSurface();
             if (surface != null && surface.isValid()) {
-                nativeStartVideo(surface);
+                // The other view is a different `ANativeWindow`, so the codec
+                // has to be reopened on it rather than left rendering into the
+                // view that is keeping the camera being stepped away from. But
+                // it is not a *new* surface: forgetting the picture here would
+                // make the wall paint its fallback until the next frame lands.
+                videoToken = nativeStartVideo(surface, VIDEO_SURFACE_SWITCHED);
             }
         }
         videoOwners[videoSlot] = wanted;
@@ -1150,7 +1248,8 @@ public class SurfaceActivity extends Activity {
         }
     }
 
-    private static native void nativeStartWall(
+    /** Takes the wall's surface; the answer identifies this hand-over. */
+    private static native long nativeStartWall(
             android.view.Surface surface,
             String internal,
             String external,
@@ -1158,9 +1257,9 @@ public class SurfaceActivity extends Activity {
             SurfaceActivity activity,
             Class<?> bridge);
 
-    private static native void nativeResizeWall(int width, int height);
+    private static native void nativeResizeWall(long token, int width, int height);
 
-    private static native void nativeStopWall();
+    private static native void nativeStopWall(long token);
 
     private static native void nativeWallFocus(boolean focused);
 
@@ -1172,14 +1271,15 @@ public class SurfaceActivity extends Activity {
 
     private static native void nativeScroll(float dx, float dy);
 
-    private static native void nativeStartVideo(android.view.Surface surface);
+    /** `mode` is one of the three `VIDEO_SURFACE_*` hand-overs above. */
+    private static native long nativeStartVideo(android.view.Surface surface, int mode);
 
-    private static native void nativeStopVideo();
+    private static native void nativeStopVideo(long token);
 
-    private static native void nativeStartBar(
+    private static native long nativeStartBar(
             android.view.Surface surface, int width, int height);
 
-    private static native void nativeStopBar();
+    private static native void nativeStopBar(long token);
 
     /** What the input method typed; see `installTextInput`. */
     private static native void nativeCommit(String text);

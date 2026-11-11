@@ -952,6 +952,13 @@ pub struct XgViewApp {
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     surface_picture_owner: Option<String>,
     surface_awaiting_first: bool,
+    /// Whether the wall must go on painting the picture this frame even though
+    /// the surface has been asked to show it. The activity moves its view on
+    /// the UI thread, a frame after the request; standing aside in that same
+    /// frame leaves one frame where neither the wall nor the view has a
+    /// picture. See [`Self::picture_on_layer`].
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    picture_layer_held: bool,
     /// Uploads the decoded planes and turns them into those pictures.
     video: VideoRenderer,
     /// The machine's memory, processor load and operating system, read while the
@@ -1562,6 +1569,7 @@ impl XgViewApp {
             surface_moments: HashMap::new(),
             surface_picture_owner: None,
             surface_awaiting_first: false,
+            picture_layer_held: false,
             video,
             vitals: monitor_core::vitals::Vitals::new(),
             started: Instant::now(),

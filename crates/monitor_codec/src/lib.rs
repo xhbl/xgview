@@ -34,6 +34,10 @@ pub mod jpeg;
 pub mod dump;
 pub mod layout;
 pub mod null;
+/// The Android picture surface's state. Compiled everywhere so the race it
+/// settles can be tested where the NDK decoder cannot be built.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub mod surface;
 pub mod sps;
 pub mod wait;
 

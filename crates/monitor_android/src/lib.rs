@@ -221,9 +221,9 @@ pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStartWall(
     density: jni::sys::jfloat,
     activity: jni::objects::JObject,
     bridge: jni::objects::JClass,
-) {
+) -> jni::sys::jlong {
     if surface.is_null() {
-        return;
+        return 0;
     }
     // What `android-activity` installs before `android_main`: the activity every
     // call back into Java goes through, and the Android context the audio sink
@@ -234,29 +234,33 @@ pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStartWall(
     let external = env.get_string(&external).map(String::from).unwrap_or_default();
     let window =
         unsafe { ANativeWindow_fromSurface(env.get_native_interface(), surface.as_raw()) };
-    monitor_gui::android_surface::start(window, internal, external, density);
+    monitor_gui::android_surface::start(window, internal, external, density) as jni::sys::jlong
 }
 
-/// The wall's surface went away, or its size changed.
+/// The wall's surface changed size. `token` says which activity's surface it
+/// was, so a late callback from one that is gone is refused. See
+/// `monitor_gui::android::SurfaceTicket`.
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeResizeWall(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
+    token: jni::sys::jlong,
     width: jni::sys::jint,
     height: jni::sys::jint,
 ) {
-    monitor_gui::android_surface::resize(width, height);
+    monitor_gui::android_surface::resize(token as u64, width, height);
 }
 
-/// The wall's surface is gone: stop drawing into it.
+/// The wall's surface is gone: stop drawing into it, if it is still ours.
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStopWall(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
+    token: jni::sys::jlong,
 ) {
-    monitor_gui::android_surface::stop();
+    monitor_gui::android_surface::stop(token as u64);
 }
 
 /// Whether the activity's window has focus.
@@ -329,7 +333,7 @@ pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeScroll(
 ///
 /// A rectangle of its own, opaque, on top of the picture - which is how a
 /// control bar sits over a decoded frame without anything having to be
-/// see-through. See `monitor_gui::android_surface::set_bar_window`.
+/// see-through. See `monitor_gui::android_surface::start_bar`.
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStartBar(
@@ -338,22 +342,23 @@ pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStartBar(
     surface: jni::objects::JObject,
     width: jni::sys::jint,
     height: jni::sys::jint,
-) {
+) -> jni::sys::jlong {
     if surface.is_null() {
-        return;
+        return 0;
     }
     let window = unsafe { ANativeWindow_fromSurface(env.get_native_interface(), surface.as_raw()) };
-    monitor_gui::android_surface::set_bar_window(window, width, height);
+    monitor_gui::android_surface::start_bar(window, width, height) as jni::sys::jlong
 }
 
-/// The bar's surface is gone.
+/// The bar's surface is gone, if it is still ours.
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStopBar(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
+    token: jni::sys::jlong,
 ) {
-    monitor_gui::android_surface::set_bar_window(std::ptr::null_mut(), 0, 0);
+    monitor_gui::android_surface::stop_bar(token as u64);
 }
 
 /// The surface a decoded picture is rendered into, under the wall.
@@ -367,22 +372,24 @@ pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStartVideo(
     env: jni::JNIEnv,
     _class: jni::objects::JClass,
     surface: jni::objects::JObject,
-) {
+    mode: jni::sys::jint,
+) -> jni::sys::jlong {
     if surface.is_null() {
-        return;
+        return 0;
     }
     let window = unsafe { ANativeWindow_fromSurface(env.get_native_interface(), surface.as_raw()) };
-    monitor_gui::android::set_video_surface(window);
+    monitor_gui::android::start_video_surface(window, mode) as jni::sys::jlong
 }
 
-/// The picture's surface is gone.
+/// The picture's surface is gone, if it is still ours.
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeStopVideo(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
+    token: jni::sys::jlong,
 ) {
-    monitor_gui::android::set_video_surface(std::ptr::null_mut());
+    monitor_gui::android::stop_video_surface(token as u64);
 }
 
 /// A block of a call's capture, handed back by the activity's record thread.

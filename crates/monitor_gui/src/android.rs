@@ -10,7 +10,7 @@
 //! on Android.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI8, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use jni::objects::{GlobalRef, JString, JValue};
@@ -137,14 +137,103 @@ fn install_context(env: &JNIEnv, activity: &jni::objects::JObject) {
     }
 }
 
+/// The identity of one surface an activity has handed over.
+///
+/// There is only one wall in a process, but there is not only one activity:
+/// turning from landscape to portrait starts the other surface activity, and
+/// the two are alive together until the old one is destroyed. Both own views,
+/// both get `surfaceCreated` and `surfaceDestroyed`, and the callbacks arrive in
+/// whatever order the system makes them. A `stop` from the activity that has
+/// already gone used to clear the window the one coming up had just set, and
+/// the wall went black until another `surfaceCreated` happened along.
+///
+/// So a surface is not named by "the wall" or "the bar" but by a number: every
+/// hand-over takes one, and every resize or destruction has to show the one it
+/// was given. `0` is nobody's - a callback from a view that never got a surface.
+/// A `take` retires whatever number was up before it, which is what makes a
+/// late `stop` harmless without the Java side having to know which activity is
+/// on top.
+#[derive(Default)]
+pub struct SurfaceTicket(AtomicU64);
+
+impl SurfaceTicket {
+    pub const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    /// Hands out a fresh identity and returns it to the caller to keep.
+    pub fn take(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+    }
+
+    /// Whether `token` is the identity that is up right now.
+    pub fn holds(&self, token: u64) -> bool {
+        token != 0 && self.0.load(Ordering::Acquire) == token
+    }
+
+    /// Retires `token`, answering whether it was the one that was up.
+    ///
+    /// A compare-and-exchange rather than a load and a store because two stops
+    /// can arrive for one surface - `surfaceDestroyed` and `onDestroy` - and
+    /// only the first may detach it. The increment also invalidates the token,
+    /// so a resize that was already on its way to the UI thread cannot put the
+    /// size of the old surface onto the new one.
+    pub fn retire(&self, token: u64) -> bool {
+        token != 0
+            && self
+                .0
+                .compare_exchange(
+                    token,
+                    token.wrapping_add(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+    }
+}
+
+/// The picture's surface has its own identity; see [`SurfaceTicket`].
+static VIDEO_TICKET: SurfaceTicket = SurfaceTicket::new();
+
 /// Hands the decoder the surface a decoded picture is rendered into.
 ///
 /// The wall keeps its own surface for the interface; this is the one underneath
 /// it, and a codec given it renders straight into a buffer the compositor scans
-/// out. A null window means the surface went away, and the next session falls
-/// back to whatever it would otherwise use.
-pub fn set_video_surface(window: *mut std::ffi::c_void) {
-    monitor_codec::amediacodec::set_surface_window(window);
+/// out. Answering with a token the activity keeps is what lets a later stop say
+/// *which* surface went away. A null window is refused: a view that has no
+/// surface has nothing to identify.
+///
+/// `mode` is what the activity knows and a pointer cannot say:
+///
+/// - `2`: the surface was created - a genuinely new, empty one.
+/// - `1`: the wall stepped to the other camera's view. Both views are alive;
+///   the codec must be repointed, but nothing about the picture changed.
+/// - `0`: `surfaceChanged` re-bound the same surface.
+///
+/// Only a created (or destroyed) surface forgets the picture. Treating a step
+/// to another view as a new surface used to clear the request and the session
+/// count in the middle of a swipe, so the new session's first frame was refused
+/// as a late frame of the camera being left: the wall painted its 480p fallback
+/// until the next step put the numbers back in step.
+pub fn start_video_surface(window: *mut std::ffi::c_void, mode: i32) -> u64 {
+    if window.is_null() {
+        return 0;
+    }
+    let token = VIDEO_TICKET.take();
+    let (replaced, switched) = match mode {
+        2 => (true, false),
+        1 => (false, true),
+        _ => (false, false),
+    };
+    monitor_codec::amediacodec::set_surface_window(window, replaced, switched);
+    token
+}
+
+/// The picture's surface went away, and only this identity of it.
+pub fn stop_video_surface(token: u64) {
+    if VIDEO_TICKET.retire(token) {
+        monitor_codec::amediacodec::set_surface_window(std::ptr::null_mut(), true, false);
+    }
 }
 
 /// Shows or hides the view the picture is scanned out of.

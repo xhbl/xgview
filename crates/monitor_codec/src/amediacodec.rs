@@ -137,245 +137,17 @@ extern "C" {
 /// `None` is what asks for byte buffers.
 type ANativeWindow = c_void;
 
-/// The `ANativeWindow` the activity gave us for a decoded picture, once it
-/// exists.
-///
-/// A codec configured with this renders into it and never hands a picture back:
-/// the compositor scans the buffer out, and the pixels never enter this process.
-/// That is the path every Android video player takes, and the reason none of
-/// them care which box they run on. The wall keeps its own surface for the
-/// interface, above this one, and leaves the picture's area unpainted.
-static SURFACE_WINDOW: std::sync::atomic::AtomicPtr<c_void> =
-    std::sync::atomic::AtomicPtr::new(ptr::null_mut());
-
-/// Takes the surface a decoded picture is rendered into, or null when it went
-/// away. See `SurfaceActivity` and `monitor_gui::android_surface`.
-pub fn set_surface_window(window: *mut c_void) {
-    let previous = SURFACE_WINDOW.swap(window, std::sync::atomic::Ordering::AcqRel);
-    // A surface that was made or destroyed is a new one, and the picture the
-    // last session left behind went with it. Being handed the same surface
-    // again - `surfaceChanged` on a change of size or format - is not: the
-    // picture is still in its buffers, and a seek in flight needs it to stay
-    // there. See `SURFACE_HAS_PICTURE`.
-    if window_replaced(previous, window) {
-        // A new window is also a new request for a picture: a session opened
-        // for the old one may still be draining its last frames, and those must
-        // not put the memory of a picture back on a surface that is empty.
-        begin_surface_picture();
-        tracing::info!(
-            target: "xgview::codec",
-            present = !window.is_null(),
-            "the surface a picture is rendered into came or went"
-        );
-    }
-}
-
-/// Whether the surface was really made or destroyed, rather than handed back
-/// again by a `surfaceChanged`. A null on either side is the tell: the activity
-/// calls `nativeStopVideo` before a new surface is created, so a resize that
-/// merely re-binds the window never passes through one.
-fn window_replaced(previous: *mut c_void, window: *mut c_void) -> bool {
-    previous.is_null() || window.is_null()
-}
-
-/// Whether the wall needs the pictures back as bytes while a surface is up.
-///
-/// A magnified picture turned a quarter turn on an upright wall is drawn by
-/// sampling a texture sideways; a codec rendering straight into a surface has
-/// no texture to turn, and rotating the view does not rotate the frames the
-/// compositor scans out. While such a picture is up the surface path is
-/// suspended: the codec hands frames back, the wall draws them with the same
-/// turned mesh it has always used, and the view is hidden. A television has no
-/// portrait to turn to, so the box this surface path exists for never suspends.
-static SURFACE_SUSPENDED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Suspends or resumes rendering into the activity's surface.
-///
-/// Both directions make every open codec close and reopen on the other kind of
-/// output, so the change is not instant: a few access units go by before the
-/// wall has a frame to draw, or the surface has a picture in it. The wall and
-/// the view decide what is on screen from [`surface_presenting`], not from this
-/// flag, so nothing is left blank in between.
-pub fn set_surface_suspended(suspended: bool) {
-    SURFACE_SUSPENDED.store(suspended, std::sync::atomic::Ordering::Release);
-}
-
-fn surface_suspended() -> bool {
-    SURFACE_SUSPENDED.load(std::sync::atomic::Ordering::Acquire)
-}
-
-/// Whether there is a surface a picture could be rendered into right now.
-pub fn video_layer_active() -> bool {
-    !surface_suspended()
-        && !SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire).is_null()
-}
-
-/// Sessions actually rendering into that surface, right now.
-///
-/// A window existing is not a picture being in it. A decoder can refuse the
-/// window and fall back to byte buffers, and a stream too narrow to be worth a
-/// window never asks for one - and in both cases the pictures come back as
-/// frames for the wall to draw. The wall and the picture's view both consult
-/// this, so neither of them can leave an area blank while the other shows
-/// nothing. See `monitor_gui::picture_on_its_own_surface`.
-///
-/// Nor is a codec that has been *opened* with the window: a surface keeps the
-/// last picture it was given until something replaces it, and on a channel step
-/// the window still holds the camera being left. Counted from the first picture
-/// rendered, which is the first moment showing the view shows this stream.
-static SURFACE_SESSIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// When a picture was last handed to the activity's surface, in milliseconds
-/// since the epoch. Zero means this window has never held one.
-///
-/// A seek opens a new decoder on the same window: the old session leaves
-/// [`SURFACE_SESSIONS`] when it closes, and the new one joins only when it
-/// renders its first picture. The window still holds the old session's last
-/// picture throughout that gap, so the wall has to go on keeping away from it.
-/// Otherwise it paints a texture of its own over that picture - and in playback
-/// the only texture the viewport can fall back to is the camera's, left at the
-/// frame it showed when playback opened. Every seek then flashed that one stale
-/// frame before the new picture landed.
-static LAST_PRESENTED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Whether the window that is up has ever been given a picture.
-///
-/// Kept apart from [`LAST_PRESENTED`] because that one is a clock, and the
-/// activity hands the same surface back more often than the surface actually
-/// changes: `SurfaceHolder.Callback.surfaceChanged` fires whenever a decoded
-/// picture changes size, and a seek to a stream of another resolution does
-/// exactly that. `ANativeWindow_fromSurface` may even return a different
-/// wrapper for the same surface. What says the picture went away is the window
-/// being destroyed (null) and a new one being created, not another reference to
-/// it. Forgetting on every resize made the wall paint its frozen camera texture
-/// over the surface during a long handover - the low-resolution frame that used
-/// to flash before the landing picture.
-static SURFACE_HAS_PICTURE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// How long a surface whose next session has not drawn yet still counts as
-/// holding its last picture. A seek's decoder needs a few hundred milliseconds
-/// to open and reach its first frame (260-600 ms measured); a surface that was
-/// destroyed, or a session that never came back, must not be waited on.
-const HANDOVER_GRACE: Duration = Duration::from_secs(2);
-
-fn millis_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Whether a picture is on the activity's surface and the wall should leave its
-/// area alone.
-///
-/// A session counts itself in only after the window it was opened for has
-/// rendered a picture, but the window can go away again while the session keeps
-/// its count: the activity detaches the surface, `decode` leaves the codec alone
-/// rather than reopening it, and the session only leaves the count when it is
-/// dropped. Between those two moments the count says a picture is on a surface
-/// that no longer exists, and both the wall and the view would keep their
-/// distance from a picture that is nowhere - a black hole until the codec is
-/// reopened. The window is part of the answer for that reason.
-///
-/// The other gap is a handover between two sessions on one window, which is
-/// what every seek is. [`LAST_PRESENTED`] is what keeps the answer true through
-/// it: the last picture is still there, and it is the frame a viewer waiting for
-/// a seek should go on looking at. `set_surface_window` clears that memory, so
-/// a surface that was destroyed and made again cannot claim to hold a picture.
-pub fn surface_presenting() -> bool {
-    if surface_suspended()
-        || SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire).is_null()
-    {
-        return false;
-    }
-    if SURFACE_SESSIONS.load(std::sync::atomic::Ordering::Acquire) > 0 {
-        return true;
-    }
-    within_handover(LAST_PRESENTED.load(std::sync::atomic::Ordering::Acquire), millis_now())
-}
-
-/// Whether the activity's surface is still there and still holds the last
-/// picture it was given.
-///
-/// Unlike [`surface_presenting`] this asks nothing about a decoder rendering
-/// right now, nor how long ago one stopped: it says only that leaving the area
-/// unpainted still leaves a picture on screen. The wall needs that while a seek
-/// is in flight, because the wait for a recording's range is a network request
-/// and can outlast [`HANDOVER_GRACE`] before a decoder is even opened.
-/// `set_surface_window` clears the memory, so a window that was destroyed and
-/// made again cannot claim to be holding one.
-pub fn surface_holds_picture() -> bool {
-    holds_picture(
-        surface_suspended(),
-        !SURFACE_WINDOW
-            .load(std::sync::atomic::Ordering::Acquire)
-            .is_null(),
-        SURFACE_HAS_PICTURE.load(std::sync::atomic::Ordering::Acquire),
-    )
-}
-
-fn holds_picture(suspended: bool, window: bool, has_picture: bool) -> bool {
-    !suspended && window && has_picture
-}
-
-/// Forgets the picture the surface was holding, without touching the window.
-///
-/// Hiding the picture's view moves it out of the way rather than destroying its
-/// surface (see `SurfaceActivity.setVideoVisible`), so the last frame stays in
-/// its buffers. Showing that view again for another recording must not count
-/// that frame as the picture of *this* one: a seek in flight would keep the wall
-/// away from its area, and the viewer would watch the previous camera until the
-/// new session draws. The next rendered picture sets the flag again, in
-/// `drain`; the handover grace starts over with it.
-pub fn forget_surface_picture() {
-    LAST_PRESENTED.store(0, std::sync::atomic::Ordering::Release);
-    SURFACE_HAS_PICTURE.store(false, std::sync::atomic::Ordering::Release);
-}
-
-/// Which picture the surface has last been asked for.
-///
-/// A `SurfaceView` keeps the last frame it was given, and stepping to another
-/// camera asks for a picture from a different one. The old session can still be
-/// draining its last frames while the new session connects - on the wall those
-/// are the frames of the camera being left, and they must not say the new
-/// picture has arrived. A session opened under an earlier request is filtered
-/// out in `drain`.
-static SURFACE_REQUEST: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Asks the surface for a new picture, forgetting the one it holds.
-///
-/// Called when the surface itself is replaced (`set_surface_window`) and when
-/// the wall steps to another camera (`XgViewApp::track_surface_picture`).
-/// Hiding the view is not such a request - its surface and its session survive
-/// the move - so that one uses `forget_surface_picture` alone.
-pub fn begin_surface_picture() {
-    SURFACE_REQUEST.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    forget_surface_picture();
-}
-
-fn surface_request() -> u64 {
-    SURFACE_REQUEST.load(std::sync::atomic::Ordering::Acquire)
-}
-
-/// Whether a session opened under `session` still answers the request the
-/// surface is holding now.
-fn answers_current_request(session: u64, current: u64) -> bool {
-    session == current
-}
-
-/// Whether a handover is still young enough that the surface's last picture is
-/// the one a viewer should be left looking at. Zero means this window has never
-/// held a picture; a clock that went backwards says nothing about a gap either.
-fn within_handover(last: u64, now: u64) -> bool {
-    last != 0
-        && now >= last
-        && now - last < HANDOVER_GRACE.as_millis() as u64
-}
+// The picture surface's record is a state machine of its own, and one that
+// does not need the NDK: it lives in `surface`, where the race between a late
+// frame and a replaced window can be tested on the desktop. The names the wall
+// has always reached through `amediacodec` are kept here.
+pub use crate::surface::{
+    begin_surface_picture, forget_surface_picture, set_surface_suspended,
+    set_surface_window, surface_holds_picture, surface_presenting, video_layer_active,
+};
+use crate::surface::{
+    millis_now, surface_rendered, surface_session_closed, surface_snapshot, surface_suspended,
+};
 
 /// How many pictures the decoder's pace is measured over.
 ///
@@ -438,13 +210,35 @@ pub struct AMediaCodecDecoder {
     /// open it again on the other path. Comparing this with the flag is what
     /// says whether that has happened yet.
     suspended: bool,
-    /// [`SURFACE_REQUEST`] as it stood when this session was opened. A decoder
-    /// opened for a picture that has since been asked of another camera must not
-    /// put its late frames back into the surface's memory: the wall would keep
-    /// away from an area showing the camera that was just left. See `drain`.
+    /// The surface's `request` as it stood when this session was opened. A
+    /// decoder opened for a picture that has since been asked of another camera
+    /// must not put its late frames back into the surface's memory: the wall
+    /// would keep away from an area showing the camera that was just left. See
+    /// `drain`.
     request: u64,
-    /// Whether this decoder counted itself in `SURFACE_SESSIONS`. `close` takes
-    /// it out again, and the flag is what makes that happen exactly once.
+    /// The surface's `generation` as it stood when this session was opened, and
+    /// the answer to "is the window I was configured with still the one on
+    /// screen?" A codec is pointed at a window when it is configured and cannot
+    /// be pointed at another, so a surface that was destroyed and made again
+    /// needs a new session: otherwise it renders into a window nobody owns,
+    /// which is a black rectangle on the screen. See `decode`.
+    ///
+    /// A number rather than the `ANativeWindow*` it used to be: the activity can
+    /// hand back a different wrapper for the same surface, and two windows that
+    /// come one after another can be given the same address. Neither says
+    /// anything about whether the session is still the current one.
+    ///
+    /// This generation belongs to the *picture's state*. The codec also needs
+    /// to know when the view it was configured with changed - a step to the
+    /// other camera's view - which is `opened_epoch` below. Those two are not
+    /// the same event: a switch keeps the picture and the request and only
+    /// repoints the codec, while a surface that was destroyed and made again
+    /// forgets everything.
+    generation: u64,
+    /// The surface's `window_epoch` this session was configured with.
+    opened_epoch: u64,
+    /// Whether this decoder counted itself in the surface's `sessions`. `close`
+    /// takes it out again, and the flag is what makes that happen exactly once.
     ///
     /// Counted when a picture is first rendered into the surface, not when the
     /// codec is opened with one: between the two the surface still holds what
@@ -452,15 +246,6 @@ pub struct AMediaCodecDecoder {
     /// on the strength of a window existing shows that instead - which is a
     /// frame of the previous camera, on a channel step.
     presenting: bool,
-    /// The window this codec was opened on, while it is rendering into one.
-    ///
-    /// A codec is pointed at a window when it is configured and cannot be
-    /// pointed at another, so this is what says whether the one it has is still
-    /// the one the activity is showing. It is not: a `SurfaceView` destroys its
-    /// surface when the window goes away and makes a new one when it comes back,
-    /// and the codec would go on rendering into the old one - a picture nobody
-    /// owns, which is a black rectangle on the screen. See `decode`.
-    opened_on: *mut std::ffi::c_void,
     /// Set once an output format this cannot read as NV12 has been reported.
     ///
     /// Byte-buffer mode only: with a surface the codec reports
@@ -552,7 +337,6 @@ impl AMediaCodecDecoder {
             return Ok(());
         }
         self.suspended = surface_suspended();
-        self.request = surface_request();
         let config = self.config.clone();
         let mime = CString::new(config.codec.mime())
             .map_err(|err| CodecError::Configure(err.to_string()))?;
@@ -586,8 +370,11 @@ impl AMediaCodecDecoder {
         // grid's sub streams stay on their own path; the picture wide enough to
         // be worth the trouble is the magnified one, and a replay.
         if video_layer_active() && size.is_some_and(|(width, _)| width >= 1280) {
-            let window = SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire)
-                as *mut ANativeWindow;
+            // The window and the generation are one answer. Reading the window
+            // alone and asking later which generation it was would let a
+            // session that outlives its surface render into the new one.
+            let snapshot = surface_snapshot();
+            let window = snapshot.window;
             if !window.is_null() {
                 tracing::info!(
                     target: "xgview::codec",
@@ -617,16 +404,18 @@ impl AMediaCodecDecoder {
                         // Rendering into the activity's surface: the picture
                         // leaves the codec as a rendered frame, never as bytes.
                         //
-                        // Not counted in `SURFACE_SESSIONS` yet. The window is
-                        // the one the last session was rendering into, and it
-                        // still holds that session's last picture; a surface
-                        // keeps what was in it until something replaces it.
-                        // Until this codec has put a picture there, the view
+                        // Not counted among the surface's sessions yet. The
+                        // window is the one the last session was rendering into,
+                        // and it still holds that session's last picture; a
+                        // surface keeps what was in it until something replaces
+                        // it. Until this codec has put a picture there, the view
                         // showing it would be showing the camera before this
                         // one. The count is taken in `drain`, on the first
                         // picture actually rendered.
                         self.on_surface = true;
-                        self.opened_on = window;
+                        self.generation = snapshot.generation;
+                        self.request = snapshot.request;
+                        self.opened_epoch = snapshot.window_epoch;
                         if let (Some((width, height)), Some(info)) = (size, self.info.as_mut()) {
                             info.width = width;
                             info.height = height;
@@ -929,29 +718,24 @@ impl AMediaCodecDecoder {
                         // can play for hours between two seeks, and the moment a
                         // handover is measured from is the last one.
                         //
-                        // But a frame drained from the camera a step has just
-                        // left is not a picture of the one being asked for. Such
-                        // a session was opened under an earlier request; letting
-                        // it set these flags would say the new picture had
-                        // arrived while the surface still held the old camera.
-                        let current = answers_current_request(
-                            self.request,
-                            SURFACE_REQUEST.load(std::sync::atomic::Ordering::Acquire),
-                        );
-                        if render && current {
-                            LAST_PRESENTED.store(
+                        // But a frame from a session whose request or whose
+                        // window has since changed is a picture of a camera or
+                        // a surface that is gone. `surface_rendered` asks and
+                        // writes under one lock, so a window replaced in the
+                        // middle of this render cannot be told it holds a
+                        // picture it never got. It also answers whether this
+                        // session has just been counted as presenting: the
+                        // first picture is the moment the surface stops being
+                        // the previous camera's.
+                        if render
+                            && surface_rendered(
+                                self.generation,
+                                self.request,
                                 millis_now(),
-                                std::sync::atomic::Ordering::Release,
-                            );
-                            SURFACE_HAS_PICTURE.store(true, std::sync::atomic::Ordering::Release);
-                        }
-                        // And on a surface, the first one is the moment the
-                        // surface stops being the previous camera's: the render
-                        // above queued it, so whatever shows this view from here
-                        // on shows *this* stream. See `presenting`.
-                        if render && current && !self.presenting {
+                                self.presenting,
+                            )
+                        {
                             self.presenting = true;
-                            SURFACE_SESSIONS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                             tracing::info!(
                                 target: "xgview::codec",
                                 "the first picture is in the activity's surface"
@@ -1105,7 +889,7 @@ impl AMediaCodecDecoder {
     fn close(&mut self) {
         if self.presenting {
             self.presenting = false;
-            SURFACE_SESSIONS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            surface_session_closed(self.generation);
         }
         if let Some(codec) = self.handle.take() {
             if self.started {
@@ -1183,19 +967,18 @@ impl VideoDecoder for AMediaCodecDecoder {
             );
             self.close();
             self.on_surface = false;
-            self.opened_on = std::ptr::null_mut();
+            self.generation = 0;
         }
         if self.on_surface {
-            let current = SURFACE_WINDOW.load(std::sync::atomic::Ordering::Acquire)
-                as *mut std::ffi::c_void;
-            if !current.is_null() && self.opened_on != current {
+            let current = surface_snapshot();
+            if !current.window.is_null() && self.opened_epoch != current.window_epoch {
                 tracing::info!(
                     target: "xgview::codec",
-                    "the surface a picture is rendered into was replaced; reopening the decoder"
+                    "the view a picture is rendered into changed; reopening the decoder"
                 );
                 self.close();
                 self.on_surface = false;
-                self.opened_on = std::ptr::null_mut();
+                self.generation = 0;
             }
         }
         let opening = Instant::now();
@@ -1492,57 +1275,5 @@ impl AudioDecoder for AmcAudioDecoder {
 impl Drop for AmcAudioDecoder {
     fn drop(&mut self) {
         self.close();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        answers_current_request, holds_picture, window_replaced, within_handover,
-    };
-    use std::ffi::c_void;
-
-    /// A seek's gap keeps the last picture on the surface; a window that never
-    /// drew one, and one whose decoder never came back, do not.
-    #[test]
-    fn a_handover_keeps_the_last_picture_only_for_a_short_gap() {
-        let last = 10_000;
-        assert!(!within_handover(0, last), "a fresh surface holds nothing");
-        assert!(within_handover(last, last), "the frame just rendered");
-        assert!(within_handover(last, last + 500), "a seek's decoder opening");
-        assert!(!within_handover(last, last + 2_000), "two seconds is too long");
-        assert!(!within_handover(last, last - 1), "a clock that went backwards");
-    }
-
-    /// A long wait for a recording's range is still a wait on a picture that is
-    /// on screen, but only while the window is there and has drawn before.
-    #[test]
-    fn a_surface_holds_its_picture_through_a_long_wait() {
-        assert!(holds_picture(false, true, true), "a seek is in flight");
-        assert!(!holds_picture(false, true, false), "the window never drew");
-        assert!(!holds_picture(false, false, true), "the window went away");
-        assert!(!holds_picture(true, true, true), "the surface is suspended");
-    }
-
-    /// A step to another camera asks the surface for a new picture. Frames
-    /// still draining from the session opened for the old one belong to that
-    /// request, and must not say the new picture has arrived.
-    #[test]
-    fn a_new_request_accepts_only_its_own_sessions() {
-        assert!(answers_current_request(3, 3), "this camera's first frame");
-        assert!(!answers_current_request(2, 3), "the camera being left");
-        assert!(!answers_current_request(4, 3), "a session from the future");
-    }
-
-    /// A change of picture size hands the same surface back. Only a surface
-    /// that was destroyed and made again forgets the picture it was holding.
-    #[test]
-    fn a_resize_does_not_forget_the_picture_but_a_new_surface_does() {
-        let window = 1usize as *mut c_void;
-        let other = 2usize as *mut c_void;
-        assert!(!window_replaced(window, window), "the same window re-bound");
-        assert!(!window_replaced(window, other), "a new wrapper, same surface");
-        assert!(window_replaced(window, std::ptr::null_mut()), "destroyed");
-        assert!(window_replaced(std::ptr::null_mut(), window), "created");
     }
 }

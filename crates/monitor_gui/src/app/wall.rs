@@ -168,7 +168,14 @@ impl XgViewApp {
     #[cfg(not(target_os = "android"))]
     pub(super) fn track_surface_picture(&mut self) {}
 
-    pub fn picture_on_layer(&self) -> bool {
+    /// Whether this frame *wants* the picture on the activity's surface, with
+    /// no regard for whether the view has reached the screen yet.
+    ///
+    /// This is the answer the loop uses to show the view, and the answer the
+    /// wall uses to measure its box: both must be settled before the wall
+    /// stands aside. The invariants behind it are the ones above -
+    /// magnification, a page at rest, a picture of *this* camera.
+    pub fn picture_layer_wanted(&self) -> bool {
         if !self.magnified() {
             return false;
         }
@@ -208,6 +215,26 @@ impl XgViewApp {
             }
         }
         false
+    }
+
+    /// Whether the wall leaves the picture's area unpainted *this frame*.
+    ///
+    /// The activity moves its view on the UI thread, one frame after the
+    /// request reaches it. Asking for the view and standing aside in the same
+    /// frame leaves a frame on which the wall has painted nothing and the view
+    /// is still off screen: the dark flash between the last low-resolution
+    /// picture and the first high-resolution one. So the loop holds this
+    /// answer back for the frame the request is made in. The wall goes on
+    /// painting its sub-stream picture, and stands aside only once the view
+    /// has had a whole frame to arrive. See [`Self::set_picture_layer_held`].
+    pub fn picture_on_layer(&self) -> bool {
+        !self.picture_layer_held && self.picture_layer_wanted()
+    }
+
+    /// Holds the wall's standing-aside back for a frame. Only the Android loop
+    /// calls it; on the desktop the answer is always the wanted one.
+    pub fn set_picture_layer_held(&mut self, held: bool) {
+        self.picture_layer_held = held;
     }
 
     /// The rectangle the magnified picture occupies, in wall points, while a
@@ -295,7 +322,7 @@ impl XgViewApp {
     /// for the length of the wait. The squeezed picture was the frame a seek
     /// used to flash.
     fn picture_size(&self, index: usize) -> Option<egui::Vec2> {
-        if self.picture_on_layer() {
+        if self.picture_layer_wanted() {
             if let Some(size) = self.channels.get(&index).and_then(|channel| {
                 match (channel.width, channel.height) {
                     (Some(width), Some(height)) if width > 0 && height > 0 => {
@@ -787,7 +814,11 @@ impl XgViewApp {
         // This is the *box*, not what the box shows: a window a pinch pushes
         // in is a crop of it, applied to the view as a scale of this rectangle
         // rather than as another rectangle. See `picture_zoom`.
-        self.picture_rect = match self.picture_on_layer() {
+        // Measured from what the frame *wants*, not from whether the wall has
+        // stood aside: the view is given its box before it is shown, including
+        // on the one frame the wall is still painting the sub-stream picture.
+        // Left on the other answer the view came back at the last camera's box.
+        self.picture_rect = match self.picture_layer_wanted() {
             true => self.magnified_area(&cameras, &view, wall, dx),
             false => None,
         };
