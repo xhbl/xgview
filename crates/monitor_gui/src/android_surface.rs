@@ -1012,7 +1012,10 @@ fn run() -> anyhow::Result<()> {
             // the scale out and the picture is both placed wrong and moves at a
             // fraction of the finger - `1/scale` of it, which is exactly what a
             // drag at 4x looked like. See `setVideoZoom`.
-            if let Some(box_) = app.picture_rect() {
+            if let Some(box_) = app
+                .picture_rect()
+                .filter(|_| crate::picture_on_its_own_surface())
+            {
                 let zoom = app.picture_zoom();
                 let window = zoom.window();
                 let scale = zoom.scale;
@@ -1280,6 +1283,11 @@ fn run() -> anyhow::Result<()> {
                         screen_rect: Some(bar_rect),
                         time: Some(started.elapsed().as_secs_f64()),
                         events: bar_events,
+                        // The same window, so the same answer: a strip that
+                        // believed it had the focus while the notification
+                        // shade was down would keep drawing a ring on a
+                        // control nobody can reach.
+                        focused: FOCUSED.load(Ordering::Acquire),
                         ..Default::default()
                     };
                     // The ring the remote puts on a control is the one thing a
@@ -1289,8 +1297,20 @@ fn run() -> anyhow::Result<()> {
                     // arrows. So it is carried across, every frame, and the
                     // strip's copy of the bar lights the same control the
                     // wall's copy would.
-                    if let Some(focused) = context.memory(|memory| memory.focused()) {
-                        bar_context.memory_mut(|memory| memory.request_focus(focused));
+                    //
+                    // Both ways: the wall gives the focus up when the viewer
+                    // leaves the bar - Back, a press on the picture, the window
+                    // losing it - and a mirror that only ever hands the focus
+                    // out would keep the ring on the last control for ever.
+                    match context.memory(|memory| memory.focused()) {
+                        Some(focused) => {
+                            bar_context.memory_mut(|memory| memory.request_focus(focused))
+                        }
+                        None => bar_context.memory_mut(|memory| {
+                            if let Some(stale) = memory.focused() {
+                                memory.surrender_focus(stale);
+                            }
+                        }),
                     }
                     {
                         let now_focused = context.memory(|memory| memory.focused());

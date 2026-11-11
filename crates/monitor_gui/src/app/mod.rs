@@ -3110,7 +3110,13 @@ impl XgViewApp {
                 // they would lie on top of it. The bar is the surface in use
                 // while it is up, and the bars' own page buttons are still
                 // there; the arrows come back with the picture once it goes.
-                if self.is_portrait() && self.chrome.visible && !self.tile_bar.is_open() {
+                //
+                // Which is also why, with a picture scanning out of its own
+                // surface, the overlay draws a second copy of them: this one is
+                // under that picture. Both ask `page_arrows_shown`, and both put
+                // them where `portrait_page_arrow_sides` says; only this copy
+                // takes the presses.
+                if self.page_arrows_shown() {
                     self.portrait_page_buttons(ui, area);
                 }
             });

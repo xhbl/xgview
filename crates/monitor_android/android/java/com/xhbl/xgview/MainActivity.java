@@ -1956,7 +1956,13 @@ public class MainActivity extends NativeActivity {
      * <p>Called from the native side, on the UI thread.
      */
     public static String writeDownloadFile(String name, String text) throws Exception {
-        if (instance == null) {
+        // The wall, not this instance: the export is the viewer's, and on the
+        // front end with surfaces of its own this class is never created, so
+        // its instance is null for ever while the wall - the activity drawing
+        // the screen - is not. Both writers below ask wall() for what they
+        // need, so this is the same question they ask; asking the other one
+        // refused the export on that front end with "the activity is not up".
+        if (wall() == null) {
             throw new IllegalStateException("the activity is not up");
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

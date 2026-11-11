@@ -492,6 +492,25 @@ impl XgViewApp {
                         self.draw_timeline(ui, row);
                     }
                 }
+                // The portrait viewport's page arrows, which the wall draws at
+                // the edges of the area it lays the tile out in - so the picture
+                // covers them. Up on the same terms as there, asked of the one
+                // method both copies ask. A paint only: the presses are found
+                // where the pointer and the remote are, in the wall's frame,
+                // which already registered both circles.
+                if self.page_arrows_shown() {
+                    let focused = ctx.memory(|memory| memory.focused());
+                    for (forward, id, has, center) in self.portrait_page_arrow_sides(body) {
+                        if has {
+                            Self::paint_page_arrow(
+                                ui.painter(),
+                                center,
+                                forward,
+                                focused == Some(Id::new(id)),
+                            );
+                        }
+                    }
+                }
             });
         // And the toast, which is not the bar's: a projection, an error, or the
         // name of the fit the switch has just moved to - this frame's news, in
@@ -500,6 +519,21 @@ impl XgViewApp {
         // is, the wall's copy is under that picture and this is the copy that
         // can be seen. See `draw_toast`.
         self.paint_toast(ctx);
+        // The question the first Back asks, which the wall puts in the middle of
+        // the screen for the same reason - and which, being drawn after the
+        // tiles, is on top of the wall's own frame and so of every picture over
+        // it. This frame is the one that can be seen while a picture is up.
+        self.draw_exit_hint(ctx);
+        // And the blank, last of all and over everything: the wall paints it on
+        // a layer above the toolbar and the tiles, and here the toolbar and the
+        // corners have been painted above the picture, so it goes on last for
+        // the same reason. It is painted rather than suspending the picture's
+        // view because the blank is not a thing laid over a picture - it is the
+        // screen going away - and a view taken off the layer for it would have
+        // to be placed again on the way back, once per schedule period.
+        if self.blackout_on {
+            self.blackout.draw(ctx, self.time);
+        }
     }
 
     /// One tile of the wall, as everything that paints it needs it.

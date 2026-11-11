@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Radius of the portrait viewport's page arrows.
+const PAGE_ARROW_R: f32 = 24.0;
+/// How far their centres sit from the side of the area they are drawn against.
+const PAGE_ARROW_MARGIN: f32 = 6.0;
+
 impl XgViewApp {
     /// The toolbar as drawn while the wall stands upright: the four portrait
     /// grids, paging, full screen and the orientation button - the few things a
@@ -141,47 +146,95 @@ impl XgViewApp {
         });
     }
 
-    pub(super) fn portrait_page_buttons(&mut self, ui: &mut egui::Ui, area: Rect) {
+    /// Whether the portrait viewport's page arrows are up.
+    ///
+    /// Asked by both copies - the wall's, and the overlay's over a picture
+    /// scanning out of its own surface - so that the two cannot disagree about
+    /// it. They are the arrows of a viewport with the bars kept and no strip of
+    /// controls open: the strip is docked to the same edges, and its own paging
+    /// buttons are what a viewer reaches for while it is up.
+    pub(super) fn page_arrows_shown(&self) -> bool {
+        self.is_portrait() && self.chrome.visible && !self.tile_bar.is_open()
+    }
 
-        let r = 24.0;
-        let margin = 6.0;
+    /// Where the portrait viewport's page arrows are, and whether there is a
+    /// page to go to that way: `(forward, the control's id, whether there is a
+    /// page that way, the centre of the circle)`.
+    ///
+    /// The arrows are drawn twice while a picture is on its own surface - by
+    /// the wall, which is under that picture, and by the overlay over it - so
+    /// both copies have to put them in the same place. See
+    /// [`Self::portrait_page_buttons`] and [`Self::paint_page_arrow`].
+    pub(super) fn portrait_page_arrow_sides(
+        &self,
+        area: Rect,
+    ) -> [(bool, &'static str, bool, egui::Pos2); 2] {
         let y = area.center().y;
+        [
+            (
+                false,
+                "portrait-prev-page",
+                self.can_advance(false),
+                egui::pos2(area.min.x + PAGE_ARROW_MARGIN + PAGE_ARROW_R, y),
+            ),
+            (
+                true,
+                "portrait-next-page",
+                self.can_advance(true),
+                egui::pos2(area.max.x - PAGE_ARROW_MARGIN - PAGE_ARROW_R, y),
+            ),
+        ]
+    }
+
+    /// One page arrow, painted: the disc, its rim - or the remote's ring, when
+    /// that is on it - and the chevron.
+    ///
+    /// A paint and nothing else: the presses are the wall's frame's, which is
+    /// where the pointer and the remote are. `focused` is that frame's focus
+    /// mirror, carried across by `android_surface`.
+    pub(super) fn paint_page_arrow(
+        painter: &egui::Painter,
+        center: egui::Pos2,
+        forward: bool,
+        focused: bool,
+    ) {
         let fill = egui::Color32::from_black_alpha(51);
         let edge = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(140));
         let glyph = egui::Stroke::new(2.0_f32, egui::Color32::from_white_alpha(230));
-        let d = r * 0.4;
-        let sides = [
-            (false, "portrait-prev-page", self.can_advance(false)),
-            (true, "portrait-next-page", self.can_advance(true)),
-        ];
-        for (forward, id, has) in sides {
+        let d = PAGE_ARROW_R * 0.4;
+        painter.circle_filled(center, PAGE_ARROW_R, fill);
+        if focused {
+            painter.circle_stroke(
+                center,
+                PAGE_ARROW_R,
+                egui::Stroke::new(theme::FOCUS_WIDTH, theme::FOCUS),
+            );
+        } else {
+            painter.circle_stroke(center, PAGE_ARROW_R, edge);
+        }
+        let sign = if forward { 1.0 } else { -1.0 };
+        let tip = egui::pos2(center.x + sign * d * 2.0 / 3.0, center.y);
+        let wing_x = center.x - sign * d / 3.0;
+        painter.add(egui::Shape::line_segment(
+            [egui::pos2(wing_x, center.y - d), tip],
+            glyph,
+        ));
+        painter.add(egui::Shape::line_segment(
+            [egui::pos2(wing_x, center.y + d), tip],
+            glyph,
+        ));
+    }
+
+    pub(super) fn portrait_page_buttons(&mut self, ui: &mut egui::Ui, area: Rect) {
+        for (forward, id, has, center) in self.portrait_page_arrow_sides(area) {
             if !has {
                 continue;
             }
-            let x = if forward { area.max.x - margin - r } else { area.min.x + margin + r };
-            let center = egui::pos2(x, y);
-            let rect = Rect::from_center_size(center, egui::Vec2::splat(r * 2.0));
+            let rect = Rect::from_center_size(center, egui::Vec2::splat(PAGE_ARROW_R * 2.0));
             let button_id = Id::new(id);
             let resp = ui.interact(rect, button_id, egui::Sense::click());
             let focused = ui.memory(|m| m.focused()) == Some(button_id);
-            let p = ui.painter();
-            p.circle_filled(center, r, fill);
-            if focused {
-                p.circle_stroke(center, r, egui::Stroke::new(theme::FOCUS_WIDTH, theme::FOCUS));
-            } else {
-                p.circle_stroke(center, r, edge);
-            }
-            let sign = if forward { 1.0 } else { -1.0 };
-            let tip = egui::pos2(center.x + sign * d * 2.0 / 3.0, center.y);
-            let wing_x = center.x - sign * d / 3.0;
-            p.add(egui::Shape::line_segment(
-                [egui::pos2(wing_x, center.y - d), tip],
-                glyph,
-            ));
-            p.add(egui::Shape::line_segment(
-                [egui::pos2(wing_x, center.y + d), tip],
-                glyph,
-            ));
+            Self::paint_page_arrow(ui.painter(), center, forward, focused);
             if resp.clicked() {
                 self.advance(forward, !resp.clicked_by(egui::PointerButton::Primary));
             }
