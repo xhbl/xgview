@@ -1891,6 +1891,21 @@ impl XgViewApp {
             self.surface_moments.insert(index, arrived);
             self.picture_arrived(index, arrived);
         }
+        // A recording plays on a channel of its own, past the wall's slots, so
+        // the loop above never reaches it: it is not one of `self.channels` and
+        // its slot is not its index. It hands nothing back either - the codec
+        // draws into its own surface - so the moment it publishes is the only
+        // word on where the picture has got to. Without this the seek that
+        // opened the recording never cleared, and the cursor and the clock
+        // stayed on the moment it opened for as long as it played.
+        let recording = self.playback.as_ref().map(|playback| playback.index);
+        if let Some(index) = recording {
+            let arrived = self.manager.frames().moment(index);
+            if self.surface_moments.get(&index) != Some(&arrived) {
+                self.surface_moments.insert(index, arrived);
+                self.picture_arrived(index, arrived);
+            }
+        }
         self.video.flush();
     }
 
