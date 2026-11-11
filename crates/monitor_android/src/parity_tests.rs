@@ -1,0 +1,196 @@
+//! Guards against the two front ends growing separate copies of the same
+//! thing again.
+//!
+//! `MainActivity` (a `NativeActivity`) and `SurfaceActivity` (a plain
+//! `Activity`) cannot share a base class, so their shared code was once copied
+//! verbatim between them. The soft keyboard was ~100 lines duplicated, and the
+//! language packs were unpacked once in Java and once in Rust. Both drifted:
+//! the `SDK_INT < R` gate on the keyboard's height poll was added to one copy
+//! and not the other (a keyboard that came up and was pulled straight back down
+//! on a television box), and the two unpackers once wrote their `.ftl` files to
+//! different directories (a clean install that stayed in English).
+//!
+//! These are structural tests read from the Java sources, so they run on the
+//! desktop with `cargo test` and need no device. They do not check behaviour -
+//! only that there is one implementation of each thing, that the few rules
+//! inside it that history showed to be fragile are still there, and that the
+//! bridge rules the native side relies on are still in place. If a future
+//! change deliberately collapses more of this - one set of JNI entry points,
+//! say - update the guard in the same commit; a failing test is the prompt to
+//! decide that on purpose rather than by accident.
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    const MAIN: &str = include_str!("../android/java/com/xhbl/xgview/MainActivity.java");
+    const SURFACE: &str = include_str!("../android/java/com/xhbl/xgview/SurfaceActivity.java");
+    const HOST: &str = include_str!("../android/java/com/xhbl/xgview/TextInputHost.java");
+
+    /// Read at run time rather than `include_str!`: the file belongs to another
+    /// crate in this workspace, so it is not part of this crate's package.
+    fn gui_lib() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../monitor_gui/src/lib.rs");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+    }
+
+    /// The build script's comment names the unpacker. A stale name there is
+    /// how a reader is sent looking for code that no longer exists.
+    fn gradle_build() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../android/app/build.gradle.kts");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+    }
+
+    /// Anything that is the *implementation* of a soft keyboard, rather than a
+    /// call into one. If any of these reappears in an activity, the copy that
+    /// was removed has started to grow back.
+    const IME_MARKS: &[&str] = &[
+        "new BaseInputConnection",
+        "imePoll",
+        "getInputMethodWindowVisibleHeight",
+        "showSoftInput(",
+        "hideSoftInputFromWindow(",
+        "private String composing",
+    ];
+
+    const JNI_DECLARATIONS: &[&str] = &[
+        "nativeCommit(String text)",
+        "nativeBackspace(int count)",
+        "nativeEnter()",
+        "nativeKeyboardHidden()",
+    ];
+
+    #[test]
+    fn the_keyboard_has_one_implementation() {
+        for mark in IME_MARKS {
+            assert!(HOST.contains(mark), "TextInputHost lost {mark}");
+            assert!(!MAIN.contains(mark), "MainActivity grew its own {mark}");
+            assert!(!SURFACE.contains(mark), "SurfaceActivity grew its own {mark}");
+        }
+    }
+
+    #[test]
+    fn both_front_ends_hold_the_host_and_only_wire_it_up() {
+        for activity in [MAIN, SURFACE] {
+            for glue in [
+                "private TextInputHost textInput;",
+                "textInput.setWanted(wanted, multiline);",
+                "textInput.install(",
+                "textInput.onImeVisibility(visible);",
+                "nativeCommit(text);",
+                "nativeBackspace(count);",
+                "nativeEnter();",
+                "nativeKeyboardHidden();",
+            ] {
+                assert!(activity.contains(glue), "an activity lost its glue: {glue}");
+            }
+            for declaration in JNI_DECLARATIONS {
+                assert!(
+                    activity.contains(declaration),
+                    "an activity lost a JNI declaration: {declaration}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_host_keeps_the_rules_that_once_drifted() {
+        // The poll is only started below R; the Runnable itself also refuses
+        // to run on R and above. The second guard was in one old copy and not
+        // the other. Both live in one place now.
+        assert!(HOST.contains("Build.VERSION.SDK_INT < Build.VERSION_CODES.R"));
+        assert!(HOST.contains("Build.VERSION.SDK_INT >= Build.VERSION_CODES.R"));
+        assert!(!MAIN.contains("Build.VERSION.SDK_INT < Build.VERSION_CODES.R"));
+        assert!(!SURFACE.contains("Build.VERSION.SDK_INT < Build.VERSION_CODES.R"));
+
+        // Composing already put the text in the field. Committing the same
+        // string must not backspace and retype it - that loses the cursor
+        // position and miscounts surrogate pairs. Check the whole short
+        // circuit rather than its condition alone: an early return that was
+        // dropped while the condition stayed would pass a string-only guard.
+        let on_commit = &HOST[HOST
+            .find("private void onCommit(")
+            .expect("TextInputHost lost onCommit")..];
+        let body = &on_commit[..on_commit.find("\n    }").expect("onCommit has no end")];
+        let equal = body.find("text.contentEquals(previous)").unwrap();
+        let early_return = body.find("return;").unwrap();
+        let backspace = body.find("nativeSide.backspace(previous.length());").unwrap();
+        let commit = body.find("nativeSide.commit(text);").unwrap();
+        assert!(
+            equal < early_return && early_return < backspace && backspace < commit,
+            "onCommit's composing short circuit was broken"
+        );
+        assert!(HOST.contains("if (!text.isEmpty())"));
+    }
+
+    #[test]
+    fn the_static_bridge_still_points_one_way() {
+        // Rust calls MainActivity's static methods. When the surfaces front end
+        // owns the wall, MainActivity forwards; the other one must not forward
+        // back or the two would call each other forever.
+        assert!(MAIN.contains("SurfaceActivity.setKeyboardWanted(wanted, multiline);"));
+        assert!(!SURFACE.contains("MainActivity.setKeyboardWanted"));
+    }
+
+    #[test]
+    fn language_packs_are_unpacked_once_before_the_native_thread_starts() {
+        assert_eq!(
+            SURFACE.matches("static void copyLanguagePacks(").count(),
+            1,
+            "there should be exactly one unpacker"
+        );
+        assert_eq!(
+            MAIN.matches("SurfaceActivity.copyLanguagePacks(this);").count(),
+            1,
+            "the old front end must use the same unpacker"
+        );
+
+        // A NativeActivity starts its native thread inside super.onCreate,
+        // and XgViewApp::new scans the language directory there. A copy made
+        // any later races that scan and a clean install stays in English.
+        let copy = MAIN.find("SurfaceActivity.copyLanguagePacks(this);").unwrap();
+        let super_on_create = MAIN.find("super.onCreate(savedInstanceState);").unwrap();
+        assert!(
+            copy < super_on_create,
+            "the packs must be copied before super.onCreate starts the native thread"
+        );
+        let surface_copy = SURFACE.find("copyLanguagePacks(this);").unwrap();
+        // The call, not the declaration of the same name further down the
+        // file: finding the first bare `nativeStartWall(` could land there.
+        let surface_start = SURFACE.find("wallToken = nativeStartWall(").unwrap();
+        assert!(
+            surface_copy < surface_start,
+            "the packs must be copied before the wall's surface starts the loop"
+        );
+
+        // The `xgview` segment is the one that was once dropped, putting the
+        // files where the catalogue does not look.
+        assert!(SURFACE.contains("\"xgview/langs\""));
+        assert!(!SURFACE.contains("new File(host.getFilesDir(), \"langs\")"));
+        assert!(!MAIN.contains("assets.list("), "a second unpacker in MainActivity");
+        // One bad asset must not stop the packs listed after it. The old Rust
+        // unpacker handled each one on its own, and the NativeActivity front
+        // end used to run that one.
+        assert!(
+            SURFACE.contains(r#""cannot copy language pack " + name"#),
+            "a broken pack must not stop the ones after it"
+        );
+
+        let gui = gui_lib();
+        assert!(!gui.contains("extract_lang_assets"), "the Rust unpacker came back");
+        assert!(!gui.contains("open_dir(&root)"), "the Rust asset walk came back");
+
+        let gradle = gradle_build();
+        assert!(
+            !gradle.contains("extract_lang_assets"),
+            "the build script still points at the Rust unpacker"
+        );
+        assert!(
+            gradle.contains("SurfaceActivity.copyLanguagePacks"),
+            "the build script should name the Java unpacker"
+        );
+    }
+}

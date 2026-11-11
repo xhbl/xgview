@@ -634,12 +634,13 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
         // one picture out here; see `monitor_codec::dump`.
         monitor_codec::dump::set_dir(dir);
     }
-    // The language packs shipped as APK assets are extracted to the
-    // configuration directory before `XgViewApp::new` runs, so the catalogue
-    // built there discovers them alongside the embedded English fallback. A
-    // pack dropped into the app's external data directory is found too, which
-    // is the one place on Android a file transfer can put one.
-    extract_lang_assets(&app);
+    // The activity copies the language packs out of the APK assets before it
+    // starts the native thread, so the catalogue built here discovers them
+    // alongside the embedded English fallback. Both front ends call the same
+    // `SurfaceActivity.copyLanguagePacks`; on the NativeActivity path it has
+    // to run before `super.onCreate`, which is where that thread starts.
+    // A pack dropped into the app's external data directory is found too,
+    // which is the one place on Android a file transfer can put one.
     let extra_lang_dir = app.external_data_path().map(|dir| dir.join("langs"));
     let config_path = AppConfig::default_path();
     let config = AppConfig::load_or_default(&config_path);
@@ -957,43 +958,3 @@ pub(crate) fn force_vulkan_in(dir: &std::path::Path) -> bool {
     dir.join("force-vulkan").exists()
 }
 
-/// Copies the language packs shipped as APK assets to the configuration
-/// directory, where `monitor_i18n` discovers them.
-///
-/// English is embedded in the binary, so only the extra packs (`zh-CN.ftl`,
-/// …) are shipped as assets and extracted here. The files are small, so they
-/// are overwritten every launch to pick up pack updates without a manual clear.
-#[cfg(target_os = "android")]
-fn extract_lang_assets(app: &android_activity::AndroidApp) {
-    use std::ffi::CString;
-
-    let manager = app.asset_manager();
-    let root = CString::new("").expect("empty C string");
-    let Some(dir) = manager.open_dir(&root) else {
-        tracing::warn!(target: "xgview", "cannot open APK assets for language packs");
-        return;
-    };
-    let dest = monitor_core::config::config_dir().join("langs");
-    if let Err(err) = std::fs::create_dir_all(&dest) {
-        tracing::warn!(target: "xgview", %err, path = %dest.display(), "cannot create language pack directory");
-        return;
-    }
-    for name in dir {
-        if !name.to_bytes().ends_with(b".ftl") {
-            continue;
-        }
-        let Some(mut asset) = manager.open(&name) else {
-            tracing::warn!(target: "xgview", name = %name.to_string_lossy(), "cannot open language asset");
-            continue;
-        };
-        match asset.buffer() {
-            Ok(bytes) => {
-                let path = dest.join(name.to_string_lossy().as_ref());
-                if let Err(err) = std::fs::write(&path, bytes) {
-                    tracing::warn!(target: "xgview", %err, path = %path.display(), "cannot write language pack");
-                }
-            }
-            Err(err) => tracing::warn!(target: "xgview", %err, name = %name.to_string_lossy(), "cannot read language asset"),
-        }
-    }
-}

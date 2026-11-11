@@ -2,15 +2,12 @@ package com.xhbl.xgview;
 
 import android.app.Activity;
 import android.content.res.AssetManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
-import android.view.View;
 import android.view.ViewGroup;
-import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
 
 import java.io.File;
@@ -167,11 +164,10 @@ public class SurfaceActivity extends Activity {
         System.loadLibrary("monitor_android");
         MainActivity.markNativeLoaded();
 
-        // The language packs travel in the APK's assets. The `NativeActivity`
-        // path extracts them from native code, which has the asset manager; this
-        // one has no `AndroidApp` to ask, so it copies them itself - the same
-        // destination, `<files>/langs`, which is where the catalogue looks.
-        copyLanguagePacks();
+        // The language packs travel in the APK's assets. Both front ends copy
+        // them through this one entry point into <files>/xgview/langs, which
+        // is the directory the language catalogue scans.
+        copyLanguagePacks(this);
 
         final FrameLayout root = new FrameLayout(this);
 
@@ -901,294 +897,59 @@ public class SurfaceActivity extends Activity {
 
     // ------------------------------------------------------------ soft keyboard
     //
-    // The same one-pixel editable view `MainActivity` installs, for the same
-    // reason: Android shows a keyboard for a focused editable view and for
-    // nothing else. The text is never kept here - every commit goes to the
-    // native side, which owns the string.
+    // The one-pixel editable view is shared with the other front end through
+    // TextInputHost. Only the root view and the JNI entry points are ours.
 
-    /** Text the input method has spelled out but not settled on yet. */
-    private String composing = "";
-
-    /** The one pixel view the input method types into. */
-    private View inputView;
-
-    private InputMethodManager inputMethod;
-
-    /** Whether the native side wants the keyboard up, as last told by {@link #setKeyboardWanted}. */
-    private boolean keyboardWanted;
-
-    /** Whether the field being edited holds several lines; see {@link #setKeyboardWanted}. */
-    private boolean keyboardMultiline;
+    /** The one-pixel editable view and everything that goes with it. */
+    private TextInputHost textInput;
 
     /**
-     * Whether the keyboard has been seen on screen since it was last asked for.
+     * Called from the native side when a text field takes or loses the focus.
+     * The native side's calls are {@code MainActivity}'s, which forwards them
+     * here when this front end owns the wall.
      *
-     * <p>A report that it is not showing means nothing until it has shown: the
-     * input method takes a moment to come up, and the first answer is always
-     * "not yet".
-     */
-    private boolean imeSeenVisible;
-
-    /** The hidden call that reports the keyboard's height, found once. */
-    private java.lang.reflect.Method imeHeightMethod;
-
-    /** Asks the input method how tall it is, while the native side wants it up. */
-    private final Runnable imePoll = new Runnable() {
-        @Override
-        public void run() {
-            if (!keyboardWanted) {
-                return;
-            }
-            final int height = imeHeight();
-            if (height < 0) {
-                // This device does not answer: nothing more to learn by asking.
-                return;
-            }
-            onImeVisibility(height > 0);
-            inputView.postDelayed(this, 300);
-        }
-    };
-
-    /**
-     * Called from the native side when a text field takes or loses the focus, so
-     * that the keyboard follows what the viewer is doing in the UI.
-     *
-     * <p>{@code multiline} is the shape of the field being edited: see
-     * {@link #keyboardMultiline}.
+     * <p>{@code multiline} is the shape of the field being edited.
      */
     public static void setKeyboardWanted(final boolean wanted, final boolean multiline) {
         final SurfaceActivity self = instance;
-        if (self == null || self.inputView == null) {
+        if (self == null || self.textInput == null) {
             return;
         }
-        self.runOnUiThread(() -> {
-            // Read before they are overwritten: the action key can only be
-            // changed by remaking the input connection, and that is worth doing
-            // only when the keyboard is already up on a field of the other kind.
-            final boolean wasWanted = self.keyboardWanted;
-            final boolean optionsChanged = self.keyboardMultiline != multiline;
-            // Told before the keyboard is asked to move, so that what it does
-            // in answer to this is not taken for the viewer putting it away.
-            self.keyboardWanted = wanted;
-            self.keyboardMultiline = multiline;
-            self.imeSeenVisible = false;
-            self.inputView.removeCallbacks(self.imePoll);
-            Log.i(TAG, "keyboard wanted=" + wanted + " multiline=" + multiline);
-            if (wanted) {
-                // The insets listener is what says whether the keyboard is on
-                // screen on Android 11 and newer, and it is the only thing that
-                // can: asking the input method for its height is a hidden call
-                // that answers 0 on plenty of devices - on this box it answers
-                // 0 while the keyboard is up. Taken as "not showing" it reads as
-                // the viewer having put the keyboard away, and the keyboard is
-                // pulled down a poll after it came up. The two must not both
-                // speak, so the poll is only for the releases whose insets carry
-                // no keyboard source. See `MainActivity.setKeyboardWanted`,
-                // which has always had this rule.
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                    self.inputView.postDelayed(self.imePoll, 600);
-                }
-                self.inputView.setFocusable(true);
-                self.inputView.setFocusableInTouchMode(true);
-                self.inputView.requestFocus();
-                self.inputMethod.showSoftInput(self.inputView, 0);
-                if (wasWanted && optionsChanged) {
-                    // The action key of an input method is fixed when its input
-                    // connection is made, so a move between a single-line and a
-                    // multi-line field while the keyboard stays up needs the
-                    // connection remade for the new editor options.
-                    self.inputMethod.restartInput(self.inputView);
-                }
-            } else {
-                self.inputMethod.hideSoftInputFromWindow(self.inputView.getWindowToken(), 0);
-                self.inputView.clearFocus();
-                // Focusable only while the keyboard is wanted. Left focusable,
-                // the window hands this view the focus the moment it opens and
-                // the input method comes up over the wall unasked - and while
-                // it has the focus it takes the remote's buttons too.
-                self.inputView.setFocusable(false);
-                self.inputView.setFocusableInTouchMode(false);
+        self.textInput.setWanted(wanted, multiline);
+    }
+
+    /** Adds the one-pixel editable view to this activity's own root. */
+    private void installTextInput(final FrameLayout root) {
+        textInput = new TextInputHost(this, new TextInputHost.Native() {
+            @Override
+            public void commit(String text) {
+                nativeCommit(text);
+            }
+
+            @Override
+            public void backspace(int count) {
+                nativeBackspace(count);
+            }
+
+            @Override
+            public void enter() {
+                nativeEnter();
+            }
+
+            @Override
+            public void keyboardHidden() {
+                nativeKeyboardHidden();
             }
         });
+        textInput.install(root);
     }
 
-    /**
-     * Adds the view the input method attaches to.
-     *
-     * <p>It is one pixel in the corner and draws nothing: what matters is that
-     * it is editable and can hold the focus. Keys it does not take - the arrows,
-     * the remote's own buttons - fall through to the activity as usual, so the
-     * viewer can still walk the form while the keyboard is up.
-     */
-    private void installTextInput(final FrameLayout root) {
-        inputMethod = (InputMethodManager) getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
-        inputView = new View(this) {
-            @Override
-            public boolean onCheckIsTextEditor() {
-                return true;
-            }
-
-            /**
-             * Back while the keyboard is up belongs to the input method: it puts
-             * itself away and the key never reaches the activity, so the native
-             * side would go on believing the keyboard is there. This is the one
-             * place that sees the key first.
-             */
-            @Override
-            public boolean onKeyPreIme(int keyCode, KeyEvent event) {
-                if (keyCode == KeyEvent.KEYCODE_BACK
-                        && event.getAction() == KeyEvent.ACTION_UP
-                        && keyboardWanted) {
-                    keyboardDismissed();
-                }
-                return super.onKeyPreIme(keyCode, event);
-            }
-
-            @Override
-            public android.view.inputmethod.InputConnection onCreateInputConnection(
-                    android.view.inputmethod.EditorInfo out) {
-                // The kind of field the native side is editing decides the
-                // action key. A single-line field finishes on Done; a multi-line
-                // one must keep Enter as a newline, because that key cannot both
-                // break the line and take the text.
-                if (keyboardMultiline) {
-                    out.inputType = android.text.InputType.TYPE_CLASS_TEXT
-                            | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                            | android.text.InputType.TYPE_TEXT_VARIATION_URI;
-                    out.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_NONE
-                            | android.view.inputmethod.EditorInfo.IME_FLAG_NO_ENTER_ACTION
-                            | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN;
-                } else {
-                    out.inputType = android.text.InputType.TYPE_CLASS_TEXT
-                            | android.text.InputType.TYPE_TEXT_VARIATION_URI;
-                    out.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
-                            | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN;
-                }
-                return new android.view.inputmethod.BaseInputConnection(this, false) {
-                    @Override
-                    public boolean setComposingText(CharSequence text, int newCursorPosition) {
-                        onComposing(text.toString());
-                        return true;
-                    }
-
-                    @Override
-                    public boolean finishComposingText() {
-                        composing = "";
-                        return true;
-                    }
-
-                    @Override
-                    public boolean commitText(CharSequence text, int newCursorPosition) {
-                        onCommit(text.toString());
-                        return true;
-                    }
-
-                    @Override
-                    public boolean deleteSurroundingText(int beforeLength, int afterLength) {
-                        composing = "";
-                        if (beforeLength > 0) {
-                            nativeBackspace(beforeLength);
-                        }
-                        return true;
-                    }
-
-                    @Override
-                    public boolean sendKeyEvent(KeyEvent event) {
-                        if (event.getAction() != KeyEvent.ACTION_DOWN) {
-                            return true;
-                        }
-                        switch (event.getKeyCode()) {
-                            case KeyEvent.KEYCODE_DEL:
-                                composing = "";
-                                nativeBackspace(1);
-                                return true;
-                            case KeyEvent.KEYCODE_ENTER:
-                            case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                                composing = "";
-                                nativeEnter();
-                                return true;
-                            default:
-                                final int unicode = event.getUnicodeChar();
-                                if (unicode != 0) {
-                                    // A character from the keyboard itself
-                                    // rather than a commit - some input methods
-                                    // spell a word out this way.
-                                    composing = "";
-                                    nativeCommit(String.valueOf((char) unicode));
-                                    return true;
-                                }
-                                // Not ours: let the remote's buttons reach the
-                                // activity.
-                                return false;
-                        }
-                    }
-                };
-            }
-        };
-        inputView.setFocusable(false);
-        inputView.setFocusableInTouchMode(false);
-        root.addView(inputView, new FrameLayout.LayoutParams(1, 1));
-    }
-
-    /**
-     * The input method spelled something out: whatever it had composed so far
-     * is replaced by this.
-     */
-    private void onComposing(String text) {
-        if (!composing.isEmpty()) {
-            nativeBackspace(composing.length());
-        }
-        composing = text;
-        if (!text.isEmpty()) {
-            nativeCommit(text);
-        }
-    }
-
-    /** The input method settled on something, and it stays. */
-    private void onCommit(String text) {
-        if (!composing.isEmpty()) {
-            final String previous = composing;
-            composing = "";
-            if (text.contentEquals(previous)) {
-                // Already in the field, put there by `onComposing`.
-                return;
-            }
-            nativeBackspace(previous.length());
-        }
-        if (!text.isEmpty()) {
-            nativeCommit(text);
-        }
-    }
-
-    /** The keyboard is, or is not, on screen. Acts only on the way from showing to gone. */
+    /** The insets listener reports to whichever front end owns the window. */
     void onImeVisibility(boolean visible) {
-        if (!keyboardWanted) {
-            imeSeenVisible = false;
-            return;
-        }
-        if (visible) {
-            imeSeenVisible = true;
-        } else if (imeSeenVisible) {
-            keyboardDismissed();
-        }
-    }
-
-    /** The keyboard went away without the native side asking. */
-    private void keyboardDismissed() {
-        imeSeenVisible = false;
-        nativeKeyboardHidden();
-    }
-
-    /** The input method's height in pixels, 0 when hidden, -1 when this device will not say. */
-    private int imeHeight() {
-        try {
-            if (imeHeightMethod == null) {
-                imeHeightMethod = InputMethodManager.class
-                        .getMethod("getInputMethodWindowVisibleHeight");
-            }
-            return (Integer) imeHeightMethod.invoke(inputMethod);
-        } catch (Throwable unsupported) {
-            return -1;
+        // An insets dispatch can arrive before onCreate has built the host;
+        // keep it harmless rather than letting it throw.
+        if (textInput != null) {
+            textInput.onImeVisibility(visible);
         }
     }
 
@@ -1203,9 +964,10 @@ public class SurfaceActivity extends Activity {
      * <p>The packs sit at the **root** of the assets, not in a {@code langs/}
      * folder: the build points `assets.srcDirs` at the repository's `langs`
      * directory and its contents become the root (see
-     * `android/app/build.gradle.kts`). {@code extract_lang_assets} on the
-     * {@code NativeActivity} path reads them the same way - list the root, take
-     * what ends in {@code .ftl} - and writes them to the same place this does.
+     * `android/app/build.gradle.kts`). Both front ends call this one copy:
+     * list the root, take what ends in {@code .ftl}, write them to the same
+     * place. There used to be a second implementation in Rust on the
+     * {@code NativeActivity} path, and the two destinations drifted once.
      *
      * <p>That place is the catalogue's configuration directory: {@code
      * config_dir()} on Android is {@code <files>/xgview}, so the packs must land
@@ -1218,33 +980,41 @@ public class SurfaceActivity extends Activity {
      * <p>Silent on failure: a missing pack costs a language, not the wall, and
      * English is compiled in.
      */
-    private void copyLanguagePacks() {
-        final AssetManager assets = getAssets();
-        final File dest = new File(getFilesDir(), "xgview/langs");
+    static void copyLanguagePacks(final Activity host) {
+        final AssetManager assets = host.getAssets();
+        final File dest = new File(host.getFilesDir(), "xgview/langs");
+        final String[] names;
         try {
-            final String[] names = assets.list("");
-            if (names == null || names.length == 0) {
-                return;
-            }
-            if (!dest.isDirectory() && !dest.mkdirs()) {
-                Log.w(TAG, "cannot create " + dest);
-                return;
-            }
-            for (String name : names) {
-                if (!name.endsWith(".ftl")) {
-                    continue;
-                }
-                try (InputStream in = assets.open(name);
-                     OutputStream out = new FileOutputStream(new File(dest, name))) {
-                    final byte[] buffer = new byte[8192];
-                    int read;
-                    while ((read = in.read(buffer)) > 0) {
-                        out.write(buffer, 0, read);
-                    }
-                }
-            }
+            names = assets.list("");
         } catch (IOException error) {
-            Log.w(TAG, "cannot copy the language packs", error);
+            Log.w(TAG, "cannot list the language pack assets", error);
+            return;
+        }
+        if (names == null || names.length == 0) {
+            return;
+        }
+        if (!dest.isDirectory() && !dest.mkdirs()) {
+            Log.w(TAG, "cannot create " + dest);
+            return;
+        }
+        for (String name : names) {
+            if (!name.endsWith(".ftl")) {
+                continue;
+            }
+            // Each pack stands on its own. One that cannot be opened or written
+            // costs a language, not every language listed after it: that is how
+            // the Rust unpacker this replaced behaved, and the NativeActivity
+            // front end used to run that one.
+            try (InputStream in = assets.open(name);
+                 OutputStream out = new FileOutputStream(new File(dest, name))) {
+                final byte[] buffer = new byte[8192];
+                int read;
+                while ((read = in.read(buffer)) > 0) {
+                    out.write(buffer, 0, read);
+                }
+            } catch (IOException error) {
+                Log.w(TAG, "cannot copy language pack " + name, error);
+            }
         }
     }
 

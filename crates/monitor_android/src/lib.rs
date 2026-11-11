@@ -9,6 +9,11 @@
 //! `android/AndroidManifest.xml` relaunches whichever of them the shape it was
 //! started in asks for after `BOOT_COMPLETED`.
 
+// Structural guard: the two front ends must not grow separate copies of the
+// soft keyboard or the language-pack unpacker again. See `parity_tests`.
+#[cfg(test)]
+mod parity_tests;
+
 /// Starts the eframe application from the Android activity.
 ///
 /// A viewer that fails to start is over: the activity finishes and the screen
