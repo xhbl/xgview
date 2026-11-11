@@ -51,7 +51,12 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const LINK_TAKEOVER: Duration = Duration::from_secs(5);
 
 /// Repaint interval while at least one channel is showing video.
-const LIVE_REPAINT: Duration = Duration::from_millis(33);
+///
+/// 25 Hz, which is what the sub-streams of a wall are coded at: repainting
+/// faster only drew the same picture again. It is the cheapest of the costs
+/// `priv/docs/grid-cpu-cost.md` counts - a sixth of the whole frame's
+/// tessellation and composition, for a number.
+const LIVE_REPAINT: Duration = Duration::from_millis(40);
 
 /// Width the toolbar is laid out for at its full size.
 ///

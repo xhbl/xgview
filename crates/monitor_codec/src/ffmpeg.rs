@@ -677,15 +677,27 @@ fn color_range(range: ffmpeg::color::Range) -> ColorRange {
 
 /// Copies the leading `columns` bytes of `rows` rows out of one strided plane,
 /// laying them out as the renderer takes them.
+fn copy_plane(frame: &Picture, plane: usize, columns: usize, rows: usize) -> Option<Vec<u8>> {
+    copy_padded(frame.stride(plane), frame.data(plane), columns, rows)
+}
+
+/// Copies one strided plane into the layout the upload wants.
 ///
 /// A decoder aligns every row to a stride of its own, usually wider than the
 /// picture, so the rows are copied one at a time. The destination pads in turn:
 /// one walk over the picture writes the layout the upload wants, which is one
 /// walk fewer than writing it twice.
-fn copy_plane(frame: &Picture, plane: usize, columns: usize, rows: usize) -> Option<Vec<u8>> {
-    let stride = frame.stride(plane);
-    let data = frame.data(plane);
+///
+/// When the decoder's stride already equals the padded row the upload wants -
+/// which is what a hardware readback hands back on the boxes the wall runs on -
+/// the plane is one contiguous run, and it is taken in a single pass rather than
+/// `rows` small ones. What is being spent here is the number of calls, not the
+/// bytes: see `priv/docs/grid-cpu-cost.md`, item a.
+fn copy_padded(stride: usize, data: &[u8], columns: usize, rows: usize) -> Option<Vec<u8>> {
     let padded = plane_stride(columns);
+    if stride == padded {
+        return Some(data.get(..padded * rows)?.to_vec());
+    }
     let mut buffer = vec![0u8; padded * rows];
     for row in 0..rows {
         let start = row * stride;
@@ -864,6 +876,53 @@ mod tests {
         // survives to be fed the next key frame.
         let produced = decoder.decode(&[0xff; 16], 0, false);
         assert!(produced.is_err() || produced.unwrap().is_empty());
+    }
+
+    /// A hardware readback that already hands its rows back at the padded width
+    /// leaves the plane contiguous, and the copy is the whole run rather than
+    /// one call per row. The bytes have to come out unchanged all the same.
+    #[test]
+    fn a_plane_at_the_upload_stride_is_taken_in_one_run() {
+        let (columns, rows) = (640, 3);
+        let padded = plane_stride(columns);
+        let stride = padded;
+        let data: Vec<u8> = (0..stride * rows).map(|byte| byte as u8).collect();
+        let out = copy_padded(stride, &data, columns, rows).expect("copied");
+        assert_eq!(out.len(), padded * rows, "one padded row per picture row");
+        assert_eq!(out, data, "a contiguous plane is copied whole");
+    }
+
+    /// A stride wider than the picture cannot be taken in one run: each row's
+    /// first `columns` bytes land at the padded offset, and the rest of the
+    /// destination row stays zero.
+    #[test]
+    fn a_wider_stride_is_walked_row_by_row() {
+        let (columns, rows) = (640, 2);
+        let padded = plane_stride(columns);
+        let stride = 1024;
+        let mut data = vec![0u8; stride * rows];
+        for row in 0..rows {
+            for column in 0..columns {
+                data[row * stride + column] = (row * 100 + column) as u8;
+            }
+        }
+        let out = copy_padded(stride, &data, columns, rows).expect("copied");
+        assert_eq!(out.len(), padded * rows);
+        for row in 0..rows {
+            for column in 0..columns {
+                assert_eq!(out[row * padded + column], (row * 100 + column) as u8, "used bytes");
+            }
+            for column in columns..padded {
+                assert_eq!(out[row * padded + column], 0, "the padding is zero");
+            }
+        }
+    }
+
+    /// A plane shorter than the layout it claims is refused rather than read
+    /// past its end - a picture that cannot be cut correctly is dropped.
+    #[test]
+    fn a_plane_shorter_than_its_layout_is_refused() {
+        assert!(copy_padded(768, &vec![0u8; 100], 640, 2).is_none());
     }
 
     /// Decodes a real bitstream when one is provided, e.g.
