@@ -3,7 +3,7 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 2.2.66
+## 2.2.69
 
 Changes since 2.1.88. **On Android a magnified 1080p picture plays at its full
 frame rate again: the decoder hands every frame straight to the display instead
@@ -32,6 +32,14 @@ rather than a change in what the viewer does. Where it shows:
   exported configuration keeps the extension it should, the interface comes up in
   Chinese again, and the soft keyboard no longer drops by itself on a television
   box.
+- **A replay plays at the speed it was asked for.** Eight times a recording's
+  rate asks for some two hundred pictures a second, and both paths were handing
+  over every one of them: a surface shows sixty a second and holds the codec's
+  buffers until it has, and the older path pays a readback and a repack for each.
+  Only the pictures a screen can show are handed over now - on the kiosk box a
+  1080p replay went from three and a half times its recording's rate to eight.
+- **A replay's clock keeps up with its picture.** The timeline and the time under
+  the bar stayed on the moment the recording was opened for as long as it played.
 - A window started full screen hands back a windowed size when it leaves it.
 
 ## 2.1.88
