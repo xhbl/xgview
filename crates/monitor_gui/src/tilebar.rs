@@ -376,6 +376,29 @@ pub fn index_of(id: Id) -> Option<usize> {
     (0..CONTROLS).find(|index| control(*index) == id)
 }
 
+/// The first arrow off the seat, whichever way it points.
+///
+/// The seat sits in the bar's top-left corner, and the row has nothing above
+/// it or to its left. egui walks the focus geometrically when the focused
+/// widget does not claim an arrow, so Down and Right happened to land on the
+/// first button while Up and Left went off to the wall's own bars. Every
+/// direction is the same request: light the first button. The seat keeps all
+/// four arrows for itself (see `draw`), which is what makes this stick.
+pub fn first_arrow_target(open: bool, focused: Option<Id>, arrow: bool) -> Option<Id> {
+    (open && focused == Some(seat()) && arrow).then(|| control(0))
+}
+
+/// Whether Down from this focus is the recording strip's way in.
+///
+/// The seat is not a control. Its Down is the first arrow onto the first
+/// button, and a strip that took it would leave the bar with no ring on any
+/// control - which is why a recording used to answer Down with a ring on the
+/// whole timeline row instead. From a control, Down still enters the strip
+/// exactly as it always has.
+pub fn down_enters_strip(focused: Option<Id>) -> bool {
+    focused.and_then(index_of).is_some()
+}
+
 /// The next control in the row that is still live, counting from `index` and
 /// round the end - `None` when every one of them is grey.
 ///
@@ -980,5 +1003,30 @@ mod tests {
         assert_eq!(scope(true), "tile-bar-column");
         assert_ne!(seat(), control(0), "the seat is not a control");
         assert_ne!(control(0), control(1));
+    }
+
+    /// The seat sits in the bar's top-left corner: egui's geometric walk can
+    /// only find the first button below it or to its right. All four arrows
+    /// mean the same thing here, so the answer must not depend on geometry.
+    #[test]
+    fn every_arrow_off_the_seat_names_the_first_button() {
+        assert_eq!(first_arrow_target(true, Some(seat()), true), Some(control(0)));
+        assert_eq!(first_arrow_target(true, Some(seat()), false), None, "not an arrow");
+        assert_eq!(first_arrow_target(false, Some(seat()), true), None, "bar not open");
+        assert_eq!(first_arrow_target(true, Some(control(2)), true), None, "already on a button");
+        assert_eq!(first_arrow_target(true, None, true), None, "nothing focused");
+        assert_eq!(first_arrow_target(true, Some(Id::new("toolbar")), true), None);
+    }
+
+    /// Down from a control still enters the recording's strip. Down from the
+    /// seat does not - it is the first arrow onto the first button, and a
+    /// strip that took it left the whole bar without a ring on any control.
+    #[test]
+    fn the_seats_down_is_not_the_strips_way_in() {
+        assert!(!down_enters_strip(Some(seat())), "the seat is not a control");
+        assert!(!down_enters_strip(None));
+        assert!(!down_enters_strip(Some(Id::new("toolbar"))));
+        assert!(down_enters_strip(Some(control(0))));
+        assert!(down_enters_strip(Some(control(7))));
     }
 }

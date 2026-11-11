@@ -1229,16 +1229,6 @@ impl XgViewApp {
                 self.pick_day_cursor();
             }
         }
-        // The magnified viewport's bar opens on its seat, which is not one of
-        // its controls: the first arrow is what steps off it, onto the first
-        // control - the handset while a call is up - and no arrow ever walks
-        // back onto it. See `tilebar::seat`.
-        if self.tile_bar.is_open()
-            && ctx.memory(|memory| memory.focused()) == Some(tilebar::seat())
-            && (keys.left || keys.right || keys.up || keys.down)
-        {
-            ctx.memory_mut(|memory| memory.request_focus(tilebar::control(0)));
-        }
         // egui has walked the focus already - and dropped it, if this was
         // Escape. Back is therefore one step out of the controls and not
         // two: a panel opened over the wall closes, and otherwise the wall
@@ -1419,6 +1409,32 @@ impl XgViewApp {
         // answers the arrow keys are read against.
         let bar_owns = ctx.memory(|memory| memory.focused()).is_some_and(tilebar::owns);
         let keys = Self::parse_keys(ctx, grid_owns, nav_owns, nav_kind, typing, bar_owns);
+
+        // The bar opens on a seat, which draws nothing: the first arrow steps
+        // off it onto the first control, and every direction means the same
+        // thing. Answered here, before either branch below, because the
+        // magnified branch returns as soon as it sees one of the bar's ids -
+        // and this used to be answered only when the wall did *not* own the
+        // keys, an answer stored at the end of the last frame.
+        let arrow = keys.left || keys.right || keys.up || keys.down;
+        if let Some(first) = tilebar::first_arrow_target(
+            self.tile_bar.is_open(),
+            ctx.memory(|memory| memory.focused()),
+            arrow,
+        ) {
+            ctx.memory_mut(|memory| memory.request_focus(first));
+            // By the time `timeline_input` runs the focus is on `control(0)` -
+            // a control, so `down_enters_strip` would answer yes, and Down
+            // would put the focus straight into the strip on the very frame
+            // it earned a button. The press is spent here. `begin_pass` reads
+            // the raw events rather than this queue, so what stops egui
+            // walking the focus is the seat's lock, not this.
+            ctx.input_mut(|input| {
+                for key in [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown] {
+                    input.consume_key(Modifiers::NONE, key);
+                }
+            });
+        }
 
         // The focus ring is armed here, before any of these keys is acted on:
         // what arms it is the keys that walk it, whatever else they end up

@@ -2086,7 +2086,7 @@ impl XgViewApp {
         });
         if !response.has_focus()
             && down_key
-            && ui.memory(|memory| memory.focused()).is_some_and(tilebar::owns)
+            && tilebar::down_enters_strip(ui.memory(|memory| memory.focused()))
         {
             // Where it came from, so Up can put it back there rather than at the
             // head of the row: a viewer who walked to the sixth control to get

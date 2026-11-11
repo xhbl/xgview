@@ -83,6 +83,30 @@ const EXIT_WINDOW: Duration = Duration::from_secs(2);
 /// [`XgViewApp::ring_follows_bars`].
 const RING_IDLE: Duration = Duration::from_secs(8);
 
+/// Whether a focus the navigation layer does not own is still the magnified
+/// viewport's own, and must be left where the viewer put it.
+///
+/// The seat and a recording's strip both draw a widget and both keep their
+/// arrows, but neither is a member of that layer. Surrendering the seat at the
+/// end of every frame rebuilt it with a default event filter, so the lock
+/// `tilebar::draw` puts on it never survived to the next frame's `begin_pass`;
+/// egui then walked the focus off in whichever direction the arrow pointed.
+/// egui reads the *raw* events at the start of a frame, so consuming a key
+/// later cannot stop that walk - only the filter can.
+fn viewport_keeps_focus(
+    focused: Id,
+    open: bool,
+    timeline_shown: bool,
+    timeline_id: Option<Id>,
+) -> bool {
+    // Only while the bar is up. Once it is hidden the seat's widget is not
+    // drawn, and keeping a focus on an id that no widget owns leaves the wall
+    // without its keys for the frames it takes egui to notice.
+    open
+        && (focused == tilebar::seat()
+            || (timeline_shown && timeline_id.is_some() && Some(focused) == timeline_id))
+}
+
 /// How long a pointer press may last and still be a tap, in seconds.
 ///
 /// A finger rests on the glass while the viewer reads the picture, and a press
@@ -2636,12 +2660,19 @@ impl XgViewApp {
                 self.step_off_a_greyed_control(ctx);
             }
             if let Some(focused) = ctx.memory(|memory| memory.focused()) {
-                // The strip under the magnified bar is the one focus that is not
-                // the layer's: it is a row rather than a control, it reads its
-                // own keys, and it was drawn - so it is a focus with a widget,
-                // and the one the arrows were put on to walk the recording.
-                let strip = self.timeline_shown && Some(focused) == self.timeline_id();
-                if !self.nav.owns_now(focused) && !strip {
+                // The strip under the magnified bar and the seat the bar opens
+                // on are the two focuses that are not the layer's. Both draw a
+                // widget and both keep their arrows; surrendering either at the
+                // end of every frame threw away the event filter it had just
+                // been given, and the next `begin_pass` walked the focus off.
+                if !self.nav.owns_now(focused)
+                    && !viewport_keeps_focus(
+                        focused,
+                        self.tile_bar.is_open(),
+                        self.timeline_shown,
+                        self.timeline_id(),
+                    )
+                {
                     ctx.memory_mut(|memory| memory.surrender_focus(focused));
                 }
             }
@@ -2798,6 +2829,11 @@ impl XgViewApp {
                 self.tile_bar.touch(Instant::now());
             } else if left.is_zero() {
                 self.tile_bar.hide();
+                // This hide happens after the frame's focus rules have run.
+                // Its seat is no longer a widget, and a focus left on it
+                // keeps the wall from its keys until egui notices - so take
+                // the focus away here instead of waiting for that.
+                self.leave_controls(ctx);
             } else {
                 ctx.request_repaint_after(left);
             }
@@ -4311,5 +4347,273 @@ mod tests {
         assert_eq!(bands_around(screen, tall).len(), 2);
         let pushed = Rect::from_min_max(pos2(-200.0, -100.0), pos2(1000.0, 500.0));
         assert!(bands_around(screen, pushed).is_empty(), "the picture covers the screen");
+    }
+
+    /// The two focuses that are not the navigation layer's, but are still the
+    /// viewport's: the seat the bar opens on, and the strip under a recording.
+    #[test]
+    fn the_viewport_keeps_its_seat_and_its_strip() {
+        let strip = Id::new("strip");
+        assert!(viewport_keeps_focus(tilebar::seat(), true, true, Some(strip)));
+        assert!(viewport_keeps_focus(strip, true, true, Some(strip)));
+        assert!(
+            !viewport_keeps_focus(tilebar::seat(), false, true, Some(strip)),
+            "a closed bar must not keep a focus on its seat"
+        );
+        assert!(!viewport_keeps_focus(strip, true, false, Some(strip)), "no strip on screen");
+        assert!(
+            !viewport_keeps_focus(strip, false, true, Some(strip)),
+            "a closed bar keeps neither its seat nor its strip"
+        );
+        assert!(!viewport_keeps_focus(Id::new("toolbar"), true, true, Some(strip)));
+        assert!(!viewport_keeps_focus(Id::new("other"), true, true, None));
+    }
+
+    /// The seat's first arrow is answered in `handle_keys`, before either the
+    /// controls branch or the grid branch can return. Moved back into
+    /// `keys_off_the_grid` it would run only on frames the wall does not own
+    /// the keys - exactly the frames the old code missed.
+    #[test]
+    fn the_seats_first_arrow_is_answered_before_either_branch() {
+        let source = include_str!("input.rs");
+        let handle = source.find("fn handle_keys(").unwrap();
+        let parsed = source.find("let keys = Self::parse_keys(").unwrap();
+        let seat = source.find("tilebar::first_arrow_target(").unwrap();
+        assert!(handle < parsed && parsed < seat, "the rule belongs in handle_keys, after parse_keys");
+        assert_eq!(source.matches("tilebar::first_arrow_target(").count(), 1);
+        let off_start = source.find("fn keys_off_the_grid(").unwrap();
+        let off_end = off_start + source[off_start..].find("fn handle_keys(").unwrap();
+        assert!(
+            !source[off_start..off_end].contains("first_arrow_target"),
+            "the rule grew a second copy behind the old branch"
+        );
+    }
+
+    /// A bar that goes down on its idle clock does so after the frame's focus
+    /// rules have run, so it must take the focus with it. Without this the
+    /// seat is an id with no widget behind it until egui notices a frame or
+    /// two later - the wall has no keys in the meantime.
+    #[test]
+    fn the_idle_bar_takes_its_focus_with_it() {
+        let source = include_str!("mod.rs");
+        let zero = source.find("left.is_zero()").unwrap();
+        let hide = zero + source[zero..].find("self.tile_bar.hide();").unwrap();
+        let tail = &source[hide..hide + 400];
+        assert!(tail.contains("self.leave_controls(ctx)"), "an idle hide must surrender the focus");
+    }
+
+    /// The lock `tilebar::draw`, `Nav::finish` and `timeline_input` each put
+    /// on whatever they have focused. egui's `begin_pass` reads the filter
+    /// left at the end of the *previous* frame, and only a widget that claims
+    /// both axes stops the geometric focus walk.
+    fn lock_arrows(ctx: &egui::Context, id: Id) {
+        ctx.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
+
+    /// One frame of the magnified viewport with the seat's real geometry: two
+    /// pixels in the bar's top-left corner, the first button down and to its
+    /// right, the recording's strip below, and the wall's two bars at the
+    /// screen's edges. `keep_seat` is the end-of-frame rule under test - the
+    /// old one surrendered the seat every frame and asked for it again, so
+    /// the lock drawn on it never reached the next `begin_pass`.
+    fn focus_frame(
+        ctx: &egui::Context,
+        frame: usize,
+        key: Option<Key>,
+        keep_seat: bool,
+        start: Id,
+        timeline: bool,
+    ) -> Option<Id> {
+        let (toolbar, status, strip) =
+            (Id::new("toolbar"), Id::new("status"), Id::new("xgview-timeline"));
+        let (seat, first) = (tilebar::seat(), tilebar::control(0));
+        let events: Vec<egui::Event> = key.map(press).into_iter().collect();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            // `handle_keys`, before anything is drawn.
+            if frame == 0 {
+                ctx.memory_mut(|memory| memory.request_focus(start));
+            }
+            // The old code answered the seat only in the branch reached when
+            // the wall did *not* own the keys; a frame that owned them left
+            // the focus on the seat for egui to walk by geometry. The fix
+            // answers it here, before either branch can be taken.
+            if keep_seat {
+                if let Some(target) = tilebar::first_arrow_target(
+                    true,
+                    ctx.memory(|memory| memory.focused()),
+                    key.is_some(),
+                ) {
+                    ctx.memory_mut(|memory| memory.request_focus(target));
+                    // The strip reads its Down from this same queue; the press
+                    // is already spent on the seat. `begin_pass` reads the raw
+                    // events, so this does not stop egui's walk - the lock does.
+                    ctx.input_mut(|input| {
+                        for k in [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown] {
+                            input.consume_key(Modifiers::NONE, k);
+                        }
+                    });
+                }
+            }
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = ui.interact(
+                    Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 30.0)),
+                    toolbar,
+                    Sense::click(),
+                );
+                let _ = ui.interact(
+                    Rect::from_min_size(pos2(0.0, 570.0), vec2(800.0, 30.0)),
+                    status,
+                    Sense::click(),
+                );
+                let seat_widget = ui.interact(
+                    Rect::from_min_size(pos2(203.0, 403.0), vec2(2.0, 2.0)),
+                    seat,
+                    Sense::focusable_noninteractive(),
+                );
+                let first_widget = ui.interact(
+                    Rect::from_min_size(pos2(209.0, 409.0), vec2(40.0, 40.0)),
+                    first,
+                    Sense::click(),
+                );
+                // Only a recording has a strip under the bar. A live picture
+                // has nothing down there for egui to walk onto.
+                let strip_widget = timeline.then(|| {
+                    ui.interact(
+                        Rect::from_min_size(pos2(200.0, 470.0), vec2(400.0, 50.0)),
+                        strip,
+                        Sense::click_and_drag(),
+                    )
+                });
+                if seat_widget.has_focus() {
+                    lock_arrows(ctx, seat);
+                }
+                if first_widget.has_focus() {
+                    lock_arrows(ctx, first);
+                }
+                if strip_widget.as_ref().is_some_and(|widget| widget.has_focus()) {
+                    lock_arrows(ctx, strip);
+                    // Up hands the keys back to the control they came from.
+                    if key == Some(Key::ArrowUp) {
+                        ctx.memory_mut(|memory| memory.request_focus(first));
+                    }
+                }
+            });
+            // `end_frame`: a focus the navigation layer does not own is given
+            // up, and one that is not the bar's goes back to the seat.
+            if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+                let keeps = if keep_seat {
+                    viewport_keeps_focus(focused, true, timeline, timeline.then_some(strip))
+                } else {
+                    timeline && focused == strip
+                };
+                if focused != first && !keeps {
+                    ctx.memory_mut(|memory| memory.surrender_focus(focused));
+                }
+            }
+            let focused = ctx.memory(|memory| memory.focused());
+            let strip_focus = timeline && focused == Some(strip);
+            if !focused.is_some_and(tilebar::owns) && !strip_focus {
+                ctx.memory_mut(|memory| memory.request_focus(seat));
+            }
+        });
+        ctx.memory(|memory| memory.focused())
+    }
+
+    fn walk_seat(key: Key, keep_seat: bool, timeline: bool) -> Vec<Option<Id>> {
+        let ctx = egui::Context::default();
+        (0..4)
+            .map(|frame| {
+                focus_frame(
+                    &ctx,
+                    frame,
+                    (frame == 2).then_some(key),
+                    keep_seat,
+                    tilebar::seat(),
+                    timeline,
+                )
+            })
+            .collect()
+    }
+
+    /// The old rule, written down so the reason for the fix is not lost: a
+    /// seat rebuilt every frame has a default event filter, so egui walks the
+    /// focus geometrically and only Down and Right find the first button.
+    #[test]
+    fn a_seat_rebuilt_every_frame_is_walked_in_only_two_directions() {
+        for key in [Key::ArrowDown, Key::ArrowRight] {
+            assert_eq!(
+                walk_seat(key, false, false)[2],
+                Some(tilebar::control(0)),
+                "{key:?} found the button by geometry"
+            );
+        }
+        for key in [Key::ArrowUp, Key::ArrowLeft] {
+            assert_ne!(
+                walk_seat(key, false, false)[2],
+                Some(tilebar::control(0)),
+                "{key:?} walked off the bar entirely"
+            );
+        }
+    }
+
+    /// Every arrow is the same request: light the first button. One idle
+    /// frame is needed for the seat's lock to reach `begin_pass`, which is
+    /// also what a viewer's two separate key presses always have.
+    #[test]
+    fn every_arrow_from_the_seat_lights_the_first_button() {
+        for timeline in [false, true] {
+            for key in [Key::ArrowUp, Key::ArrowDown, Key::ArrowLeft, Key::ArrowRight] {
+                let seen = walk_seat(key, true, timeline);
+                let state = if timeline { "recording" } else { "live" };
+                assert_eq!(seen[0], Some(tilebar::seat()), "{state}: opens on its seat");
+                assert_eq!(
+                    seen[2],
+                    Some(tilebar::control(0)),
+                    "{state}, {key:?}: must light the first button"
+                );
+                assert_eq!(
+                    seen[3],
+                    Some(tilebar::control(0)),
+                    "{state}, {key:?}: and the ring stays put"
+                );
+            }
+        }
+    }
+
+    /// A focused strip keeps its arrows: Up hands them back to a control,
+    /// Down stays with the strip, and neither puts a ring on the wall's bars.
+    #[test]
+    fn a_focused_strip_keeps_its_arrows_out_of_the_walls_bars() {
+        let strip = Id::new("xgview-timeline");
+        for key in [Key::ArrowUp, Key::ArrowDown] {
+            let ctx = egui::Context::default();
+            let seen: Vec<Option<Id>> = (0..4)
+                .map(|frame| {
+                    focus_frame(&ctx, frame, (frame == 2).then_some(key), true, strip, true)
+                })
+                .collect();
+            assert_ne!(seen[2], Some(Id::new("toolbar")), "{key:?} reached the toolbar");
+            assert_ne!(seen[2], Some(Id::new("status")), "{key:?} reached the status row");
+            let expected = if key == Key::ArrowUp {
+                Some(tilebar::control(0))
+            } else {
+                Some(strip)
+            };
+            assert_eq!(seen[2], expected, "{key:?} goes where the recording says");
+        }
     }
 }
