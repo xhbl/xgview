@@ -808,12 +808,22 @@ impl AMediaCodecDecoder {
         let chroma_height = height.div_ceil(2);
         let padded = plane_stride(width);
 
-        let mut y = vec![0u8; padded * height];
-        for row in 0..height {
-            let start = row * stride;
-            let source = data.get(start..start + width)?;
-            y.get_mut(row * padded..row * padded + width)?.copy_from_slice(source);
-        }
+        // When the codec's stride already equals the padded row the upload
+        // wants - which some codecs hand back - the plane is one contiguous run
+        // and it is taken in a single pass rather than `height` small ones. The
+        // cost being spent here is the number of calls, not the bytes: see
+        // `priv/docs/grid-cpu-cost.md`, item a.
+        let y = if stride == padded {
+            data.get(..padded * height)?.to_vec()
+        } else {
+            let mut y = vec![0u8; padded * height];
+            for row in 0..height {
+                let start = row * stride;
+                let source = data.get(start..start + width)?;
+                y.get_mut(row * padded..row * padded + width)?.copy_from_slice(source);
+            }
+            y
+        };
 
         // Where the colour is, and in which of the two shapes the codec chose.
         //
@@ -869,31 +879,39 @@ impl AMediaCodecDecoder {
                 crate::dump::dump(width as u32, height as u32, stride as u32, slice_height as u32, data);
             }
         }
-        let mut uv = vec![0u8; padded * chroma_height];
-        match layout {
+        let uv = match layout {
             Layout::SemiPlanar => {
-            // The interleaved plane follows the luma one, one chroma row per two
-            // luma rows, with the codec's padding in between.
-            for row in 0..chroma_height {
-                let start = base + row * stride;
-                let source = data.get(start..start + width)?;
-                uv.get_mut(row * padded..row * padded + width)?.copy_from_slice(source);
-            }
-            }
-            Layout::Planar => {
-            // Two planes of their own, U then V, each half as wide as the
-            // picture, interleaved into the one plane the renderer binds.
-            let u_base = stride * height;
-            let v_base = u_base + chroma_stride * chroma_height;
-            for row in 0..chroma_height {
-                let u_row = data.get(u_base + row * chroma_stride..u_base + (row + 1) * chroma_stride)?;
-                let v_row = data.get(v_base + row * chroma_stride..v_base + (row + 1) * chroma_stride)?;
-                let out = uv.get_mut(row * padded..row * padded + width)?;
-                for column in 0..chroma_stride {
-                    out[column * 2] = u_row[column];
-                    out[column * 2 + 1] = v_row[column];
+                // The interleaved plane follows the luma one, one chroma row per
+                // two luma rows, with the codec's padding in between. At the
+                // upload stride it is one run, like the luma plane.
+                if stride == padded {
+                    data.get(base..base + padded * chroma_height)?.to_vec()
+                } else {
+                    let mut uv = vec![0u8; padded * chroma_height];
+                    for row in 0..chroma_height {
+                        let start = base + row * stride;
+                        let source = data.get(start..start + width)?;
+                        uv.get_mut(row * padded..row * padded + width)?.copy_from_slice(source);
+                    }
+                    uv
                 }
             }
+            Layout::Planar => {
+                // Two planes of their own, U then V, each half as wide as the
+                // picture, interleaved into the one plane the renderer binds.
+                let mut uv = vec![0u8; padded * chroma_height];
+                let u_base = stride * height;
+                let v_base = u_base + chroma_stride * chroma_height;
+                for row in 0..chroma_height {
+                    let u_row = data.get(u_base + row * chroma_stride..u_base + (row + 1) * chroma_stride)?;
+                    let v_row = data.get(v_base + row * chroma_stride..v_base + (row + 1) * chroma_stride)?;
+                    let out = uv.get_mut(row * padded..row * padded + width)?;
+                    for column in 0..chroma_stride {
+                        out[column * 2] = u_row[column];
+                        out[column * 2 + 1] = v_row[column];
+                    }
+                }
+                uv
             }
             Layout::Unknown => {
                 // Neither shape fits the buffer the codec handed over, which is
@@ -901,7 +919,7 @@ impl AMediaCodecDecoder {
                 // drawn in colours that are not there.
                 return None;
             }
-        }
+        };
 
         Some(DecodedFrame {
             width: width as u32,

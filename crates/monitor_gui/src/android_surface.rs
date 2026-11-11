@@ -1481,11 +1481,11 @@ fn run() -> anyhow::Result<()> {
 
         // Wait for the next frame egui asked for, instead of compositing both
         // surfaces sixty times a second whether or not anything changed. A
-        // live channel asks for 33 ms and an idle wall for half a second - the
-        // same two answers eframe's loop gets on the older front end. The
-        // picture the codec scans straight into its own surface needs no
-        // repaint from here; one the wall draws from a texture is a live
-        // channel, and `needs_animation` has already asked for the 33 ms.
+        // live channel asks for the live repaint interval and an idle wall for
+        // half a second - the same two answers eframe's loop gets on the older
+        // front end. The picture the codec scans straight into its own surface
+        // needs no repaint from here; one the wall draws from a texture is a
+        // live channel, and `needs_animation` has already asked for it.
         //
         // egui has already taken `predicted_dt` off the delay it asks for, so
         // the frame's own cost is not subtracted a second time here.
