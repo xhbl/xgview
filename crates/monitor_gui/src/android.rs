@@ -303,7 +303,16 @@ pub fn set_video_shift(shift: f32) {
 /// any of those views, so it is not told about a camera at all. Leaving the
 /// magnification is *always* reported, even when the window has gone away:
 /// that is the signal that takes the views off the grid again.
+///
+/// The owner is also what says the surface is wanted at all. The window stays
+/// alive on a grid, so a wide stream opened there would otherwise be rendered
+/// into a view that is off screen and the tile would never get a texture.
+/// See `monitor_codec::surface::set_surface_layer_wanted`.
 pub fn set_video_owner(owner: Option<&str>) {
+    // Before the test below, which reads the same answer: the frame a zoom
+    // begins on has to reach the views, and the codec has to be allowed to
+    // open on the surface from that frame on.
+    monitor_codec::amediacodec::set_surface_layer_wanted(owner.is_some());
     if owner.is_some() && !monitor_codec::amediacodec::video_layer_active() {
         return;
     }

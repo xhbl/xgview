@@ -142,11 +142,13 @@ type ANativeWindow = c_void;
 // frame and a replaced window can be tested on the desktop. The names the wall
 // has always reached through `amediacodec` are kept here.
 pub use crate::surface::{
-    begin_surface_picture, forget_surface_picture, set_surface_suspended,
-    set_surface_window, surface_holds_picture, surface_presenting, video_layer_active,
+    begin_surface_picture, forget_surface_picture, set_surface_layer_wanted,
+    set_surface_suspended, set_surface_window, surface_holds_picture, surface_presenting,
+    video_layer_active,
 };
 use crate::surface::{
-    millis_now, surface_rendered, surface_session_closed, surface_snapshot, surface_suspended,
+    millis_now, surface_layer_wanted, surface_rendered, surface_session_closed, surface_snapshot,
+    surface_suspended,
 };
 
 /// How many pictures the decoder's pace is measured over.
@@ -210,6 +212,27 @@ pub struct AMediaCodecDecoder {
     /// open it again on the other path. Comparing this with the flag is what
     /// says whether that has happened yet.
     suspended: bool,
+    /// Whether this session's picture is wide enough to be offered the
+    /// activity's surface at all.
+    ///
+    /// The grid's sub streams are not, and going into or out of a magnification
+    /// must leave their decoders alone: reopening nine of them would stall the
+    /// whole wall for a change that concerns one picture.
+    surface_eligible: bool,
+    /// Whether this session has already tried to move on to the surface during
+    /// the current magnification.
+    ///
+    /// A tile pinned to the main stream is decoded into byte buffers while the
+    /// wall is a grid. Magnifying it changes no plan, so nothing replaces its
+    /// session - and on a box that cannot afford to read 1080p back, the
+    /// viewer watches a stuttering picture until some unrelated retry happens
+    /// to reopen the stream. `decode` reopens this one decoder on the surface
+    /// when the magnification begins. What is remembered is the *attempt*, not
+    /// the state the decoder was opened under: a device that refuses to point
+    /// this codec at the window falls back to byte buffers, and must not be
+    /// reopened on every following frame. Leaving the magnification clears it,
+    /// so the next one gets a fresh attempt.
+    surface_attempted: bool,
     /// The surface's `request` as it stood when this session was opened. A
     /// decoder opened for a picture that has since been asked of another camera
     /// must not put its late frames back into the surface's memory: the wall
@@ -346,6 +369,7 @@ impl AMediaCodecDecoder {
         // is only a hint for the buffers the decoder sizes up front.
         let (csd, size) = decode_parameter_sets(config.codec, access_unit);
         let size = size.or(Some((config.width, config.height)).filter(|(w, h)| *w > 0 && *h > 0));
+        self.surface_eligible = size.is_some_and(|(width, _)| width >= 1280);
 
         // The layout is asked for rather than guessed: `YUV420Flexible` lets the
         // codec pick, and one here picks differently from one session to the
@@ -369,7 +393,14 @@ impl AMediaCodecDecoder {
         // rendering into it would be one picture drawn nine times over. The
         // grid's sub streams stay on their own path; the picture wide enough to
         // be worth the trouble is the magnified one, and a replay.
-        if video_layer_active() && size.is_some_and(|(width, _)| width >= 1280) {
+        //
+        // `video_layer_active` asks for a magnified viewport, not merely a
+        // window. The window exists on a grid too, while its view is off
+        // screen: a tile pinned to the main stream there is just as wide, and
+        // a session configured with the surface would send every frame into
+        // that hidden view while the grid waits for a texture it never gets.
+        // See `surface::set_surface_layer_wanted`.
+        if video_layer_active() && self.surface_eligible {
             // The window and the generation are one answer. Reading the window
             // alone and asking later which generation it was would let a
             // session that outlives its surface render into the new one.
@@ -959,12 +990,65 @@ impl VideoDecoder for AMediaCodecDecoder {
         // the surface; neither is a change a configured codec can make, so the
         // session is dropped and the next access unit opens it on the other
         // path. `surface_presenting` answers for the frames in between.
+        let wanted_now = surface_layer_wanted();
+        if !wanted_now {
+            // Back on a grid: the next magnification gets one attempt of its
+            // own, whether or not this one managed to reach the surface.
+            self.surface_attempted = false;
+        }
         if self.suspended != surface_suspended() {
             tracing::info!(
                 target: "xgview::codec",
                 suspended = surface_suspended(),
                 "the surface path was suspended or resumed; reopening the decoder"
             );
+            self.close();
+            self.on_surface = false;
+            self.generation = 0;
+        }
+        // The window outlives the view. Going back to the grid moves the
+        // picture's view off screen but does not end a stream that was opened
+        // for it: a session still rendering into that surface hands the grid
+        // no frames at all, and a tile pinned to the main stream would wait
+        // for its first picture for ever. Reopen it on byte buffers, the path
+        // every grid picture needs.
+        if self.on_surface && !wanted_now {
+            tracing::info!(
+                target: "xgview::codec",
+                "the magnified view went away; reopening the decoder for the grid"
+            );
+            self.close();
+            self.on_surface = false;
+            self.generation = 0;
+        }
+        // The other direction, and why the attempt is remembered. A tile pinned
+        // to the main stream is opened on byte buffers while the wall is a grid;
+        // magnifying it changes no plan, so nothing replaces the session. On a
+        // television box reading 1080p back costs hundreds of milliseconds a
+        // frame - the viewer watches that stutter until an unrelated retry
+        // reopens the stream and the new session happens to take the surface.
+        // Magnify on purpose instead: reopen this one decoder on the surface.
+        //
+        // Only a wide session, only once per magnification, only while the
+        // surface can really be had. The last condition is what lets a window
+        // that arrives late, or a turn that is undone, still get the switch
+        // rather than burning the attempt on a decoder that would only fall
+        // back to byte buffers. The wall keeps drawing its held texture until
+        // the new session puts its first picture in the surface, exactly as a
+        // magnification that switches streams already does. The grid's sub
+        // streams are not eligible, so they are never disturbed.
+        if self.surface_eligible
+            && self.handle.is_some()
+            && !self.on_surface
+            && wanted_now
+            && !self.surface_attempted
+            && video_layer_active()
+        {
+            tracing::info!(
+                target: "xgview::codec",
+                "the magnified view asked for the surface; reopening the decoder"
+            );
+            self.surface_attempted = true;
             self.close();
             self.on_surface = false;
             self.generation = 0;

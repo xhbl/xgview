@@ -193,4 +193,57 @@ mod tests {
             "the build script should name the Java unpacker"
         );
     }
+
+    /// The activity's window is alive on a grid too, while its view is moved
+    /// off screen. A tile pinned to the main stream is just as wide as a
+    /// magnified picture, and a codec that asks only for a window renders into
+    /// that hidden view: the grid waits for a first frame for ever. Three ends
+    /// hold the rule together - the owner sets the want, the want gates the
+    /// layer, and a session left on the surface reopens on byte buffers.
+    #[test]
+    fn a_grid_tile_keeps_its_frames_off_the_hidden_surface() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let read = |name: &str| {
+            let path = root.join(name);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+        };
+        let surface = read("monitor_codec/src/surface.rs");
+        let codec = read("monitor_codec/src/amediacodec.rs");
+        let gui = read("monitor_gui/src/android.rs");
+
+        assert!(
+            surface.contains("!suspended && wanted && window"),
+            "a window without a magnified view must not be an active layer"
+        );
+        assert!(
+            gui.contains("set_surface_layer_wanted(owner.is_some())"),
+            "only a magnified view may ask for the surface"
+        );
+        assert!(
+            codec.contains("if video_layer_active() && self.surface_eligible"),
+            "the decoder must ask for the layer, not just for a window"
+        );
+        assert!(
+            codec.contains("if self.on_surface && !wanted_now"),
+            "a session left on the surface must reopen for the grid"
+        );
+        assert!(
+            codec.contains("the magnified view asked for the surface; reopening the decoder"),
+            "magnifying a pinned tile must switch to the surface on purpose"
+        );
+        assert!(
+            codec.contains("self.surface_attempted = true;")
+                && codec.contains("&& !self.surface_attempted"),
+            "the reverse switch must be a one-off, and must record the attempt"
+        );
+        assert!(
+            codec.contains("self.surface_attempted = false;") && codec.contains("if !wanted_now {"),
+            "a device that falls back to byte buffers must not be retried every frame, but the next magnification gets a fresh attempt"
+        );
+        assert!(
+            codec.contains("&& video_layer_active()"),
+            "the reverse switch must wait until the surface can really be had"
+        );
+    }
 }

@@ -189,9 +189,42 @@ pub(crate) fn surface_suspended() -> bool {
     SURFACE_SUSPENDED.load(Ordering::Acquire)
 }
 
+/// Whether a magnified picture has asked for the activity's surface.
+///
+/// The window outlives the view: it is created with the activity and stays
+/// there while the viewer looks at a grid, with the view merely moved off
+/// screen. A wide stream opened on a grid is still a wide stream, and one
+/// configured with that window would render every frame into a surface nobody
+/// is showing - the tile would wait for a first picture for ever, because the
+/// codec hands none back. See `AMediaCodecDecoder::open`.
+///
+/// The magnified viewport is the only thing the surface is for, so its owner
+/// sets this. `set_video_owner` answers it on the frame the zoom changes; the
+/// wall's `picture_layer_wanted` and the codec's choice of output then read the
+/// same answer. A device whose surface has gone away, or one that has suspended
+/// the path for a turned picture, still answers false from the other two terms.
+static SURFACE_LAYER_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// Says whether the magnified viewport is asking the surface for a picture.
+pub fn set_surface_layer_wanted(wanted: bool) {
+    SURFACE_LAYER_WANTED.store(wanted, Ordering::Release);
+}
+
+pub(crate) fn surface_layer_wanted() -> bool {
+    SURFACE_LAYER_WANTED.load(Ordering::Acquire)
+}
+
+fn layer_active(suspended: bool, wanted: bool, window: bool) -> bool {
+    !suspended && wanted && window
+}
+
 /// Whether there is a surface a picture could be rendered into right now.
 pub fn video_layer_active() -> bool {
-    !surface_suspended() && with_surface(|fact| fact.window != 0)
+    layer_active(
+        surface_suspended(),
+        surface_layer_wanted(),
+        with_surface(|fact| fact.window != 0),
+    )
 }
 
 /// How long a surface whose next session has not drawn yet still counts as
@@ -364,8 +397,9 @@ fn within_handover(last: u64, now: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        answers_current_request, answers_surface, holds_picture, presenting, rendered,
-        replace_window, session_closed, window_replaced, within_handover, SurfaceFact,
+        answers_current_request, answers_surface, holds_picture, layer_active, presenting,
+        rendered, replace_window, session_closed, set_surface_layer_wanted, set_surface_suspended,
+        set_surface_window, video_layer_active, window_replaced, within_handover, SurfaceFact,
     };
     use std::ffi::c_void;
 
@@ -513,5 +547,40 @@ mod tests {
         assert_eq!(fact.sessions, 0);
         session_closed(&mut fact, 6);
         assert_eq!(fact.sessions, 0, "a second close cannot go negative");
+    }
+
+    /// The activity's window is created once and outlives its view: it is
+    /// still there on a grid, with the view moved off screen. A stream wide
+    /// enough for the surface is opened on a grid too - a tile pinned to the
+    /// main stream - and a codec given that window would render into a view
+    /// nobody is showing while the tile waits for a frame it never receives.
+    #[test]
+    fn a_window_without_a_magnified_view_is_not_an_active_layer() {
+        assert!(!layer_active(false, false, true), "a grid has a window but no view");
+        assert!(!layer_active(false, true, false), "a view with no window");
+        assert!(!layer_active(true, true, true), "a turned picture suspends the path");
+        assert!(layer_active(false, true, true), "a magnified picture on a surface");
+    }
+
+    /// The flag is read through the public answer the codec and the views ask,
+    /// in both directions, and the other two terms still hold it down.
+    #[test]
+    fn the_magnified_view_is_what_makes_the_layer_active() {
+        let window = 1usize as *mut c_void;
+        set_surface_window(window, true, false);
+        set_surface_suspended(false);
+        set_surface_layer_wanted(false);
+        assert!(!video_layer_active(), "the grid's window is not a picture layer");
+
+        set_surface_layer_wanted(true);
+        assert!(video_layer_active(), "the magnified view asks for the surface");
+        set_surface_suspended(true);
+        assert!(!video_layer_active(), "suspending the path wins over the view");
+        set_surface_suspended(false);
+        assert!(video_layer_active(), "the turn was undone");
+
+        set_surface_window(std::ptr::null_mut(), true, false);
+        assert!(!video_layer_active(), "the surface went away");
+        set_surface_layer_wanted(false);
     }
 }
