@@ -53,6 +53,20 @@ use crate::{
     DecoderConfig, PixelFormat, Result, VideoDecoder, VideoStreamInfo,
 };
 
+/// The shortest gap between two pictures handed to the renderer.
+///
+/// A picture costs a readback and a repack before it is anything the wall can
+/// draw, and the wall shows one per refresh however many it is given - the
+/// monitor is sixty a second, and a replay at eight times its recording's speed
+/// decodes two hundred. Bringing every one of them back is what a replay at that
+/// rate spends its second on, and it is spent on pictures that are replaced
+/// before the screen ever shows them.
+///
+/// A live channel at twenty-five frames a second, and a recording played at its
+/// own speed, are further apart than this gap and hand over every picture they
+/// have. Only a read that is faster than the screen is thinned.
+const HANDOVER_GAP: Duration = Duration::from_millis(25);
+
 /// Decoder backed by FFmpeg's `libavcodec`.
 pub struct FfmpegDecoder {
     /// Codec the session negotiated, reported through [`VideoDecoder::info`].
@@ -67,7 +81,15 @@ pub struct FfmpegDecoder {
     info: Option<VideoStreamInfo>,
     /// Timestamp of the last access unit, reused when the decoder is drained.
     last_pts_us: i64,
+    /// Pictures handed to the renderer, which is what [`Self::frames`] counts.
     frames: u64,
+    /// Pictures that came out of the decoder, whether or not they were handed
+    /// over. The difference between the two is a readback saved; see
+    /// [`HANDOVER_GAP`]. Reported through [`VideoDecoder::pictures`], which is
+    /// how a session tells "decoded but thinned" from "the decoder is stuck".
+    pictures: u64,
+    /// When the last picture was handed over, or `None` before the first.
+    handed_at: Option<Instant>,
     /// The device this decoder was handed, when one opened.
     device: Option<&'static Device>,
     /// Set once a picture comes back in that device's format, which is the only
@@ -117,6 +139,8 @@ impl Default for FfmpegDecoder {
             info: None,
             last_pts_us: 0,
             frames: 0,
+            pictures: 0,
+            handed_at: None,
             device: None,
             hardware: false,
             cost: TransferCost::default(),
@@ -152,6 +176,15 @@ impl FfmpegDecoder {
         let mut copied_back = Picture::empty();
         let mut converted = Picture::empty();
         while decoder.receive_frame(&mut picture).is_ok() {
+            self.pictures += 1;
+            // Decoded, and taken off the decoder either way: a picture the next
+            // one is predicted from cannot be left where it is. What a picture
+            // that is not handed over does not cost is the readback and the
+            // repack - the two steps that stand between the decoder and the
+            // wall, and the two a screen this far behind would not have shown.
+            if !take_handover(&mut self.handed_at) {
+                continue;
+            }
             // A picture the decoder left on the GPU has to be brought back into
             // system memory before anything can read it, and every device hands
             // it over as NV12 - the very layout the renderer takes. Which format
@@ -603,6 +636,26 @@ unsafe extern "C" fn prefer_hardware(
     *formats
 }
 
+/// Whether this picture is one to bring back and hand to the renderer.
+///
+/// Decided on the clock and not on a share of the stream, because what the wall
+/// can take is a rate: the same decoder serves a camera at its own twenty-five
+/// frames and a replay at eight times a recording's, and only the replay has
+/// pictures the screen will never show. Taken as `&mut` on the field rather than
+/// as a method because the decoder context is borrowed for the length of the
+/// drain, and a method on `self` would not be.
+///
+/// The first picture of a session is always handed over: `None` is not "long
+/// ago", it is "nothing has been shown yet".
+fn take_handover(handed_at: &mut Option<Instant>) -> bool {
+    let now = Instant::now();
+    if handed_at.is_some_and(|last| now.duration_since(last) < HANDOVER_GAP) {
+        return false;
+    }
+    *handed_at = Some(now);
+    true
+}
+
 /// Copies a picture the decoder left on the GPU back into system memory.
 ///
 /// The destination is an empty frame: the transfer fills in its size and its
@@ -845,6 +898,16 @@ impl VideoDecoder for FfmpegDecoder {
 
     fn info(&self) -> Option<&VideoStreamInfo> {
         self.info.as_ref()
+    }
+
+    /// Pictures the decoder has produced, counted whether or not they were
+    /// brought back.
+    ///
+    /// A session reads this to tell a picture that came out and was thinned
+    /// from a decoder that has stopped producing, and the two want opposite
+    /// answers from it.
+    fn pictures(&self) -> u64 {
+        self.pictures
     }
 }
 
