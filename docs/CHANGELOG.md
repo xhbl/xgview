@@ -3,77 +3,36 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 2.2.53
+## 2.2.66
 
 Changes since 2.1.88. **On Android a magnified 1080p picture plays at its full
-frame rate again: the decoder hands each frame straight to the display, instead
-of the wall copying every one of them back out of the decoder's buffers.** A
-three-layer window makes that possible, and the older rendering path - the
-desktop, and a device that refuses a surface - is unchanged. See
-`docs/DevMemo.md` §71 for how the layers fit together.
+frame rate again: the decoder hands every frame straight to the display instead
+of the wall copying it back out of the decoder's buffers, which had cost more
+than a frame's whole budget.** A magnified 1080p channel now runs at about 25 fps
+where it managed 18.6, and fast playback is fast rather than stuck at the
+stream's own rate. The wall still paints everything it always did - the four OSD
+corners, the bar, the timeline, the focus ring, the toast and the one-point frame
+around a full-screen picture - on a see-through layer over the picture, at the
+same pixels as before. The desktop, and a device that refuses a surface, keep the
+older path unchanged; `docs/DevMemo.md` §71 covers how the layers fit together.
 
-### Full-speed pictures on Android
+### The rest of the line
 
-- **A 1080p picture reaches about 25 fps where it used to reach 18.6**, and fast
-  playback is fast rather than stuck at the stream's own rate. Copying a frame
-  back cost more than the frame's whole budget, so no decoder could have gone
-  faster; the frames now never pass through the CPU.
-- **The wall still paints everything it always did.** The four OSD corners, the
-  bar, the timeline, the focus ring, the toast and the one-point frame around a
-  full-screen picture are drawn on a see-through layer over the picture, at the
-  same pixels as before.
-- **Switching cameras no longer flashes the previous one.** The picture's view
-  is shown only once a frame has really been rendered into it; the wall keeps
-  drawing the incoming sub-stream and the "connecting" notice meanwhile.
-- **A recording is the same size as a live picture.** The bars that an empty
-  wall holds open no longer shrink the viewport during playback.
-- **Leaving the app and coming back no longer aborts or comes up black.** A new
-  surface gets a new renderer *and* a new egui context, and the decoder reopens
-  on the window it has rather than the one it was given at launch.
+Most of what follows is that new front end being brought up to the old one
+rather than a change in what the viewer does. Where it shows:
 
-### Touch, orientation and the system bars
-
-- **Pinch to zoom, drag to pan and the aspect switch all move the picture**,
-  including the one the decoder draws. One finger pans a pushed-in picture and
-  steps to the next camera when the whole picture is in view.
-- **A touch no longer makes the picture jump**, and a drag moves it exactly as
-  far as the finger rather than a fraction of it.
-- **The orientation button is back, and portrait uses the same fast path.**
-  Turning a picture on still shows it turned: while that switch is on, the
-  decoder gives its frames back to the wall, which has always known how to
-  rotate them.
-- **"Keep the navigation bar" works again.** The wall, the picture and the
-  controls all leave the bar's strip alone.
-
-### A hardware keyboard
-
-- **Keys type into settings fields again**, with Shift, a non-Latin layout, the
-  numpad and punctuation; Ctrl+A selects the field instead of putting a control
-  character in it. The remote's volume and media keys still belong to the
-  system.
-- **F1, F2 and F11 open settings, devices and full screen** as they do on the
-  desktop.
-
-### Quieter when idle
-
-- **An idle wall no longer redraws sixty times a second.** The loop waits for
-  the next repaint egui asks for - a few dozen times a second while a picture
-  or an animation is running, twice a second when nothing is moving - and a
-  key, a touch, a new surface or an incoming message wakes it at once.
-- **A device whose surfaces can only be opaque no longer shows a black
-  rectangle** where the overlay should be. It falls back to the wall drawing the
-  whole screen: slower, but a picture.
-
-### Also in 2.2.x
-
-- Each picture has its own decoder, and a playback speed survives the request
-  that set it; a held picture says why it is held.
-- Colour is taken from what the stream declares rather than guessed, whether the
-  picture arrives in one shape or two.
-- A session stops when it is told to without taking the picture off the screen,
-  and an event still in progress is drawn up to the present moment.
-- An import no longer needs the system's document picker, and Android ships a
-  32-bit package beside the 64-bit one.
+- **An idle wall no longer redraws sixty times a second**, and the wall repaints
+  at the rate its streams run at. Ten 640x480 channels on the kiosk box came
+  down from 80% of a core to 70%.
+- **The picture arrives instead of flashing, aborting or staying black**: on a
+  camera step and on a return to the app, on a tile pinned to the main stream,
+  and on magnifying one - which also moves that decoder onto the surface at once
+  rather than stuttering until an unrelated retry reopens the stream.
+- **On Android an import or an export uses the system's file picker**, an
+  exported configuration keeps the extension it should, the interface comes up in
+  Chinese again, and the soft keyboard no longer drops by itself on a television
+  box.
+- A window started full screen hands back a windowed size when it leaves it.
 
 ## 2.1.88
 
