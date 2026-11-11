@@ -307,8 +307,13 @@ impl XgViewApp {
         // for one at creation is what drops it back out of full screen, see
         // `native_options` - so the first time full screen is left it is handed
         // one rather than coming back at whatever size it happens to be.
-        let resized = std::mem::take(&mut self.windowed_size_pending);
-        if window && !enabled && resized {
+        //
+        // Spend the flag only on the call that actually sends the size. Taking
+        // it unconditionally spent it on the first frame's `set_fullscreen(true)`
+        // and left the eventual exit with nothing to send, so a desktop that
+        // started full screen came back at whatever size the compositor had.
+        if owes_windowed_size(window, enabled, self.windowed_size_pending) {
+            self.windowed_size_pending = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                 crate::WINDOWED_SIZE[0],
                 crate::WINDOWED_SIZE[1],
@@ -390,5 +395,52 @@ impl XgViewApp {
         // The picture's shape is the bar's default too: turned, it goes; back
         // upright, it comes.
         self.settle_tile_bar();
+    }
+}
+
+/// Whether this call owes the window its windowed size, and may spend the flag
+/// that says one is still owed.
+///
+/// The first frame of a full-screen launch calls `set_fullscreen(true)`, which
+/// is not a departure from full screen and must not consume the flag - only the
+/// eventual `set_fullscreen(false)` does that. Asking this as one answer rather
+/// than relying on the short circuit of a `&&` keeps a later rearrangement from
+/// quietly spending the flag again. Off Android there is no window manager to
+/// ask, and the flag is false there in any case.
+fn owes_windowed_size(window: bool, enabled: bool, pending: bool) -> bool {
+    window && !enabled && pending
+}
+
+#[cfg(test)]
+mod tests {
+    use super::owes_windowed_size;
+
+    #[test]
+    fn a_full_screen_launch_keeps_its_windowed_size_until_it_leaves() {
+        let mut pending = true;
+        // The window was built full screen: the first frame, and every later
+        // request to stay full screen, must leave the flag alone. This is the
+        // frame that used to spend it and lose the 1280x720 restore.
+        assert!(!owes_windowed_size(true, true, pending));
+        assert!(!owes_windowed_size(true, true, pending));
+        // Leaving full screen sends the size once...
+        assert!(owes_windowed_size(true, false, pending));
+        pending = false;
+        // ...and a second exit, or another trip through full screen, does not
+        // send it again.
+        assert!(!owes_windowed_size(true, false, pending));
+        assert!(!owes_windowed_size(true, true, pending));
+    }
+
+    #[test]
+    fn a_window_that_never_started_full_screen_owes_no_size() {
+        assert!(!owes_windowed_size(true, true, false));
+        assert!(!owes_windowed_size(true, false, false));
+    }
+
+    #[test]
+    fn a_television_has_no_window_to_resize() {
+        assert!(!owes_windowed_size(false, true, true));
+        assert!(!owes_windowed_size(false, false, true));
     }
 }
