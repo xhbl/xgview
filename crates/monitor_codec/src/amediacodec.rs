@@ -63,6 +63,23 @@ const INFO_OUTPUT_FORMAT_CHANGED: isize = -2;
 /// `INFO_TRY_AGAIN_LATER`
 const INFO_TRY_AGAIN_LATER: isize = -1;
 
+/// The shortest gap between two pictures handed to the surface's compositor.
+///
+/// A surface shows one picture per refresh, and holds the codec's output buffers
+/// until it has shown them. A session that renders every picture it decodes is
+/// therefore paced by the display rather than by what it is reading: a live
+/// channel at 25 frames a second never notices, and a recording played at eight
+/// times its speed is pinned to sixty pictures a second - the codec waits for an
+/// output buffer it has already handed over, the session sees every sample
+/// arrive late, and the rate the viewer asked for is never reached.
+///
+/// Skipping a handover costs nothing visible: the compositor can only show the
+/// newest picture it was given, so the ones in between were never going to be
+/// seen. The gap is a little wider than a frame at 30Hz, which leaves the live
+/// channel - and a recording at its own speed - handing over every picture they
+/// have.
+const RENDER_GAP: Duration = Duration::from_millis(25);
+
 /// `COLOR_FormatYUV420Flexible`: the format a decoder offers when it is given no
 /// surface to render into. What it hands over is NV12 in practice, with the row
 /// pitch and plane height it reports as `stride` and `slice-height`.
@@ -269,6 +286,12 @@ pub struct AMediaCodecDecoder {
     /// on the strength of a window existing shows that instead - which is a
     /// frame of the previous camera, on a channel step.
     presenting: bool,
+    /// When the last picture was handed to the surface's compositor.
+    ///
+    /// `None` before the first one, so that a session always renders the picture
+    /// it opened on however soon after it opened. See [`RENDER_GAP`] for why the
+    /// handovers are spaced at all.
+    rendered_at: Option<Instant>,
     /// Set once an output format this cannot read as NV12 has been reported.
     ///
     /// Byte-buffer mode only: with a surface the codec reports
@@ -683,6 +706,27 @@ impl AMediaCodecDecoder {
         self.stat_drain += whole.elapsed();
     }
 
+    /// Whether this picture is one to hand to the surface's compositor.
+    ///
+    /// Answered with the clock rather than with a count of pictures, because
+    /// what the surface can take is a rate and not a share of the stream: the
+    /// same codec serves a live camera at 25 frames a second and a recording at
+    /// eight times that, and only the second one has pictures to spare.
+    ///
+    /// The first picture after a session opens is always handed over - the
+    /// surface is showing the previous session's, or nothing at all.
+    fn take_handover(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .rendered_at
+            .is_some_and(|last| now.duration_since(last) < RENDER_GAP)
+        {
+            return false;
+        }
+        self.rendered_at = Some(now);
+        true
+    }
+
     fn drain_inner(&mut self, codec: *mut AMediaCodec, frames: &mut Vec<DecodedFrame>) {
         let Some(_) = self.handle else {
             return;
@@ -735,8 +779,13 @@ impl AMediaCodecDecoder {
                     // nothing to render now. A codec given a surface is the
                     // other way round: the render *is* the hand-off, and this
                     // is the call the box spends 14-20 ms in when there is no
-                    // surface to render into.
-                    let render = self.on_surface && info.flags & BUFFER_FLAG_END_OF_STREAM == 0;
+                    // surface to render into. A session reading faster than the
+                    // surface can show - a recording at eight times its speed -
+                    // hands over only the pictures that could be seen: see
+                    // [`RENDER_GAP`].
+                    let render = self.on_surface
+                        && info.flags & BUFFER_FLAG_END_OF_STREAM == 0
+                        && self.take_handover();
                     let releasing = Instant::now();
                     unsafe { AMediaCodec_releaseOutputBuffer(codec, index as usize, render) };
                     self.stat_release += releasing.elapsed();
@@ -940,6 +989,10 @@ impl AMediaCodecDecoder {
             self.presenting = false;
             surface_session_closed(self.generation);
         }
+        // Whatever the next session opens on is not this one's picture, and the
+        // gap between two handovers is a gap within a session: a session opened
+        // straight after another must not be held back by the last one's clock.
+        self.rendered_at = None;
         if let Some(codec) = self.handle.take() {
             if self.started {
                 unsafe { AMediaCodec_stop(codec) };
