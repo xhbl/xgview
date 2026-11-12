@@ -5,8 +5,8 @@
 //! a device without a document provider has no way to import at all. This one
 //! is built the way the rest of the interface is - every row a registered
 //! control of a column scope, so Up and Down walk it, Enter opens a directory
-//! or takes a file, and Back steps out of the directory it is in before it
-//! closes the window.
+//! or takes a file, and Back closes the window. The way up is a button beside
+//! the shortcuts, not a key.
 //!
 //! It answers both questions the settings page asks. An import walks the
 //! listing and takes a file; an export walks the same listing, names the file
@@ -74,9 +74,10 @@ const SEALED_SUFFIXES: [&str; 1] = [".seal"];
 ///
 /// Going up is not a row: it is a button beside the shortcuts - see
 /// [`FilePicker::body`] - because a row for it costs the height of a folder in
-/// every directory, for a press the remote already has a key for. A folder with
-/// nothing to show has no rows at all; the wall says so in words and the focus
-/// stays on the shortcuts above, which are the only things there are to press.
+/// every directory, and Back is the one key that leaves the window now. A
+/// folder with nothing to show has no rows at all; the wall says so in words
+/// and the focus stays on the shortcuts above, which are the only things there
+/// are to press.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Entry {
     /// A directory: Enter walks into it.
@@ -141,6 +142,14 @@ impl Listing {
     fn above(&self) -> Option<PathBuf> {
         self.dir.parent().map(Path::to_path_buf)
     }
+}
+
+/// Whether a walk into a folder should hand the ring to the listing's first
+/// row. A press on the up button keeps it on that button while the button is
+/// still enabled; any other way in - and a button that has just gone grey -
+/// hands it down instead.
+fn focuses_listing_after_walk(from_up: bool, up_still_enabled: bool) -> bool {
+    !from_up || !up_still_enabled
 }
 
 /// The window's navigation scopes, declared beside the window they walk.
@@ -344,18 +353,21 @@ impl FilePicker {
         Some(self.listing.dir.join(name))
     }
 
-    /// Moves up one directory, and says whether there was one to move to.
+    /// Enters `dir` after a press, and decides where the focus should land.
     ///
-    /// The window closes on `false`: Back steps out of the listing first, so a
-    /// window opened three directories deep is not closed by one press.
-    pub(super) fn up(&mut self) -> bool {
-        let Some(above) = self.listing.above() else {
-            return false;
-        };
-        self.listing = Listing::read(&above, self.mode);
-        self.reanchor = true;
+    /// `from_up` is whether the press was on the button beside the shortcuts.
+    /// That button is still there in the folder above - a viewer climbing
+    /// several levels presses the same control again - so its focus ring stays
+    /// on it rather than being handed to the first row of the new listing. The
+    /// one exception is the button having gone grey: at a root there is no
+    /// further up to go, and a ring on a disabled control answers nothing.
+    /// Every other way into a folder re-anchors as it always did.
+    fn walk(&mut self, dir: &Path, from_up: bool) {
+        self.listing = Listing::read(dir, self.mode);
+        self.reanchor = focuses_listing_after_walk(from_up, self.listing.above().is_some());
+        // A question about a name in the folder just left is a question about
+        // a file that is no longer on screen.
         self.ask = None;
-        true
     }
 
     /// What a press on the Save button comes to.
@@ -413,7 +425,7 @@ impl FilePicker {
     /// reads [`take_picked`](Self::take_picked) and [`took_back`](Self::took_back)
     /// to find out why.
     pub(super) fn body(&mut self, app: &mut XgViewApp, ui: &mut egui::Ui) -> Answer {
-        // Escape, or Back at a root, asked to leave. The request is carried on
+        // A Back key asked to leave. The request is carried on
         // the app rather than acted on in `handle_keys`: closing through the
         // window's own answer is what lets `draw_file_picker` clear `file_job`,
         // the flag that hands the keyboard back to the rest of the interface.
@@ -423,7 +435,9 @@ impl FilePicker {
         // One action per frame at most, applied after the rows are drawn: a
         // press that changes the directory while the rows are being walked
         // would leave the loop reading a listing that no longer exists.
-        let mut go: Option<PathBuf> = None;
+        // Where a press takes the listing, and whether that press was the up
+        // button - which is the one that keeps its focus ring (see `walk`).
+        let mut go: Option<(PathBuf, bool)> = None;
         let mut take: Option<PathBuf> = None;
         let mut write: Option<PathBuf> = None;
         let mut rename: Option<String> = None;
@@ -444,11 +458,11 @@ impl FilePicker {
 
         // The shortcuts, with the way up beside them.
         //
-        // Going up used to be the first row of the listing. That costs the
-        // height of a folder in every directory for a press the remote already
-        // has a key for - Back steps out of a directory, see `picker_back` - so
-        // it is a button here instead, where it costs nothing: a pointer has no
-        // Back, and this is what it gets. Greyed at a root, where up is nowhere.
+        // Going up used to be the first row of the listing, and then a Back
+        // press. Both cost too much now: a row takes the height of a folder in
+        // every directory, and Back closes the window on every platform. So
+        // this button is the one way up - a pointer has no keys at all - and it
+        // is greyed at a root, where up is nowhere.
         let above = self.listing.above();
         let mut up: Option<(Id, bool)> = None;
         // Where the focus goes when the listing has no rows at all - a folder
@@ -466,7 +480,7 @@ impl FilePicker {
                     first = Some(button.id);
                 }
                 if button.clicked() {
-                    go = Some(path.clone());
+                    go = Some((path.clone(), false));
                 }
             }
             let button = ui.add_enabled(above.is_some(), egui::Button::new(UP_ICON));
@@ -478,7 +492,15 @@ impl FilePicker {
             // has nothing for the line to read otherwise.
             app.name(&button, "file-picker-up");
             if button.clicked() {
-                go = above.clone();
+                if let Some(parent) = &above {
+                    // The ring follows the button that was pressed: climbing
+                    // several levels is pressing this same control again, and
+                    // `walk` leaves the ring here while it is still enabled.
+                    // A mouse press is included - it may have come from a row,
+                    // and the button is what the viewer just chose.
+                    ui.ctx().memory_mut(|memory| memory.request_focus(button.id));
+                    go = Some((parent.clone(), true));
+                }
             }
             up = Some((button.id, above.is_none()));
         });
@@ -618,7 +640,7 @@ impl FilePicker {
                 }
                 if response.clicked() || (confirm && response.has_focus()) {
                     match entry {
-                        Entry::Directory { path, .. } => go = Some(path.clone()),
+                        Entry::Directory { path, .. } => go = Some((path.clone(), false)),
                         // A save writes a name the field below carries, so an
                         // existing file is not something to open: a press fills
                         // the name in, so the next save replaces it. The confirm
@@ -776,15 +798,11 @@ impl FilePicker {
 
         // There is no line of instructions under the window. The keys are the
         // same ones the rest of the interface already answers - arrows to walk,
-        // OK to confirm, Back to step out - and on a handset held sideways a
+        // OK to confirm, Back to close - and on a handset held sideways a
         // line of them costs height the listing can spend on a folder.
 
-        if let Some(dir) = go {
-            self.listing = Listing::read(&dir, self.mode);
-            self.reanchor = true;
-            // A question about a name in the folder just left is a question
-            // about a file that is no longer on screen.
-            self.ask = None;
+        if let Some((dir, from_up)) = go {
+            self.walk(&dir, from_up);
         }
         if let Some(path) = take.or(write) {
             app.file_picker_picked = Some(path);
@@ -991,7 +1009,7 @@ mod tests {
         );
         assert_eq!(files(&picker.listing), ["sealed.seal"]);
         picker.listing = Listing::read(&dir.join("nested"), Mode::Save { sealed: true });
-        assert!(picker.up(), "back to the folder with the files");
+        picker.walk(&dir, true);
         assert_eq!(files(&picker.listing), ["sealed.seal"]);
     }
 
@@ -1110,6 +1128,33 @@ mod tests {
         assert_eq!(nav.step(field, Dir::Down), Some(save), "then Save");
         assert_eq!(nav.step(save, Dir::Up), Some(field));
         assert_eq!(nav.step(field, Dir::Up), Some(place), "and back to the shortcuts");
+    }
+
+    /// A press on the up button keeps its focus ring in the folder above: the
+    /// button is still there, and a viewer often climbs more than one level.
+    /// Only when it goes grey - at a root, where there is no further up - is
+    /// the ring handed down to the listing. Every other way into a folder
+    /// re-anchors as it did before.
+    #[test]
+    fn the_up_button_keeps_its_ring_until_it_goes_grey() {
+        assert!(!focuses_listing_after_walk(true, true), "an enabled button keeps its ring");
+        assert!(focuses_listing_after_walk(true, false), "a grey button hands it down");
+        assert!(focuses_listing_after_walk(false, true), "a shortcut re-anchors");
+        assert!(focuses_listing_after_walk(false, false), "a directory row re-anchors");
+
+        let root = scratch("up-ring");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let mut picker = FilePicker::start(nested.clone(), Vec::new(), Mode::Open, String::new());
+        picker.ask = Some("taken.json".to_owned());
+        picker.walk(&root, true);
+        assert_eq!(picker.listing.dir, root);
+        assert!(!picker.reanchor, "the parent still has a parent of its own");
+        assert!(picker.ask.is_none(), "the question belonged to the folder just left");
+
+        picker.walk(&nested, false);
+        assert_eq!(picker.listing.dir, nested);
+        assert!(picker.reanchor, "walking into a folder is not the up button");
     }
 
     #[test]

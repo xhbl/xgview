@@ -3,37 +3,6 @@
 
 use super::*;
 
-/// The two ways out of the import picker. Every other window in the program
-/// treats Escape, the remote's Back and Backspace as the same "leave"; the
-/// picker reads them itself because a listing has a level to step out of.
-/// Backspace in its save field is the one exception - there it deletes a
-/// character and is left in the queue for the field.
-enum PickerBack {
-    /// A desktop's Escape closes the window outright. A television has no such
-    /// key - its BACK arrives as Escape and has to step out of the directory
-    /// first - so this is only built off Android.
-    #[cfg_attr(target_os = "android", allow(dead_code))]
-    Close,
-    Up,
-}
-
-/// What Escape does to the picker depends on what the device calls Back.
-///
-/// A television's BACK key reaches winit as `Key::Escape` - there is no
-/// `BrowserBack` event alongside it to tell the two apart - so on Android the
-/// key steps out of one directory, while on a desktop it closes the window.
-/// The title bar's close button is the way out on a television, as is a Back
-/// at a root.
-#[cfg(not(target_os = "android"))]
-fn escape_leaves() -> PickerBack {
-    PickerBack::Close
-}
-
-#[cfg(target_os = "android")]
-fn escape_leaves() -> PickerBack {
-    PickerBack::Up
-}
-
 impl XgViewApp {
     /// Remembers where a press went down, so the release can be read as a tap.
     ///
@@ -614,8 +583,17 @@ impl XgViewApp {
         })
     }
 
-    /// Reads the picker's leaving keys, taking them out of the queue so the
-    /// window behind it cannot answer the same press as well.
+    /// Whether a Back key was pressed, taking it out of the queue so the
+    /// window behind it cannot answer the same press as well. `true` means
+    /// the picker is to close - on every platform, and whichever of the three
+    /// keys it was.
+    ///
+    /// Escape, the remote's `BrowserBack` and a keyboard's Backspace all read
+    /// as Back elsewhere in the program, and the file window is no longer an
+    /// exception: it used to step out of one directory instead, with Escape
+    /// meaning something else again on a television, where BACK *is* Escape.
+    /// Walking up a directory is the button beside the shortcuts now; see
+    /// [`super::file_picker`].
     ///
     /// `typing` is whether the focused control is a text field of the
     /// navigation layer - in this window, the save field at its foot. A
@@ -623,21 +601,15 @@ impl XgViewApp {
     /// character, and the `TextEdit` has to be left to read it. The rest of
     /// the interface answers the same question the same way; see
     /// [`XgViewApp::typing`] and [`XgViewApp::dialog_back_pressed`].
-    fn picker_back(ctx: &egui::Context, typing: bool) -> Option<PickerBack> {
+    fn picker_back(ctx: &egui::Context, typing: bool) -> bool {
         ctx.input_mut(|input| {
             let none = Modifiers::NONE;
-            if input.consume_key(none, Key::Escape) {
-                return Some(escape_leaves());
-            }
-            if input.consume_key(none, Key::BrowserBack) {
-                return Some(PickerBack::Up);
+            if input.consume_key(none, Key::Escape) || input.consume_key(none, Key::BrowserBack) {
+                return true;
             }
             // The remote's Back is BrowserBack; a keyboard's Backspace is only
             // a Back while no field is being typed into.
-            if !typing && input.consume_key(none, Key::Backspace) {
-                return Some(PickerBack::Up);
-            }
-            None
+            !typing && input.consume_key(none, Key::Backspace)
         })
     }
 
@@ -1390,7 +1362,7 @@ impl XgViewApp {
         //
         // The viewer's own picker is different: its rows are walked by the very
         // navigation layer below, so handing the keys back to it is what makes
-        // Up and Down move the ring and Back step out of a directory.
+        // Up and Down move the ring and Back close the window.
         //
         // Read as the frame began rather than now: a Back that has just closed
         // the dialog is the dialog's to answer, and it is the same press that a
@@ -1436,46 +1408,29 @@ impl XgViewApp {
             self.exit_armed = None;
         }
 
-        // The picker is the one window with a level to step out of: Back goes
-        // up one directory and closes only at a root. On a desktop Escape
-        // closes it outright; on a television that same key *is* the Back
-        // button. Both are consumed here, before the shared window handling
-        // below, so the panel behind it does not also answer the press.
-        // Backspace in the save field is the exception: it deletes a character
-        // and belongs to that field, not to the window.
-        if self.file_picker.is_open() {
-            if let Some(leave) = Self::picker_back(ctx, self.typing(ctx)) {
-                // A footer asking whether to replace a file is a question of
-                // its own: Back answers it by taking it down, leaving the
-                // folder - and the window - where they were. Stepping up a
-                // directory out from under a question would answer it by
-                // changing the subject.
-                let asked = self
-                    .file_picker
-                    .payload
-                    .as_mut()
-                    .is_some_and(|picker| picker.dismiss_ask());
-                if asked {
-                    return;
-                }
-                match leave {
-                    PickerBack::Close => self.file_picker_cancelled = true,
-                    PickerBack::Up => {
-                        let went_up = self
-                            .file_picker
-                            .payload
-                            .as_mut()
-                            .is_some_and(|picker| picker.up());
-                        if !went_up {
-                            self.file_picker_cancelled = true;
-                        }
-                    }
-                }
-                // Closing is left to the window's own answer, which clears the
-                // dialog's flags. Doing it here would leave `file_job` set and
-                // the keyboard swallowed by a window that is no longer up.
-                return;
+        // Every Back key closes the picker, on every platform: Escape on a
+        // desktop, Escape on a television (where BACK *is* Escape), the remote's
+        // BrowserBack and a keyboard's Backspace. Read here, before the shared
+        // window handling below, and consumed so the panel behind it does not
+        // also answer the press. The save field keeps its Backspace: there it
+        // deletes a character, see [`XgViewApp::picker_back`].
+        if self.file_picker.is_open() && Self::picker_back(ctx, self.typing(ctx)) {
+            // A footer asking whether to replace a file is a question of its
+            // own: the first Back takes the question down, leaving the folder
+            // and the window where they were. Closing out from under it would
+            // throw away the name the viewer has just typed.
+            let asked = self
+                .file_picker
+                .payload
+                .as_mut()
+                .is_some_and(|picker| picker.dismiss_ask());
+            if !asked {
+                self.file_picker_cancelled = true;
             }
+            // Closing is left to the window's own answer, which clears the
+            // dialog's flags. Doing it here would leave `file_job` set and
+            // the keyboard swallowed by a window that is no longer up.
+            return;
         }
 
         // A window this application opened is the innermost layer: Back closes
@@ -1665,7 +1620,7 @@ mod tests {
     use super::*;
 
     /// One frame carrying one key, as the picker's reader sees it.
-    fn pressed(key: Key, typing: bool) -> Option<PickerBack> {
+    fn pressed(key: Key, typing: bool) -> bool {
         let ctx = egui::Context::default();
         let input = egui::RawInput {
             events: vec![egui::Event::Key {
@@ -1677,32 +1632,30 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mut answer = None;
-        let _ = ctx.run(input, |ctx| answer = Some(XgViewApp::picker_back(ctx, typing)));
-        answer.unwrap()
+        let mut answer = false;
+        let _ = ctx.run(input, |ctx| answer = XgViewApp::picker_back(ctx, typing));
+        answer
     }
 
     #[test]
-    fn escape_and_back_leave_the_picker_by_different_routes() {
-        let escape = pressed(Key::Escape, false);
-        // A television's BACK is delivered as Escape, so there it has to walk
-        // out of the directory instead of closing the window.
-        #[cfg(not(target_os = "android"))]
-        assert!(matches!(escape, Some(PickerBack::Close)));
-        #[cfg(target_os = "android")]
-        assert!(matches!(escape, Some(PickerBack::Up)));
-        assert!(matches!(pressed(Key::BrowserBack, false), Some(PickerBack::Up)));
-        assert!(matches!(pressed(Key::Backspace, false), Some(PickerBack::Up)));
-        assert!(pressed(Key::ArrowDown, false).is_none(), "a direction belongs to the listing");
+    fn every_back_key_closes_the_picker_on_every_platform() {
+        // A television's BACK arrives as Escape, a remote's as BrowserBack and
+        // a keyboard's as Backspace. None of them walks out of a directory any
+        // more, and the answer no longer depends on the platform the window was
+        // built for - one press, one way out.
+        assert!(pressed(Key::Escape, false), "Escape closes it");
+        assert!(pressed(Key::BrowserBack, false), "the remote's Back closes it");
+        assert!(pressed(Key::Backspace, false), "a keyboard's Back closes it");
+        assert!(!pressed(Key::ArrowDown, false), "a direction belongs to the listing");
     }
 
     /// In the save field a Backspace deletes a character. Taking it as a Back
-    /// would step out of the directory - or close the window - on every press
-    /// that was only trying to fix a typo. Escape and the remote's Back are
-    /// still the window's, wherever the focus is.
+    /// would close the window on every press that was only trying to fix a
+    /// typo. Escape and the remote's Back are still the window's, wherever the
+    /// focus is.
     #[test]
     fn backspace_in_the_name_field_belongs_to_the_field() {
-        assert!(pressed(Key::Backspace, true).is_none(), "the field keeps its Backspace");
+        assert!(!pressed(Key::Backspace, true), "the field keeps its Backspace");
         // Not consumed, so `TextEdit` still sees it - the reader must not have
         // taken it out of the queue on its way to answering `None`.
         let ctx = egui::Context::default();
@@ -1723,10 +1676,7 @@ mod tests {
         });
         assert!(left_in_queue, "the TextEdit has to see the press");
 
-        #[cfg(not(target_os = "android"))]
-        assert!(matches!(pressed(Key::Escape, true), Some(PickerBack::Close)));
-        #[cfg(target_os = "android")]
-        assert!(matches!(pressed(Key::Escape, true), Some(PickerBack::Up)));
-        assert!(matches!(pressed(Key::BrowserBack, true), Some(PickerBack::Up)));
+        assert!(pressed(Key::Escape, true), "Escape still closes from the field");
+        assert!(pressed(Key::BrowserBack, true), "the remote's Back still closes from the field");
     }
 }
