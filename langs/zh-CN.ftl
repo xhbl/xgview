@@ -225,45 +225,6 @@ prompt-open-working = 正在打开配置…
 prompt-seal-action = 导出
 prompt-open-action = 打开
 
-## 文件对话框
-file-dialog-title-open = 📂 打开文件
-file-dialog-title-save = 📥 保存文件
-file-dialog-cancel = 取消
-file-dialog-overwrite = 覆盖
-file-dialog-reload = ⟲ 重新载入
-file-dialog-working-directory = ↗ 转到工作目录
-file-dialog-show-hidden = 显示隐藏项
-file-dialog-show-system = 显示系统文件
-file-dialog-heading-pinned = 已固定
-file-dialog-heading-places = 位置
-file-dialog-heading-devices = 设备
-file-dialog-heading-removable = 可移动设备
-file-dialog-home = 🏠 主目录
-file-dialog-desktop = 🖵 桌面
-file-dialog-documents = 🗐 文档
-file-dialog-downloads = 📥 下载
-file-dialog-audio = 🎵 音乐
-file-dialog-pictures = 🖼 图片
-file-dialog-videos = 🎞 视频
-file-dialog-pin = 📌 固定
-file-dialog-unpin = ✖ 取消固定
-file-dialog-rename = ✏ 重命名
-file-dialog-selected-directory = 已选目录：
-file-dialog-selected-file = 已选文件：
-file-dialog-selected-items = 已选项目：
-file-dialog-file-name = 文件名：
-file-dialog-all-files = 所有文件
-file-dialog-any-extension = 任意
-file-dialog-open = 🗀 打开
-file-dialog-save = 📥 保存
-file-dialog-cancel-button = 🚫 取消
-file-dialog-overwrite-text = 已存在。要覆盖它吗？
-file-dialog-err-empty-folder = 文件夹名不能为空
-file-dialog-err-empty-file = 文件名不能为空
-file-dialog-err-directory-exists = 已存在同名文件夹
-file-dialog-err-file-exists = 已存在同名文件
-file-dialog-filter-config = 配置文件
-
 # 导入时自绘的文件选择器，遥控器可操作。
 file-picker-title = 📂 导入配置文件
 file-picker-title-save = 📂 导出配置文件

@@ -231,45 +231,6 @@ prompt-open-working = Opening the configuration…
 prompt-seal-action = Export
 prompt-open-action = Open
 
-## File dialog
-file-dialog-title-open = 📂 Open File
-file-dialog-title-save = 📥 Save File
-file-dialog-cancel = Cancel
-file-dialog-overwrite = Overwrite
-file-dialog-reload = ⟲  Reload
-file-dialog-working-directory = ↗  Go to working directory
-file-dialog-show-hidden = Show hidden
-file-dialog-show-system = Show system files
-file-dialog-heading-pinned = Pinned
-file-dialog-heading-places = Places
-file-dialog-heading-devices = Devices
-file-dialog-heading-removable = Removable Devices
-file-dialog-home = 🏠  Home
-file-dialog-desktop = 🖵  Desktop
-file-dialog-documents = 🗐  Documents
-file-dialog-downloads = 📥  Downloads
-file-dialog-audio = 🎵  Audio
-file-dialog-pictures = 🖼  Pictures
-file-dialog-videos = 🎞  Videos
-file-dialog-pin = 📌 Pin
-file-dialog-unpin = ✖ Unpin
-file-dialog-rename = ✏ Rename
-file-dialog-selected-directory = Selected directory:
-file-dialog-selected-file = Selected file:
-file-dialog-selected-items = Selected items:
-file-dialog-file-name = File name:
-file-dialog-all-files = All Files
-file-dialog-any-extension = Any
-file-dialog-open = 🗀  Open
-file-dialog-save = 📥  Save
-file-dialog-cancel-button = 🚫 Cancel
-file-dialog-overwrite-text = already exists. Do you want to overwrite it?
-file-dialog-err-empty-folder = Name of the folder cannot be empty
-file-dialog-err-empty-file = The file name cannot be empty
-file-dialog-err-directory-exists = A directory with the name already exists
-file-dialog-err-file-exists = A file with the name already exists
-file-dialog-filter-config = Configuration
-
 ## File picker
 file-picker-title = 📂 Import configuration
 file-picker-title-save = 📂 Export configuration

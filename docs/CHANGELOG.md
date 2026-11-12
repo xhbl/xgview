@@ -42,6 +42,14 @@ rather than a change in what the viewer does. Where it shows:
   the bar stayed on the moment the recording was opened for as long as it played.
 - A window started full screen hands back a windowed size when it leaves it.
 
+**Update (2026-11-12)**: the system file picker on Android is gone, and so is
+the third-party egui dialog library whose labels this and earlier releases
+translated. An import on every platform now uses the viewer's own file window
+(`app/file_picker.rs`), while an Android export writes straight into the public
+`Download/xgview` folder without opening a window; the `file-dialog-*` keys and
+the SAF shortcut have been removed. The notes above describe what was true at
+2.2.69 and are kept as the record of that release.
+
 ## 2.1.88
 
 Changes since 2.1.66. **The timeline's arrows walk the whole recording now -

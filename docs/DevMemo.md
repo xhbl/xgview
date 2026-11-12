@@ -5925,9 +5925,10 @@ providers holding `MANAGE_DOCUMENTS`, which is `signature|privileged`, so a copy
 else is an empty window.
 
 So the viewer draws its own: the dialog the desktop has always used, egui inside this window,
-which needs no activity, no provider and no permission behind it. `egui-file-dialog` moved
-from the desktop-only dependencies to the common ones for that - it is pure egui and compiled
-for `armv7-linux-androideabi` without a change.
+which needs no activity, no provider and no permission behind it. A third-party egui file
+dialog was moved from the desktop-only dependencies to the common ones for that - it is pure
+egui and compiled for `armv7-linux-androideabi` without a change. That library has since been
+replaced by the viewer's own window; see the update at the end of this section.
 
 It starts in the app's own folder on the shared volume,
 `/storage/emulated/0/Android/data/<package>/files`, which is the one place a transfer can put a
@@ -5944,6 +5945,14 @@ frame that takes an answer so a request in it is dropped.
 And the about panel's tab strip overflows at 1080p once a device has ten cameras: `摄像头(10)`
 is wide enough to push `关于` - and with it the import button - off the right edge. That is why
 the button had to be reached with the remote's arrow keys, and is worth a look on its own.
+
+**Update (2026-11-12)**: the third-party file-dialog library named above is no longer used.
+Import and export now share a file window drawn in this crate (`app/file_picker.rs`), walked by the same
+navigation layer as the rest of the interface so a remote can use it; on Android only the
+import opens that window, while an export writes into the public `Download/xgview` folder
+through the activity. The dependency, the SAF system-picker shortcut and the `file-dialog-*`
+translation keys have been removed. The paragraphs above are kept as the record of why the
+native dialog could not be used on a television build.
 
 ### A magnification that costs a page of sessions, and a 100 ms deadline that is not a delay
 

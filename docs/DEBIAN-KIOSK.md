@@ -530,8 +530,8 @@ interface**.
 
 **Why** (from the logs and from testing):
 
-1. The dialog library (rfd) first asks xdg-desktop-portal over D-Bus to raise a
-   system dialog.
+1. The old native-dialog path (rfd) first asked xdg-desktop-portal over D-Bus
+   to raise a system dialog. The current build no longer links rfd at all.
 2. A process started by systemd has no user session bus
    (`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR/bus`), so the portal call fails
    (`Portal operation not allowed` in the log).
@@ -540,13 +540,15 @@ interface**.
 4. Called **synchronously** on the UI thread, the wait never ends and the whole
    wall freezes. That is why `pkill zenity` unfreezes it.
 
-**The solution used here**: the program uses **`egui-file-dialog`**, which draws
-the file browser inside the egui interface:
+**The solution used here**: the viewer draws its **own file window** in egui
+(`app/file_picker.rs`). It has no dependency on a system dialog, on `rfd`, or on
+any third-party file-dialog crate:
 
 - No zenity, GTK, portal or D-Bus, and no window-stacking problems, so the
   deployment stays minimal;
-- It behaves the same on Android and the other platforms;
-- Verified in the VM (import and export dialogs work under systemd, Chinese
+- The import window is the same one on Android; an Android export writes
+  straight into `Download/xgview` without opening a window;
+- Verified in the VM (import and export windows work under systemd, Chinese
   labels included).
 
 **So none of these are needed**: `zenity`, `xdg-desktop-portal`,
@@ -980,7 +982,7 @@ Use any VNC client (RealVNC Viewer, TightVNC, Remmina and so on) against
 | Manual `xg` conflicts with the service | Two X servers on vt1 | `systemctl stop monitor` first |
 | Xorg cannot open tty/DRM - permission errors | Missing privileges or logind | Install `xserver-xorg-legacy libpam-systemd dbus-user-session`, configure `Xwrapper.config`, join the input/video groups |
 | `ldd` shows `not found` | Missing system libraries (X11/GL, outside the package) | Install the matching packages |
-| The import/export file dialog does not appear, or freezes the interface | No session bus under systemd, so the system dialog (portal/zenity) fails, and the UI thread waits synchronously | The program uses `egui-file-dialog` (see 7.4); as a stopgap, `pkill zenity` |
+| The import/export file window does not appear, or freezes the interface | Historical: the old native-dialog path waited synchronously on portal/zenity, which a systemd session has no bus for | The current build draws its own file window (see 7.4); no system dialog, portal or D-Bus is involved |
 | The screen blanks after a while | X's default screen saver / power saving | Add `xset s off -dpms s noblank` to the session script, and install `x11-xserver-utils` |
 | Chinese in the tty console shows as diamonds | The console's bitmap font has no Chinese (not related to `fonts-noto-cjk`) | The setup script sets the system language to English by default (`--no-en` turns that off); or `update-locale LANG=en_US.UTF-8 LANGUAGE=en` and log in again |
 | Rendering misbehaves (especially in a VM) | Vulkan backend problem | Set `WGPU_BACKEND=gl` |
