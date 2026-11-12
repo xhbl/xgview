@@ -273,16 +273,12 @@ file-dialog-filter-config = Configuration
 ## File picker
 file-picker-title = 📂 Choose a configuration
 file-picker-title-save = 📂 Save the configuration
-file-picker-parent = .. Up one level
+file-picker-up = Up one level
 file-picker-folder = Folder
 file-picker-file = Configuration
 file-picker-empty = No configuration in this folder
 file-picker-name = File name
 file-picker-save = Save
-file-picker-hint = Up and down to choose, OK to open or take, Backspace to go up, Esc to close
-file-picker-hint-android = Up and down to choose, OK to open or take, Back to go up, Back again at a root to close
-file-picker-hint-save = Up and down to choose a folder, type a name and confirm to save; Backspace goes up, Esc closes
-file-picker-hint-save-android = Up and down to choose a folder, type a name and confirm to save; Back goes up, Back again at a root closes
 file-picker-place-home = Home
 
 ## Toolbar

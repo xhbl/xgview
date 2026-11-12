@@ -168,6 +168,30 @@ impl XgViewApp {
     #[cfg(not(target_os = "android"))]
     pub(super) fn track_surface_picture(&mut self) {}
 
+    /// Whether a window this application opened is up, over the picture.
+    ///
+    /// The magnified picture can be a surface of the activity's, and a surface
+    /// is drawn above everything the wall paints - that is what makes it
+    /// zero-copy, and it is also why a window the wall draws gets cut in half by
+    /// it: the file picker, opened over a magnified camera, showed its right
+    /// half and the camera's picture where the left should have been.
+    ///
+    /// So the view is taken down while one of these is up, and put back when it
+    /// closes. A `SurfaceView` keeps the last frame it was given, so nothing is
+    /// decoded and no stream is reopened for it: the picture is there again on
+    /// the frame the window goes away.
+    pub fn modal_is_up(&self) -> bool {
+        self.file_picker.is_open()
+            || self.layout_picker.is_open()
+            || self.portrait_aspect_picker.is_open()
+            || self.combined_info_picker.is_open()
+            || self.passphrase.is_open()
+            || self.camera_edit.is_open()
+            || self.remove_confirm.is_open()
+            || self.system_confirm.is_open()
+            || self.discovery.open
+    }
+
     /// Whether this frame *wants* the picture on the activity's surface, with
     /// no regard for whether the view has reached the screen yet.
     ///

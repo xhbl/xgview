@@ -1004,7 +1004,13 @@ fn run() -> anyhow::Result<()> {
         // the wall, so one left visible while the wall paints its own picture
         // covers it - and one shown while empty is a black rectangle over
         // everything.
-        let on_layer = app.picture_layer_wanted();
+        // A window the wall draws - the file picker, the camera form - is under
+        // that view, so it is taken down while one is up: otherwise the view
+        // covers the half of the window it overlaps. See
+        // `App::modal_is_up`. The wall keeps standing aside (`picture_on_layer`
+        // is untouched), the surface keeps its last frame, and the picture is
+        // back the frame the window closes.
+        let on_layer = app.picture_layer_wanted() && !app.modal_is_up();
         let changed = on_layer != video_shown;
         if changed {
             // Placed again before it is shown again: the rectangle it was left

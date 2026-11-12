@@ -267,16 +267,12 @@ file-dialog-filter-config = 配置文件
 # 导入时自绘的文件选择器，遥控器可操作。
 file-picker-title = 📂 选择配置文件
 file-picker-title-save = 📂 保存配置文件
-file-picker-parent = .. 上一级
+file-picker-up = 上一级
 file-picker-folder = 文件夹
 file-picker-file = 配置文件
 file-picker-empty = 这个文件夹里没有配置文件
 file-picker-name = 文件名
 file-picker-save = 保存
-file-picker-hint = 上下选择，确认进入文件夹或选取文件；Backspace 回上一级，Esc 关闭
-file-picker-hint-android = 上下选择，确认进入文件夹或选取文件；返回键回上一级，到根目录再按一次关闭
-file-picker-hint-save = 上下选择文件夹，输入文件名后确认保存；Backspace 回上一级，Esc 关闭
-file-picker-hint-save-android = 上下选择文件夹，输入文件名后确认保存；返回键回上一级，到根目录再按一次关闭
 file-picker-place-home = 主目录
 
 ## 工具栏

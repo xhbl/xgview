@@ -27,6 +27,9 @@ const PLACES_SCOPE: &'static str = "file-picker-places";
 /// The scope the save field and its button live in.
 const ACTIONS_SCOPE: &'static str = "file-picker-actions";
 
+/// The way up's label. A glyph rather than a word, so it reads as a control of
+/// its own beside the folder shortcuts and costs a fraction of their width.
+const UP_ICON: &str = "↑";
 /// Height of one row.
 ///
 /// The space a television can spare is not the space a phone has: this window
@@ -40,12 +43,11 @@ const ROW_H: f32 = 32.0;
 /// so a folder with two files looks the same as one with two hundred, and the
 /// arrows never make it jump. How much room there is to measure out depends on
 /// the screen, and a handset held sideways is the tight one - 384 points on the
-/// 2340x1080 phone this was measured on. Title, path, shortcuts, the name field,
-/// the hint and the frame come to about 214 of them, which leaves four rows and
-/// a margin on either side. Five rows is 374 - it fits, but it touches both
-/// edges, which is the thing the camera form already does. A desktop is not
-/// short of height, so it shows eight.
-const LIST_ROWS: usize = if cfg!(target_os = "android") { 4 } else { 8 };
+/// 2340x1080 phone this was measured on. Title, path, shortcuts, the name field
+/// and the frame come to about 180 of them once the way up is a button and the
+/// instructions are gone, which leaves five rows and a margin on either side.
+/// A desktop is not short of height, so it shows eight.
+const LIST_ROWS: usize = if cfg!(target_os = "android") { 5 } else { 8 };
 /// The extensions a configuration comes in: the JSON written in clear, and the
 /// sealed export. Both have to be listed - the settings page writes one or the
 /// other, and a picker that only showed the first could not read back what this
@@ -54,14 +56,14 @@ const LIST_ROWS: usize = if cfg!(target_os = "android") { 4 } else { 8 };
 const SUFFIXES: [&str; 2] = [".json", ".seal"];
 
 /// One row of the listing.
+///
+/// Going up is not a row: it is a button beside the shortcuts - see
+/// [`FilePicker::body`] - because a row for it costs the height of a folder in
+/// every directory, for a press the remote already has a key for. A folder with
+/// nothing to show has no rows at all; the wall says so in words and the focus
+/// stays on the shortcuts above, which are the only things there are to press.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Entry {
-    /// The way back up. Never present at a root.
-    Parent,
-    /// The way out of a root that has nothing to show. A listing always keeps
-    /// at least one row: a scope with no members drops the focus, and the
-    /// arrows go back to the wall while the window is still up.
-    Close,
     /// A directory: Enter walks into it.
     Directory { name: String, path: PathBuf },
     /// A file this picker accepts: Enter takes it.
@@ -111,20 +113,10 @@ impl Listing {
                 }
                 dirs.sort_by_key(|(name, _)| name.to_lowercase());
                 files.sort_by_key(|(name, _, _)| name.to_lowercase());
-                if dir.parent().is_some() {
-                    entries.push(Entry::Parent);
-                }
                 entries.extend(dirs.into_iter().map(|(name, path)| Entry::Directory { name, path }));
                 entries.extend(files.into_iter().map(|(name, path, size)| Entry::File { name, path, size }));
             }
             Err(err) => error = Some(err.to_string()),
-        }
-        // A directory that cannot be read - or a root with nothing in it -
-        // still offers one row to walk onto. Without it the focus has no
-        // widget, egui drops it, and the remote is left pressing arrows at the
-        // wall behind a window that is still up.
-        if entries.is_empty() {
-            entries.push(placeholder(dir));
         }
         Self { dir: dir.to_path_buf(), entries, error }
     }
@@ -133,11 +125,6 @@ impl Listing {
     fn above(&self) -> Option<PathBuf> {
         self.dir.parent().map(Path::to_path_buf)
     }
-}
-
-/// The one row a listing that has nothing else can offer.
-fn placeholder(dir: &Path) -> Entry {
-    if dir.parent().is_some() { Entry::Parent } else { Entry::Close }
 }
 
 /// Whether a file's name is one this picker takes.
@@ -277,20 +264,47 @@ impl FilePicker {
         let path = self.listing.dir.display().to_string();
         ui.label(RichText::new(path).small().color(theme::TEXT_DIM));
 
-        if !self.places.is_empty() {
-            ui.add_space(theme::space::S);
-            app.nav.open(PLACES_SCOPE);
-            ui.horizontal_wrapped(|ui| {
-                for (label, path) in &self.places {
-                    let button = ui.button(label);
-                    let button = app.nav.tracked(button);
-                    if button.clicked() {
-                        go = Some(path.clone());
-                    }
+        // The shortcuts, with the way up beside them.
+        //
+        // Going up used to be the first row of the listing. That costs the
+        // height of a folder in every directory for a press the remote already
+        // has a key for - Back steps out of a directory, see `picker_back` - so
+        // it is a button here instead, where it costs nothing: a pointer has no
+        // Back, and this is what it gets. Greyed at a root, where up is nowhere.
+        let above = self.listing.above();
+        let mut up: Option<(Id, bool)> = None;
+        // Where the focus goes when the listing has no rows at all - a folder
+        // that is empty or cannot be read. The shortcuts above it are then the
+        // only controls in the window, and the home folder is the one a viewer
+        // would reach for.
+        let mut first: Option<Id> = None;
+        ui.add_space(theme::space::S);
+        app.nav.open(PLACES_SCOPE);
+        ui.horizontal_wrapped(|ui| {
+            for (label, path) in &self.places {
+                let button = ui.button(label);
+                let button = app.nav.tracked(button);
+                if first.is_none() {
+                    first = Some(button.id);
                 }
-            });
-            app.nav.close();
-        }
+                if button.clicked() {
+                    go = Some(path.clone());
+                }
+            }
+            let button = ui.add_enabled(above.is_some(), egui::Button::new(UP_ICON));
+            let button = app.nav.tracked(button);
+            if first.is_none() {
+                first = Some(button.id);
+            }
+            // What the status line calls it. A control whose label is a glyph
+            // has nothing for the line to read otherwise.
+            app.name(&button, "file-picker-up");
+            if button.clicked() {
+                go = above.clone();
+            }
+            up = Some((button.id, above.is_none()));
+        });
+        app.nav.close();
 
         ui.add_space(theme::space::S);
 
@@ -338,12 +352,7 @@ impl FilePicker {
             // the rows, and the window stays the size it was.
             if let Some(error) = &self.listing.error {
                 ui.label(RichText::new(error).color(theme::ERROR));
-            } else if self
-                .listing
-                .entries
-                .iter()
-                .all(|entry| matches!(entry, Entry::Parent | Entry::Close))
-            {
+            } else if self.listing.entries.is_empty() {
                 ui.label(
                     RichText::new(monitor_i18n::tr("file-picker-empty")).color(theme::TEXT_DIM),
                 );
@@ -357,8 +366,6 @@ impl FilePicker {
                 app.name(
                     &response,
                     match entry {
-                        Entry::Parent => "file-picker-parent",
-                        Entry::Close => "dialog-close",
                         Entry::Directory { .. } => "file-picker-folder",
                         Entry::File { .. } => "file-picker-file",
                     },
@@ -373,6 +380,16 @@ impl FilePicker {
                     if self.reanchor {
                         ui.ctx().memory_mut(|memory| memory.request_focus(response.id));
                         self.reanchor = false;
+                    }
+                    // A button that has just gone grey - the viewer walked back
+                    // up to a root - is no place for the ring: it answers
+                    // nothing now, and the listing's first row is what it would
+                    // have led to. Handed on in the same frame, on the row it
+                    // goes to, because that row is the one just drawn.
+                    if let Some((id, true)) = up {
+                        if ui.ctx().memory(|memory| memory.focused()) == Some(id) {
+                            ui.ctx().memory_mut(|memory| memory.request_focus(response.id));
+                        }
                     }
                 }
                 if ui.is_rect_visible(rect) {
@@ -390,13 +407,11 @@ impl FilePicker {
                         );
                     }
                     let (text, tail) = match entry {
-                        Entry::Parent => (monitor_i18n::tr("file-picker-parent"), String::new()),
-                        Entry::Close => (monitor_i18n::tr("dialog-close"), String::new()),
                         Entry::Directory { name, .. } => (format!("{name}/"), String::new()),
                         Entry::File { name, size, .. } => (name.clone(), size_label(*size)),
                     };
                     let color = match entry {
-                        Entry::Directory { .. } | Entry::Parent | Entry::Close => theme::ACCENT,
+                        Entry::Directory { .. } => theme::ACCENT,
                         Entry::File { .. } => visuals.text_color(),
                     };
                     ui.painter().text(
@@ -418,8 +433,6 @@ impl FilePicker {
                 }
                 if response.clicked() || (confirm && response.has_focus()) {
                     match entry {
-                        Entry::Parent => go = self.listing.above(),
-                        Entry::Close => close = true,
                         Entry::Directory { path, .. } => go = Some(path.clone()),
                         // A save writes a name the field below carries, so an
                         // existing file is not something to open: a press fills
@@ -439,6 +452,22 @@ impl FilePicker {
             }
         });
         app.nav.close();
+
+        // A folder with nothing to show has no rows, and a scope with no
+        // members is where a focus goes to die - the arrows would go back to
+        // the wall with this window still up, and the window would open with
+        // nothing in it focused at all. The shortcuts above are what is left,
+        // so the window opens on the first of them, the home folder, and
+        // stepping into an empty folder hands the focus there too.
+        if self.listing.entries.is_empty() {
+            app.file_picker.anchor = first;
+            if self.reanchor {
+                if let Some(id) = first {
+                    ui.ctx().memory_mut(|memory| memory.request_focus(id));
+                }
+                self.reanchor = false;
+            }
+        }
 
         if let Some(name) = rename {
             self.name = name;
@@ -491,16 +520,10 @@ impl FilePicker {
             app.nav.close();
         }
 
-        ui.add_space(theme::space::S);
-        // A television has no Esc: its BACK is the key that walks up a level.
-        // Say that, rather than promising a key the remote does not have.
-        let hint = match (self.saving(), cfg!(target_os = "android")) {
-            (true, true) => "file-picker-hint-save-android",
-            (true, false) => "file-picker-hint-save",
-            (false, true) => "file-picker-hint-android",
-            (false, false) => "file-picker-hint",
-        };
-        ui.label(RichText::new(monitor_i18n::tr(hint)).small().color(theme::TEXT_DIM));
+        // There is no line of instructions under the window. The keys are the
+        // same ones the rest of the interface already answers - arrows to walk,
+        // OK to confirm, Back to step out - and on a handset held sideways a
+        // line of them costs height the listing can spend on a folder.
 
         if let Some(dir) = go {
             self.listing = Listing::read(&dir);
@@ -586,7 +609,6 @@ mod tests {
             .entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::Parent | Entry::Close => None,
                 Entry::Directory { name, .. } | Entry::File { name, .. } => Some(name.clone()),
             })
             .collect();
@@ -612,17 +634,22 @@ mod tests {
         assert_eq!(files, ["shown.json"]);
     }
 
+    /// Going up is not a row any more - it is the button beside the shortcuts -
+    /// so what a listing has to answer is only whether there is anywhere to go
+    /// up to. That is what greys the button out at a root.
     #[test]
-    fn the_way_up_appears_except_at_a_root() {
+    fn the_way_up_is_known_except_at_a_root() {
         let dir = scratch("root");
         let listing = Listing::read(&dir);
-        assert_eq!(listing.entries.first(), Some(&Entry::Parent), "a temporary folder has a parent");
         assert_eq!(listing.above(), dir.parent().map(Path::to_path_buf));
+        // Nothing in it, so no rows - and no row for going up either: that is
+        // the button. The window puts the focus on its shortcuts then; see
+        // `FilePicker::body`.
+        assert!(listing.entries.is_empty());
 
         let root = Path::new("/");
         let listing = Listing::read(root);
-        assert!(!listing.entries.contains(&Entry::Parent), "the root has nowhere to go up to");
-        assert!(listing.above().is_none());
+        assert!(listing.above().is_none(), "the root has nowhere to go up to");
     }
 
     #[test]
@@ -630,17 +657,11 @@ mod tests {
         let missing = std::env::temp_dir().join("xgview-picker-does-not-exist");
         let listing = Listing::read(&missing);
         assert!(listing.error.is_some());
-        // It still has a row for the focus to land on. An empty listing used to
-        // leave the navigation scope with no members: the focus was dropped and
-        // the arrows went to the wall while the window stayed up.
-        assert_eq!(listing.entries, [Entry::Parent]);
-    }
-
-    #[test]
-    fn a_root_with_nothing_to_show_still_offers_a_way_out() {
-        let root = PathBuf::from(std::path::MAIN_SEPARATOR.to_string());
-        assert_eq!(placeholder(&root), Entry::Close, "a root has no way up");
-        assert_eq!(placeholder(&root.join("somewhere")), Entry::Parent);
+        // No rows at all: what the wall says instead is a line of text, and the
+        // focus is handed to the shortcuts above the listing. A row that only
+        // closed the window was there before, and it was the strangest thing in
+        // the picker - a folder's worth of height saying "Close".
+        assert!(listing.entries.is_empty());
     }
 
     #[test]
