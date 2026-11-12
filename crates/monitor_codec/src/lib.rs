@@ -316,6 +316,29 @@ pub trait VideoDecoder: Send {
     fn pictures(&self) -> u64 {
         0
     }
+
+    /// Releases whatever the decoder holds of the machine's own resources.
+    ///
+    /// A decoder kept but no longer used still owns its codec session, and on
+    /// Android a hardware session is a resource there are only so many of:
+    /// [`Fallback`](crate::fallback::Fallback) is the caller, because a channel
+    /// that moved to the CPU would otherwise hold the platform decoder it left
+    /// behind, and the next channel to ask for one is refused because of it.
+    ///
+    /// The decoder stays usable. A later [`configure`](VideoDecoder::configure)
+    /// opens it again, which is what makes a return to hardware possible.
+    fn close(&mut self) {}
+
+    /// Offers the stream back to the decoder this one took it from, if that is
+    /// a thing this decoder does. `true` when the offer was taken.
+    ///
+    /// Only a wrapper has anything to offer back - see
+    /// [`Fallback::try_upgrade`](crate::fallback::Fallback::try_upgrade) - and
+    /// the caller is the session, on a key frame, because a decoder cannot be
+    /// resumed past a picture it never saw.
+    fn try_upgrade(&mut self) -> bool {
+        false
+    }
 }
 
 /// What the current target can actually do.

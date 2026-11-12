@@ -22,6 +22,21 @@
 
 use crate::{CodecError, DecodedFrame, DecoderConfig, Result, VideoDecoder, VideoStreamInfo};
 
+use std::time::{Duration, Instant};
+
+/// How long after a stream was moved to the CPU the first attempt to move it
+/// back is made.
+///
+/// A device that ran out of hardware sessions frees one when a channel is
+/// closed or the grid is made smaller, and a stream that stays on the CPU for
+/// the rest of the session never notices - it is only ever offered the platform
+/// decoder again if its session reconnects for some unrelated reason. Waiting
+/// first keeps a wall that is genuinely full from asking on every key frame.
+const UPGRADE_FIRST_WAIT: Duration = Duration::from_secs(30);
+
+/// The longest wait between two attempts, reached by doubling.
+const UPGRADE_MAX_WAIT: Duration = Duration::from_secs(300);
+
 /// The decoder tried first, and the one that takes what it refuses.
 pub struct Fallback {
     preferred: Box<dyn VideoDecoder>,
@@ -29,13 +44,29 @@ pub struct Fallback {
     /// The configuration the stream was set up with, kept because a switch has
     /// to set the software decoder up before it can take the refused unit.
     config: Option<DecoderConfig>,
-    /// Set once the switch has been made, so the first is not asked again.
+    /// Set once the switch has been made, so the first is not asked again
+    /// until [`Fallback::try_upgrade`] offers the stream back.
     switched: bool,
+    /// When the stream was last moved on to the CPU, or last offered back -
+    /// whichever happened most recently. Nothing is offered back before
+    /// [`Fallback::upgrade_wait`] has passed.
+    settled_at: Option<Instant>,
+    /// How long to leave the platform decoder alone after an offer it refused.
+    /// Doubles with every refusal, so a wall that is full for good asks a
+    /// handful of times and then stops.
+    upgrade_wait: Duration,
 }
 
 impl Fallback {
     pub fn new(preferred: Box<dyn VideoDecoder>, software: Box<dyn VideoDecoder>) -> Self {
-        Self { preferred, software, config: None, switched: false }
+        Self {
+            preferred,
+            software,
+            config: None,
+            switched: false,
+            settled_at: None,
+            upgrade_wait: UPGRADE_FIRST_WAIT,
+        }
     }
 
     /// The decoder in use right now.
@@ -74,9 +105,72 @@ impl Fallback {
             to = self.software.name(),
             "the platform decoder refused the stream, decoding on the cpu instead"
         );
+        // Given back before the CPU one is set up. A platform decoder left open
+        // but idle is still a session the next channel cannot have, and this is
+        // the point where this channel stops needing it.
+        self.preferred.close();
         self.software.configure(&config)?;
         self.switched = true;
+        self.settled_at = Some(Instant::now());
         self.software.decode(access_unit, pts_us, keyframe)
+    }
+
+    /// Offers the stream back to the platform decoder after it was refused.
+    ///
+    /// The refusal that sends a stream to the CPU is usually a device at its
+    /// limit of hardware sessions - "already holding as many as it allows",
+    /// which is temporary. Closing a channel or shrinking the grid frees one,
+    /// and without this the stream that was refused stays on the CPU for as
+    /// long as its session lasts, because nothing else ever asks again: a
+    /// session reconnects only when something goes wrong with it.
+    ///
+    /// Called on key frames, so the platform decoder is handed a picture it can
+    /// start on rather than one it has to wait past. Attempts are spaced by
+    /// [`Fallback::upgrade_wait`], which doubles every time the offer is
+    /// refused, and the stream stays on the CPU throughout: a decoder that is
+    /// configured and then turns out to be a shell is caught by the platform
+    /// side's own starvation check and comes straight back here.
+    fn try_upgrade(&mut self) -> bool {
+        if !self.switched {
+            return false;
+        }
+        let Some(config) = self.config.clone() else {
+            return false;
+        };
+        let now = Instant::now();
+        if let Some(settled) = self.settled_at {
+            if now.duration_since(settled) < self.upgrade_wait {
+                return false;
+            }
+        }
+        self.settled_at = Some(now);
+        match self.preferred.configure(&config) {
+            Ok(()) => {
+                tracing::info!(
+                    target: "xgview::codec",
+                    from = self.software.name(),
+                    to = self.preferred.name(),
+                    "the platform decoder will take the stream again, decoding on it"
+                );
+                // Released rather than kept: the CPU decoder is rebuilt by a
+                // later switch, and holding it open would keep a copy of the
+                // stream's state that nobody reads.
+                self.software.close();
+                self.switched = false;
+                self.upgrade_wait = UPGRADE_FIRST_WAIT;
+                true
+            }
+            Err(err) => {
+                self.upgrade_wait = (self.upgrade_wait * 2).min(UPGRADE_MAX_WAIT);
+                tracing::debug!(
+                    target: "xgview::codec",
+                    %err,
+                    next_try_s = self.upgrade_wait.as_secs(),
+                    "the platform decoder will not take the stream back yet"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -116,6 +210,7 @@ impl VideoDecoder for Fallback {
                 );
                 self.software.configure(config)?;
                 self.switched = true;
+                self.settled_at = Some(Instant::now());
                 Ok(())
             }
             Err(err) => Err(err),
@@ -149,12 +244,22 @@ impl VideoDecoder for Fallback {
     fn info(&self) -> Option<&VideoStreamInfo> {
         self.active().info()
     }
+
+    /// Hands the platform decoder back when the stream was moved off it.
+    ///
+    /// Named through the type so that the inherent method - the one with the
+    /// state machine in it - is the one that runs.
+    fn try_upgrade(&mut self) -> bool {
+        Fallback::try_upgrade(self)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Codec, ColorSpace, PixelFormat};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
 
     fn config() -> DecoderConfig {
         DecoderConfig { codec: Codec::H264, width: 0, height: 0, hardware: true }
@@ -269,5 +374,129 @@ mod tests {
         let mut decoder = Fallback::new(stub("first", Answer::Refused), stub("second", Answer::Refused));
         decoder.configure(&config()).unwrap();
         assert!(decoder.decode(&[0; 8], 0, true).is_err());
+    }
+
+    /// A decoder that records what the wrapper did to it, and whose answer can
+    /// be changed while the stream runs - the way a device that frees a
+    /// hardware session changes its mind.
+    ///
+    /// Counters are atomics rather than `Cell`s because a decoder is `Send`.
+    struct Spy {
+        name: &'static str,
+        answer: Arc<AtomicU32>,
+        configures: Arc<AtomicU32>,
+        closed: Arc<AtomicU32>,
+    }
+
+    /// `Answer` as a number, since an atomic cannot hold the enum itself.
+    const PICTURE: u32 = 0;
+    const REFUSED: u32 = 1;
+
+    fn answer_of(value: u32) -> Answer {
+        match value {
+            PICTURE => Answer::Picture,
+            REFUSED => Answer::Refused,
+            _ => Answer::Broken,
+        }
+    }
+
+    impl VideoDecoder for Spy {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn configure(&mut self, _config: &DecoderConfig) -> Result<()> {
+            self.configures.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn decode(&mut self, _unit: &[u8], _pts_us: i64, _keyframe: bool) -> Result<Vec<DecodedFrame>> {
+            match answer_of(self.answer.load(Ordering::Relaxed)) {
+                Answer::Picture => Ok(vec![frame()]),
+                Answer::Refused => Err(CodecError::Unsupported("no".to_string())),
+                Answer::Broken => Err(CodecError::Decode("a damaged picture".to_string())),
+            }
+        }
+
+        fn flush(&mut self) -> Result<Vec<DecodedFrame>> {
+            Ok(Vec::new())
+        }
+
+        fn info(&self) -> Option<&VideoStreamInfo> {
+            None
+        }
+
+        fn close(&mut self) {
+            self.closed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A stream that was moved to the CPU, and the parts a test needs to watch.
+    struct Spied {
+        decoder: Fallback,
+        answer: Arc<AtomicU32>,
+        configures: Arc<AtomicU32>,
+        closed: Arc<AtomicU32>,
+    }
+
+    fn spied() -> Spied {
+        let answer = Arc::new(AtomicU32::new(REFUSED));
+        let configures = Arc::new(AtomicU32::new(0));
+        let closed = Arc::new(AtomicU32::new(0));
+        let decoder = Fallback::new(
+            Box::new(Spy {
+                name: "first",
+                answer: answer.clone(),
+                configures: configures.clone(),
+                closed: closed.clone(),
+            }),
+            stub("second", Answer::Picture),
+        );
+        Spied { decoder, answer, configures, closed }
+    }
+
+    #[test]
+    fn the_decoder_left_behind_is_closed_when_the_stream_moves_to_the_cpu() {
+        let mut spied = spied();
+        spied.decoder.configure(&config()).unwrap();
+        assert_eq!(spied.decoder.decode(&[0; 8], 0, true).unwrap().len(), 1);
+        assert_eq!(spied.decoder.name(), "second");
+        // A platform session held open but idle is one the next channel cannot
+        // have, and this channel no longer needs it.
+        assert_eq!(spied.closed.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn the_platform_decoder_is_offered_the_stream_again_after_a_cooling_off() {
+        let mut spied = spied();
+        spied.decoder.configure(&config()).unwrap();
+        spied.decoder.decode(&[0; 8], 0, true).unwrap();
+        assert_eq!(spied.decoder.name(), "second", "refused, so the cpu decodes it");
+
+        // Not on the key frame that follows: the stream was just moved, and a
+        // wall that is genuinely full must not be asked every group.
+        assert!(!spied.decoder.try_upgrade());
+        assert_eq!(spied.decoder.name(), "second");
+
+        // Once the wait has passed, the next key frame offers it back.
+        spied.decoder.upgrade_wait = Duration::ZERO;
+        spied.answer.store(PICTURE, Ordering::Relaxed);
+        assert!(spied.decoder.try_upgrade());
+        assert_eq!(spied.decoder.name(), "first");
+        assert_eq!(spied.configures.load(Ordering::Relaxed), 2, "configured again before it is given the stream");
+        assert_eq!(spied.decoder.decode(&[0; 8], 0, true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_taken_offer_back_starts_the_wait_again() {
+        let mut spied = spied();
+        spied.decoder.configure(&config()).unwrap();
+        spied.decoder.decode(&[0; 8], 0, true).unwrap();
+        assert_eq!(spied.decoder.upgrade_wait, UPGRADE_FIRST_WAIT);
+
+        spied.decoder.upgrade_wait = Duration::ZERO;
+        assert!(spied.decoder.try_upgrade(), "the spy takes the stream back");
+        assert_eq!(spied.decoder.upgrade_wait, UPGRADE_FIRST_WAIT, "and the wait starts over");
+        assert!(!spied.decoder.try_upgrade(), "so it is not asked again straight away");
     }
 }

@@ -176,6 +176,27 @@ use crate::surface::{
 /// makes two of them comparable. See `priv/docs/playback-decode-cost.md`.
 const PACE_FRAMES: u32 = 60;
 
+/// Access units a codec may starve on before it is judged dead rather than slow.
+///
+/// A hardware session the platform could not really start still opens, still
+/// takes its configuration and still reports itself started - it simply never
+/// hands a picture back. That is the state a box that is out of decoder
+/// instances is in, and it is the one the tenth stream on an Amlogic S905X
+/// meets: `AMediaCodec_start` fails, the retry without a named colour layout
+/// succeeds, and the session that comes out of that retry is a shell. The
+/// channel then waits out the first picture's patience - ten to twenty seconds,
+/// see `FIRST_PICTURE_FLOOR` in the pipeline - before its stall detector
+/// reconnects the stream.
+///
+/// Six starvations is about three seconds of waits (`wait::WAIT_MAX` is 500 ms
+/// and a starved unit spends it in full), long enough that a codec merely
+/// behind the stream is not mistaken for one that will never answer, and short
+/// enough that the tile is not dark for the length of a reconnect. Only a codec
+/// that has never produced a picture is counted: once one has, a starving
+/// decode is the stream's trouble and the pipeline's stall handling is what
+/// deals with it.
+const STARVED_ACCESS_UNITS: u32 = 6;
+
 /// `AMediaCodec` decoder.
 ///
 /// It reads pictures back through `AMediaCodec_getOutputBuffer`, unless the
@@ -192,6 +213,13 @@ pub struct AMediaCodecDecoder {
     /// stalled one by looking at the frames - this is what it counts instead.
     /// See `VideoDecoder::pictures`.
     pictures: u64,
+    /// Access units the codec could not even take a buffer for since it last
+    /// produced a picture.
+    ///
+    /// Counted to tell a codec that is behind the stream from one that will
+    /// never answer at all; see [`STARVED_ACCESS_UNITS`]. Reset whenever a unit
+    /// gets through, so a codec that is merely slow never accumulates.
+    starved: u32,
     /// Configuration remembered from [`VideoDecoder::configure`], which is the
     /// only thing known before the stream is: the parameter sets the codec has
     /// to be opened with come with the first access unit.
@@ -982,8 +1010,19 @@ impl AMediaCodecDecoder {
         })
     }
 
+}
+
+impl VideoDecoder for AMediaCodecDecoder {
+    fn name(&self) -> &'static str {
+        "AMediaCodec"
+    }
+
     /// Stops and releases the codec. Safe to call twice, and called by [`Drop`]
     /// when the channel ends.
+    ///
+    /// Also the call that gives a hardware session back: a channel that fell
+    /// back to the CPU keeps this decoder in its wrapper, and the codec session
+    /// behind it is one the next channel cannot have until it is released.
     fn close(&mut self) {
         if self.presenting {
             self.presenting = false;
@@ -993,6 +1032,9 @@ impl AMediaCodecDecoder {
         // gap between two handovers is a gap within a session: a session opened
         // straight after another must not be held back by the last one's clock.
         self.rendered_at = None;
+        // A new session starts its own count: the one that came before it was
+        // judged on a codec that no longer exists.
+        self.starved = 0;
         if let Some(codec) = self.handle.take() {
             if self.started {
                 unsafe { AMediaCodec_stop(codec) };
@@ -1000,12 +1042,6 @@ impl AMediaCodecDecoder {
             }
             unsafe { AMediaCodec_delete(codec) };
         }
-    }
-}
-
-impl VideoDecoder for AMediaCodecDecoder {
-    fn name(&self) -> &'static str {
-        "AMediaCodec"
     }
 
     fn configure(&mut self, config: &DecoderConfig) -> Result<()> {
@@ -1027,6 +1063,7 @@ impl VideoDecoder for AMediaCodecDecoder {
         self.wait = crate::wait::WAIT_MIN;
         self.geometry_logged = false;
         self.layout = None;
+        self.starved = 0;
         Ok(())
     }
 
@@ -1156,8 +1193,29 @@ impl VideoDecoder for AMediaCodecDecoder {
         // `WAIT_MAX` and the unit is given up as before.
         let dequeuing = Instant::now();
         let Some(index) = self.dequeue_input(codec) else {
+            // A codec that cannot take a buffer at all is not behind the
+            // stream, it is not decoding - and one that has never produced a
+            // picture gives no sign that it ever will. Reported as a refusal,
+            // it moves the session to the software decoder; reported as
+            // `NoBuffer` the channel instead waits out the first picture's
+            // patience and reconnects, which is ten to twenty seconds of a dark
+            // tile for a decoder that was never going to work.
+            if self.pictures == 0 {
+                self.starved = self.starved.saturating_add(1);
+                if self.starved >= STARVED_ACCESS_UNITS {
+                    tracing::warn!(
+                        target: "xgview::codec",
+                        units = self.starved,
+                        "the decoder opened but never produced a picture"
+                    );
+                    return Err(CodecError::Unsupported(
+                        "the codec opened but never produced a picture".to_string(),
+                    ));
+                }
+            }
             return Err(CodecError::NoBuffer);
         };
+        self.starved = 0;
         self.stat_dequeue += dequeuing.elapsed();
 
         let mut capacity = 0usize;

@@ -1340,6 +1340,16 @@ impl<'a> RtspSession<'a> {
             }
             self.baseline_fix.observe(self.index, self.kind, &mut unit.data);
             self.stall.observe(unit.keyframe, Instant::now());
+            // Offered back to the platform decoder on a key frame, and only
+            // there: a decoder cannot be resumed past a picture it never saw,
+            // so a return to hardware that started mid-group would leave the
+            // tile dark until the next one. A channel that fell back to the CPU
+            // because the device was out of hardware sessions is the case this
+            // is for - one of them frees up when a channel closes or the grid
+            // is made smaller, and nothing else ever asks again.
+            if unit.keyframe {
+                decoder.try_upgrade();
+            }
             let started = Instant::now();
             // Counted before and after, because a decoder given a surface keeps
             // its pictures: `decode` comes back empty on a stream that is
