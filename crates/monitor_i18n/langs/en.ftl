@@ -204,7 +204,7 @@ about-import-name = Import configuration
 about-only-cameras = Only import the cameras
 about-only-cameras-name = Only import the cameras
 about-import-hint = Importing overwrites your current configuration. Check the box to import the cameras and their groups only, keeping your viewer settings. The export is sealed with a passphrase unless you untick the box beside it.
-about-import-hint-android = Export saves into Download/xgview: xgvconfig.seal sealed with a passphrase, or xgvconfig.json in clear when you untick the box beside it. Import opens a file picker - the system's where the device has one, the viewer's own where it does not. { about-import-hint }
+about-import-hint-android = Export writes into the folder the file picker is showing - the viewer's own folder to begin with: xgvconfig.seal sealed with a passphrase, or xgvconfig.json in clear when you untick the box beside it. Import opens a file picker - the system's where the device has one, the viewer's own where it does not. { about-import-hint }
 about-memory = Memory: { $used } MB / { $total } MB ({ $percent }%)
 about-memory-unknown = Memory: --
 about-cpu = CPU: { $percent }%
@@ -269,6 +269,21 @@ file-dialog-err-empty-file = The file name cannot be empty
 file-dialog-err-directory-exists = A directory with the name already exists
 file-dialog-err-file-exists = A file with the name already exists
 file-dialog-filter-config = Configuration
+
+## File picker
+file-picker-title = 📂 Choose a configuration
+file-picker-title-save = 📂 Save the configuration
+file-picker-parent = .. Up one level
+file-picker-folder = Folder
+file-picker-file = Configuration
+file-picker-empty = No configuration in this folder
+file-picker-name = File name
+file-picker-save = Save
+file-picker-hint = Up and down to choose, OK to open or take, Backspace to go up, Esc to close
+file-picker-hint-android = Up and down to choose, OK to open or take, Back to go up, Back again at a root to close
+file-picker-hint-save = Up and down to choose a folder, type a name and confirm to save; Backspace goes up, Esc closes
+file-picker-hint-save-android = Up and down to choose a folder, type a name and confirm to save; Back goes up, Back again at a root closes
+file-picker-place-home = Home
 
 ## Toolbar
 toolbar-layout-1x1 = Grid 1×1

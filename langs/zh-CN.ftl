@@ -198,7 +198,7 @@ about-import-name = 导入配置
 about-only-cameras = 仅导入摄像头
 about-only-cameras-name = 仅导入摄像头
 about-import-hint = 导入会覆盖当前配置。勾选此框仅导入摄像头及其分组，保留本查看器自身的设置。导出默认用口令加密后写入，取消旁边的勾选则明文导出。
-about-import-hint-android = 导出会保存到 Download/xgview：勾选口令加密时为 xgvconfig.seal，取消勾选则明文导出为 xgvconfig.json。导入会打开文件选择器：设备有系统选择器时用系统的，没有时用查看器自带的。{ about-import-hint }
+about-import-hint-android = 导出会写入文件选择器里的目录，默认是查看器自己的文件夹，勾选口令加密时为 xgvconfig.seal，取消勾选则明文导出为 xgvconfig.json。导入会打开文件选择器：设备有系统选择器时用系统的，没有时用查看器自带的。{ about-import-hint }
 about-memory = 内存使用：{ $used } MB / { $total } MB（{ $percent }%）
 about-memory-unknown = 内存使用：--
 about-cpu = CPU 使用：{ $percent }%
@@ -263,6 +263,21 @@ file-dialog-err-empty-file = 文件名不能为空
 file-dialog-err-directory-exists = 已存在同名文件夹
 file-dialog-err-file-exists = 已存在同名文件
 file-dialog-filter-config = 配置文件
+
+# 导入时自绘的文件选择器，遥控器可操作。
+file-picker-title = 📂 选择配置文件
+file-picker-title-save = 📂 保存配置文件
+file-picker-parent = .. 上一级
+file-picker-folder = 文件夹
+file-picker-file = 配置文件
+file-picker-empty = 这个文件夹里没有配置文件
+file-picker-name = 文件名
+file-picker-save = 保存
+file-picker-hint = 上下选择，确认进入文件夹或选取文件；Backspace 回上一级，Esc 关闭
+file-picker-hint-android = 上下选择，确认进入文件夹或选取文件；返回键回上一级，到根目录再按一次关闭
+file-picker-hint-save = 上下选择文件夹，输入文件名后确认保存；Backspace 回上一级，Esc 关闭
+file-picker-hint-save-android = 上下选择文件夹，输入文件名后确认保存；返回键回上一级，到根目录再按一次关闭
+file-picker-place-home = 主目录
 
 ## 工具栏
 toolbar-layout-1x1 = 宫格 1×1

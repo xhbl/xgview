@@ -141,27 +141,12 @@ impl XgViewApp {
         if self.file_job.is_none() {
             return;
         }
-        self.file_dialog.update(ctx);
-        if let Some(path) = self.file_dialog.take_picked() {
-            self.file_dialog_answered = true;
-            match self.file_job.take() {
-                // Android never opens this dialog to export - the file goes
-                // into the public folder through `MediaStore` instead - so a
-                // path picked there is always an import.
-                #[cfg(not(target_os = "android"))]
-                Some(FileJob::Export(passphrase)) => self.export_to(&path, passphrase.as_deref()),
-                Some(FileJob::Import) => self.import_from(path),
-                _ => {}
-            }
-        } else if matches!(
-            self.file_dialog.state(),
-            DialogState::Closed | DialogState::Cancelled
-        ) {
-            // The viewer backed out of it: nothing is imported or exported, and
-            // there is nothing to say about it.
-            self.file_dialog_answered = true;
-            self.file_job = None;
-        }
+        // The window itself is drawn later in the frame, after the navigation
+        // layer has begun: a row drawn before `Nav::begin` is wiped from the
+        // layout the arrows read, and the listing cannot be walked. Its answer
+        // is acted on there too, still before the wall is drawn. See
+        // `XgViewApp::frame` and `XgViewApp::draw_file_picker`.
+        //
         // It is down now, so the control behind it takes the focus back - the
         // way it would have had the dialog not been opened at all. An import
         // that turned out to want the passphrase anchors itself instead.
@@ -172,10 +157,12 @@ impl XgViewApp {
         }
     }
 
-    /// Opens what Android has instead of a file dialog: the export is written
-    /// straight into the public folder, and the import is handed to the
-    /// system's document picker - or, on a device without one, to the viewer's
-    /// own dialog.
+    /// Opens what Android has instead of a file dialog.
+    ///
+    /// The export writes through the viewer's own picker, into the folder it
+    /// walks to - the app's own on the shared volume, which needs no
+    /// permission. The import is handed to the system's document picker when
+    /// the device has one, and to that same window when it does not.
     #[cfg(target_os = "android")]
     pub(super) fn ask_for_file(&mut self, job: FileJob) {
         // The press that answered the dialog, read again by the control it was
@@ -184,7 +171,11 @@ impl XgViewApp {
             return;
         }
         match job {
-            FileJob::Export(passphrase) => self.export_config(passphrase.as_deref()),
+            // The export now writes where the viewer points it, through the
+            // same window the import uses: a remote can walk one picker, and
+            // the app's own folder on the shared volume is writable without a
+            // permission. See [`Self::export_with_picker`].
+            FileJob::Export(passphrase) => self.export_with_picker(passphrase),
             FileJob::Import => {
                 // A television build can ship without `DocumentsUI` and without
                 // a single document provider behind it, while still answering
@@ -195,26 +186,55 @@ impl XgViewApp {
                 if crate::android::has_document_picker() {
                     self.import_config();
                 } else {
-                    self.import_with_builtin_dialog();
+                    self.import_with_picker();
                 }
             }
         }
     }
 
-    /// Opens the viewer's own file dialog for an import.
+    /// Opens the viewer's own picker for an import.
     ///
-    /// The dialog the desktop uses - drawn by egui inside this window, so it
-    /// needs no other activity, no provider and no permission behind it. It is
-    /// started in the app's own folder on the shared volume, the one place a
-    /// file transfer can put a configuration the app may read back. A remote
-    /// drives it poorly; a device with no picker at all has nothing better.
-    #[cfg(target_os = "android")]
-    fn import_with_builtin_dialog(&mut self) {
-        if let Some(dir) = crate::android::external_files_dir() {
-            self.file_dialog.config_mut().initial_directory = dir;
-        }
-        self.file_dialog.pick_file();
+    /// Every platform that has no document picker to hand an import to ends up
+    /// here - a television build that ships without `DocumentsUI` above all -
+    /// and so does the desktop: the listing is walked by the arrows, which is
+    /// the only way a remote can walk one. The dialog it replaces needed no
+    /// provider and no permission behind it, and neither does this.
+    ///
+    /// It starts where [`start_dir`] says: the app's own folder on the shared
+    /// volume on Android, the viewer's home on a desktop. Both are places a
+    /// file transfer can put a configuration without a permission behind it.
+    pub(super) fn import_with_picker(&mut self) {
+        let (start, places) = picker_start_and_places();
+        self.file_picker.open(super::file_picker::FilePicker::start(
+            start,
+            places,
+            super::file_picker::Mode::Open,
+            String::new(),
+        ));
         self.file_job = Some(FileJob::Import);
+    }
+
+    /// Opens the picker to write a configuration out.
+    ///
+    /// The same window as an import, with the field and the button it grows at
+    /// its foot: the folder on screen is where the file goes, and the name is
+    /// the one the viewer leaves in the field. It starts in the same place an
+    /// import does, so a file written here is one the import can walk to
+    /// without leaving the window.
+    pub(super) fn export_with_picker(&mut self, passphrase: Option<String>) {
+        let (start, places) = picker_start_and_places();
+        let name = if passphrase.is_some() {
+            monitor_core::EXPORT_FILE_NAME
+        } else {
+            monitor_core::CONFIG_FILE_NAME
+        };
+        self.file_picker.open(super::file_picker::FilePicker::start(
+            start,
+            places,
+            super::file_picker::Mode::Save,
+            name.to_owned(),
+        ));
+        self.file_job = Some(FileJob::Export(passphrase));
     }
 
     /// Whether the file dialog is up. It owns the screen while it is: the
@@ -233,12 +253,11 @@ impl XgViewApp {
     /// Writes the configuration out sealed with `passphrase`, to a file the
     /// viewer has already chosen.
     ///
-    /// Choosing it is the dialog [`Self::ask_for_file`] opens on another thread;
-    /// this is what happens once its answer is in. Sealing is handed to a thread
+    /// Choosing it is the window [`Self::ask_for_file`] opens; this is what
+    /// happens once its answer is in. Sealing is handed to a thread
     /// of its own and the file is written when the text is in - see
     /// [`Self::poll_sealing`] - while the JSON, which costs nothing to produce,
     /// goes out from here.
-    #[cfg(not(target_os = "android"))]
     pub(super) fn export_to(&mut self, path: &Path, passphrase: Option<&str>) {
         match passphrase {
             Some(passphrase) => {
@@ -254,9 +273,12 @@ impl XgViewApp {
         }
     }
 
-    /// Writes what an export came to into the file the dialog chose, and says
+    /// Writes what an export came to into the file the picker chose, and says
     /// where it went.
-    #[cfg(not(target_os = "android"))]
+    ///
+    /// Every platform that can write the path uses this: on Android that is the
+    /// app's own folder on the shared volume, which needs no permission; a
+    /// desktop writes wherever the viewer pointed the window.
     pub(super) fn write_export_to(&mut self, path: &Path, written: &str) {
         match std::fs::write(path, written.as_bytes()) {
             Ok(()) => self.flash(
@@ -267,57 +289,6 @@ impl XgViewApp {
                 ToastKind::Info,
             ),
             Err(error) => self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]), ToastKind::Error),
-        }
-    }
-
-    /// Writes the configuration out into the public `Download/xgview` folder:
-    /// sealed with `passphrase`, or the JSON in clear when there is none.
-    ///
-    /// The sealing itself is handed to a thread of its own, and the write
-    /// follows it there; see [`Self::poll_sealing`].
-    #[cfg(target_os = "android")]
-    pub(super) fn export_config(&mut self, passphrase: Option<&str>) {
-        // The name says which of the two the file is, as it does for the
-        // desktop's dialog.
-        let name = if passphrase.is_some() {
-            monitor_core::EXPORT_FILE_NAME
-        } else {
-            monitor_core::CONFIG_FILE_NAME
-        };
-        match passphrase {
-            Some(passphrase) => {
-                self.spawn_seal(passphrase.to_owned(), ExportTarget::Download(name))
-            }
-            None => match self.config.to_json() {
-                Ok(written) => self.write_download_export(name, &written),
-                Err(error) => self.flash(
-                    monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]),
-                    ToastKind::Error,
-                ),
-            },
-        }
-    }
-
-    /// Writes what an export came to into the public `Download/xgview` folder
-    /// under `name`.
-    ///
-    /// The write is the activity's - `MediaStore` from Android 10 on, a plain
-    /// file into the public Downloads folder before that - because a
-    /// `NativeActivity` has no storage of its own the viewer can reach. See
-    /// `MainActivity.writeDownloadFile`.
-    #[cfg(target_os = "android")]
-    pub(super) fn write_download_export(&mut self, name: &str, written: &str) {
-        match crate::android::write_download(name, written) {
-            Ok(crate::android::ExportOutcome::Written(path)) => self.flash(
-                monitor_i18n::tr_args("toast-config-exported", &[("path", path.into())]),
-                ToastKind::Info,
-            ),
-            // Android 9 only: the storage permission has just been asked for,
-            // so the export is one press away rather than failed.
-            Ok(crate::android::ExportOutcome::NeedsStoragePermission) => {
-                self.flash(monitor_i18n::tr("toast-export-needs-storage"), ToastKind::Error)
-            }
-            Err(error) => self.flash(monitor_i18n::tr_args("toast-export-failed", &[("error", error.into())]), ToastKind::Error),
         }
     }
 
@@ -519,10 +490,7 @@ impl XgViewApp {
             },
             Sealing::Export { result, target } => match result.try_recv() {
                 Ok(Ok(written)) => match target {
-                    #[cfg(not(target_os = "android"))]
                     ExportTarget::File(path) => self.write_export_to(&path, &written),
-                    #[cfg(target_os = "android")]
-                    ExportTarget::Download(name) => self.write_download_export(name, &written),
                 },
                 Ok(Err(error)) => self.flash(
                     monitor_i18n::tr_args("toast-export-failed", &[("error", error.into())]),
@@ -549,5 +517,169 @@ impl XgViewApp {
             monitor_i18n::tr_args("toast-imported-document", &[("count", count.into())]),
             ToastKind::Info,
         );
+    }
+}
+
+/// Where the picker opens, and what it offers above the listing.
+///
+/// Two entries, never a wall of them: the home folder and the volumes the
+/// machine has. The per-user folders a native dialog also lists - desktop,
+/// documents, downloads, pictures and the rest - are all inside home, and a
+/// remote walks this list one press at a time; a shortcut for each of them is
+/// a list to read rather than one to remember.
+fn picker_start_and_places() -> (PathBuf, Vec<(String, PathBuf)>) {
+    let home = home_dir();
+    let start = start_dir(home.as_deref());
+    let mut places = Vec::new();
+    if let Some(home) = &home {
+        places.push((monitor_i18n::tr("file-picker-place-home"), home.clone()));
+    }
+    places.extend(device_places());
+    (start, places)
+}
+
+/// The folder the picker opens on.
+///
+/// Android opens on the app's own folder on the shared volume: since Android 11
+/// a program sees nothing of that volume but the folders it made, and this is
+/// the one a file transfer can put a configuration into without a permission
+/// behind it. The desktops open on home, which is where a browser's download
+/// lands and where the exports carried between machines are kept.
+fn start_dir(home: Option<&Path>) -> PathBuf {
+    home.map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The viewer's home folder, when the platform names one.
+///
+/// A television does not have one in any sense its viewer would recognise: the
+/// only folder it may read is the app's own on the shared volume, so that is
+/// what is called home here - the window opens on it and the list offers it,
+/// exactly as a desktop does with `~`.
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::external_files_dir()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        #[cfg(windows)]
+        let home = std::env::var_os("USERPROFILE");
+        #[cfg(not(windows))]
+        let home = std::env::var_os("HOME");
+        home.map(PathBuf::from).filter(|dir| dir.is_dir())
+    }
+}
+
+/// The volumes above the listing.
+///
+/// Windows names them by drive letter. `GetLogicalDrives` is asked rather than
+/// each letter's `is_dir`: a disconnected network drive blocks on the filesystem
+/// until the client gives up, and that would be the frame the window opens on.
+#[cfg(windows)]
+fn device_places() -> Vec<(String, PathBuf)> {
+    let mask = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
+    let mut places = Vec::new();
+    // A: and B: are the legacy floppy positions; no machine that runs this has
+    // one, and asking about them can stall a controller that is still mapped.
+    for index in 2..26u32 {
+        if mask & (1 << index) == 0 {
+            continue;
+        }
+        let letter = (b'A' + index as u8) as char;
+        places.push((format!("{letter}:"), PathBuf::from(format!("{letter}:\\"))));
+    }
+    places
+}
+
+/// Linux names its volumes by where they are mounted.
+///
+/// The block devices in `/dev` are nodes, not folders - `read_dir` on one fails -
+/// so the picker offers the places they are mounted at: the root, the homes, and
+/// whatever removable medium or manual mount is under `/media`, `/mnt` or
+/// `/run/media`.
+#[cfg(target_os = "linux")]
+fn device_places() -> Vec<(String, PathBuf)> {
+    let mut places = Vec::new();
+    for root in ["/", "/home"] {
+        let path = PathBuf::from(root);
+        if path.is_dir() {
+            places.push((root.to_owned(), path));
+        }
+    }
+    for base in ["/media", "/mnt", "/run/media"] {
+        let Ok(read) = std::fs::read_dir(base) else { continue };
+        for item in read.flatten() {
+            let path = item.path();
+            if !item.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            // `/run/media` holds one folder per user; the mounts are inside it.
+            if base == "/run/media" {
+                if let Ok(inner) = std::fs::read_dir(&path) {
+                    for mount in inner.flatten() {
+                        if mount.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                            places.push((
+                                mount.file_name().to_string_lossy().into_owned(),
+                                mount.path(),
+                            ));
+                        }
+                    }
+                }
+                continue;
+            }
+            places.push((item.file_name().to_string_lossy().into_owned(), path));
+        }
+    }
+    places
+}
+
+/// macOS names its volumes by their labels, under `/Volumes`.
+#[cfg(target_os = "macos")]
+fn device_places() -> Vec<(String, PathBuf)> {
+    let mut places = vec![("/".to_owned(), PathBuf::from("/"))];
+    if let Ok(read) = std::fs::read_dir("/Volumes") {
+        for item in read.flatten() {
+            if item.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                places.push((item.file_name().to_string_lossy().into_owned(), item.path()));
+            }
+        }
+    }
+    places
+}
+
+/// Android has one folder it may read, and that is where the window opens.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn device_places() -> Vec<(String, PathBuf)> {
+    Vec::new()
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// A remote that walked down to `D:\` has no `..` above it; the only way
+    /// onto another volume is a shortcut to its root.
+    #[test]
+    fn every_volume_on_the_machine_is_one_press_away() {
+        for (label, path) in device_places() {
+            // A volume need not be readable - an optical drive with no disc in
+            // it still has a letter, and the list names it rather than probing
+            // every root on the frame the window opens. What matters is that
+            // every entry is a drive root and nothing else.
+            assert_eq!(label.len(), 2, "{label} is a drive letter");
+            assert!(path.is_absolute(), "{label} is not a path");
+            assert_eq!(path.parent(), None, "{label} is a drive root");
+        }
+    }
+
+    /// The window opens on home, and home is the first thing in the list.
+    #[test]
+    fn the_picker_opens_on_home_with_home_in_the_list() {
+        let (start, places) = picker_start_and_places();
+        let home = home_dir().expect("a Windows session always names a profile");
+        assert_eq!(start, home);
+        assert_eq!(places.first().map(|(_, path)| path.clone()), Some(home));
     }
 }

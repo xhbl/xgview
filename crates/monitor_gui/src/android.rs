@@ -1,8 +1,7 @@
 //! Android helpers that ask the activity to do what the native side cannot:
 //! report the start-on-boot state, open the two system screens that grant it,
-//! say which edge the navigation bar's strip is on, and export / import the
-//! configuration through the public Downloads folder and the system's document
-//! picker.
+//! say which edge the navigation bar's strip is on, and hand an import to the
+//! system's document picker.
 //!
 //! Everything here calls a static method on `MainActivity` - see the matching
 //! methods there - over the same JNI bridge `keyboard` uses, including the

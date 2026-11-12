@@ -7,13 +7,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(not(target_os = "android"))]
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use egui::{Align, Align2, CornerRadius, FontId, Id, Key, Layout, Modifiers, Rect, RichText, Sense, StrokeKind, vec2};
-use egui_file_dialog::{DialogState, FileDialog, FileDialogLabels};
 use tokio::runtime::Handle;
 
 use monitor_core::autostart::{self, AutostartStatus};
@@ -28,6 +26,7 @@ use monitor_core::talk::{TalkRoute, ToneFailure};
 use monitor_core::{CameraSource, Direction};
 
 use crate::dialogs::{self, BackgroundEvent, CameraDraft, DiscoveryUi, Tab};
+use self::file_picker::FilePicker;
 use crate::fonts;
 use crate::grid::{self, PictureZoom, Tile, TileActions};
 use crate::icons::{self, Icon};
@@ -654,7 +653,18 @@ impl<T> Modal<T> {
     /// opened. `fresh_caret` drops the caret state of a form whose fields carry
     /// the same ids on every visit - see [`Handoff::takes_focus`].
     fn hand_off(&mut self, ctx: &egui::Context, fresh_caret: bool) -> bool {
-        self.handoff.takes_focus(ctx, self.payload.is_some(), self.anchor, fresh_caret)
+        self.hand_off_when(ctx, self.payload.is_some(), fresh_caret)
+    }
+
+    /// [`hand_off`](Self::hand_off) for a window whose rows are drawn a frame
+    /// after it opens, so the anchor does not exist on the opening frame.
+    ///
+    /// The hand-off happens once, on the frame `open` rises. A window opened by
+    /// a control in the panel - the file picker is - puts up its first row only
+    /// on the following frame, and spending that one chance on the frame it
+    /// opened would leave the keyboard on the wall behind it.
+    fn hand_off_when(&mut self, ctx: &egui::Context, open: bool, fresh_caret: bool) -> bool {
+        self.handoff.takes_focus(ctx, open, self.anchor, fresh_caret)
     }
 }
 
@@ -769,12 +779,10 @@ impl Passphrase {
 /// Where a sealed export is written once its text is in.
 #[derive(Debug)]
 enum ExportTarget {
-    /// The desktop: the file its dialog chose.
-    #[cfg(not(target_os = "android"))]
+    /// The file the picker chose, which every platform writes the same way -
+    /// `std::fs` into the app's own folder on Android, or anywhere the viewer
+    /// can write on a desktop.
     File(PathBuf),
-    /// Android: the name to write into the public `Download/xgview` folder.
-    #[cfg(target_os = "android")]
-    Download(&'static str),
 }
 
 /// A passphrase being stretched, or a sealed document being opened, on a thread
@@ -814,70 +822,6 @@ enum FileJob {
     Export(Option<String>),
     /// Reading a configuration in - sealed, or in clear from an older export.
     Import,
-}
-
-/// The file dialog the export / import opens, with this program's filters and
-/// wording.
-///
-/// Built once and kept for the life of the viewer: it remembers the directory
-/// it was last left in, and its labels are read from the language pack here
-/// rather than on every frame. See [`XgViewApp::ask_for_file`] for why it is
-/// drawn by egui rather than by the desktop.
-fn new_file_dialog() -> FileDialog {
-    let configurations = monitor_i18n::tr("file-dialog-filter-config");
-    FileDialog::new()
-        .labels(file_dialog_labels())
-        .add_file_filter_extensions(&configurations, vec!["seal", "json"])
-        .default_file_filter(&configurations)
-        .default_size([760.0, 480.0])
-        .min_size([520.0, 340.0])
-}
-
-/// What the file dialog's own controls say, in the viewer's language.
-///
-/// Every label it draws is named here; the two it never draws - the titles of
-/// the folder and multiple-selection modes, which this program does not open -
-/// are left at the default by `..Default`.
-fn file_dialog_labels() -> FileDialogLabels {
-    FileDialogLabels {
-        title_select_file: monitor_i18n::tr("file-dialog-title-open"),
-        title_save_file: monitor_i18n::tr("file-dialog-title-save"),
-        cancel: monitor_i18n::tr("file-dialog-cancel"),
-        overwrite: monitor_i18n::tr("file-dialog-overwrite"),
-        reload: monitor_i18n::tr("file-dialog-reload"),
-        working_directory: monitor_i18n::tr("file-dialog-working-directory"),
-        show_hidden: monitor_i18n::tr("file-dialog-show-hidden"),
-        show_system_files: monitor_i18n::tr("file-dialog-show-system"),
-        heading_pinned: monitor_i18n::tr("file-dialog-heading-pinned"),
-        heading_places: monitor_i18n::tr("file-dialog-heading-places"),
-        heading_devices: monitor_i18n::tr("file-dialog-heading-devices"),
-        heading_removable_devices: monitor_i18n::tr("file-dialog-heading-removable"),
-        home_dir: monitor_i18n::tr("file-dialog-home"),
-        desktop_dir: monitor_i18n::tr("file-dialog-desktop"),
-        documents_dir: monitor_i18n::tr("file-dialog-documents"),
-        downloads_dir: monitor_i18n::tr("file-dialog-downloads"),
-        audio_dir: monitor_i18n::tr("file-dialog-audio"),
-        pictures_dir: monitor_i18n::tr("file-dialog-pictures"),
-        videos_dir: monitor_i18n::tr("file-dialog-videos"),
-        pin_folder: monitor_i18n::tr("file-dialog-pin"),
-        unpin_folder: monitor_i18n::tr("file-dialog-unpin"),
-        rename_pinned_folder: monitor_i18n::tr("file-dialog-rename"),
-        selected_directory: monitor_i18n::tr("file-dialog-selected-directory"),
-        selected_file: monitor_i18n::tr("file-dialog-selected-file"),
-        selected_items: monitor_i18n::tr("file-dialog-selected-items"),
-        file_name: monitor_i18n::tr("file-dialog-file-name"),
-        file_filter_all_files: monitor_i18n::tr("file-dialog-all-files"),
-        save_extension_any: monitor_i18n::tr("file-dialog-any-extension"),
-        open_button: monitor_i18n::tr("file-dialog-open"),
-        save_button: monitor_i18n::tr("file-dialog-save"),
-        cancel_button: monitor_i18n::tr("file-dialog-cancel-button"),
-        overwrite_file_modal_text: monitor_i18n::tr("file-dialog-overwrite-text"),
-        err_empty_folder_name: monitor_i18n::tr("file-dialog-err-empty-folder"),
-        err_empty_file_name: monitor_i18n::tr("file-dialog-err-empty-file"),
-        err_directory_exists: monitor_i18n::tr("file-dialog-err-directory-exists"),
-        err_file_exists: monitor_i18n::tr("file-dialog-err-file-exists"),
-        ..Default::default()
-    }
 }
 
 /// Translation key of what the status line calls a grid layout.
@@ -1003,17 +947,20 @@ pub struct XgViewApp {
     frame_clock: Option<crate::frame::FrameClock>,
     events_tx: Sender<BackgroundEvent>,
     events_rx: Receiver<BackgroundEvent>,
-    /// The file dialog the export / import opens, and what it was opened for.
-    ///
-    /// Drawn by egui inside this window rather than by the desktop; `file_job`
-    /// is what the answer is for, and `None` while the dialog is closed. Kept
-    /// between uses so the directory it was last left in is kept. See
-    /// [`Self::ask_for_file`].
-    ///
-    /// Android uses it too, but only when the device has no document picker to
-    /// hand an import to; see [`Self::import_with_builtin_dialog`].
-    file_dialog: FileDialog,
+    /// What the file window was opened for, and `None` while it is closed.
+    /// Both directions use the viewer's own picker, which is the only file
+    /// window a remote can walk. See [`Self::ask_for_file`].
     file_job: Option<FileJob>,
+    /// The import picker: a listing a remote control can walk. It is what an
+    /// import opens everywhere - the mouse-driven dialog above is kept for the
+    /// export, whose typed name a remote could not manage. See
+    /// [`file_picker::FilePicker`].
+    file_picker: Modal<FilePicker>,
+    /// What the picker answered, carried out of it: the window's payload is
+    /// dropped as it closes, so the answer cannot travel in it.
+    file_picker_picked: Option<PathBuf>,
+    /// Whether the picker was backed out of rather than answered.
+    file_picker_cancelled: bool,
     /// Whether the file dialog had the keyboard when this frame's keys were
     /// handed out.
     ///
@@ -1378,6 +1325,7 @@ pub struct XgViewApp {
 mod bars;
 mod cameras;
 mod chrome;
+mod file_picker;
 mod input;
 mod paging;
 mod persist;
@@ -1576,6 +1524,16 @@ impl XgViewApp {
             ("passphrase-body", ScopeDef::new(Axis::Column)),
             ("juanz-row", ScopeDef::new(Axis::Row)),
             ("aspect-picker", ScopeDef::new(Axis::Column)),
+            // The import picker: shortcuts across the top, then the listing
+            // itself, which scrolls - a folder can be longer than the window.
+            ("file-picker-places", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("file-picker-list"))),
+            // Down from the listing reaches the save field on the frame a save
+            // is being set up. An import draws no footer, so the exit leads
+            // nowhere and Up still leaves for the shortcuts.
+            ("file-picker-list", ScopeDef::new(Axis::Column).scrolling()
+                .exit(Dir::Up, Exit::Scope("file-picker-places"))
+                .exit(Dir::Down, Exit::Scope("file-picker-actions"))),
+            ("file-picker-actions", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope("file-picker-list"))),
             // The magnified viewport's bar: a row across the wall, a column down
             // a turned picture. No exits - a strip has nothing above or below it
             // to walk to, and Back is the way out.
@@ -1605,8 +1563,10 @@ impl XgViewApp {
             frame_clock: crate::frame::FrameClock::from_env(),
             events_tx,
             events_rx,
-            file_dialog: new_file_dialog(),
             file_job: None,
+            file_picker: Modal::default(),
+            file_picker_picked: None,
+            file_picker_cancelled: false,
             file_dialog_keys: false,
             file_dialog_answered: false,
             file_dialog_anchor: None,
@@ -1923,22 +1883,16 @@ impl XgViewApp {
         if self.file_dialog_answered {
             return;
         }
-        match &job {
-            FileJob::Export(passphrase) => {
-                // The name says which of the two the file is: the sealed export
-                // carries a `.seal` and the one written in clear a `.json`, and
-                // both are what the dialog's filter accepts.
-                self.file_dialog.config_mut().default_file_name = if passphrase.is_some() {
-                    monitor_core::EXPORT_FILE_NAME
-                } else {
-                    monitor_core::CONFIG_FILE_NAME
-                }
-                .to_owned();
-                self.file_dialog.save_file();
-            }
-            FileJob::Import => self.file_dialog.pick_file(),
+        match job {
+            // Both directions use the viewer's own window. The native dialogs
+            // it replaces are the two screens a remote could not reach at all,
+            // and one window means one set of keys to learn. The name it starts
+            // with says which of the two files it is: a sealed export carries a
+            // `.seal` and one written in clear a `.json`, and the listing takes
+            // both.
+            FileJob::Export(passphrase) => self.export_with_picker(passphrase),
+            FileJob::Import => self.import_with_picker(),
         }
-        self.file_job = Some(job);
     }
 
     fn poll_events(&mut self) {
@@ -2358,6 +2312,17 @@ impl XgViewApp {
         // `XgViewApp::read_strip`.
         self.read_strip(ctx);
         let focus_before = self.route_keys(ctx);
+        // The picker is drawn here rather than with the file dialog at the top
+        // of the frame: `route_keys` starts the navigation layer, and its rows
+        // have to be registered after that or the arrows would have no listing
+        // to walk. Both jobs walk the same window - an export names the file it
+        // writes in the field at its foot, an import takes one off the listing -
+        // so it is up whenever a job is, not only for an import. What it
+        // answers is still in hand before the wall is drawn. See
+        // `poll_file_dialog`.
+        if self.file_job.is_some() {
+            self.draw_file_picker(ctx);
+        }
         self.draw_chrome(ctx);
         self.draw_wall(ctx);
         self.end_frame(ctx, start, focus_before);
@@ -2575,6 +2540,12 @@ impl XgViewApp {
         opened |= self.remove_confirm.hand_off(ctx, false);
         opened |= self.system_confirm.hand_off(ctx, false);
         opened |= self.passphrase.hand_off(ctx, true);
+        // The picker is opened from a control in the settings panel, so its
+        // rows do not exist until the following frame. Wait for the first row
+        // before spending the hand-off, or the focus stays on the wall and its
+        // arrows go to the grid.
+        let picker_ready = self.file_picker.is_open() && self.file_picker.anchor.is_some();
+        opened |= self.file_picker.hand_off_when(ctx, picker_ready, false);
         if opened {
             self.swallow_enter = 10;
         }
@@ -3440,6 +3411,27 @@ mod tests {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1280.0, 36.0)),
             Rect::from_min_max(pos2(0.0, 690.0), pos2(1280.0, 720.0)),
         ))
+    }
+
+    /// A window opened by a control in the panel is drawn at the top of the
+    /// *next* frame. If the one-shot hand-off is spent on the opening frame,
+    /// before its first row exists, the focus stays on the wall behind it and
+    /// the arrows never reach the window - the file picker's failure. Waiting
+    /// for the anchor keeps the hand-off for the frame it can do something.
+    #[test]
+    fn a_window_drawn_a_frame_late_is_not_handed_the_focus_too_soon() {
+        let ctx = egui::Context::default();
+        let mut modal: Modal<()> = Modal::default();
+        let row = Id::new("first-row");
+
+        modal.open(());
+        assert!(!modal.hand_off_when(&ctx, false, false), "no row has been drawn yet");
+        assert!(ctx.memory(|memory| memory.focused()).is_none());
+
+        modal.anchor = Some(row);
+        assert!(modal.hand_off_when(&ctx, true, false), "the frame its rows were drawn on");
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(row));
+        assert!(!modal.hand_off_when(&ctx, true, false), "and only that frame");
     }
 
     /// The sub badge is about provenance, not shape: a Foscam's ONVIF sub stream
@@ -4387,6 +4379,26 @@ mod tests {
         );
         assert!(!viewport_keeps_focus(Id::new("toolbar"), true, true, Some(strip)));
         assert!(!viewport_keeps_focus(Id::new("other"), true, true, None));
+    }
+
+    /// Both jobs walk the same window, so it has to be drawn for whichever one
+    /// is up. The call once read `Some(FileJob::Import)`, and that is what an
+    /// export ran into: the job was set, the keyboard was handed to the picker
+    /// by `file_dialog_keys`, and the window it belonged to was never drawn - so
+    /// the settings page answered an export press with nothing at all.
+    #[test]
+    fn the_picker_is_drawn_for_an_export_too() {
+        let source = include_str!("mod.rs");
+        let call = source.find("self.draw_file_picker(ctx);").unwrap();
+        let gate = &source[call - 700..call];
+        assert!(
+            gate.contains("if self.file_job.is_some()"),
+            "the picker is up for whatever job was asked for"
+        );
+        assert!(
+            !gate.contains("FileJob::Import)"),
+            "an import-only gate leaves an export with no window and a swallowed keyboard"
+        );
     }
 
     /// The seat's first arrow is answered in `handle_keys`, before either the

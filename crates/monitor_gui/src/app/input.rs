@@ -3,6 +3,35 @@
 
 use super::*;
 
+/// The two ways out of the import picker. Every other window in the program
+/// treats Escape, the remote's Back and Backspace as the same "leave"; the
+/// picker reads them itself because a listing has a level to step out of.
+enum PickerBack {
+    /// A desktop's Escape closes the window outright. A television has no such
+    /// key - its BACK arrives as Escape and has to step out of the directory
+    /// first - so this is only built off Android.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    Close,
+    Up,
+}
+
+/// What Escape does to the picker depends on what the device calls Back.
+///
+/// A television's BACK key reaches winit as `Key::Escape` - there is no
+/// `BrowserBack` event alongside it to tell the two apart - so on Android the
+/// key steps out of one directory, while on a desktop it closes the window.
+/// The title bar's close button is the way out on a television, as is a Back
+/// at a root.
+#[cfg(not(target_os = "android"))]
+fn escape_leaves() -> PickerBack {
+    PickerBack::Close
+}
+
+#[cfg(target_os = "android")]
+fn escape_leaves() -> PickerBack {
+    PickerBack::Up
+}
+
 impl XgViewApp {
     /// Remembers where a press went down, so the release can be read as a tap.
     ///
@@ -580,6 +609,21 @@ impl XgViewApp {
         ctx.input_mut(|input| {
             let none = Modifiers::NONE;
             input.consume_key(none, Key::Escape) || input.consume_key(none, Key::BrowserBack)
+        })
+    }
+
+    /// Reads the picker's leaving keys, taking them out of the queue so the
+    /// window behind it cannot answer the same press as well.
+    fn picker_back(ctx: &egui::Context) -> Option<PickerBack> {
+        ctx.input_mut(|input| {
+            let none = Modifiers::NONE;
+            if input.consume_key(none, Key::Escape) {
+                return Some(escape_leaves());
+            }
+            if input.consume_key(none, Key::BrowserBack) || input.consume_key(none, Key::Backspace) {
+                return Some(PickerBack::Up);
+            }
+            None
         })
     }
 
@@ -1282,16 +1326,21 @@ impl XgViewApp {
     }
 
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
-        // The file dialog owns the keyboard while it is up. Its own keybindings
-        // and egui's focus walk are how a viewer moves around it, and the arrows
-        // and Back taken out of the queue below would reach neither; it is left
-        // to close itself, by its Cancel button or the Esc it reads.
+        // The old mouse dialog owns the keyboard while it is up. Its own
+        // keybindings and egui's focus walk are how a viewer moves around it,
+        // and the arrows and Back taken out of the queue below would reach
+        // neither; it is left to close itself, by its Cancel button or the Esc
+        // it reads.
+        //
+        // The viewer's own picker is different: its rows are walked by the very
+        // navigation layer below, so handing the keys back to it is what makes
+        // Up and Down move the ring and Back step out of a directory.
         //
         // Read as the frame began rather than now: a Back that has just closed
         // the dialog is the dialog's to answer, and it is the same press that a
         // `file_dialog_open` read here would find still in the queue and hand to
         // the wall - closing the panel the dialog was opened from.
-        if self.file_dialog_keys {
+        if self.file_dialog_keys && !self.file_picker.is_open() {
             return;
         }
 
@@ -1329,6 +1378,33 @@ impl XgViewApp {
         // down before it could be read.
         if self.exit_armed.is_some() && Self::input_other_than_back(ctx) {
             self.exit_armed = None;
+        }
+
+        // The picker is the one window with a level to step out of: Back goes
+        // up one directory and closes only at a root. On a desktop Escape
+        // closes it outright; on a television that same key *is* the Back
+        // button. Both are consumed here, before the shared window handling
+        // below, so the panel behind it does not also answer the press.
+        if self.file_picker.is_open() {
+            if let Some(leave) = Self::picker_back(ctx) {
+                match leave {
+                    PickerBack::Close => self.file_picker_cancelled = true,
+                    PickerBack::Up => {
+                        let went_up = self
+                            .file_picker
+                            .payload
+                            .as_mut()
+                            .is_some_and(|picker| picker.up());
+                        if !went_up {
+                            self.file_picker_cancelled = true;
+                        }
+                    }
+                }
+                // Closing is left to the window's own answer, which clears the
+                // dialog's flags. Doing it here would leave `file_job` set and
+                // the keyboard swallowed by a window that is no longer up.
+                return;
+            }
         }
 
         // A window this application opened is the innermost layer: Back closes
@@ -1487,5 +1563,42 @@ impl XgViewApp {
         if keys.back {
             self.back(ctx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One frame carrying one key, as the picker's reader sees it.
+    fn pressed(key: Key) -> Option<PickerBack> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let mut answer = None;
+        let _ = ctx.run(input, |ctx| answer = Some(XgViewApp::picker_back(ctx)));
+        answer.unwrap()
+    }
+
+    #[test]
+    fn escape_and_back_leave_the_picker_by_different_routes() {
+        let escape = pressed(Key::Escape);
+        // A television's BACK is delivered as Escape, so there it has to walk
+        // out of the directory instead of closing the window.
+        #[cfg(not(target_os = "android"))]
+        assert!(matches!(escape, Some(PickerBack::Close)));
+        #[cfg(target_os = "android")]
+        assert!(matches!(escape, Some(PickerBack::Up)));
+        assert!(matches!(pressed(Key::BrowserBack), Some(PickerBack::Up)));
+        assert!(matches!(pressed(Key::Backspace), Some(PickerBack::Up)));
+        assert!(pressed(Key::ArrowDown).is_none(), "a direction belongs to the listing");
     }
 }

@@ -39,17 +39,6 @@ monitor_core = { path = "../monitor_core" }
 monitor_codec = { path = "../monitor_codec" }
 monitor_i18n = { path = "../monitor_i18n" }
 
-# The file dialog the configuration export / import opens, drawn by egui inside
-# this window rather than by the desktop. A native one goes through
-# `xdg-desktop-portal` on Linux and can be left waiting on a `zenity` fallback,
-# which is a wall frozen behind a dialog that never came up; this one comes up
-# the same way everywhere, needs no session of its own, and cannot end up behind
-# a full screen wall held on top. The version tracks egui's.
-#
-# Android uses it too, on the builds that have no document picker to hand an
-# import to: the system's needs a `DocumentsProvider` behind it, and a
-# television build leaves both out. See `MainActivity.hasDocumentPicker`.
-egui-file-dialog = "0.11"
 
 # Desktop keeps the rest of eframe's defaults: the accessibility support and the
 # glow backend it would otherwise turn on itself.
@@ -60,7 +49,10 @@ eframe = { version = "0.32", features = ["accesskit", "glow", "wayland", "x11"] 
 # whether another instance holds this configuration, and a named event it is
 # asked to come forward on. See `src/instance.rs`.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading"] }
+# `GetLogicalDrives` names the volumes the file picker offers without touching
+# the filesystem of each one: asking a disconnected network drive would block
+# the frame the window opens on.
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
