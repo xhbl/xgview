@@ -246,4 +246,129 @@ mod tests {
             "the reverse switch must wait until the surface can really be had"
         );
     }
+
+    /// Android's export writes into the public `Download/xgview` folder, and
+    /// the import window opens on that same folder. The two halves are spelled
+    /// out in different files - the activity writes the file, the window walks
+    /// to it - so a rename in one place has to reach the other, and the export
+    /// must keep going out through the activity rather than through `std::fs`
+    /// into a folder no file manager can see.
+    #[test]
+    fn an_export_lands_where_the_import_looks_for_it() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let gui = std::fs::read_to_string(root.join("monitor_gui/src/app/persist.rs"))
+            .expect("cannot read persist.rs");
+        assert!(
+            MAIN.contains("EXPORT_FOLDER = \"Download/xgview\""),
+            "the activity writes into Download/xgview"
+        );
+        assert!(
+            gui.contains("pub const EXPORT_SUBFOLDER: &str = \"xgview\""),
+            "the picker must name the same subfolder the activity writes into"
+        );
+        assert!(
+            gui.contains("crate::android::export_folder().filter(|dir| readable(dir))"),
+            "the import window must open on the export folder when it can be walked"
+        );
+        assert!(
+            gui.contains("FileJob::Export(passphrase) => self.export_to_download(passphrase)"),
+            "Android's export must keep writing into the public folder"
+        );
+        assert!(
+            gui.contains("crate::android::request_storage()"),
+            "the public folder needs the Android 9 permission asked for before it is offered"
+        );
+    }
+
+    /// Neither half of the configuration pair may go ahead before the storage
+    /// permission it asked for is in hand. Asking is asynchronous - the answer
+    /// is a dialog in another window - so an import window opened first listed
+    /// the app's own folder and nothing of the volume it was opened for, and an
+    /// export attempted first was refused by the platform and told the viewer to
+    /// press a button that had already been pressed.
+    #[test]
+    fn both_halves_wait_for_the_storage_answer() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let gui = std::fs::read_to_string(root.join("monitor_gui/src/app/persist.rs"))
+            .expect("cannot read persist.rs");
+        let android = std::fs::read_to_string(root.join("monitor_gui/src/android.rs"))
+            .expect("cannot read android.rs");
+        assert!(
+            MAIN.contains("public static boolean hasStoragePermission()"),
+            "the activity must answer whether the permission is held"
+        );
+        assert!(
+            android.contains("call_bool(\"hasStoragePermission\")"),
+            "the native side must ask the activity rather than guess"
+        );
+        assert!(
+            gui.matches("if !crate::android::storage_granted() && crate::android::request_storage()")
+                .count()
+                >= 2,
+            "an import and an export must each ask before they touch the public folder"
+        );
+        assert!(
+            gui.contains("fn wait_for_storage")
+                && gui.contains("StorageJob::Import, \"toast-import-grant-storage\"")
+                && gui.contains("StorageJob::Export(passphrase), \"toast-export-grant-storage\""),
+            "a waiting press has to be remembered with what it was going to do"
+        );
+        assert!(
+            gui.contains("fn poll_storage_pending")
+                && gui.contains("StorageJob::Import | StorageJob::ImportAllFiles => self.open_import_picker()")
+                && gui.contains("StorageJob::Export(passphrase) => self.write_export_now(passphrase)"),
+            "the press that asked has to be carried out on the frame the answer arrives"
+        );
+        assert!(
+            gui.matches("self.open_import_picker()").count() >= 3,
+            "the window must open from the poll as well as from the press"
+        );
+    }
+
+    /// From Android 11 the shared volume is filtered by owner, so a
+    /// configuration copied on from another machine is not in the listing at
+    /// all. The grant that lifts it is a switch in the system settings, which
+    /// answers nothing: the wait for it can only see the viewer come back, and
+    /// has to end there - granted or not - instead of leaving the press held.
+    #[test]
+    fn an_import_offers_the_all_files_switch_and_waits_for_the_trip_back() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let gui = std::fs::read_to_string(root.join("monitor_gui/src/app/persist.rs"))
+            .expect("cannot read persist.rs");
+        let android = std::fs::read_to_string(root.join("monitor_gui/src/android.rs"))
+            .expect("cannot read android.rs");
+        let manifest = std::fs::read_to_string(root.join("monitor_android/android/AndroidManifest.xml"))
+            .expect("cannot read the manifest");
+        assert!(
+            manifest.contains("android.permission.MANAGE_EXTERNAL_STORAGE"),
+            "the manifest must declare the grant the switch turns on"
+        );
+        assert!(
+            MAIN.contains("public static boolean hasAllFilesAccess()")
+                && MAIN.contains("Environment.isExternalStorageManager()"),
+            "the activity must answer whether the whole volume is readable"
+        );
+        assert!(
+            MAIN.contains("ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION"),
+            "the press has to reach the screen the switch lives on"
+        );
+        assert!(
+            android.contains("call_bool(\"hasAllFilesAccess\")")
+                && android.contains("call_bool(\"requestAllFilesAccess\")"),
+            "the native side must ask the activity for both"
+        );
+        assert!(
+            gui.contains("!crate::android::all_files_access() && !self.all_files_asked")
+                && gui.contains("StorageJob::ImportAllFiles"),
+            "an import without it must offer the switch, once per run"
+        );
+        assert!(
+            gui.contains("crate::android::resume_count() != pending.resumes"),
+            "the wait must end when the viewer comes back, since the switch reports nothing"
+        );
+        assert!(
+            gui.contains("toast-import-all-files-missing"),
+            "a wait that ends without the grant has to say what is missing"
+        );
+    }
 }

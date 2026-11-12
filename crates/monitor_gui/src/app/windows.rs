@@ -389,7 +389,11 @@ impl XgViewApp {
                             // `poll_sealing`, and the prompt waits for it with
                             // its buttons gone.
                             let data = prompt.sealed.clone().unwrap_or_default();
-                            app.spawn_open(data, prompt.first.clone(), prompt.origin.clone());
+                            // The file the sealed document was read from: an
+                            // import prompt always knows it, and the toast that
+                            // follows names it.
+                            let origin = prompt.origin.clone().unwrap_or_default();
+                            app.spawn_open(data, prompt.first.clone(), origin);
                             prompt.working = true;
                         }
                     }

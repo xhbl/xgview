@@ -839,10 +839,11 @@ impl XgViewApp {
 
         // The export / import pair. The export is sealed with a passphrase by
         // default, which the prompt asks for before the file is written;
-        // unticking the box beside it writes the JSON in clear instead. Both
-        // directions open the viewer's own file picker - on Android the import
-        // is handed to the system's document picker when the device has one -
-        // and the hint says where the file goes.
+        // unticking the box beside it writes the JSON in clear instead. On a
+        // desktop both directions open the viewer's own file picker; on Android
+        // the export goes into the public Download/xgview folder through the
+        // activity, and the import walks the picker through that same folder.
+        // The hint says where the file goes.
         ui.add_space(theme::space::M);
         ui.horizontal(|ui| {
             let export = ui.button(monitor_i18n::tr("about-export"));

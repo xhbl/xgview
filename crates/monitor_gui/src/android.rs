@@ -1,7 +1,8 @@
 //! Android helpers that ask the activity to do what the native side cannot:
 //! report the start-on-boot state, open the two system screens that grant it,
-//! say which edge the navigation bar's strip is on, and hand an import to the
-//! system's document picker.
+//! say which edge the navigation bar's strip is on, write the configuration an
+//! export produces into the public folder, and answer whether the storage
+//! permission that folder needs is held.
 //!
 //! Everything here calls a static method on `MainActivity` - see the matching
 //! methods there - over the same JNI bridge `keyboard` uses, including the
@@ -10,7 +11,6 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI8, AtomicU64, Ordering};
-use std::sync::Mutex;
 
 use jni::objects::{GlobalRef, JString, JValue};
 use jni::JNIEnv;
@@ -497,6 +497,14 @@ pub fn reset_orientation() {
 /// application has acted on it. See [`request_resume`].
 static RESUME_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// How many times the activity has come back to the foreground.
+///
+/// Retained where [`RESUME_REQUESTED`] is consumed: a press waiting on a switch
+/// the viewer has to go and flip in the system settings has no answer to read,
+/// so "the viewer is back" is what tells that wait the trip is over - and it
+/// needs to see every resumption, not only the first since the last frame.
+static RESUMES: AtomicU64 = AtomicU64::new(0);
+
 /// The activity came back to the foreground.
 ///
 /// The channels may have spent the time in the background counting failures -
@@ -504,12 +512,19 @@ static RESUME_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// to its ceiling. [`take_resume`] is how the application learns to retry them
 /// at once rather than wait that backoff out.
 pub fn request_resume() {
+    RESUMES.fetch_add(1, Ordering::Relaxed);
     RESUME_REQUESTED.store(true, Ordering::Relaxed);
 }
 
 /// Whether the activity has come back since the last call, clearing the flag.
 pub fn take_resume() -> bool {
     RESUME_REQUESTED.swap(false, Ordering::Relaxed)
+}
+
+/// How many times it has come back, for a wait that compares a snapshot of it
+/// with what it is now. See [`RESUMES`].
+pub fn resume_count() -> u64 {
+    RESUMES.load(Ordering::Relaxed)
 }
 
 /// Whether the device can stand upright - it has a touch screen and is not a
@@ -733,8 +748,9 @@ pub enum ExportOutcome {
     /// Written; the path to show the viewer.
     Written(String),
     /// Android 9 has no `MediaStore` route into the public Downloads folder, so
-    /// the write needs `WRITE_EXTERNAL_STORAGE`. The system dialog has been
-    /// asked for, and the export is one press away once it is answered.
+    /// the write needs `WRITE_EXTERNAL_STORAGE`, and it is not held. The
+    /// permission is asked for before the write is ever attempted, so this is
+    /// an answer that was given and refused rather than a question still open.
     NeedsStoragePermission,
 }
 
@@ -759,8 +775,8 @@ pub fn write_download(name: &str, text: &str) -> Result<ExportOutcome, String> {
     );
     let path = match result {
         Ok(value) => match value.l() {
-            // A null answer is the Android 9 storage permission having been
-            // asked for, not a failure; see `MainActivity.writeDownloadFile`.
+            // A null answer is the Android 9 storage permission not being held,
+            // not a failure; see `MainActivity.writeDownloadFile`.
             Ok(object) if object.is_null() => None,
             Ok(object) => {
                 let object = JString::from(object);
@@ -782,32 +798,6 @@ pub fn write_download(name: &str, text: &str) -> Result<ExportOutcome, String> {
     })
 }
 
-/// Whether the device has a document picker at all.
-///
-/// A television build can ship without `DocumentsUI`, and - as on the boxes
-/// this was written for - without a single `DocumentsProvider` behind it,
-/// while still answering the intent with the Android TV framework's
-/// placeholder, which opens nothing. That is not a picker, and
-/// [`Self::pick_config_file`] on such a device leaves the viewer looking at a
-/// screen that does nothing. What asks is the activity; see
-/// `MainActivity.hasDocumentPicker`.
-pub fn has_document_picker() -> bool {
-    call_bool("hasDocumentPicker")
-}
-
-/// Asks the activity to open the system's document picker for an import.
-///
-/// The answer comes back later, through [`java_config_picked`] and
-/// [`take_picked_config`]: a picker is not something to wait for inside a
-/// frame.
-pub fn pick_config_file() {
-    let (Some(class), Some(mut env)) = (class(), attach()) else {
-        return;
-    };
-    let _ = env.call_static_method(class, "pickConfigFile", "()V", &[]);
-    clear_exception(&mut env);
-}
-
 /// The app's own folder on the shared volume, remembered from the entry point.
 ///
 /// `/storage/emulated/0/Android/data/<package>/files`: the one place a file
@@ -827,51 +817,64 @@ pub fn external_files_dir() -> Option<PathBuf> {
     EXTERNAL_FILES.get().cloned()
 }
 
-/// What the document picker answered since the last frame.
-pub enum Picked {
-    /// The text of the document the viewer chose.
-    Config(String),
-    /// The viewer backed out; nothing happened, and nothing is said about it.
-    Cancelled,
-    /// The document could not be read.
-    Failed(String),
-}
-
-/// The picker's answer, waiting for the next frame to pick it up.
+/// The public `Download` folder on the volume the app's own sits on.
 ///
-/// A slot rather than a queue: the picker is modal, so one answer is in flight
-/// at a time, and a second would only overwrite the first.
-static PICKED: Mutex<Option<Picked>> = Mutex::new(None);
+/// `/storage/emulated/0/Download`, or the same folder on a card. Derived from
+/// the app's own folder rather than handed over: `<volume>/Android/data/
+/// <package>/files` names the volume, and asking Java for a third string would
+/// be a third string to keep in step. `None` when the entry point never named
+/// the app's own.
+pub fn download_dir() -> Option<PathBuf> {
+    crate::app::public_download_dir(&external_files_dir()?)
+}
 
-/// The document an import picked, or why it could not be read.
+/// The folder an export is written into: `Download/xgview`, spelled the same as
+/// `MainActivity.EXPORT_FOLDER`.
+pub fn export_folder() -> Option<PathBuf> {
+    download_dir().map(|dir| dir.join(crate::app::EXPORT_SUBFOLDER))
+}
+
+/// Asks for the Android 9 storage permission when a public folder needs it, and
+/// says whether the system's dialog has just been put up.
 ///
-/// Called from the JNI entry point in `monitor_android`; see
-/// `MainActivity.onActivityResult`.
-pub fn java_config_picked(env: &mut JNIEnv, text: &JString, error: &JString) {
-    let text = jstring(env, text);
-    let error = jstring(env, error);
-    let picked = match (text, error) {
-        (Some(text), _) => Picked::Config(text),
-        (None, Some(error)) => Picked::Failed(error),
-        (None, None) => Picked::Cancelled,
-    };
-    if let Ok(mut slot) = PICKED.lock() {
-        *slot = Some(picked);
-    }
-    crate::keyboard::wake();
+/// From Android 10 on there is nothing to ask: the shared volume is reached
+/// through `MediaStore`, and the permission no longer exists to be granted. See
+/// `MainActivity.requestStorageIfNeeded`.
+pub fn request_storage() -> bool {
+    call_bool("requestStorageIfNeeded")
 }
 
-/// Takes the picker's answer, if one has arrived.
-pub fn take_picked_config() -> Option<Picked> {
-    PICKED.lock().ok().and_then(|mut slot| slot.take())
+/// Whether the permission a public folder needs is held, and whether it is
+/// still being asked for.
+///
+/// The answer to the system's dialog arrives in Java, in a callback this side
+/// never sees, so the only thing an import can do is ask this question again on
+/// later frames. It answers `true` from Android 10 on, where nothing is needed.
+/// See `MainActivity.hasStoragePermission`.
+pub fn storage_granted() -> bool {
+    call_bool("hasStoragePermission")
 }
 
-/// A Java string, or `None` when the reference is null.
-fn jstring(env: &mut JNIEnv, value: &JString) -> Option<String> {
-    if value.is_null() {
-        return None;
-    }
-    env.get_string(value).ok().map(String::from)
+/// Whether the whole shared volume may be read by path, not just this app's own
+/// files.
+///
+/// From Android 11 the volume is filtered by owner, and a configuration copied
+/// on from another machine belongs to whoever copied it: without this the
+/// import window shows only the exports this app itself wrote. It is the "all
+/// files access" special grant - a switch in the system settings - and it is
+/// always held below Android 11, where no such filter exists. See
+/// `MainActivity.hasAllFilesAccess`.
+pub fn all_files_access() -> bool {
+    call_bool("hasAllFilesAccess")
+}
+
+/// Opens the system screen that grants it, answering whether it was opened.
+///
+/// Nothing is answered by that screen: the viewer leaves the app to flip the
+/// switch and comes back, and [`resume_count`] is how the wait for it learns
+/// that the trip is over. See `MainActivity.requestAllFilesAccess`.
+pub fn request_all_files_access() -> bool {
+    call_bool("requestAllFilesAccess")
 }
 
 /// Whether XGView may use the microphone, asking for the permission when it is

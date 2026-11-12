@@ -779,10 +779,13 @@ impl Passphrase {
 /// Where a sealed export is written once its text is in.
 #[derive(Debug)]
 enum ExportTarget {
-    /// The file the picker chose, which every platform writes the same way -
-    /// `std::fs` into the app's own folder on Android, or anywhere the viewer
-    /// can write on a desktop.
+    /// The file the picker chose, which every desktop writes the same way, and
+    /// Android too when the viewer walks to a folder it may write.
     File(PathBuf),
+    /// Android: the name to write into the public `Download/xgview` folder,
+    /// through the activity. See [`XgViewApp::export_to_download`].
+    #[cfg(target_os = "android")]
+    Download(&'static str),
 }
 
 /// A passphrase being stretched, or a sealed document being opened, on a thread
@@ -797,10 +800,11 @@ enum ExportTarget {
 /// stays up until it has been answered.
 #[derive(Debug)]
 enum Sealing {
-    /// A sealed document being opened for the prompt that is up for it.
+    /// A sealed document being opened for the prompt that is up for it, and the
+    /// file it came from.
     Open {
         result: Receiver<Result<AppConfig, ()>>,
-        origin: Option<PathBuf>,
+        origin: PathBuf,
     },
     /// The configuration being sealed for an export, which is written out as
     /// soon as the text is in.
@@ -822,6 +826,44 @@ enum FileJob {
     Export(Option<String>),
     /// Reading a configuration in - sealed, or in clear from an older export.
     Import,
+}
+
+/// Android: the press that is waiting on the storage the public volume needs.
+///
+/// Two different things are asked for, with the same shape of wait: the runtime
+/// storage permission on Android 9, which is a dialog answered over the app, and
+/// "all files access" from Android 11 on, which is a switch in the system
+/// settings the viewer has to leave the app to flip. Neither answer is visible
+/// on this side - one arrives in Java, the other in a screen that reports
+/// nothing - so the press is remembered here and the question is asked again
+/// every frame until it comes. See [`XgViewApp::poll_storage_pending`]. Only
+/// compiled on Android, where alone the questions exist.
+#[cfg(target_os = "android")]
+struct PendingStorage {
+    /// The press that asked, and what it does once the answer is `yes`.
+    job: StorageJob,
+    /// When it was asked, so one never answered can be given up on.
+    asked: Instant,
+    /// How many times the activity had come back when it was asked. One more
+    /// than this means the viewer has been away and returned - the only signal
+    /// the system-settings switch gives.
+    resumes: u64,
+}
+
+/// The press, as a wait: which half of the configuration pair it was, and which
+/// question it is waiting on.
+#[cfg(target_os = "android")]
+#[derive(Debug)]
+enum StorageJob {
+    /// Open the import window, on the export folder the Android 9 storage
+    /// permission makes readable.
+    Import,
+    /// The same window, waiting instead on "all files access" - the grant that
+    /// lets it list the configurations other applications put on the volume.
+    ImportAllFiles,
+    /// Write the configuration into `Download/xgview`, sealed under this
+    /// passphrase when there is one.
+    Export(Option<String>),
 }
 
 /// Translation key of what the status line calls a grid layout.
@@ -952,8 +994,8 @@ pub struct XgViewApp {
     /// window a remote can walk. See [`Self::ask_for_file`].
     file_job: Option<FileJob>,
     /// The import picker: a listing a remote control can walk. It is what an
-    /// import opens everywhere - the mouse-driven dialog above is kept for the
-    /// export, whose typed name a remote could not manage. See
+    /// import opens everywhere, and what an export opens on a desktop - the
+    /// typed name a save needs is a field the window grows at its foot. See
     /// [`file_picker::FilePicker`].
     file_picker: Modal<FilePicker>,
     /// What the picker answered, carried out of it: the window's payload is
@@ -961,6 +1003,21 @@ pub struct XgViewApp {
     file_picker_picked: Option<PathBuf>,
     /// Whether the picker was backed out of rather than answered.
     file_picker_cancelled: bool,
+    /// Android: the half of the pair that asked for the storage a public folder
+    /// needs, and is waiting for it before it goes ahead - the import window is
+    /// not put up, the export is not written. `None` when nothing is waiting.
+    #[cfg(target_os = "android")]
+    storage_pending: Option<PendingStorage>,
+    /// Android: whether this run has already sent the viewer to the system
+    /// screen that grants "all files access", which is where an import of a
+    /// configuration copied on from another machine begins.
+    ///
+    /// Once, so that a viewer who does not want that grant can still browse -
+    /// and import - what this app itself wrote, instead of being pushed into
+    /// the system settings on every press. The screen is offered again after a
+    /// restart.
+    #[cfg(target_os = "android")]
+    all_files_asked: bool,
     /// Whether the file dialog had the keyboard when this frame's keys were
     /// handed out.
     ///
@@ -1329,6 +1386,9 @@ mod file_picker;
 mod input;
 mod paging;
 mod persist;
+#[cfg(target_os = "android")]
+pub use persist::public_download_dir;
+pub use persist::EXPORT_SUBFOLDER;
 mod playback;
 use playback::Source;
 mod pickers;
@@ -1567,6 +1627,10 @@ impl XgViewApp {
             file_picker: Modal::default(),
             file_picker_picked: None,
             file_picker_cancelled: false,
+            #[cfg(target_os = "android")]
+            storage_pending: None,
+            #[cfg(target_os = "android")]
+            all_files_asked: false,
             file_dialog_keys: false,
             file_dialog_answered: false,
             file_dialog_anchor: None,
@@ -2230,24 +2294,24 @@ impl XgViewApp {
         true
     }
 
-    /// What the export / import pair does. The desktop picks files with the
-    /// system's dialogs; Android has the fixed export folder and the system's
-    /// document picker, and says so. See [`Self::ask_for_file`].
+    /// What the export / import pair does. The desktop picks files with its own
+    /// window; Android writes its export into a fixed public folder and walks
+    /// that same folder for an import, and says so. See [`Self::ask_for_file`].
     #[cfg(not(target_os = "android"))]
     fn import_hint(&self) -> String {
         monitor_i18n::tr("about-import-hint")
     }
 
-    /// Says what an import of `count` cameras did, naming the file it came from
-    /// where the platform names one.
-    ///
-    /// The desktop's dialogs hand over a path, so the toast points at the file;
-    /// Android's picker hands over the text alone, and the wording says so.
+    /// Says what an import of `count` cameras did, naming the file it came
+    /// from: the dialog this platform opens hands over a path, so there is
+    /// always one to name.
     #[cfg(not(target_os = "android"))]
-    fn say_imported(&mut self, count: usize, origin: Option<PathBuf>) {
-        let path = origin.map(|path| path.display().to_string()).unwrap_or_default();
+    fn say_imported(&mut self, count: usize, origin: &Path) {
         self.flash(
-            monitor_i18n::tr_args("toast-imported", &[("count", count.into()), ("path", path.into())]),
+            monitor_i18n::tr_args(
+                "toast-imported",
+                &[("count", count.into()), ("path", origin.display().to_string().into())],
+            ),
             ToastKind::Info,
         );
     }
@@ -2904,12 +2968,6 @@ impl XgViewApp {
         // drawn in, so a keystroke handed over later would be a frame behind.
         #[cfg(target_os = "android")]
         crate::keyboard::drain(ctx);
-
-        // The document an import picked, if the picker has answered since the
-        // last frame. Taken before anything is drawn, so the wall it changes is
-        // drawn from the new configuration on this frame.
-        #[cfg(target_os = "android")]
-        self.poll_picked_config();
 
         if ctx.input(|input| input.viewport().close_requested()) {
             self.save_now();

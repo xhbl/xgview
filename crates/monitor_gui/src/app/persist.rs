@@ -3,6 +3,20 @@
 
 use super::*;
 
+/// How long a press waits for the storage permission it has asked for.
+///
+/// Long enough to read a system dialog and press Allow, short enough that one
+/// taken away without an answer does not leave the viewer waiting on nothing.
+#[cfg(target_os = "android")]
+const STORAGE_WAIT: Duration = Duration::from_secs(30);
+
+/// How long an import waits for "all files access" - a switch in the system
+/// settings, so the wait covers walking there, finding it and coming back. It is
+/// only the backstop: the app sees the viewer return, which ends the wait at
+/// once, granted or not. See [`XgViewApp::poll_storage_pending`].
+#[cfg(target_os = "android")]
+const ALL_FILES_WAIT: Duration = Duration::from_secs(300);
+
 impl XgViewApp {
     /// Recomputes the decoding schedule and hands the transitions to the
     /// pipeline. Cheap and idempotent, it is only run when something changed.
@@ -115,6 +129,11 @@ impl XgViewApp {
 
     /// Draws the file dialog while it is up, and acts on what it answers.
     pub(super) fn poll_file_dialog(&mut self, ctx: &egui::Context) {
+        // Before anything else, and whether or not a window is up: a press
+        // waiting on the storage permission goes ahead from here, on the frame
+        // the answer arrives. See [`Self::poll_storage_pending`].
+        #[cfg(target_os = "android")]
+        self.poll_storage_pending();
         // Cleared first, set again below only if this frame is the one that
         // takes the answer - so the panel drawn later in the same frame knows
         // the press that answered the dialog is spent. See
@@ -157,12 +176,20 @@ impl XgViewApp {
         }
     }
 
-    /// Opens what Android has instead of a file dialog.
+    /// What Android does instead of a file dialog, for each of the two jobs.
     ///
-    /// The export writes through the viewer's own picker, into the folder it
-    /// walks to - the app's own on the shared volume, which needs no
-    /// permission. The import is handed to the system's document picker when
-    /// the device has one, and to that same window when it does not.
+    /// The export goes into the public `Download/xgview` folder through the
+    /// activity, as it always has: on Android 10 and later the shared volume is
+    /// reached through `MediaStore`, which needs no permission and writes into
+    /// that folder; before it, a plain file and the storage permission the
+    /// activity asks for. A file manager and a transfer both see the result,
+    /// which is what the public folder is for - and what the app's own folder
+    /// on that volume is not.
+    ///
+    /// The import walks the same window the desktop does, opening on that
+    /// folder. It is the only way in: a document another application put on the
+    /// device may not be read by path since Android 11, so what the viewer can
+    /// import is what this window can list.
     #[cfg(target_os = "android")]
     pub(super) fn ask_for_file(&mut self, job: FileJob) {
         // The press that answered the dialog, read again by the control it was
@@ -171,39 +198,128 @@ impl XgViewApp {
             return;
         }
         match job {
-            // The export now writes where the viewer points it, through the
-            // same window the import uses: a remote can walk one picker, and
-            // the app's own folder on the shared volume is writable without a
-            // permission. See [`Self::export_with_picker`].
-            FileJob::Export(passphrase) => self.export_with_picker(passphrase),
-            FileJob::Import => {
-                // A television build can ship without `DocumentsUI` and without
-                // a single document provider behind it, while still answering
-                // the intent with the framework's placeholder - so asking
-                // whether there is a picker is not the same question as asking
-                // whether anything claims to be one. See
-                // `MainActivity.hasDocumentPicker`.
-                if crate::android::has_document_picker() {
-                    self.import_config();
-                } else {
-                    self.import_with_picker();
-                }
-            }
+            FileJob::Export(passphrase) => self.export_to_download(passphrase),
+            FileJob::Import => self.import_with_picker(),
         }
     }
 
     /// Opens the viewer's own picker for an import.
     ///
-    /// Every platform that has no document picker to hand an import to ends up
-    /// here - a television build that ships without `DocumentsUI` above all -
-    /// and so does the desktop: the listing is walked by the arrows, which is
-    /// the only way a remote can walk one. The dialog it replaces needed no
-    /// provider and no permission behind it, and neither does this.
+    /// Every platform ends up here, the desk included: the listing is walked by
+    /// the arrows, which is the only way a remote can walk one. The dialog it
+    /// replaces needed no provider and no permission behind it, and neither
+    /// does this.
     ///
-    /// It starts where [`start_dir`] says: the app's own folder on the shared
-    /// volume on Android, the viewer's home on a desktop. Both are places a
-    /// file transfer can put a configuration without a permission behind it.
+    /// It starts where [`picker_start_and_places`] says: `Download/xgview` -
+    /// the folder an export goes into - on Android, the viewer's home on a
+    /// desktop, and elsewhere on Android when neither can be walked.
+    ///
+    /// Android asks two different things before that window is worth opening,
+    /// and waits for both the same way:
+    ///
+    /// - up to Android 9 the public folder is reachable only with the runtime
+    ///   storage permission, which puts up a dialog answered over the app - and
+    ///   a window opened first listed the app's own folder and nothing of the
+    ///   volume it was opened for, which is what the first press used to do;
+    /// - from Android 11 the volume is filtered by owner, so a configuration
+    ///   copied on from another machine is not in the listing at all unless
+    ///   this app holds "all files access" - a switch in the system settings
+    ///   rather than a dialog, which is why the press sends the viewer there
+    ///   once and the window waits for the trip back.
+    ///
+    /// See [`Self::poll_storage_pending`].
     pub(super) fn import_with_picker(&mut self) {
+        #[cfg(target_os = "android")]
+        {
+            // The same question is already out, holding a press of the
+            // viewer's: a second one must not queue behind it.
+            if self.storage_pending.is_some() {
+                return;
+            }
+            // Asked, and the window waits to be opened on the answer. `false`
+            // is the permission being held already - every Android from 10 on,
+            // where `MediaStore` needs none - or being beyond asking: refused
+            // once, or no activity to ask. Then what can be shown is shown.
+            if !crate::android::storage_granted() && crate::android::request_storage() {
+                self.wait_for_storage(StorageJob::Import, "toast-import-grant-storage");
+                return;
+            }
+            // The files other applications put on the device. Asked once per
+            // run: a viewer who does not want the grant still gets the window,
+            // listing what this app itself wrote, on every press after this.
+            if !crate::android::all_files_access() && !self.all_files_asked {
+                self.all_files_asked = true;
+                if crate::android::request_all_files_access() {
+                    self.wait_for_storage(
+                        StorageJob::ImportAllFiles,
+                        "toast-import-grant-all-files",
+                    );
+                    return;
+                }
+            }
+        }
+        self.open_import_picker();
+    }
+
+    /// Remembers a press as waiting, and says that it is.
+    #[cfg(target_os = "android")]
+    fn wait_for_storage(&mut self, job: StorageJob, said: &str) {
+        self.storage_pending = Some(PendingStorage {
+            job,
+            asked: Instant::now(),
+            resumes: crate::android::resume_count(),
+        });
+        self.flash(monitor_i18n::tr(said), ToastKind::Info);
+    }
+
+    /// Goes ahead with the press the storage was asked for, the moment it is in
+    /// hand.
+    ///
+    /// Both halves of the configuration pair ask the same question and wait the
+    /// same way: the import is not put up, the export is not written, until the
+    /// folder can be reached. Neither answer is visible here - the runtime
+    /// permission's arrives in Java, and the system-settings switch reports
+    /// nothing at all - so the question is asked again every frame.
+    ///
+    /// A wait ends three ways: the grant arrives, the viewer comes back without
+    /// it, or [`STORAGE_WAIT`] / [`ALL_FILES_WAIT`] runs out with the app in the
+    /// background. The second is the one that matters for the switch: nothing
+    /// says "answered", so a resumption is the whole of the answer - and the
+    /// press then says what is missing and opens what can be shown, rather than
+    /// leaving the viewer pressing a button that does nothing.
+    #[cfg(target_os = "android")]
+    pub(super) fn poll_storage_pending(&mut self) {
+        let Some(pending) = self.storage_pending.take() else {
+            return;
+        };
+        let wanted = pending.asked.elapsed();
+        let limit = match pending.job {
+            StorageJob::ImportAllFiles => ALL_FILES_WAIT,
+            _ => STORAGE_WAIT,
+        };
+        if crate::android::storage_granted() && crate::android::all_files_access() {
+            match pending.job {
+                StorageJob::Import | StorageJob::ImportAllFiles => self.open_import_picker(),
+                StorageJob::Export(passphrase) => self.write_export_now(passphrase),
+            }
+        } else if wanted > limit || crate::android::resume_count() != pending.resumes {
+            let said = match pending.job {
+                StorageJob::Import => "toast-import-storage-missing",
+                StorageJob::ImportAllFiles => "toast-import-all-files-missing",
+                StorageJob::Export(_) => "toast-export-storage-missing",
+            };
+            self.flash(monitor_i18n::tr(said), ToastKind::Error);
+            // The press still owes its window: what can be shown is shown.
+            if !matches!(pending.job, StorageJob::Export(_)) {
+                self.open_import_picker();
+            }
+        } else {
+            self.storage_pending = Some(pending);
+        }
+    }
+
+    /// Puts the import window up, on whatever [`picker_start_and_places`] says.
+    fn open_import_picker(&mut self) {
         let (start, places) = picker_start_and_places();
         self.file_picker.open(super::file_picker::FilePicker::start(
             start,
@@ -214,13 +330,19 @@ impl XgViewApp {
         self.file_job = Some(FileJob::Import);
     }
 
-    /// Opens the picker to write a configuration out.
+    /// Opens the picker to write a configuration out, on a desktop.
     ///
     /// The same window as an import, with the field and the button it grows at
     /// its foot: the folder on screen is where the file goes, and the name is
     /// the one the viewer leaves in the field. It starts in the same place an
     /// import does, so a file written here is one the import can walk to
     /// without leaving the window.
+    ///
+    /// Android has no such window for an export: its file goes into the public
+    /// `Download/xgview` through the activity, which is a folder the picker
+    /// cannot walk and a write that needs no permission. See
+    /// [`Self::export_to_download`].
+    #[cfg(not(target_os = "android"))]
     pub(super) fn export_with_picker(&mut self, passphrase: Option<String>) {
         let (start, places) = picker_start_and_places();
         let name = if passphrase.is_some() {
@@ -237,6 +359,89 @@ impl XgViewApp {
         self.file_job = Some(FileJob::Export(passphrase));
     }
 
+    /// Writes the configuration out into the public `Download/xgview` folder:
+    /// sealed with `passphrase`, or the JSON in clear when there is none.
+    ///
+    /// Android's export opens no window. The folder is one the app is not free
+    /// to walk - from Android 10 on the shared volume is reached through
+    /// `MediaStore`, which writes into that folder without a permission - so a
+    /// listing has nothing to choose, and the name is the one the file's kind
+    /// gives it.
+    ///
+    /// Before Android 10 that folder is a plain file written with
+    /// `WRITE_EXTERNAL_STORAGE`, which is the same permission the import window
+    /// needs and is asked for in the same way: the press asks, waits for the
+    /// answer, and goes ahead on the frame it comes. An export that tried the
+    /// write first was refused by the platform and told the viewer to press
+    /// again, which is a press that had already been made. See
+    /// [`Self::write_export_now`].
+    #[cfg(target_os = "android")]
+    pub(super) fn export_to_download(&mut self, passphrase: Option<String>) {
+        // The same dialog is already up, holding a press of the viewer's.
+        if self.storage_pending.is_some() {
+            return;
+        }
+        if !crate::android::storage_granted() && crate::android::request_storage() {
+            self.wait_for_storage(StorageJob::Export(passphrase), "toast-export-grant-storage");
+            return;
+        }
+        // Nothing to wait for: the permission is held, or it cannot be asked
+        // for any more. Either way the write is what answers the press - and
+        // one that cannot be made says so.
+        self.write_export_now(passphrase);
+    }
+
+    /// The write itself, once the folder can be reached.
+    ///
+    /// The sealing is handed to a thread of its own and the write follows it
+    /// there; see [`Self::poll_sealing`].
+    #[cfg(target_os = "android")]
+    fn write_export_now(&mut self, passphrase: Option<String>) {
+        let name = if passphrase.is_some() {
+            monitor_core::EXPORT_FILE_NAME
+        } else {
+            monitor_core::CONFIG_FILE_NAME
+        };
+        match passphrase {
+            Some(passphrase) => self.spawn_seal(passphrase, ExportTarget::Download(name)),
+            None => match self.config.to_json() {
+                Ok(written) => self.write_download_export(name, &written),
+                Err(error) => self.flash(
+                    monitor_i18n::tr_args("toast-export-failed", &[("error", error.to_string().into())]),
+                    ToastKind::Error,
+                ),
+            },
+        }
+    }
+
+    /// Writes what an export came to into the public `Download/xgview` folder
+    /// under `name`.
+    ///
+    /// The write is the activity's - `MediaStore` from Android 10 on, a plain
+    /// file into the public Downloads folder before that - because a
+    /// `NativeActivity` has no storage of its own the viewer can reach. The
+    /// Android 9 permission the plain file needs has been asked for before this
+    /// is reached; see [`Self::export_to_download`]. See
+    /// `MainActivity.writeDownloadFile`.
+    #[cfg(target_os = "android")]
+    pub(super) fn write_download_export(&mut self, name: &str, written: &str) {
+        match crate::android::write_download(name, written) {
+            Ok(crate::android::ExportOutcome::Written(path)) => self.flash(
+                monitor_i18n::tr_args("toast-config-exported", &[("path", path.into())]),
+                ToastKind::Info,
+            ),
+            // Android 9 only: the storage permission has just been asked for,
+            // so the export is one press away rather than failed.
+            Ok(crate::android::ExportOutcome::NeedsStoragePermission) => {
+                self.flash(monitor_i18n::tr("toast-export-needs-storage"), ToastKind::Error)
+            }
+            Err(error) => self.flash(
+                monitor_i18n::tr_args("toast-export-failed", &[("error", error.into())]),
+                ToastKind::Error,
+            ),
+        }
+    }
+
     /// Whether the file dialog is up. It owns the screen while it is: the
     /// pointer, the focus and the keyboard all belong to it.
     pub(super) fn file_dialog_open(&self) -> bool {
@@ -244,7 +449,7 @@ impl XgViewApp {
     }
 
     /// What the export / import pair does, where the export has a fixed folder
-    /// and the import opens the system's document picker.
+    /// and the import walks the same folder through the viewer's own window.
     #[cfg(target_os = "android")]
     pub(super) fn import_hint(&self) -> String {
         monitor_i18n::tr("about-import-hint-android")
@@ -312,25 +517,14 @@ impl XgViewApp {
             return;
         }
         match self.apply_import(&data) {
-            Ok(count) => self.say_imported(count, Some(path)),
+            Ok(count) => self.say_imported(count, &path),
             Err(error) => self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error),
         }
     }
 
-    /// Opens the system's document picker.
-    ///
-    /// Nothing is imported here: the picker is another activity, and its answer
-    /// arrives frames later, where [`Self::poll_picked_config`] takes it. A
-    /// picker the viewer backs out of is not a failure and says nothing.
-    #[cfg(target_os = "android")]
-    pub(super) fn import_config(&mut self) {
-        crate::android::pick_config_file();
-    }
-
     /// Applies a configuration that was read from somewhere - a file the
-    /// desktop picked, a document the Android picker returned, a sealed one the
-    /// prompt has just opened - and reports how many cameras came with it, for
-    /// the toast the caller puts up.
+    /// viewer picked, a sealed one the prompt has just opened - and reports how
+    /// many cameras came with it, for the toast the caller puts up.
     pub(super) fn apply_import(&mut self, data: &str) -> Result<usize, String> {
         let imported = AppConfig::from_json(data).map_err(|error| error.to_string())?;
         Ok(self.apply_import_config(imported))
@@ -403,37 +597,12 @@ impl XgViewApp {
         }
     }
 
-    /// Takes the document the system picker returned, if one has arrived.
-    ///
-    /// A sealed document asks for its passphrase before anything is touched; an
-    /// older export, JSON in clear, is imported on the spot.
-    #[cfg(target_os = "android")]
-    pub(super) fn poll_picked_config(&mut self) {
-        match crate::android::take_picked_config() {
-            None => {}
-            Some(crate::android::Picked::Cancelled) => {}
-            Some(crate::android::Picked::Config(text)) => {
-                if monitor_core::sealed::is_sealed(&text) {
-                    self.passphrase.open(Passphrase::for_import(text, None));
-                    return;
-                }
-                match self.apply_import(&text) {
-                    Ok(count) => self.say_imported(count, None),
-                    Err(error) => self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error),
-                }
-            }
-            Some(crate::android::Picked::Failed(error)) => {
-                self.flash(monitor_i18n::tr_args("toast-import-failed", &[("error", error.into())]), ToastKind::Error)
-            }
-        }
-    }
-
     /// Hands a sealed document and a passphrase to a thread of its own.
     ///
     /// Nothing waits for it: stretching a passphrase is hundreds of thousands of
     /// rounds, and the render loop has a wall to draw. What comes back is taken
     /// by [`Self::poll_sealing`] on a later frame.
-    pub(super) fn spawn_open(&mut self, data: String, passphrase: String, origin: Option<PathBuf>) {
+    pub(super) fn spawn_open(&mut self, data: String, passphrase: String, origin: PathBuf) {
         let (sender, result) = unbounded();
         std::thread::spawn(move || {
             // A wrong passphrase and a damaged document are one answer here, as
@@ -469,7 +638,7 @@ impl XgViewApp {
             Sealing::Open { result, origin } => match result.try_recv() {
                 Ok(Ok(config)) => {
                     let count = self.apply_import_config(config);
-                    self.say_imported(count, origin);
+                    self.say_imported(count, &origin);
                     self.passphrase.close();
                     self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
                     self.mark_dirty();
@@ -491,6 +660,8 @@ impl XgViewApp {
             Sealing::Export { result, target } => match result.try_recv() {
                 Ok(Ok(written)) => match target {
                     ExportTarget::File(path) => self.write_export_to(&path, &written),
+                    #[cfg(target_os = "android")]
+                    ExportTarget::Download(name) => self.write_download_export(name, &written),
                 },
                 Ok(Err(error)) => self.flash(
                     monitor_i18n::tr_args("toast-export-failed", &[("error", error.into())]),
@@ -509,12 +680,16 @@ impl XgViewApp {
         }
     }
 
-    /// Says what an import of `count` cameras did, the picked document having no
-    /// path to name.
+    /// Says what an import of `count` cameras did, naming the file it came
+    /// from: every import on Android is the viewer's own window choosing a row,
+    /// so there is always a path to name.
     #[cfg(target_os = "android")]
-    pub(super) fn say_imported(&mut self, count: usize, _origin: Option<PathBuf>) {
+    pub(super) fn say_imported(&mut self, count: usize, origin: &Path) {
         self.flash(
-            monitor_i18n::tr_args("toast-imported-document", &[("count", count.into())]),
+            monitor_i18n::tr_args(
+                "toast-imported",
+                &[("count", count.into()), ("path", origin.display().to_string().into())],
+            ),
             ToastKind::Info,
         );
     }
@@ -522,54 +697,114 @@ impl XgViewApp {
 
 /// Where the picker opens, and what it offers above the listing.
 ///
-/// Two entries, never a wall of them: the home folder and the volumes the
-/// machine has. The per-user folders a native dialog also lists - desktop,
-/// documents, downloads, pictures and the rest - are all inside home, and a
-/// remote walks this list one press at a time; a shortcut for each of them is
-/// a list to read rather than one to remember.
+/// Android is answered by [`android_start_and_places`], which knows about the
+/// public `Download` folder an export goes into. Everywhere else it is two
+/// entries, never a wall of them: the home folder and the volumes the machine
+/// has. The per-user folders a native dialog also lists - desktop, documents,
+/// downloads, pictures and the rest - are all inside home, and a remote walks
+/// this list one press at a time; a shortcut for each of them is a list to read
+/// rather than one to remember.
 fn picker_start_and_places() -> (PathBuf, Vec<(String, PathBuf)>) {
-    let home = home_dir();
-    let start = start_dir(home.as_deref());
-    let mut places = Vec::new();
-    if let Some(home) = &home {
-        places.push((monitor_i18n::tr("file-picker-place-home"), home.clone()));
+    #[cfg(target_os = "android")]
+    {
+        android_start_and_places()
     }
-    places.extend(device_places());
+    #[cfg(not(target_os = "android"))]
+    {
+        let home = home_dir();
+        let start = start_dir(home.as_deref());
+        let mut places = Vec::new();
+        if let Some(home) = &home {
+            places.push((monitor_i18n::tr("file-picker-place-home"), home.clone()));
+        }
+        places.extend(device_places());
+        (start, places)
+    }
+}
+
+/// The folder an export is written into inside the public one.
+///
+/// The second half of `MainActivity.EXPORT_FOLDER`, which is where the activity
+/// puts the file; spelled here because the picker opens on it.
+pub const EXPORT_SUBFOLDER: &str = "xgview";
+
+/// The public `Download` folder on the volume the app's own folder sits on.
+///
+/// `<volume>/Android/data/<package>/files` names the volume, and an export goes
+/// to `<volume>/Download/xgview`. Derived rather than handed over: the entry
+/// point hands out the app's own folder, and a third string from Java would be
+/// a third string to keep in step. `None` when the path has no `Android`
+/// segment, which nothing on a device has.
+#[cfg(any(target_os = "android", test))]
+pub fn public_download_dir(external_files: &Path) -> Option<PathBuf> {
+    let volume = external_files
+        .ancestors()
+        .find(|dir| dir.ends_with("Android"))
+        .and_then(Path::parent)
+        // A bare `Android` has nothing above it to join a `Download` to, and a
+        // relative answer would be a folder nobody meant.
+        .filter(|volume| volume.components().next().is_some())?;
+    Some(volume.join("Download"))
+}
+
+/// Whether the picker could walk `dir` at all.
+///
+/// `is_dir` is not the question: `Download` on a device whose app holds no
+/// storage permission answers that and then refuses the listing, which is a
+/// window that opens on an error the viewer can do nothing about.
+#[cfg(any(target_os = "android", test))]
+fn readable(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok()
+}
+
+/// What the picker opens on and offers, on Android.
+///
+/// `Download/xgview` first: it is where [`XgViewApp::export_to_download`] puts
+/// an export, so the file the viewer made a moment ago is the first thing an
+/// import shows. Two fallbacks, in order - the public `Download` itself, which
+/// is all a device that has never exported has, and the app's own folder, the
+/// one place always readable and writable and the only one a device with no
+/// storage permission shows anything in.
+#[cfg(target_os = "android")]
+fn android_start_and_places() -> (PathBuf, Vec<(String, PathBuf)>) {
+    let own = crate::android::external_files_dir();
+    let export = crate::android::export_folder().filter(|dir| readable(dir));
+    let download = crate::android::download_dir().filter(|dir| readable(dir));
+    let start = export
+        .clone()
+        .or_else(|| download.clone())
+        .or_else(|| own.clone())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut places = Vec::new();
+    if let Some(own) = own {
+        places.push((monitor_i18n::tr("file-picker-place-files"), own));
+    }
+    if let Some(download) = export.or(download) {
+        places.push((monitor_i18n::tr("file-picker-place-downloads"), download));
+    }
     (start, places)
 }
 
-/// The folder the picker opens on.
-///
-/// Android opens on the app's own folder on the shared volume: since Android 11
-/// a program sees nothing of that volume but the folders it made, and this is
-/// the one a file transfer can put a configuration into without a permission
-/// behind it. The desktops open on home, which is where a browser's download
-/// lands and where the exports carried between machines are kept.
+/// The folder the picker opens on, where home is the only place to name.
+#[cfg(not(target_os = "android"))]
 fn start_dir(home: Option<&Path>) -> PathBuf {
     home.map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// The viewer's home folder, when the platform names one.
+/// The viewer's home folder, on a desktop.
 ///
-/// A television does not have one in any sense its viewer would recognise: the
-/// only folder it may read is the app's own on the shared volume, so that is
-/// what is called home here - the window opens on it and the list offers it,
-/// exactly as a desktop does with `~`.
+/// A television does not have one in any sense its viewer would recognise; what
+/// it opens on is [`android_start_and_places`]'s business.
+#[cfg(not(target_os = "android"))]
 fn home_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "android")]
-    {
-        crate::android::external_files_dir()
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        #[cfg(windows)]
-        let home = std::env::var_os("USERPROFILE");
-        #[cfg(not(windows))]
-        let home = std::env::var_os("HOME");
-        home.map(PathBuf::from).filter(|dir| dir.is_dir())
-    }
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    home.map(PathBuf::from).filter(|dir| dir.is_dir())
 }
 
 /// The volumes above the listing.
@@ -649,8 +884,9 @@ fn device_places() -> Vec<(String, PathBuf)> {
     places
 }
 
-/// Android has one folder it may read, and that is where the window opens.
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+/// Android is not asked: what it offers is [`android_start_and_places`]'s, and
+/// a device has no volume a listing could walk to.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "android")))]
 fn device_places() -> Vec<(String, PathBuf)> {
     Vec::new()
 }
@@ -681,5 +917,58 @@ mod tests {
         let home = home_dir().expect("a Windows session always names a profile");
         assert_eq!(start, home);
         assert_eq!(places.first().map(|(_, path)| path.clone()), Some(home));
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+
+    /// `Download` is found from the app's own folder rather than handed over,
+    /// so it has to come out right for every shape that folder takes: the
+    /// emulated volume, the older `/sdcard` spelling, and a card.
+    #[test]
+    fn the_public_folder_sits_beside_the_apps_own() {
+        for (own, expected) in [
+            (
+                "/storage/emulated/0/Android/data/com.xhbl.xgview/files",
+                "/storage/emulated/0/Download",
+            ),
+            (
+                "/storage/emulated/10/Android/data/com.xhbl.xgview/files",
+                "/storage/emulated/10/Download",
+            ),
+            ("/sdcard/Android/data/com.xhbl.xgview/files", "/sdcard/Download"),
+            (
+                "/storage/1234-ABCD/Android/data/com.xhbl.xgview/files",
+                "/storage/1234-ABCD/Download",
+            ),
+        ] {
+            assert_eq!(
+                public_download_dir(Path::new(own)),
+                Some(PathBuf::from(expected)),
+                "{own}"
+            );
+        }
+    }
+
+    /// A folder with no `Android` above it is not on a volume the app was given
+    /// a folder on, and nothing is guessed for it.
+    #[test]
+    fn a_folder_that_is_not_under_android_names_no_downloads() {
+        assert_eq!(public_download_dir(Path::new("/home/xgview")), None);
+        assert_eq!(public_download_dir(Path::new("Android")), None);
+    }
+
+    /// A place is offered only when the picker could walk it: `Download` on a
+    /// device with no storage permission answers `is_dir` and then refuses the
+    /// listing, which would be a window opening on an error.
+    #[test]
+    fn a_folder_that_cannot_be_listed_is_not_a_place() {
+        let dir = std::env::temp_dir().join("xgview-picker-readable");
+        let _ = std::fs::create_dir_all(&dir);
+        assert!(readable(&dir));
+        assert!(!readable(&dir.join("not-there")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

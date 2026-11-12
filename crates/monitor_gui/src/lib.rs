@@ -625,9 +625,10 @@ pub fn run_android(app: android_activity::AndroidApp) -> anyhow::Result<()> {
     if let Some(dir) = app.internal_data_path() {
         monitor_core::config::set_config_home(dir);
     }
-    // The same folder on the shared volume, kept for the file dialog a device
-    // without a document picker falls back to: it is the one place a transfer
-    // can put a configuration and the app can still read it back.
+    // The same folder on the shared volume, kept for the file window an import
+    // opens: it is the one place a transfer can put a configuration and the app
+    // can still read it back, and it names the volume the public Download folder
+    // is derived from.
     if let Some(dir) = app.external_data_path() {
         crate::android::set_external_files(dir.clone());
         // A decoder that cannot make sense of the geometry it is given writes

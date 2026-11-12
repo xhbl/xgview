@@ -50,12 +50,10 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
@@ -1337,11 +1335,9 @@ public class MainActivity extends NativeActivity {
     //
     // The About tab's export and import. Android has no file dialog of the
     // desktop kind, so the export goes to a fixed place any file manager can
-    // reach - Download/xgview/xgvconfig.seal - while the import is handed to the
-    // system's own document picker. The picker is not a preference: from
-    // Android 11 a plain path into shared storage is closed to an app for any
-    // file it did not create itself, which is exactly the case for a
-    // configuration carried over from another device.
+    // reach - Download/xgview/xgvconfig.seal - and the import walks that same
+    // folder through the viewer's own file window, whose listing and path
+    // arithmetic live on the native side.
 
     /** Folder the export is written to, under the public Downloads directory. */
     private static final String EXPORT_FOLDER = "Download/xgview";
@@ -1354,19 +1350,6 @@ public class MainActivity extends NativeActivity {
 
     /** Request code for the storage permission Android 9 needs to write there. */
     private static final int REQUEST_WRITE_STORAGE = 0x5847;
-
-    /** Request code for the document picker an import opens. */
-    private static final int REQUEST_IMPORT_DOCUMENT = 0x5848;
-
-    /**
-     * The Android TV framework's stand-in for the apps a television build
-     * leaves out.
-     *
-     * <p>It answers intents for the apps that are not there - documents, media,
-     * contacts - and opens nothing when it is started. See
-     * {@link #hasDocumentPicker}.
-     */
-    private static final String STUB_PACKAGE = "com.android.tv.frameworkpackagestubs";
 
     /** Request code for the microphone permission talk-back needs. */
     private static final int REQUEST_RECORD_AUDIO = 0x5849;
@@ -1863,73 +1846,118 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
-     * Android 9: the public Downloads directory itself, which needs the storage
-     * permission. There is no MediaStore route at that API level, so this is
-     * the one version whose export can ask the viewer for something.
+     * Asks for the storage permission a public-folder import or export needs on
+     * Android 9, when it is still missing, and says whether it asked.
      *
-     * <p>Returns null when the permission is missing, having asked for it.
-     */
-    @SuppressWarnings("deprecation")
-    private static String writeViaPublicDownload(String name, String text) throws Exception {
-        final Activity self = wall();
-        if (self.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                != PackageManager.PERMISSION_GRANTED) {
-            self.runOnUiThread(() -> self.requestPermissions(
-                    new String[] { android.Manifest.permission.WRITE_EXTERNAL_STORAGE },
-                    REQUEST_WRITE_STORAGE));
-            return null;
-        }
-        final File folder = new File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "xgview");
-        if (!folder.isDirectory() && !folder.mkdirs()) {
-            throw new IOException("cannot create " + folder);
-        }
-        final File file = new File(folder, name);
-        try (OutputStream stream = new FileOutputStream(file)) {
-            stream.write(text.getBytes(StandardCharsets.UTF_8));
-        }
-        // So a media transfer and the Downloads app see it without a reboot.
-        MediaScannerConnection.scanFile(self, new String[] { file.getAbsolutePath() }, null, null);
-        return EXPORT_FOLDER + "/" + name;
-    }
-
-    /**
-     * The intent an import asks the system for a document with.
+     * <p>Only up to Android 9. From Android 10 on the shared volume is reached
+     * through {@code MediaStore}, which needs no permission at all, and the
+     * permission itself can no longer be granted to an app targeting a later
+     * API level - asking would put up nothing and leave the caller waiting on an
+     * answer that never comes.
      *
-     * <p>Built in one place because it is asked twice: once to find out whether
-     * anything on the device answers it, and once to put it up.
-     */
-    private static Intent importIntent() {
-        return new Intent(Intent.ACTION_OPEN_DOCUMENT)
-                .addCategory(Intent.CATEGORY_OPENABLE)
-                .setType("*/*")
-                // A picker honouring the filter shows only these, which keeps
-                // a wall of unrelated files out of the way.
-                .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
-                        SEALED_MIME_TYPE, "application/json", "text/plain",
-                        "application/octet-stream"
-                });
-    }
-
-    /**
-     * Whether this device has a document picker worth opening.
+     * <p>Asked once per process: the viewer presses import, the system's dialog
+     * appears over it, and the file picker it opens is already looking at what
+     * it can see. Asking again on every press would be a dialog the viewer has
+     * already answered.
      *
-     * <p>Called from the native side before {@link #pickConfigFile}, which is
-     * only worth doing when this answers `true`. A television build can ship
-     * without `DocumentsUI` - and, on the boxes this was written for, without
-     * any {@code DocumentsProvider} behind it - while still answering the
-     * intent with {@link #STUB_PACKAGE}'s placeholder, which opens nothing and
-     * says nothing. A handler that is that placeholder is not a handler, and
-     * the viewer draws its own file dialog instead.
+     * <p>Called from the native side; see {@code android::request_storage}.
      */
-    public static boolean hasDocumentPicker() {
+    public static boolean requestStorageIfNeeded() {
+        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P || storageAsked) {
+            return false;
+        }
         final Activity self = wall();
         if (self == null) {
             return false;
         }
-        for (ResolveInfo handler : self.getPackageManager().queryIntentActivities(importIntent(), 0)) {
-            final String owner = handler.activityInfo == null ? null : handler.activityInfo.packageName;
-            if (owner != null && !STUB_PACKAGE.equals(owner)) {
+        if (self.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                == PackageManager.PERMISSION_GRANTED) {
+            return false;
+        }
+        storageAsked = true;
+        self.runOnUiThread(() -> self.requestPermissions(
+                new String[] { android.Manifest.permission.WRITE_EXTERNAL_STORAGE },
+                REQUEST_WRITE_STORAGE));
+        return true;
+    }
+
+    /** Whether the Android 9 storage permission has been asked for already. */
+    private static boolean storageAsked;
+
+    /**
+     * Whether the storage permission a public folder needs is held.
+     *
+     * <p>True from Android 10 on without asking anything: that volume is
+     * reached through {@code MediaStore}, and the permission itself is not
+     * grantable there any more.
+     *
+     * <p>Called from the native side before an import window is opened, so that
+     * a window is not put up on a volume it can see nothing of while the
+     * system's dialog is still waiting for an answer. See
+     * {@code android::storage_granted}.
+     */
+    public static boolean hasStoragePermission() {
+        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
+            return true;
+        }
+        final Activity self = wall();
+        return self != null
+                && self.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /**
+     * Whether this app may read the whole shared volume by path.
+     *
+     * <p>From Android 11 the volume is filtered by owner: an app that holds no
+     * storage permission sees the files it wrote itself and nothing else, so a
+     * configuration copied onto the device by USB or a file manager is not in
+     * the listing. The runtime permission that used to lift that filter covers
+     * media only from Android 13 on, and a `.json` is not media - the
+     * "all files access" special grant is the one that does, and it is a switch
+     * in the system settings rather than a dialog.
+     *
+     * <p>True below Android 11 without asking anything: there is no such grant
+     * to hold there, and on Android 9 the storage permission asked for above is
+     * the whole story.
+     *
+     * <p>Called from the native side before an import window is opened; see
+     * {@code android::all_files_access}.
+     */
+    public static boolean hasAllFilesAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return Environment.isExternalStorageManager();
+        }
+        return true;
+    }
+
+    /**
+     * Opens the system screen that grants "all files access", and says whether
+     * it was opened.
+     *
+     * <p>Nothing is answered here: the viewer leaves the app, flips the switch
+     * and comes back, and the native side asks {@link #hasAllFilesAccess} again
+     * when it does. A device with no such screen - some television builds strip
+     * the settings page - answers `false`, and the caller opens what it can
+     * show instead of sending the viewer nowhere.
+     */
+    public static boolean requestAllFilesAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            final Activity self = wall();
+            if (self != null) {
+                self.runOnUiThread(() -> {
+                    try {
+                        self.startActivity(new Intent(
+                                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                Uri.parse("package:" + self.getPackageName())));
+                    } catch (RuntimeException noSuchScreen) {
+                        try {
+                            self.startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                        } catch (RuntimeException none) {
+                            android.util.Log.w("xgview", "no all-files screen on this device", none);
+                        }
+                    }
+                });
                 return true;
             }
         }
@@ -1937,66 +1965,89 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
-     * Opens the system's document picker for an import.
+     * Android 9: the public Downloads directory itself, which needs the storage
+     * permission. There is no MediaStore route at that API level, so this is
+     * the one version whose export can ask the viewer for something.
      *
-     * <p>Called from the native side. The answer - the file's text, or why it
-     * could not be read - comes back through {@link #onActivityResult}.
+     * <p>The asking is not done here. The native side asks - the same
+     * {@link #requestStorageIfNeeded} the import window goes through - and only
+     * calls this once the answer is in; see {@code app::persist}. A write that
+     * arrives without the permission is one the viewer has refused, and says so
+     * by returning null rather than by putting the dialog up again on a press
+     * that was already answered.
      */
-    public static void pickConfigFile() {
+    @SuppressWarnings("deprecation")
+    private static String writeViaPublicDownload(String name, String text) throws Exception {
         final Activity self = wall();
-        if (self == null) {
-            return;
+        if (self.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+            // Asked before this call, and refused: the press has had its
+            // answer, and the native side is the one that says what it means.
+            return null;
         }
-        self.runOnUiThread(() -> {
-            try {
-                self.startActivityForResult(importIntent(), REQUEST_IMPORT_DOCUMENT);
-            } catch (RuntimeException none) {
-                // Some television builds have no document provider at all.
-                android.util.Log.w("xgview", "no document picker on this device", none);
-                nativeConfigPicked(null, "no document picker on this device");
-            }
-        });
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        readPickedDocument(this, requestCode, resultCode, data);
+        final File folder = new File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "xgview");
+        final File file = writeOnceGranted(folder, name, text.getBytes(StandardCharsets.UTF_8));
+        // So a media transfer and the Downloads app see it without a reboot.
+        MediaScannerConnection.scanFile(self, new String[] { file.getAbsolutePath() }, null, null);
+        return EXPORT_FOLDER + "/" + name;
     }
 
     /**
-     * Reads the file an import picked, and hands it to the native side.
+     * Writes {@code bytes} into {@code folder/name}, giving the storage grant a
+     * moment to reach the volume when it has only just been given.
      *
-     * <p>Static, and given the activity that started the picker, because either
-     * front end can be the one that asked: the answer comes back to the
-     * activity that asked, and what to do with it does not depend on which.
+     * <p>The permission is a runtime one and the shared volume it unlocks is a
+     * FUSE mount handed to the process: on Android 8 and 9 the mount is
+     * refreshed a moment <em>after</em> the grant rather than with it, so a
+     * write arriving inside that moment fails with {@code EACCES} although
+     * {@code checkSelfPermission} already answers granted. That is the export
+     * the viewer allowed and was refused, and it went out on the second press -
+     * a press that should not have been needed. A bounded retry is what makes
+     * the first one enough; it costs nothing when the volume is ready, and this
+     * is only ever reached from an export.
      */
-    static void readPickedDocument(
-            final Activity self, final int requestCode, final int resultCode, final Intent data) {
-        if (requestCode != REQUEST_IMPORT_DOCUMENT) {
-            return;
-        }
-        final Uri uri = resultCode == RESULT_OK && data != null ? data.getData() : null;
-        if (uri == null) {
-            // Cancelled: nothing happened, and nothing is said about it.
-            nativeConfigPicked(null, null);
-            return;
-        }
-        try (InputStream stream = self.getContentResolver().openInputStream(uri)) {
-            if (stream == null) {
-                throw new IOException("cannot open " + uri);
+    private static File writeOnceGranted(File folder, String name, byte[] bytes) throws IOException {
+        IOException refused = null;
+        // 6 x 200 ms: long enough for a mount to settle, short enough that a
+        // permission that really is missing still fails while the viewer is
+        // looking at the screen.
+        for (int attempt = 0; attempt < 6; attempt++) {
+            if (attempt > 0) {
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
-            final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-            final byte[] chunk = new byte[8192];
-            int read;
-            while ((read = stream.read(chunk)) > 0) {
-                buffer.write(chunk, 0, read);
+            try {
+                if (!folder.isDirectory() && !folder.mkdirs()) {
+                    throw new IOException("cannot create " + folder);
+                }
+                final File file = new File(folder, name);
+                try (OutputStream stream = new FileOutputStream(file)) {
+                    stream.write(bytes);
+                }
+                return file;
+            } catch (IOException error) {
+                if (!isPermissionRefusal(error)) {
+                    throw error;
+                }
+                refused = error;
             }
-            nativeConfigPicked(new String(buffer.toByteArray(), StandardCharsets.UTF_8), null);
-        } catch (Exception error) {
-            android.util.Log.w("xgview", "cannot read the picked file", error);
-            nativeConfigPicked(null, String.valueOf(error));
         }
+        throw refused != null ? refused : new IOException("cannot write " + new File(folder, name));
+    }
+
+    /** Whether an {@code IOException} is the volume refusing a write, not a fault. */
+    private static boolean isPermissionRefusal(IOException error) {
+        final String message = error.getMessage();
+        if (message == null) {
+            return false;
+        }
+        final String said = message.toLowerCase(java.util.Locale.ROOT);
+        return said.contains("eacces") || said.contains("permission denied");
     }
 
     // ---------------------------------------------------------------- boot start
@@ -2085,15 +2136,6 @@ public class MainActivity extends NativeActivity {
 
     /** The keyboard went away on its own - Back, or its own hide button. */
     private static native void nativeKeyboardHidden();
-
-    /**
-     * The document an import picked, or why it could not be read.
-     *
-     * <p>{@code text} is the file's content and {@code error} says what went
-     * wrong when it is not null; both null means the viewer cancelled, which is
-     * not a failure and is not reported as one.
-     */
-    private static native void nativeConfigPicked(String text, String error);
 
     /**
      * The window insets, in pixels: the strip the navigation bar keeps, one

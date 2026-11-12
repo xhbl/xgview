@@ -23,7 +23,8 @@
       them are placeholders until real artwork replaces them; see
       `scripts/make-icons.py`.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Network access is required to pull RTSP streams and to run ONVIF / TCP
          port discovery. -->
@@ -60,28 +61,22 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <!-- Reading a configuration another machine put on the device. Since
+         Android 11 the shared volume is filtered by owner: without a storage
+         permission the app sees only the files it wrote itself, and a
+         configuration copied over by USB or a file manager belongs to whoever
+         copied it. The one runtime permission that lifts that filter is
+         `READ_EXTERNAL_STORAGE`, which is a no-op for a non-media file such as
+         a `.json` from Android 13 on - so the only way to read one by path is
+         the "all files access" special grant, which the viewer turns on in the
+         system settings; see `MainActivity.requestAllFilesAccess`. -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
     <!-- Broadcast / multicast reception has to be enabled on some TV boxes,
          otherwise the WS-Discovery probe never leaves the device. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-
-    <!-- Android 11+ package visibility: without this, the app's own
-         `queryIntentActivities(ACTION_OPEN_DOCUMENT)` cannot see the system
-         document picker - `com.google.android.documentsui` on phones and
-         tablets - so `MainActivity.hasDocumentPicker()` wrongly returns false
-         and import falls back to the built-in dialog (egui inside the window),
-         which starts in the app's private `external_files_dir` and can never
-         reach the public `Download/xgview` folder the export writes to.
-         Declaring the intent restores visibility where a picker ships.
-         Television boxes that only answer the intent with
-         `com.android.tv.frameworkpackagestubs` are still excluded by name in
-         `hasDocumentPicker`, so they keep using the built-in fallback. -->
-    <queries>
-        <intent>
-            <action android:name="android.intent.action.OPEN_DOCUMENT" />
-            <category android:name="android.intent.category.OPENABLE" />
-            <data android:mimeType="*/*" />
-        </intent>
-    </queries>
 
     <!-- Talk-back captures the viewer's voice. Declared rather than implied:
          without it Oboe refuses to open an input stream at all, and the

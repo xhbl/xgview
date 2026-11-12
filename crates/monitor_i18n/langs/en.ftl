@@ -204,7 +204,7 @@ about-import-name = Import configuration
 about-only-cameras = Only import the cameras
 about-only-cameras-name = Only import the cameras
 about-import-hint = Importing overwrites your current configuration. Check the box to import the cameras and their groups only, keeping your viewer settings. The export is sealed with a passphrase unless you untick the box beside it.
-about-import-hint-android = Export writes into the folder the file picker is showing - the viewer's own folder to begin with: xgvconfig.seal sealed with a passphrase, or xgvconfig.json in clear when you untick the box beside it. Import opens a file picker - the system's where the device has one, the viewer's own where it does not. { about-import-hint }
+about-import-hint-android = Export writes into the public Download/xgview folder - xgvconfig.seal sealed with a passphrase, or xgvconfig.json in clear when you untick the box beside it - where a file manager and a computer can both reach it. Import opens that same folder and can walk the app's own as well. On older Android versions the first import or export asks for the storage permission and carries on by itself once it is allowed. From Android 11 the system shows an app only the files it wrote itself, so importing a configuration copied on from elsewhere needs "all files access", which the first press on import offers to open in the system settings. { about-import-hint }
 about-memory = Memory: { $used } MB / { $total } MB ({ $percent }%)
 about-memory-unknown = Memory: --
 about-cpu = CPU: { $percent }%
@@ -280,7 +280,8 @@ file-picker-empty = No configuration in this folder
 file-picker-name = File name
 file-picker-save = Save
 file-picker-place-home = Home
-
+file-picker-place-files = App folder
+file-picker-place-downloads = Downloads
 ## Toolbar
 toolbar-layout-1x1 = Grid 1×1
 toolbar-layout-2x2 = Grid 2×2
@@ -376,17 +377,18 @@ toast-config-save-failed = cannot save { $path }: { $error }
 toast-config-exported = configuration exported to { $path }
 toast-export-failed = cannot export: { $error }
 toast-export-interrupted = the export did not finish
-toast-export-needs-storage = export needs the storage permission - grant it, then export again
+toast-export-needs-storage = export needs the storage permission - allow it in the system settings, then export again
+toast-export-grant-storage = asking for the storage permission - the export goes out as soon as it is allowed
+toast-export-storage-missing = no storage permission, so nothing was exported
+toast-import-grant-storage = asking for the storage permission - the import window opens as soon as it is allowed
+toast-import-storage-missing = no storage permission, so only the app's own folder can be opened
+toast-import-grant-all-files = import needs all-files access - the window opens as soon as it is allowed in the system settings
+toast-import-all-files-missing = no all-files access, so only the configurations this app exported are listed
 toast-imported =
     imported { $count ->
         [one] { $count } camera
        *[other] { $count } cameras
     } from { $path }
-toast-imported-document =
-    imported { $count ->
-        [one] { $count } camera
-       *[other] { $count } cameras
-    } from the picked file
 toast-import-failed = cannot import: { $error }
 toast-backup-failed = could not keep a copy of the configuration being replaced: { $error }
 toast-started-autostart = XGView v{ $version } started automatically ({ $decoder } decoder)

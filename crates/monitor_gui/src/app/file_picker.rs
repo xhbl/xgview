@@ -179,7 +179,13 @@ pub(super) struct FilePicker {
 
 impl Default for FilePicker {
     fn default() -> Self {
-        Self { mode: Mode::Open, listing: Listing::default(), places: Vec::new(), name: String::new(), reanchor: false }
+        Self {
+            mode: Mode::Open,
+            listing: Listing::default(),
+            places: Vec::new(),
+            name: String::new(),
+            reanchor: false,
+        }
     }
 }
 
@@ -191,7 +197,13 @@ impl FilePicker {
         mode: Mode,
         name: String,
     ) -> Self {
-        Self { mode, listing: Listing::read(&dir), places, name, reanchor: false }
+        Self {
+            mode,
+            listing: Listing::read(&dir),
+            places,
+            name,
+            reanchor: false,
+        }
     }
 
     /// Whether this window writes a file rather than taking one.
@@ -569,6 +581,9 @@ impl XgViewApp {
         if !self.passphrase.is_open() {
             self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
         }
+        // Android: the window handed the question on rather than answering it.
+        // The picker it asked for is another activity and answers frames later,
+        // where `poll_picked_config` takes it; this window is done either way.
         if let Some(path) = picked {
             // One window answers both directions, so which one it was opened
             // for is what decides what the path means: a document to read, or
