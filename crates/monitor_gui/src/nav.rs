@@ -42,6 +42,9 @@ use std::collections::HashMap;
 
 use egui::{Context, EventFilter, Id, Response};
 
+/// How far [`Nav::enter`] follows exits through scopes that drew nothing.
+const MAX_EXITS: usize = 8;
+
 /// How the members of a scope are laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -72,6 +75,9 @@ impl Dir {
 }
 
 /// Where a direction press goes once it walks off the end of a scope.
+///
+/// A scope that drew no members at all is passed through along its own exit in
+/// the same direction rather than swallowing the press; see [`Nav::enter`].
 #[derive(Debug, Clone, Copy)]
 pub enum Exit {
     /// Into another scope: its entry control, or its first member.
@@ -417,23 +423,59 @@ impl Nav {
         }
         let target = match target {
             Some(target) => Some(target),
-            None => match def.exits[dir.index()]? {
-                Exit::Scope(key) => self
-                    .entries
-                    .get(key)
-                    .copied()
-                    .or_else(|| self.prev_scopes.get(key).and_then(|members| members.first().copied())),
-                Exit::ScopeAt(key) => self.prev_scopes.get(key).and_then(|members| {
-                    // The same seat in the target, or its last member when the
-                    // target is shorter than the seat.
-                    members.get(slot.pos).or_else(|| members.last()).copied()
-                }),
-            },
+            None => self.enter(slot.scope, dir, slot.pos),
         };
 
         let revealed = target.filter(|target| self.scrolling(*target));
         self.revealed = revealed;
         target
+    }
+
+    /// Follows the exits of `scope` in one direction until a scope with a
+    /// member is reached.
+    ///
+    /// An empty listing is the case this exists for. The file picker's
+    /// shortcuts exit Down into the listing, and the listing exits Down into
+    /// the save field; a folder with nothing in it registers no member in the
+    /// listing's scope, and a plain `Exit::Scope` would then answer `None` -
+    /// leaving the focus on the shortcuts with a name field and a Save button
+    /// on screen that no key could reach. An empty scope is passed through
+    /// instead, along that same direction's exit, until something is there.
+    ///
+    /// The walk is bounded: two scopes that point at each other would
+    /// otherwise send a press round forever. Eight is more than any window in
+    /// the viewer has scopes in a line.
+    fn enter(&self, scope: &'static str, dir: Dir, seat: usize) -> Option<Id> {
+        let mut scope = scope;
+        for _ in 0..MAX_EXITS {
+            let (key, at_seat) = match self.defs.get(scope)?.exits[dir.index()]? {
+                Exit::Scope(key) => (key, false),
+                Exit::ScopeAt(key) => (key, true),
+            };
+            if !at_seat {
+                // An entry named by `set_entry` wins even when the scope it
+                // lives in drew nothing this frame: the tab strip uses it to
+                // return to the tab that is on.
+                if let Some(&entry) = self.entries.get(key) {
+                    return Some(entry);
+                }
+            }
+            if let Some(members) = self.prev_scopes.get(key) {
+                if !members.is_empty() {
+                    return if at_seat {
+                        // The same seat in the target, or its last member when
+                        // the target is shorter than the seat.
+                        members.get(seat).or_else(|| members.last()).copied()
+                    } else {
+                        members.first().copied()
+                    };
+                }
+            }
+            // Nothing was drawn in that scope on the last frame. Its own exit
+            // in this direction is the next place to look.
+            scope = key;
+        }
+        None
     }
 
     /// The control after `focused` in its own scope, or `None` at the end.
@@ -586,6 +628,50 @@ mod tests {
         assert_eq!(nav.step(x, Dir::Left), None, "the column has no sideways exit");
         // With no entry set, an Up out of the body falls back to the first tab.
         assert_eq!(nav.step(x, Dir::Up), Some(a));
+    }
+
+    /// A scope that drew nothing is walked *through*, not into. The file
+    /// picker's listing in an empty folder is the case this exists for: the
+    /// shortcuts exit Down into it, it exits Down into the save field, and
+    /// without this the press died in the empty scope with a name field and a
+    /// Save button on screen that no arrow could reach. Up has to unwind the
+    /// same way.
+    #[test]
+    fn an_exit_walks_through_a_scope_that_drew_nothing() {
+        let (place, field, save) =
+            (Id::new("place"), Id::new("field"), Id::new("save"));
+        let mut nav = Nav::new(&[
+            ("places", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("list"))),
+            ("list", ScopeDef::new(Axis::Column)
+                .exit(Dir::Up, Exit::Scope("places"))
+                .exit(Dir::Down, Exit::Scope("field"))),
+            ("field", ScopeDef::new(Axis::Row)
+                .exit(Dir::Up, Exit::Scope("list"))
+                .exit(Dir::Down, Exit::Scope("button"))),
+            ("button", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope("field"))),
+        ]);
+        let ctx = Context::default();
+
+        // A frame with an empty listing: it opens and closes but registers no
+        // member, exactly as the picker draws a folder with no files.
+        nav.begin();
+        nav.open("places");
+        nav.push(place, Kind::Plain);
+        nav.close();
+        nav.open("list");
+        nav.close();
+        nav.open("field");
+        nav.push(field, Kind::Plain);
+        nav.close();
+        nav.open("button");
+        nav.push(save, Kind::Plain);
+        nav.close();
+        nav.finish(&ctx);
+
+        assert_eq!(nav.step(place, Dir::Down), Some(field), "the empty listing is skipped");
+        assert_eq!(nav.step(field, Dir::Down), Some(save));
+        assert_eq!(nav.step(save, Dir::Up), Some(field));
+        assert_eq!(nav.step(field, Dir::Up), Some(place), "and Up skips it on the way back");
     }
 
     #[test]

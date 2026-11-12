@@ -24,8 +24,14 @@ use std::path::{Path, PathBuf};
 const LIST_SCOPE: &'static str = "file-picker-list";
 /// The scope the shortcuts above the listing live in.
 const PLACES_SCOPE: &'static str = "file-picker-places";
-/// The scope the save field and its button live in.
-const ACTIONS_SCOPE: &'static str = "file-picker-actions";
+/// The scope the name field lives in.
+const FIELD_SCOPE: &'static str = "file-picker-field";
+/// The scope the button beside the field lives in.
+///
+/// Beside, and a scope of its own, because a text field keeps Left and Right
+/// for its caret - so the button would have no key that reaches it if the two
+/// shared a row. Down out of the field enters this scope, and Up leaves it.
+const BUTTON_SCOPE: &'static str = "file-picker-buttons";
 
 /// The way up's label. A glyph rather than a word, so it reads as a control of
 /// its own beside the folder shortcuts and costs a fraction of their width.
@@ -49,11 +55,20 @@ const ROW_H: f32 = 32.0;
 /// A desktop is not short of height, so it shows eight.
 const LIST_ROWS: usize = if cfg!(target_os = "android") { 5 } else { 8 };
 /// The extensions a configuration comes in: the JSON written in clear, and the
-/// sealed export. Both have to be listed - the settings page writes one or the
-/// other, and a picker that only showed the first could not read back what this
-/// very program had just written. The later dialog accepted both; this one has
-/// to as well.
+/// sealed export. An import has to list both - the settings page writes one or
+/// the other, and a picker that only showed the first could not read back what
+/// this very program had just written. The later dialog accepted both; this one
+/// has to as well.
 const SUFFIXES: [&str; 2] = [".json", ".seal"];
+/// What a save lists: only the kind it is about to write.
+///
+/// The listing is not a catalogue of everything readable, it is the set of
+/// files the viewer can name this export after. Showing a sealed file in a
+/// clear export - or the other way round - invites the very mistake the
+/// extension is there to prevent: one press would put a name of the wrong kind
+/// in the field, and the file it replaces would have been written as the other.
+const CLEAR_SUFFIXES: [&str; 1] = [".json"];
+const SEALED_SUFFIXES: [&str; 1] = [".seal"];
 
 /// One row of the listing.
 ///
@@ -90,9 +105,10 @@ impl Listing {
     /// viewer has to read rather than remember. Hidden entries - a name that
     /// starts with a dot - are left out: on Android and Linux they are the
     /// plumbing of the directory, not something an import is ever after.
-    fn read(dir: &Path) -> Self {
+    fn read(dir: &Path, mode: Mode) -> Self {
         let mut entries = Vec::new();
         let mut error = None;
+        let suffixes = suffixes(mode);
         match fs::read_dir(dir) {
             Ok(read) => {
                 let mut dirs: Vec<(String, PathBuf)> = Vec::new();
@@ -106,7 +122,7 @@ impl Listing {
                     let path = item.path();
                     if kind.is_dir() {
                         dirs.push((name, path));
-                    } else if kind.is_file() && takes(&name) {
+                    } else if kind.is_file() && takes(&name, suffixes) {
                         let size = item.metadata().map(|meta| meta.len()).unwrap_or(0);
                         files.push((name, path, size));
                     }
@@ -127,10 +143,48 @@ impl Listing {
     }
 }
 
-/// Whether a file's name is one this picker takes.
-fn takes(name: &str) -> bool {
+/// The window's navigation scopes, declared beside the window they walk.
+///
+/// Down from the shortcuts enters the listing; Down from the listing enters the
+/// name field; Down from the field enters the button beside it, and Up unwinds
+/// the same way. The field and the button are two scopes rather than one row
+/// because a text field keeps Left and Right for its caret - in a row of its
+/// own the button beside it would have no key that reaches it at all, which is
+/// exactly how the Save button used to be unreachable from a remote.
+///
+/// An import draws no footer, so the last two scopes have no members then and
+/// their exits lead nowhere: Up out of the listing still leaves for the
+/// shortcuts.
+pub(super) fn scopes() -> [(&'static str, ScopeDef); 4] {
+    [
+        (PLACES_SCOPE, ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope(LIST_SCOPE))),
+        (LIST_SCOPE, ScopeDef::new(Axis::Column).scrolling()
+            .exit(Dir::Up, Exit::Scope(PLACES_SCOPE))
+            .exit(Dir::Down, Exit::Scope(FIELD_SCOPE))),
+        (FIELD_SCOPE, ScopeDef::new(Axis::Row)
+            .exit(Dir::Up, Exit::Scope(LIST_SCOPE))
+            .exit(Dir::Down, Exit::Scope(BUTTON_SCOPE))),
+        (BUTTON_SCOPE, ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope(FIELD_SCOPE))),
+    ]
+}
+
+/// The extensions this window lists, given what it was opened for.
+///
+/// An import reads both kinds. A save lists only the kind it is about to write,
+/// so a name taken from a row cannot quietly change an export from clear to
+/// sealed or back - and so a file of the other kind cannot be replaced by one.
+fn suffixes(mode: Mode) -> &'static [&'static str] {
+    match mode {
+        Mode::Open => &SUFFIXES,
+        Mode::Save { sealed: false } => &CLEAR_SUFFIXES,
+        Mode::Save { sealed: true } => &SEALED_SUFFIXES,
+    }
+}
+
+/// Whether a file's name is one this window lists.
+fn takes(name: &str, suffixes: &[&str]) -> bool {
     let lower = name.to_lowercase();
-    SUFFIXES.iter().any(|suffix| lower.ends_with(suffix))
+    suffixes.iter().any(|suffix| lower.ends_with(suffix))
 }
 
 /// A file's size, short enough to sit at the end of a row.
@@ -148,16 +202,35 @@ fn size_label(bytes: u64) -> String {
 
 /// What the window was opened for.
 ///
-/// The listing is the same either way; what differs is what the confirm key and
-/// the button at the foot of the window do with the row under the focus.
+/// The rows it lists and what the confirm key does with the row under the focus
+/// both come from this: an import reads either kind of configuration, a save
+/// shows only the kind it is writing - clear or sealed - and names its file in
+/// the field at the foot of the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
-    /// Take a file that is already there.
+    /// Take a file that is already there, clear or sealed.
     Open,
     /// Write one into the folder on screen, named in the field at the foot of
-    /// it. What it is sealed under belongs to the job that opened the window,
-    /// not to the listing.
-    Save,
+    /// it. `sealed` is whether a passphrase was given for this export, which
+    /// is also the kind of file the listing is filtered to. The passphrase
+    /// itself belongs to the job that opened the window, not to the picker.
+    ///
+    /// Android's export goes straight into the public Download folder via the
+    /// activity, so the only mode it ever constructs is `Open` - the field,
+    /// the filter and the overwrite question are a desktop window's.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    Save { sealed: bool },
+}
+
+/// What a press on the Save button came to. See [`FilePicker::press`].
+#[derive(Debug, PartialEq, Eq)]
+enum SavePress {
+    /// The field does not name a file this window may write.
+    Nothing,
+    /// The name is taken, and the footer is asking whether to replace it.
+    Asking,
+    /// Write it.
+    Write(PathBuf),
 }
 
 /// The picker's window: where it is and what it offers as shortcuts.
@@ -175,6 +248,20 @@ pub(super) struct FilePicker {
     /// drops a focus whose widget is no longer drawn - which would leave the
     /// window up with the arrows going to the wall again.
     reanchor: bool,
+    /// The name the footer is asking about, while it is asking.
+    ///
+    /// A save whose name is already in the folder writes nothing on the press
+    /// that asked for it: the field makes way for the question, and only the
+    /// answer writes. `None` when nothing is being asked - which is every
+    /// window until a save lands on a name that is taken.
+    ask: Option<String>,
+    /// The question has just gone up: the answer that changes nothing takes
+    /// the focus as it is drawn.
+    ask_focus: bool,
+    /// The question was answered with "no": the field comes back and takes the
+    /// focus, so the viewer is naming a file again rather than looking at a
+    /// window with no ring in it.
+    refocus_field: bool,
 }
 
 impl Default for FilePicker {
@@ -185,6 +272,9 @@ impl Default for FilePicker {
             places: Vec::new(),
             name: String::new(),
             reanchor: false,
+            ask: None,
+            ask_focus: false,
+            refocus_field: false,
         }
     }
 }
@@ -199,16 +289,37 @@ impl FilePicker {
     ) -> Self {
         Self {
             mode,
-            listing: Listing::read(&dir),
+            listing: Listing::read(&dir, mode),
             places,
             name,
             reanchor: false,
+            ask: None,
+            ask_focus: false,
+            refocus_field: false,
         }
     }
 
     /// Whether this window writes a file rather than taking one.
     fn saving(&self) -> bool {
-        self.mode == Mode::Save
+        matches!(self.mode, Mode::Save { .. })
+    }
+
+    /// Whether the name carries the extension of the *other* kind of export.
+    ///
+    /// The kind is decided by the checkbox on the settings page, not by what
+    /// the field says, so a clear export named `.seal` would put clear text in
+    /// a sealed-looking file - and the other way round. Refused rather than
+    /// silently corrected: the field is the viewer's to name.
+    fn wrong_kind(&self) -> bool {
+        let Mode::Save { sealed } = self.mode else {
+            return false;
+        };
+        let name = self.name.trim().to_lowercase();
+        if sealed {
+            name.ends_with(".json")
+        } else {
+            name.ends_with(".seal")
+        }
     }
 
     /// The file a save would write, or `None` while the name cannot be one.
@@ -217,7 +328,8 @@ impl FilePicker {
     /// is a name, not a path, and `../` there would write outside the folder the
     /// listing is showing - which the viewer cannot see. The extensions the
     /// listing accepts are not forced on it; the name arrives with the one the
-    /// export wants.
+    /// export wants. A name that says the *other* kind is refused too; see
+    /// [`Self::wrong_kind`].
     fn target(&self) -> Option<PathBuf> {
         let name = self.name.trim();
         if name.is_empty()
@@ -225,6 +337,7 @@ impl FilePicker {
             || name == ".."
             || name.contains(['/', '\\'])
             || name.contains('\0')
+            || self.wrong_kind()
         {
             return None;
         }
@@ -239,8 +352,60 @@ impl FilePicker {
         let Some(above) = self.listing.above() else {
             return false;
         };
-        self.listing = Listing::read(&above);
+        self.listing = Listing::read(&above, self.mode);
         self.reanchor = true;
+        self.ask = None;
+        true
+    }
+
+    /// What a press on the Save button comes to.
+    ///
+    /// A name that is free is written on the press. One that is already in the
+    /// folder is not: an export is the one thing this program writes, and a
+    /// file it wrote an hour ago is as likely to be the thing the viewer means
+    /// to keep as it is to be the one being replaced - so the footer asks, and
+    /// the answer is what writes. The question is about the name in the field
+    /// as it stood when the press was made; see [`Self::sync_ask`].
+    fn press(&mut self, target: Option<PathBuf>) -> SavePress {
+        let Some(path) = target else {
+            return SavePress::Nothing;
+        };
+        let name = self.name.trim().to_owned();
+        // Already asked about this name: the press that reaches here a second
+        // time is the one that answers "yes", which is answered at the buttons
+        // instead - so wait rather than ask again.
+        if self.ask.as_deref() == Some(name.as_str()) {
+            return SavePress::Asking;
+        }
+        if !path.exists() {
+            return SavePress::Write(path);
+        }
+        self.ask = Some(name);
+        self.ask_focus = true;
+        SavePress::Asking
+    }
+
+    /// Drops the question when the field no longer names what it asked about.
+    ///
+    /// The field is drawn again as soon as a question stops being asked, and a
+    /// viewer who types a different name there has answered the question by
+    /// meaning something else.
+    fn sync_ask(&mut self) {
+        if self.ask.as_deref().is_some_and(|asked| asked != self.name.trim()) {
+            self.ask = None;
+        }
+    }
+
+    /// Drops the question, saying whether there was one to drop.
+    ///
+    /// Back is how a viewer says "not this one" to a question they did not open
+    /// a window for: it takes the question down and leaves the listing where it
+    /// is, rather than stepping out of the folder underneath it.
+    pub(super) fn dismiss_ask(&mut self) -> bool {
+        if self.ask.take().is_none() {
+            return false;
+        }
+        self.refocus_field = true;
         true
     }
 
@@ -260,6 +425,7 @@ impl FilePicker {
         // would leave the loop reading a listing that no longer exists.
         let mut go: Option<PathBuf> = None;
         let mut take: Option<PathBuf> = None;
+        let mut write: Option<PathBuf> = None;
         let mut rename: Option<String> = None;
         let mut close = false;
 
@@ -363,8 +529,15 @@ impl FilePicker {
             // exactly what a fixed height is not. Here the line scrolls with
             // the rows, and the window stays the size it was.
             if let Some(error) = &self.listing.error {
+                // A folder that cannot be read is worth saying so in either
+                // mode: a save into it is as impossible as an import from it.
                 ui.label(RichText::new(error).color(theme::ERROR));
-            } else if self.listing.entries.is_empty() {
+            } else if self.listing.entries.is_empty() && !self.saving() {
+                // "No configuration here" is news to somebody *looking* for a
+                // file. A save is here to create one, so an empty folder is
+                // exactly what it wants and the line would only read as a
+                // complaint about the state of things. The empty space is kept
+                // by the scroll area, and the footer below says what to do.
                 ui.label(
                     RichText::new(monitor_i18n::tr("file-picker-empty")).color(theme::TEXT_DIM),
                 );
@@ -488,48 +661,117 @@ impl FilePicker {
         // A save names its file before it is written: the field and its button
         // are the footer of the window, and the folder they write into is the
         // one the listing above is showing.
+        //
+        // A name that is already in that folder turns the footer into a
+        // question, which takes the field's place rather than growing the
+        // window: the window is measured out once - see [`LIST_ROWS`] - and a
+        // row that came and went would move everything above it.
         if self.saving() {
             ui.add_space(theme::space::S);
             ui.separator();
             ui.add_space(theme::space::XS);
-            app.nav.open(ACTIONS_SCOPE);
+            self.sync_ask();
+            let asking = self.ask.clone();
             ui.horizontal(|ui| {
-                ui.label(monitor_i18n::tr("file-picker-name"));
-                let field = dialogs::text_field(
-                    ui,
-                    &mut app.nav,
-                    &mut self.name,
-                    &monitor_i18n::tr("file-picker-name"),
-                    false,
-                    false,
-                    |text| egui::TextEdit::singleline(text).desired_width(240.0),
-                );
-                app.name(&field, "file-picker-name");
-                // Only what can be a file name enables the button: an empty
-                // field, or one with a separator in it, is not a path this
-                // window may write.
-                let target = self.target();
-                let save = ui.add_enabled(
-                    target.is_some(),
-                    egui::Button::new(monitor_i18n::tr("file-picker-save")),
-                );
-                let save = app.nav.tracked(save);
-                app.name(&save, "file-picker-save");
-                // Enter confirms from the field; a space is a character in a
-                // name and is read as one, so only Enter saves from here.
-                let enter = ui.input(|input| {
-                    input.events.iter().any(|event| {
-                        matches!(
-                            event,
-                            egui::Event::Key { key: Key::Enter, pressed: true, repeat: false, .. }
+                if let Some(asked) = &asking {
+                    // A name can be longer than the footer: truncated, so the
+                    // two answers stay inside the window rather than being
+                    // pushed off its right edge.
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(monitor_i18n::tr_args(
+                                "file-picker-overwrite",
+                                &[("name", asked.as_str().into())],
+                            ))
+                            .small()
+                            .color(theme::TEXT_DIM),
                         )
-                    })
-                });
-                if save.clicked() || (enter && field.has_focus()) {
-                    take = target;
+                        .truncate(),
+                    );
+                    app.nav.open(BUTTON_SCOPE);
+                    let overwrite = ui.button(RichText::new(monitor_i18n::tr("file-picker-overwrite-yes")));
+                    let overwrite = app.nav.tracked(overwrite);
+                    app.name(&overwrite, "file-picker-overwrite-yes");
+                    let cancel = ui.button(monitor_i18n::tr("action-cancel"));
+                    let cancel = app.nav.tracked(cancel);
+                    app.name(&cancel, "action-cancel");
+                    // The question opens on the answer that changes nothing,
+                    // the way the reboot prompt does. Both buttons are drawn by
+                    // now, and the focus asked for here is read next frame -
+                    // the same seam `reanchor` uses.
+                    if std::mem::take(&mut self.ask_focus) {
+                        ui.ctx().memory_mut(|memory| memory.request_focus(cancel.id));
+                    }
+                    if overwrite.clicked() {
+                        // Answered: the name is being replaced on purpose.
+                        write = self.target();
+                    }
+                    if cancel.clicked() {
+                        self.dismiss_ask();
+                    }
+                    app.nav.close();
+                } else {
+                    // The kind is written beside the field rather than left for
+                    // the extension to imply: the listing above is filtered to
+                    // it, and the name about to be written goes out as this
+                    // kind whatever the field ends up saying.
+                    let sealed = matches!(self.mode, Mode::Save { sealed: true });
+                    let kind_key = if sealed { "file-picker-kind-sealed" } else { "file-picker-kind-clear" };
+                    let kind = monitor_i18n::tr(kind_key);
+                    let label = if self.wrong_kind() {
+                        RichText::new(monitor_i18n::tr_args(
+                            "file-picker-kind-mismatch",
+                            &[("kind", kind.as_str().into())],
+                        ))
+                        .color(theme::ERROR)
+                    } else {
+                        RichText::new(format!("{} · {}", monitor_i18n::tr("file-picker-name"), kind))
+                    };
+                    ui.label(label);
+                    app.nav.open(FIELD_SCOPE);
+                    let field = dialogs::text_field(
+                        ui,
+                        &mut app.nav,
+                        &mut self.name,
+                        &monitor_i18n::tr("file-picker-name"),
+                        false,
+                        false,
+                        |text| egui::TextEdit::singleline(text).desired_width(240.0),
+                    );
+                    app.name(&field, "file-picker-name");
+                    if std::mem::take(&mut self.refocus_field) {
+                        ui.ctx().memory_mut(|memory| memory.request_focus(field.id));
+                    }
+                    app.nav.close();
+                    app.nav.open(BUTTON_SCOPE);
+                    // Only what can be a file name enables the button: an empty
+                    // field, or one with a separator in it, is not a path this
+                    // window may write.
+                    let target = self.target();
+                    let save = ui.add_enabled(
+                        target.is_some(),
+                        egui::Button::new(monitor_i18n::tr("file-picker-save")),
+                    );
+                    let save = app.nav.tracked(save);
+                    app.name(&save, "file-picker-save");
+                    // Enter confirms from the field; a space is a character in
+                    // a name and is read as one, so only Enter saves from here.
+                    let enter = ui.input(|input| {
+                        input.events.iter().any(|event| {
+                            matches!(
+                                event,
+                                egui::Event::Key { key: Key::Enter, pressed: true, repeat: false, .. }
+                            )
+                        })
+                    });
+                    if save.clicked() || (enter && field.has_focus()) {
+                        if let SavePress::Write(path) = self.press(target) {
+                            write = Some(path);
+                        }
+                    }
+                    app.nav.close();
                 }
             });
-            app.nav.close();
         }
 
         // There is no line of instructions under the window. The keys are the
@@ -538,10 +780,13 @@ impl FilePicker {
         // line of them costs height the listing can spend on a folder.
 
         if let Some(dir) = go {
-            self.listing = Listing::read(&dir);
+            self.listing = Listing::read(&dir, self.mode);
             self.reanchor = true;
+            // A question about a name in the folder just left is a question
+            // about a file that is no longer on screen.
+            self.ask = None;
         }
-        if let Some(path) = take {
+        if let Some(path) = take.or(write) {
             app.file_picker_picked = Some(path);
             return Answer::CLOSE;
         }
@@ -581,9 +826,10 @@ impl XgViewApp {
         if !self.passphrase.is_open() {
             self.restore_focus = self.file_dialog_anchor.take().or(self.restore_focus);
         }
-        // Android: the window handed the question on rather than answering it.
-        // The picker it asked for is another activity and answers frames later,
-        // where `poll_picked_config` takes it; this window is done either way.
+        // A path is an answer only while the window has one. The export's is
+        // the name the field held when Save was pressed - already asked about,
+        // if there was something in the folder under it - and the import's is
+        // the row the focus was on.
         if let Some(path) = picked {
             // One window answers both directions, so which one it was opened
             // for is what decides what the path means: a document to read, or
@@ -619,7 +865,7 @@ mod tests {
         fs::write(dir.join("A-config.json"), b"{}").unwrap();
         fs::write(dir.join("notes.txt"), b"x").unwrap();
 
-        let listing = Listing::read(&dir);
+        let listing = Listing::read(&dir, Mode::Open);
         let names: Vec<String> = listing
             .entries
             .iter()
@@ -637,7 +883,7 @@ mod tests {
         let dir = scratch("hidden");
         fs::write(dir.join(".secret.json"), b"{}").unwrap();
         fs::write(dir.join("shown.json"), b"{}").unwrap();
-        let listing = Listing::read(&dir);
+        let listing = Listing::read(&dir, Mode::Open);
         let files: Vec<&String> = listing
             .entries
             .iter()
@@ -655,7 +901,7 @@ mod tests {
     #[test]
     fn the_way_up_is_known_except_at_a_root() {
         let dir = scratch("root");
-        let listing = Listing::read(&dir);
+        let listing = Listing::read(&dir, Mode::Open);
         assert_eq!(listing.above(), dir.parent().map(Path::to_path_buf));
         // Nothing in it, so no rows - and no row for going up either: that is
         // the button. The window puts the focus on its shortcuts then; see
@@ -663,14 +909,14 @@ mod tests {
         assert!(listing.entries.is_empty());
 
         let root = Path::new("/");
-        let listing = Listing::read(root);
+        let listing = Listing::read(root, Mode::Open);
         assert!(listing.above().is_none(), "the root has nowhere to go up to");
     }
 
     #[test]
     fn a_directory_that_cannot_be_read_says_so_instead_of_showing_nothing() {
         let missing = std::env::temp_dir().join("xgview-picker-does-not-exist");
-        let listing = Listing::read(&missing);
+        let listing = Listing::read(&missing, Mode::Open);
         assert!(listing.error.is_some());
         // No rows at all: what the wall says instead is a line of text, and the
         // focus is handed to the shortcuts above the listing. A row that only
@@ -687,30 +933,183 @@ mod tests {
     }
 
     #[test]
-    fn both_kinds_of_configuration_are_listed() {
-        assert!(takes("config.json"), "an export written in clear");
-        assert!(takes("xgvconfig.seal"), "a sealed export, which the settings page writes");
-        assert!(takes("CONFIG.JSON"));
-        assert!(takes("XGVCONFIG.SEAL"));
-        assert!(!takes("config.json.bak"));
-        assert!(!takes("config"));
-        assert!(!takes("notes.txt"));
+    fn an_import_lists_both_kinds_of_configuration_and_nothing_else() {
+        let all = suffixes(Mode::Open);
+        assert!(takes("config.json", all), "an export written in clear");
+        assert!(takes("xgvconfig.seal", all), "a sealed export, which the settings page writes");
+        assert!(takes("CONFIG.JSON", all));
+        assert!(takes("XGVCONFIG.SEAL", all));
+        assert!(!takes("config.json.bak", all));
+        assert!(!takes("config", all));
+        assert!(!takes("notes.txt", all));
+    }
+
+    /// The filter follows the export: a clear export lists JSON only, a sealed
+    /// one lists `.seal` only, and switching folders keeps the filter. A file of
+    /// the other kind is not a name this export may be given from a row, and is
+    /// not a file this export can replace by accident.
+    #[test]
+    fn a_save_lists_only_the_kind_it_writes() {
+        let dir = scratch("save-filter");
+        fs::create_dir(dir.join("nested")).unwrap();
+        fs::write(dir.join("clear.json"), b"{}").unwrap();
+        fs::write(dir.join("CLEAR-UPPER.JSON"), b"{}").unwrap();
+        fs::write(dir.join("sealed.seal"), b"{}").unwrap();
+        fs::write(dir.join("notes.txt"), b"x").unwrap();
+
+        fn files(listing: &Listing) -> Vec<String> {
+            listing.entries.iter().filter_map(|entry| match entry {
+                Entry::File { name, .. } => Some(name.clone()),
+                _ => None,
+            }).collect()
+        }
+
+        assert_eq!(files(&Listing::read(&dir, Mode::Open)).len(), 3, "an import reads both kinds");
+        assert_eq!(
+            files(&Listing::read(&dir, Mode::Save { sealed: false })),
+            ["CLEAR-UPPER.JSON", "clear.json"],
+            "a clear export sees JSON only"
+        );
+        assert_eq!(
+            files(&Listing::read(&dir, Mode::Save { sealed: true })),
+            ["sealed.seal"],
+            "a sealed export sees .seal only"
+        );
+        // Directories stay visible in every mode - they are where the export
+        // may be written instead.
+        assert!(Listing::read(&dir, Mode::Save { sealed: true })
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Directory { .. })));
+
+        // Walking into a folder re-reads with the very same filter.
+        let mut picker = FilePicker::start(
+            dir.clone(),
+            Vec::new(),
+            Mode::Save { sealed: true },
+            "xgvconfig.seal".to_owned(),
+        );
+        assert_eq!(files(&picker.listing), ["sealed.seal"]);
+        picker.listing = Listing::read(&dir.join("nested"), Mode::Save { sealed: true });
+        assert!(picker.up(), "back to the folder with the files");
+        assert_eq!(files(&picker.listing), ["sealed.seal"]);
     }
 
     #[test]
     fn a_save_writes_a_name_inside_the_folder_on_screen() {
         let dir = scratch("save-target");
         let picker =
-            FilePicker::start(dir.clone(), Vec::new(), Mode::Save, "xgvconfig.seal".to_owned());
+            FilePicker::start(dir.clone(), Vec::new(), Mode::Save { sealed: true }, "xgvconfig.seal".to_owned());
         assert_eq!(picker.target(), Some(dir.join("xgvconfig.seal")));
 
         // The field is a name, not a path: a separator in it would write
         // outside the folder the listing is showing, which the viewer cannot
         // see. An empty or dot-only name is not a file either.
-        for name in ["", "  ", ".", "..", "sub/other.json", "sub\\other.json", "bad\0name"] {
-            let picker = FilePicker::start(dir.clone(), Vec::new(), Mode::Save, name.to_owned());
-            assert!(picker.target().is_none(), "{name:?} must not be written as a path");
+        for name in ["", "  ", ".", "..", "sub/other.json", "sub\\other.json", "bad\0name", "xgvconfig.json"] {
+            let picker = FilePicker::start(dir.clone(), Vec::new(), Mode::Save { sealed: true }, name.to_owned());
+            assert!(picker.target().is_none(), "{name:?} must not be written as a path or the wrong kind");
         }
+    }
+
+    /// The extension of the other kind is refused in both directions, while a
+    /// name with no recognised extension is still the viewer's to choose.
+    #[test]
+    fn a_save_refuses_the_other_kinds_extension() {
+        let dir = scratch("kind-mismatch");
+        let clear = |name: &str| {
+            FilePicker::start(dir.clone(), Vec::new(), Mode::Save { sealed: false }, name.to_owned())
+        };
+        let sealed = |name: &str| {
+            FilePicker::start(dir.clone(), Vec::new(), Mode::Save { sealed: true }, name.to_owned())
+        };
+
+        assert!(clear("backup.seal").target().is_none(), "clear text in a .seal file");
+        assert!(sealed("backup.json").target().is_none(), "a sealed blob in a .json file");
+        assert!(clear("BACKUP.SEAL").target().is_none(), "case does not matter");
+        assert_eq!(clear("backup.json").target(), Some(dir.join("backup.json")));
+        assert_eq!(sealed("backup.seal").target(), Some(dir.join("backup.seal")));
+        assert_eq!(clear("backup").target(), Some(dir.join("backup")), "a custom name is allowed");
+        // An import has no kind to disagree with.
+        let open = FilePicker::start(dir, Vec::new(), Mode::Open, "backup.seal".to_owned());
+        assert!(!open.wrong_kind());
+    }
+
+    /// Down walks the footer: shortcuts, listing, name field, and the button
+    /// beside it - which is the press that used to have no key at all, because
+    /// a field and a button in one row leaves the button behind the field's
+    /// caret keys.
+    ///
+    /// Driven off the very scopes the window is drawn under, so the walk this
+    /// asserts is the walk the application gets.
+    #[test]
+    fn down_walks_the_footer_and_up_unwinds_it() {
+        use crate::nav::{Dir, Nav};
+
+        let (place, row, field, save) = (
+            Id::new("place"),
+            Id::new("row"),
+            Id::new("field"),
+            Id::new("save"),
+        );
+        let mut nav = Nav::new(&scopes());
+        let ctx = egui::Context::default();
+
+        // One frame of the window: a shortcut, one row, the field and Save.
+        nav.begin();
+        nav.open(PLACES_SCOPE);
+        nav.item_id(place);
+        nav.close();
+        nav.open(LIST_SCOPE);
+        nav.item_id(row);
+        nav.close();
+        nav.open(FIELD_SCOPE);
+        nav.item_id(field);
+        nav.close();
+        nav.open(BUTTON_SCOPE);
+        nav.item_id(save);
+        nav.close();
+        nav.finish(&ctx);
+
+        assert_eq!(nav.step(place, Dir::Down), Some(row), "shortcuts lead to the listing");
+        assert_eq!(nav.step(row, Dir::Down), Some(field), "the listing leads to the name");
+        assert_eq!(nav.step(field, Dir::Down), Some(save), "the name leads to the button");
+        assert_eq!(nav.step(save, Dir::Down), None, "nothing below the footer");
+        assert_eq!(nav.step(save, Dir::Up), Some(field));
+        assert_eq!(nav.step(field, Dir::Up), Some(row), "and back to the listing");
+        assert_eq!(nav.step(row, Dir::Up), Some(place));
+    }
+
+    /// An empty folder draws no rows at all - and a scope with no members used
+    /// to be where a Down press died, leaving the name field and Save button
+    /// unreachable from the keyboard. The scope's exit has to be followed
+    /// through the empty listing; see `Nav::enter`.
+    #[test]
+    fn an_empty_folder_still_lets_the_arrows_reach_the_footer() {
+        use crate::nav::{Dir, Nav};
+
+        let (place, field, save) =
+            (Id::new("place"), Id::new("field"), Id::new("save"));
+        let mut nav = Nav::new(&scopes());
+        let ctx = egui::Context::default();
+
+        nav.begin();
+        nav.open(PLACES_SCOPE);
+        nav.item_id(place);
+        nav.close();
+        nav.open(LIST_SCOPE); // no rows in this folder
+        nav.close();
+        nav.open(FIELD_SCOPE);
+        nav.item_id(field);
+        nav.close();
+        nav.open(BUTTON_SCOPE);
+        nav.item_id(save);
+        nav.close();
+        nav.finish(&ctx);
+
+        assert_eq!(nav.step(place, Dir::Down), Some(field), "Down reaches the name");
+        assert_eq!(nav.step(field, Dir::Down), Some(save), "then Save");
+        assert_eq!(nav.step(save, Dir::Up), Some(field));
+        assert_eq!(nav.step(field, Dir::Up), Some(place), "and back to the shortcuts");
     }
 
     #[test]
@@ -718,5 +1117,55 @@ mod tests {
         let dir = scratch("open-target");
         let picker = FilePicker::start(dir, Vec::new(), Mode::Open, "xgvconfig.json".to_owned());
         assert!(!picker.saving());
+    }
+
+    /// A save onto a name that is already in the folder writes nothing until
+    /// the question it puts up is answered, and a name that is free is written
+    /// on the press.
+    #[test]
+    fn a_save_over_a_name_that_is_there_asks_before_it_writes() {
+        let dir = scratch("asks-first");
+        fs::write(dir.join("taken.json"), b"{}").unwrap();
+
+        let mut picker = FilePicker::start(dir.clone(), Vec::new(), Mode::Save { sealed: false }, "taken.json".to_owned());
+        let target = picker.target();
+        assert_eq!(picker.press(target), SavePress::Asking, "the file is there");
+        assert_eq!(picker.ask.as_deref(), Some("taken.json"), "the question is about that name");
+        assert!(picker.ask_focus, "the question opens on the answer that changes nothing");
+
+        // Asked already: a second press does not queue a second question.
+        // Only the button writes, and it writes the path under the question.
+        let target = picker.target();
+        assert_eq!(picker.press(target), SavePress::Asking);
+
+        let mut picker = FilePicker::start(dir, Vec::new(), Mode::Save { sealed: false }, "fresh.json".to_owned());
+        let target = picker.target();
+        assert!(matches!(picker.press(target), SavePress::Write(_)), "nothing to ask about");
+        assert!(picker.ask.is_none());
+    }
+
+    /// The question is about the name the field held when it was asked. A
+    /// viewer who types another name has answered it by meaning something else,
+    /// and one who backs out of it gets the field back with the name in it.
+    #[test]
+    fn the_question_goes_when_the_name_does() {
+        let dir = scratch("ask-drops");
+        fs::write(dir.join("taken.json"), b"{}").unwrap();
+        let mut picker = FilePicker::start(dir, Vec::new(), Mode::Save { sealed: false }, "taken.json".to_owned());
+        let target = picker.target();
+        assert_eq!(picker.press(target), SavePress::Asking);
+
+        picker.name = "other.json".to_owned();
+        picker.sync_ask();
+        assert!(picker.ask.is_none(), "a question about a name that has gone");
+
+        // Back on the question: taken down, and the field comes back to be
+        // typed into rather than the window losing its ring.
+        picker.name = "taken.json".to_owned();
+        let target = picker.target();
+        assert_eq!(picker.press(target), SavePress::Asking);
+        assert!(picker.dismiss_ask());
+        assert!(picker.ask.is_none() && picker.refocus_field);
+        assert!(!picker.dismiss_ask(), "nothing left to take down");
     }
 }

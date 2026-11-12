@@ -1565,7 +1565,7 @@ impl XgViewApp {
         let software_renderer = render_state.adapter.get_info().device_type == wgpu::DeviceType::Cpu;
         let video = VideoRenderer::new(render_state);
 
-        let scopes = [
+        let mut scopes: Vec<(&'static str, ScopeDef)> = vec![
             ("dialog-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("dialog-body"))),
             ("dialog-body", ScopeDef::new(Axis::Column).scrolling().exit(Dir::Up, Exit::Scope("dialog-tabs"))),
             ("settings-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("settings-body"))),
@@ -1584,22 +1584,15 @@ impl XgViewApp {
             ("passphrase-body", ScopeDef::new(Axis::Column)),
             ("juanz-row", ScopeDef::new(Axis::Row)),
             ("aspect-picker", ScopeDef::new(Axis::Column)),
-            // The import picker: shortcuts across the top, then the listing
-            // itself, which scrolls - a folder can be longer than the window.
-            ("file-picker-places", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("file-picker-list"))),
-            // Down from the listing reaches the save field on the frame a save
-            // is being set up. An import draws no footer, so the exit leads
-            // nowhere and Up still leaves for the shortcuts.
-            ("file-picker-list", ScopeDef::new(Axis::Column).scrolling()
-                .exit(Dir::Up, Exit::Scope("file-picker-places"))
-                .exit(Dir::Down, Exit::Scope("file-picker-actions"))),
-            ("file-picker-actions", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope("file-picker-list"))),
             // The magnified viewport's bar: a row across the wall, a column down
             // a turned picture. No exits - a strip has nothing above or below it
             // to walk to, and Back is the way out.
             ("tile-bar-row", ScopeDef::new(Axis::Row)),
             ("tile-bar-column", ScopeDef::new(Axis::Column)),
         ];
+        // The picker's own scopes are declared with the window that walks them;
+        // see `file_picker::scopes`.
+        scopes.extend(file_picker::scopes());
 
         let mut app = Self {
             persisted: config.clone(),

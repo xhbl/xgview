@@ -6,6 +6,8 @@ use super::*;
 /// The two ways out of the import picker. Every other window in the program
 /// treats Escape, the remote's Back and Backspace as the same "leave"; the
 /// picker reads them itself because a listing has a level to step out of.
+/// Backspace in its save field is the one exception - there it deletes a
+/// character and is left in the queue for the field.
 enum PickerBack {
     /// A desktop's Escape closes the window outright. A television has no such
     /// key - its BACK arrives as Escape and has to step out of the directory
@@ -614,13 +616,25 @@ impl XgViewApp {
 
     /// Reads the picker's leaving keys, taking them out of the queue so the
     /// window behind it cannot answer the same press as well.
-    fn picker_back(ctx: &egui::Context) -> Option<PickerBack> {
+    ///
+    /// `typing` is whether the focused control is a text field of the
+    /// navigation layer - in this window, the save field at its foot. A
+    /// Backspace there is not a Back at all: it is the key that deletes a
+    /// character, and the `TextEdit` has to be left to read it. The rest of
+    /// the interface answers the same question the same way; see
+    /// [`XgViewApp::typing`] and [`XgViewApp::dialog_back_pressed`].
+    fn picker_back(ctx: &egui::Context, typing: bool) -> Option<PickerBack> {
         ctx.input_mut(|input| {
             let none = Modifiers::NONE;
             if input.consume_key(none, Key::Escape) {
                 return Some(escape_leaves());
             }
-            if input.consume_key(none, Key::BrowserBack) || input.consume_key(none, Key::Backspace) {
+            if input.consume_key(none, Key::BrowserBack) {
+                return Some(PickerBack::Up);
+            }
+            // The remote's Back is BrowserBack; a keyboard's Backspace is only
+            // a Back while no field is being typed into.
+            if !typing && input.consume_key(none, Key::Backspace) {
                 return Some(PickerBack::Up);
             }
             None
@@ -1325,6 +1339,48 @@ impl XgViewApp {
         }
     }
 
+    /// The control the window that owns the screen opens on, when one is up.
+    ///
+    /// Only the windows that take the whole screen - the picker and the prompts.
+    /// The settings panel is left out on purpose: it is an overlay over a wall
+    /// the viewer is still watching, and losing the ring from it means the
+    /// arrows go back to the wall, which is where they were before it opened.
+    fn screen_anchor(&self) -> Option<Id> {
+        for (open, anchor) in [
+            (self.file_picker.is_open(), self.file_picker.anchor),
+            (self.layout_picker.is_open(), self.layout_picker.anchor),
+            (self.portrait_aspect_picker.is_open(), self.portrait_aspect_picker.anchor),
+            (self.passphrase.is_open(), self.passphrase.anchor),
+            (self.camera_edit.is_open(), self.camera_edit.anchor),
+            (self.remove_confirm.is_open(), self.remove_confirm.anchor),
+            (self.system_confirm.is_open(), self.system_confirm.anchor),
+        ] {
+            if open {
+                return anchor;
+            }
+        }
+        None
+    }
+
+    /// Whether a direction key is pressed this frame, held or fresh.
+    ///
+    /// A held key counts: the focus is gone, and whichever arrow is walking it
+    /// is the one that has to bring it back.
+    fn direction_pressed(ctx: &egui::Context) -> bool {
+        ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown,
+                        pressed: true,
+                        ..
+                    }
+                )
+            })
+        })
+    }
+
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
         // The old mouse dialog owns the keyboard while it is up. Its own
         // keybindings and egui's focus walk are how a viewer moves around it,
@@ -1385,8 +1441,23 @@ impl XgViewApp {
         // closes it outright; on a television that same key *is* the Back
         // button. Both are consumed here, before the shared window handling
         // below, so the panel behind it does not also answer the press.
+        // Backspace in the save field is the exception: it deletes a character
+        // and belongs to that field, not to the window.
         if self.file_picker.is_open() {
-            if let Some(leave) = Self::picker_back(ctx) {
+            if let Some(leave) = Self::picker_back(ctx, self.typing(ctx)) {
+                // A footer asking whether to replace a file is a question of
+                // its own: Back answers it by taking it down, leaving the
+                // folder - and the window - where they were. Stepping up a
+                // directory out from under a question would answer it by
+                // changing the subject.
+                let asked = self
+                    .file_picker
+                    .payload
+                    .as_mut()
+                    .is_some_and(|picker| picker.dismiss_ask());
+                if asked {
+                    return;
+                }
                 match leave {
                     PickerBack::Close => self.file_picker_cancelled = true,
                     PickerBack::Up => {
@@ -1464,6 +1535,29 @@ impl XgViewApp {
         // the field.
         let nav_owns =
             ctx.memory(|memory| memory.focused()).is_some_and(|focused| self.nav.owns(focused));
+        // A window that owns the screen keeps the keyboard even when none of its
+        // controls has the focus - and a pointer press on its empty space is
+        // exactly what takes the focus away: egui clears it, and nothing here
+        // puts it back. The window then sat there with no ring, and the arrows
+        // walked the wall behind it - a press that was supposed to move inside
+        // the window moved the wall instead. So a direction press pulls the
+        // focus back to the control the window opened on and is spent doing
+        // that, the way a seat's first arrow is spent on the magnified bar's
+        // first control. See `tilebar::first_arrow_target`.
+        if !nav_owns {
+            if let Some(anchor) = self.screen_anchor() {
+                if Self::direction_pressed(ctx) {
+                    ctx.memory_mut(|memory| memory.request_focus(anchor));
+                    ctx.input_mut(|input| {
+                        for key in
+                            [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown]
+                        {
+                            input.consume_key(Modifiers::NONE, key);
+                        }
+                    });
+                }
+            }
+        }
         // What the focused control keeps for itself: a slider is moved with
         // Left and Right, a drag value with Up and Down, and only the other
         // axis moves the focus. A plain control keeps neither.
@@ -1571,7 +1665,7 @@ mod tests {
     use super::*;
 
     /// One frame carrying one key, as the picker's reader sees it.
-    fn pressed(key: Key) -> Option<PickerBack> {
+    fn pressed(key: Key, typing: bool) -> Option<PickerBack> {
         let ctx = egui::Context::default();
         let input = egui::RawInput {
             events: vec![egui::Event::Key {
@@ -1584,21 +1678,55 @@ mod tests {
             ..Default::default()
         };
         let mut answer = None;
-        let _ = ctx.run(input, |ctx| answer = Some(XgViewApp::picker_back(ctx)));
+        let _ = ctx.run(input, |ctx| answer = Some(XgViewApp::picker_back(ctx, typing)));
         answer.unwrap()
     }
 
     #[test]
     fn escape_and_back_leave_the_picker_by_different_routes() {
-        let escape = pressed(Key::Escape);
+        let escape = pressed(Key::Escape, false);
         // A television's BACK is delivered as Escape, so there it has to walk
         // out of the directory instead of closing the window.
         #[cfg(not(target_os = "android"))]
         assert!(matches!(escape, Some(PickerBack::Close)));
         #[cfg(target_os = "android")]
         assert!(matches!(escape, Some(PickerBack::Up)));
-        assert!(matches!(pressed(Key::BrowserBack), Some(PickerBack::Up)));
-        assert!(matches!(pressed(Key::Backspace), Some(PickerBack::Up)));
-        assert!(pressed(Key::ArrowDown).is_none(), "a direction belongs to the listing");
+        assert!(matches!(pressed(Key::BrowserBack, false), Some(PickerBack::Up)));
+        assert!(matches!(pressed(Key::Backspace, false), Some(PickerBack::Up)));
+        assert!(pressed(Key::ArrowDown, false).is_none(), "a direction belongs to the listing");
+    }
+
+    /// In the save field a Backspace deletes a character. Taking it as a Back
+    /// would step out of the directory - or close the window - on every press
+    /// that was only trying to fix a typo. Escape and the remote's Back are
+    /// still the window's, wherever the focus is.
+    #[test]
+    fn backspace_in_the_name_field_belongs_to_the_field() {
+        assert!(pressed(Key::Backspace, true).is_none(), "the field keeps its Backspace");
+        // Not consumed, so `TextEdit` still sees it - the reader must not have
+        // taken it out of the queue on its way to answering `None`.
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: Key::Backspace,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let mut left_in_queue = false;
+        let _ = ctx.run(input, |ctx| {
+            let _ = XgViewApp::picker_back(ctx, true);
+            left_in_queue = ctx.input(|input| input.key_pressed(Key::Backspace));
+        });
+        assert!(left_in_queue, "the TextEdit has to see the press");
+
+        #[cfg(not(target_os = "android"))]
+        assert!(matches!(pressed(Key::Escape, true), Some(PickerBack::Close)));
+        #[cfg(target_os = "android")]
+        assert!(matches!(pressed(Key::Escape, true), Some(PickerBack::Up)));
+        assert!(matches!(pressed(Key::BrowserBack, true), Some(PickerBack::Up)));
     }
 }

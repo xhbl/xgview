@@ -353,7 +353,7 @@ impl XgViewApp {
         self.file_picker.open(super::file_picker::FilePicker::start(
             start,
             places,
-            super::file_picker::Mode::Save,
+            super::file_picker::Mode::Save { sealed: passphrase.is_some() },
             name.to_owned(),
         ));
         self.file_job = Some(FileJob::Export(passphrase));
