@@ -17,6 +17,14 @@ const STORAGE_WAIT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "android")]
 const ALL_FILES_WAIT: Duration = Duration::from_secs(300);
 
+/// How long a save that failed waits before it is tried again.
+///
+/// A save is how an edit reaches the disk, and the wall is usually switched off
+/// at the plug - so a write that failed is retried rather than treated as done.
+/// The wait keeps a directory that has gone read-only, or a disk that is full,
+/// from being asked once a frame.
+const SAVE_RETRY: Duration = Duration::from_secs(5);
+
 impl XgViewApp {
     /// Recomputes the decoding schedule and hands the transitions to the
     /// pipeline. Cheap and idempotent, it is only run when something changed.
@@ -91,10 +99,17 @@ impl XgViewApp {
                 self.persisted = self.config.clone();
                 self.dirty = false;
                 self.dirty_since = None;
+                self.save_blocked_until = None;
             }
             Err(err) => {
-                self.dirty = false;
-                self.dirty_since = None;
+                // The change never reached the disk, so it is still an edit
+                // waiting to be written - not a save that happened. Clearing
+                // `dirty` here left the new configuration only in memory, and a
+                // wall is usually switched off at the plug: the next save would
+                // never come. It is retried instead, after a wait, until the
+                // write goes through. See [`SAVE_RETRY`].
+                self.dirty = true;
+                self.save_blocked_until = Some(Instant::now() + SAVE_RETRY);
                 self.flash(
                     monitor_i18n::tr_args(
                         "toast-config-save-failed",
@@ -115,6 +130,15 @@ impl XgViewApp {
         }
         if self.persisted == self.config {
             self.dirty = false;
+            return;
+        }
+        // A write that failed is waiting for its next turn. The change is still
+        // dirty: what did not reach the disk must not be forgotten. See
+        // [`SAVE_RETRY`] and [`XgViewApp::save_now`].
+        if self
+            .save_blocked_until
+            .is_some_and(|until| Instant::now() < until)
+        {
             return;
         }
         if let Some(since) = self.dirty_since {

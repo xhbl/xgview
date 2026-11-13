@@ -1088,6 +1088,12 @@ pub struct XgViewApp {
     needs_sync: bool,
     dirty: bool,
     dirty_since: Option<Instant>,
+    /// A write that failed leaves the change in memory and holds the next
+    /// automatic attempt until this moment. The state file is written on every
+    /// edit, so a directory that has gone read-only would otherwise be asked
+    /// once a frame; and the change has to stay dirty, because a wall is
+    /// usually switched off at the plug. See [`XgViewApp::save_now`].
+    save_blocked_until: Option<Instant>,
     toast: Option<Toast>,
     /// When Back was last pressed on the wall with nothing left to close. The
     /// next Back inside [`EXIT_WINDOW`] leaves the program.
@@ -1649,6 +1655,7 @@ impl XgViewApp {
             needs_sync: true,
             dirty: false,
             dirty_since: None,
+            save_blocked_until: None,
             toast: None,
             exit_armed: None,
             fullscreen,

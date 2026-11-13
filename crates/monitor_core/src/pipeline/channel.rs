@@ -326,6 +326,12 @@ pub(super) async fn run_channel(
                     detail: failure,
                 },
             );
+            // A hole is the end of this attempt, not a task that died: without
+            // this the supervisor would take the channel for one that ended on
+            // its own and start it again every couple of seconds, asking the
+            // same server for the same empty moment for ever. See
+            // `Supervisor::restart_finished`.
+            done.store(true, Ordering::Relaxed);
             return;
         }
 
@@ -351,6 +357,11 @@ pub(super) async fn run_channel(
             // attempt that has just ended is dropped here rather than left for
             // a renderer to read as if the channel were still running.
             stats.clear(index);
+            // Giving up is an ending too. Said only in the event, it was still
+            // a task that had ended without being told to - so the supervisor
+            // started it again with the count back at zero, and the limit the
+            // user set never held. See `Supervisor::restart_finished`.
+            done.store(true, Ordering::Relaxed);
             emit(
                 &events,
                 StreamEvent::State {

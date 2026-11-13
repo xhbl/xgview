@@ -124,6 +124,16 @@ pub fn start_bar(window: *mut c_void, width: i32, height: i32) -> u64 {
     if window.is_null() {
         return 0;
     }
+    if window == BAR_WINDOW.load(Ordering::Acquire) {
+        // The same surface, re-bound: the activity calls in on every size
+        // change and takes a fresh reference to the window each time. That
+        // reference goes straight back - it is not a second surface - and only
+        // the size it reports is kept, which the loop applies to the swapchain
+        // it already has.
+        crate::android::release_native_window(window);
+        attach_bar_sizes(width, height);
+        return BAR_TICKET.current();
+    }
     let token = BAR_TICKET.take();
     attach_bar(window, width, height);
     token
@@ -136,14 +146,34 @@ pub fn stop_bar(token: u64) {
     }
 }
 
+/// Gives back a window's reference once the surface made from it is gone.
+///
+/// `ANativeWindow_fromSurface` hands this side one reference per call, and that
+/// reference is owed back when the surface behind it is finished with. `held` is
+/// the window whose reference this side still owns; called with the window the
+/// next surface will be built from, it keeps a reference that is still in use
+/// and gives back one that has been replaced.
+fn let_go_of_window(held: *mut c_void, current: *mut c_void) {
+    if !held.is_null() && held != current {
+        crate::android::release_native_window(held);
+    }
+}
+
 fn attach_bar(window: *mut c_void, width: i32, height: i32) {
+    // The window first: the wake below may run the loop, and the loop reads the
+    // window and the size together.
+    BAR_WINDOW.store(window, Ordering::Release);
+    attach_bar_sizes(width, height);
+}
+
+/// Records the bar's size without touching its window.
+fn attach_bar_sizes(width: i32, height: i32) {
     if width > 0 {
         BAR_WIDTH.store(width as u32, Ordering::Release);
     }
     if height > 0 {
         BAR_HEIGHT.store(height as u32, Ordering::Release);
     }
-    BAR_WINDOW.store(window, Ordering::Release);
     wake();
 }
 
@@ -643,12 +673,17 @@ fn run() -> anyhow::Result<()> {
     let mut built: Option<(egui::Context, egui_wgpu::RenderState, XgViewApp)> = None;
     let mut surface: Option<(wgpu::Surface<'_>, wgpu::SurfaceConfiguration)> = None;
     let mut attached: *mut c_void = std::ptr::null_mut();
+    // The window whose `ANativeWindow` reference this loop still owns. Kept
+    // apart from `attached` because a surface can be lost and made again from
+    // the same window: the surface's identity changes, the reference does not.
+    let mut held: *mut c_void = std::ptr::null_mut();
     // The bar's own swapchain, over the picture - and its own renderer, because
     // two `egui::Context`s share nothing: each numbers its textures from
     // `Managed(0)`, so the font atlas of one would land on the other's.
     let mut bar: Option<(wgpu::Surface<'_>, wgpu::SurfaceConfiguration, egui_wgpu::Renderer)> =
         None;
     let mut bar_attached: *mut c_void = std::ptr::null_mut();
+    let mut bar_held: *mut c_void = std::ptr::null_mut();
     let mut last_focus: Option<egui::Id> = None;
     // What the strip's frame was last told about the pointer. It is carried
     // across because the strip paints and does not read: the wall's context is
@@ -735,6 +770,8 @@ fn run() -> anyhow::Result<()> {
             lost = false;
             surface = None;
             attached = std::ptr::null_mut();
+            // The reference stays ours: the window has not been given back by
+            // the activity, and the next surface may well be made from it.
         }
         let window = WINDOW.load(Ordering::Acquire);
         if window.is_null() {
@@ -745,6 +782,11 @@ fn run() -> anyhow::Result<()> {
                 attached = std::ptr::null_mut();
                 tracing::info!(target: "xgview", "the wall let go of its surface");
             }
+            // The window is gone with it, whether or not a surface was still up
+            // - one lost a moment before the stop is the same window - so the
+            // reference it came with is given back now.
+            let_go_of_window(held, std::ptr::null_mut());
+            held = std::ptr::null_mut();
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
@@ -819,6 +861,10 @@ fn run() -> anyhow::Result<()> {
                 fresh.configure(&render_state.device, &fresh_config);
                 tracing::info!(target: "xgview", width, height, "the wall took a new surface");
                 surface = Some((fresh, fresh_config));
+                // A window that is not the one this loop holds replaces it, and
+                // the reference that went with the old one comes back here.
+                let_go_of_window(held, window);
+                held = window;
                 attached = window;
                 continue;
             }
@@ -949,6 +995,8 @@ fn run() -> anyhow::Result<()> {
                 "the wall is drawing on the activity's surface"
             );
             surface = Some((fresh, fresh_config));
+            let_go_of_window(held, window);
+            held = window;
             attached = window;
             built = Some((context, render_state, app));
             continue;
@@ -1271,6 +1319,8 @@ fn run() -> anyhow::Result<()> {
         if bar_window.is_null() {
             bar = None;
             bar_attached = std::ptr::null_mut();
+            let_go_of_window(bar_held, std::ptr::null_mut());
+            bar_held = std::ptr::null_mut();
         } else if bar.is_none() || bar_attached != bar_window {
             if let Some(window_ptr) = std::ptr::NonNull::new(bar_window) {
                 let handle_ndk = wgpu::rwh::RawWindowHandle::AndroidNdk(
@@ -1329,6 +1379,11 @@ fn run() -> anyhow::Result<()> {
                             false,
                         );
                         bar = Some((fresh, config, renderer));
+                        // A different window replaces the one the bar held, and
+                        // its reference comes back now that the surface built
+                        // from it has been dropped.
+                        let_go_of_window(bar_held, bar_window);
+                        bar_held = bar_window;
                         bar_attached = bar_window;
                         // The context goes with the renderer: the one that was
                         // here belonged to the renderer that has just been

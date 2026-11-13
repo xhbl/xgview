@@ -10,7 +10,7 @@
 //! on Android.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI8, AtomicPtr, AtomicU64, Ordering};
 
 use jni::objects::{GlobalRef, JString, JValue};
 use jni::JNIEnv;
@@ -170,6 +170,13 @@ impl SurfaceTicket {
         token != 0 && self.0.load(Ordering::Acquire) == token
     }
 
+    /// The identity that is up right now, or `0` before the first [`take`].
+    ///
+    /// [`take`]: Self::take
+    pub fn current(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+
     /// Retires `token`, answering whether it was the one that was up.
     ///
     /// A compare-and-exchange rather than a load and a store because two stops
@@ -193,6 +200,35 @@ impl SurfaceTicket {
 
 /// The picture's surface has its own identity; see [`SurfaceTicket`].
 static VIDEO_TICKET: SurfaceTicket = SurfaceTicket::new();
+
+/// The `ANativeWindow` the decoder was last given, so the reference that came
+/// with it can be given back when the surface goes away.
+///
+/// `ANativeWindow_fromSurface` hands the caller one reference to the window and
+/// the caller owes an `ANativeWindow_release` for it. Nothing on this side ever
+/// gave one back: the activity calls in again on every `surfaceChanged`, so the
+/// buffer queue behind each of those surfaces stayed alive for the life of the
+/// process. The wall and the bar have the same accounting in
+/// `android_surface`; this is the picture's.
+static VIDEO_WINDOW: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Gives back one reference to a window taken by `ANativeWindow_fromSurface`.
+///
+/// Only for a reference this side holds and is finished with: the window must
+/// not be used here afterwards, and the surface it came from is gone or is being
+/// replaced.
+pub fn release_native_window(window: *mut std::ffi::c_void) {
+    if !window.is_null() {
+        // Safety: the caller owns the reference being given back, and nothing
+        // on this side uses the window after this call.
+        unsafe { ANativeWindow_release(window) };
+    }
+}
+
+#[link(name = "android")]
+extern "C" {
+    fn ANativeWindow_release(window: *mut std::ffi::c_void);
+}
 
 /// Hands the decoder the surface a decoded picture is rendered into.
 ///
@@ -218,6 +254,23 @@ pub fn start_video_surface(window: *mut std::ffi::c_void, mode: i32) -> u64 {
     if window.is_null() {
         return 0;
     }
+    let previous = VIDEO_WINDOW.swap(window, Ordering::AcqRel);
+    if previous == window {
+        // `surfaceChanged` re-binds the surface that is already in use, and the
+        // activity hands over a new reference every time it asks. The reference
+        // that is the same window is given straight back - it is not a second
+        // surface, and keeping it would pin the buffer queue for nothing.
+        release_native_window(window);
+        if mode == 1 {
+            // A step to the other view's camera: the window is the same, the
+            // picture behind it is not.
+            monitor_codec::amediacodec::set_surface_window(window, false, true);
+        }
+        return VIDEO_TICKET.current();
+    }
+    // A different window: the surface the codec was pointing at is gone, so its
+    // reference goes back with it. The codec is repointed below.
+    release_native_window(previous);
     let token = VIDEO_TICKET.take();
     let (replaced, switched) = match mode {
         2 => (true, false),
@@ -232,6 +285,9 @@ pub fn start_video_surface(window: *mut std::ffi::c_void, mode: i32) -> u64 {
 pub fn stop_video_surface(token: u64) {
     if VIDEO_TICKET.retire(token) {
         monitor_codec::amediacodec::set_surface_window(std::ptr::null_mut(), true, false);
+        // The view that owned it has been destroyed, which is the moment the
+        // reference taken in `nativeStartVideo` is owed back.
+        release_native_window(VIDEO_WINDOW.swap(std::ptr::null_mut(), Ordering::AcqRel));
     }
 }
 
