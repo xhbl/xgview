@@ -350,6 +350,12 @@ impl FilePicker {
         {
             return None;
         }
+        // A name is a name, not a path - and on Windows that takes more than
+        // the separators above. See [`plain_name_on_windows`].
+        #[cfg(windows)]
+        if !plain_name_on_windows(name) {
+            return None;
+        }
         Some(self.listing.dir.join(name))
     }
 
@@ -1213,4 +1219,55 @@ mod tests {
         assert!(picker.ask.is_none() && picker.refocus_field);
         assert!(!picker.dismiss_ask(), "nothing left to take down");
     }
+
+    /// A name with a drive in it is a path on Windows, and `join` follows the
+    /// drive rather than the folder the window is showing; the rest are names
+    /// the system rewrites or refuses.
+    #[test]
+    fn a_name_that_would_leave_the_folder_is_not_a_name() {
+        for name in ["xgvconfig.json", "a b.seal", "cam-1.json", "汇总 2026.json"] {
+            assert!(plain_name_on_windows(name), "{name} is a plain name");
+        }
+        for name in [
+            "C:evil.json",
+            "C:\\evil.json",
+            "NUL",
+            "con.json",
+            "COM1.json",
+            "a:b.json",
+            "a?b.json",
+            "a*b.json",
+            "a|b.json",
+            "trailing.",
+            " trailing.json",
+        ] {
+            assert!(!plain_name_on_windows(name), "{name} is not a plain name");
+        }
+    }
+}
+
+/// Whether a typed name stays a name on Windows.
+///
+/// More than the separators the window already refuses: `Path::join` with a
+/// drive-relative name like `C:evil.json` replaces the base with it, so the file
+/// lands in whatever directory that drive is currently in rather than the folder
+/// the window shows. Windows also silently rewrites names ending in a dot or a
+/// space, and refuses the reserved device names (`NUL`, `CON`, `COM1` …) - a
+/// save that looked like it worked would write something else, or nothing.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn plain_name_on_windows(name: &str) -> bool {
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if name.contains([':', '<', '>', '"', '|', '?', '*']) {
+        return false;
+    }
+    if name.starts_with(' ') || name.ends_with(' ') || name.ends_with('.') {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name);
+    !RESERVED
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }

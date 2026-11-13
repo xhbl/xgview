@@ -1003,7 +1003,11 @@ impl XgViewApp {
             || self.camera_edit.is_open()
             || self.remove_confirm.is_open()
             || self.system_confirm.is_open()
-            || self.passphrase.is_open();
+            || self.passphrase.is_open()
+            // The file window is a modal like the rest: a panel key pressed
+            // under it would open something behind a window the viewer cannot
+            // see past.
+            || self.file_job.is_some();
         // The layout picker is a modal of its own, and it owns the keys while
         // it is up: opening a panel behind it would stack two of them.
         if keys.settings && !dialog_open && !self.layout_picker.is_open() && !self.portrait_aspect_picker.is_open() && !self.combined_info_picker.is_open() && !self.is_portrait() {
@@ -1015,7 +1019,7 @@ impl XgViewApp {
             // back to when it closes.
             self.discovery.from = None;
         }
-        if keys.fullscreen {
+        if keys.fullscreen && !dialog_open {
             let enabled = !self.fullscreen;
             self.set_fullscreen(ctx, enabled);
         }
@@ -1053,7 +1057,14 @@ impl XgViewApp {
         // The picker is a modal: while it is up the wall's own keys - page
         // turns and the layout digits - are spent, so a press cannot change the
         // wall behind it. Back is answered below, where the panels are unwound.
-        if !self.layout_picker.is_open() && !self.portrait_aspect_picker.is_open() && !self.combined_info_picker.is_open() {
+        // The file window is one of them: its own rows take the arrows, and a
+        // page turned underneath it would move the wall the viewer is not
+        // looking at.
+        if self.file_job.is_none()
+            && !self.layout_picker.is_open()
+            && !self.portrait_aspect_picker.is_open()
+            && !self.combined_info_picker.is_open()
+        {
             // A page key turns the page from wherever the focus is, but the
             // bounce a turn at the edge makes - to the other page button -
             // belongs to a focus that was standing on one of those buttons: the

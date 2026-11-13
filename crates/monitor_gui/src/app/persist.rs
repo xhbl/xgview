@@ -580,13 +580,28 @@ impl XgViewApp {
             // installation reads and writes stays its own - it is a field of
             // the app, not of the configuration. The wall follows the imported
             // layout, page and focus, so the scheduler is rebuilt the way
-            // start-up builds it.
+            // start-up builds it - from the layout of the shape the wall is
+            // drawn in, because the document keeps one layout per shape and
+            // taking the other one would be overwritten by the first `sync`.
             self.config = imported;
             let (layout, page, focus) = {
                 let view = self.config.group();
-                (view.layout, view.page, view.focus)
+                let layout = if self.orientation.is_portrait() {
+                    view.portrait_layout
+                } else {
+                    view.layout
+                };
+                (layout, view.page, view.focus)
             };
             self.scheduler = Scheduler::new(layout, page, focus, self.config.enabled_count());
+            // The sound and the power are part of the document too. Start-up
+            // reads them beside building the scheduler, and an import that
+            // took everything else but left these on the old configuration
+            // would be half an import: a muted wall stays muted, a wall told to
+            // stay awake sleeps.
+            self.sound_on = self.config.sound_on;
+            self.reopen_audio_sink();
+            self.apply_power_for_blackout();
         }
         self.config.normalize();
         self.needs_sync = true;

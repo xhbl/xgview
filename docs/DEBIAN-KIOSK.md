@@ -524,8 +524,8 @@ EOF
 
 ### 7.4 File dialogs (import/export): the built-in one, not the system's
 
-On a desktop, import and export can raise the system file dialog; under systemd
-on a minimal system the system dialog **does not come up, and can freeze the
+On a desktop, import and export used to raise the system file dialog; under
+systemd on a minimal system that dialog **did not come up, and could freeze the
 interface**.
 
 **Why** (from the logs and from testing):

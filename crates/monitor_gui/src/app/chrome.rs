@@ -201,7 +201,11 @@ impl XgViewApp {
     /// [`Self::ring_follows_bars`].
     pub(super) fn chrome_idle(&self) -> Duration {
         let secs = self.config.chrome_idle_secs;
-        if secs <= 0.0 {
+        // A document can say anything: `1e300` becomes `inf` on the way to
+        // `f32`, and `Duration::from_secs_f32` panics on that and on a value
+        // beyond its own range. A number the clock cannot hold is the same as
+        // no hiding at all, which is what zero already means here.
+        if !secs.is_finite() || secs <= 0.0 {
             Duration::MAX
         } else {
             Duration::from_secs_f32(secs)

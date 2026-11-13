@@ -194,12 +194,14 @@ Two kinds of device fall below that floor and are refused rather than half run: 
 box that offers only **OpenGL ES 2.0** - an Amlogic S905 / Mali-450 on its stock
 Android 9, for instance - has no adapter to draw with, and one whose OpenGL ES
 3.x driver lacks `GL_KHR_debug` cannot be given the resource labels the GL
-backend asks for. In both cases the viewer says so in its log. A device that
-cannot make a surface at all also says it on the screen - what the viewer needs,
-which OpenGL ES level the device offers, and a button that ends it - because
-there is no wall to draw a message on. The floor is the same for both ABIs: a
-32-bit package does not make a device with OpenGL ES 2.0 draw, it only lets a
-32-bit system install the viewer at all.
+backend asks for. In both cases the viewer says so in its log and on the screen:
+the activity puts up a notice naming what the viewer needs and which OpenGL ES
+level the device offers, with one button that ends it - the wall cannot draw a
+message of its own when there is no surface to draw on. The same notice covers
+the third way a launch can fail there, a surface that is made but yields no
+adapter or no device. The floor is the same for both ABIs: a 32-bit package does
+not make a device with OpenGL ES 2.0 draw, it only lets a 32-bit system install
+the viewer at all.
 
 If a launch does fail before the renderer comes up, the failure is written to the
 log and the app brings itself back on the GL backend a few seconds later - no
@@ -910,15 +912,17 @@ XGView.app/Contents/MacOS/xgview --print-schedule
 - **The APK does not come back after a reboot.** Grant the *Display over other
   apps* permission, or set XGView as the home app - see
   [Start on boot](#start-on-boot).
-- **The Android app closes a moment after launch.** Its GPU has no backend the
-  renderer can use; see
+- **The Android app says it cannot run on this device.** Its GPU has no backend
+  the renderer can use; see
   [Android: what the device needs](#android-what-the-device-needs). A device that
   offers only OpenGL ES 2.0, or an OpenGL ES 3.x driver without `GL_KHR_debug`,
-  has nothing to draw with and exits - watch for `No suitable graphics adapter
-  found` in the log (see below). A Vulkan driver older than 1.1 is routed to
-  OpenGL ES before the renderer is built, so a `Parent device is lost` panic
-  should not appear at all; if one does, the app logs it and brings itself back
-  on OpenGL ES a few seconds later.
+  has nothing to draw with: after about two seconds it puts up a notice saying
+  what the viewer needs and what the device offers, and **Exit** ends it. The log
+  carries `this device has no graphics backend the viewer can draw with` and the
+  reason under it. A Vulkan driver older than 1.1 is routed to OpenGL ES before
+  the renderer is built, so a `Parent device is lost` panic should not appear at
+  all; if one does, the app logs it and brings itself back on OpenGL ES a few
+  seconds later.
 - **macOS will not open the app, or says the developer cannot be verified.** The
   bundle is signed ad-hoc rather than notarised, so a copy that travelled over
   the network is quarantined. Allow it in *System Settings → Privacy & Security*,

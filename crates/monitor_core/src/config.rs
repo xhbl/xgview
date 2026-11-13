@@ -1219,6 +1219,15 @@ impl AppConfig {
         if self.version == 0 {
             self.version = CONFIG_VERSION;
         }
+        // The shell's idle time has a slider and a document behind it, and a
+        // document is only text: a value that cannot be a duration - infinite,
+        // or far beyond the slider - would stop the interface from ever being
+        // able to make one. Kept inside a range the clock can hold.
+        self.chrome_idle_secs = if self.chrome_idle_secs.is_finite() {
+            self.chrome_idle_secs.clamp(0.0, 600.0)
+        } else {
+            0.0
+        };
         // There is always a group to add to: the built-in one is never removed,
         // and a configuration that somehow lost every group gets it back.
         if self.groups.is_empty() {
@@ -1527,6 +1536,30 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         assert_eq!(AppConfig::load_or_default(&path), AppConfig::default());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "left as it was");
+    }
+
+    /// The shell's idle time is turned into a `Duration` where it is read, and
+    /// that conversion panics on a value a clock cannot hold. A document is only
+    /// text, so the value is brought into range when it is normalised rather
+    /// than trusted.
+    #[test]
+    fn the_idle_time_is_kept_where_a_clock_can_hold_it() {
+        let mut config = AppConfig::default();
+        config.chrome_idle_secs = f32::INFINITY;
+        config.normalize();
+        assert_eq!(config.chrome_idle_secs, 0.0, "an infinity is no idle time");
+
+        config.chrome_idle_secs = -3.0;
+        config.normalize();
+        assert_eq!(config.chrome_idle_secs, 0.0);
+
+        config.chrome_idle_secs = 1.0e30;
+        config.normalize();
+        assert_eq!(config.chrome_idle_secs, 600.0);
+
+        config.chrome_idle_secs = 2.5;
+        config.normalize();
+        assert_eq!(config.chrome_idle_secs, 2.5, "a value in range is left alone");
     }
 
     /// The configuration carries the cameras' credentials in clear, so it is

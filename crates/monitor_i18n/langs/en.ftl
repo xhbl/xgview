@@ -611,3 +611,10 @@ input-done = Done
 unsupported-title = XGView cannot run on this device
 unsupported-body = XGView draws the wall through Vulkan 1.1, or through OpenGL ES 3.2 with GL_KHR_debug. This device offers no graphics backend the viewer can use.
 unsupported-exit = Exit
+
+## Control names (the focus ring and the status bar read them out)
+toolbar-portrait-aspect = Picture fit
+cameras-cancel-order = Cancel
+portrait-aspect-entry = Picture fit
+combined-info-button = Combined info
+settings-talk-mute = Mute the sound while the microphone is open

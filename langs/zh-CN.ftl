@@ -556,3 +556,10 @@ input-done = 完成
 unsupported-title = 无法在此设备上运行 XGView
 unsupported-body = XGView 需要 Vulkan 1.1，或带 GL_KHR_debug 的 OpenGL ES 3.2，才能绘制监控墙。这台设备没有可用的图形后端。
 unsupported-exit = 退出
+
+## 控件名（焦点环/状态栏用它念出控件）
+toolbar-portrait-aspect = 画面比例
+cameras-cancel-order = 取消
+portrait-aspect-entry = 画面比例
+combined-info-button = 组合信息
+settings-talk-mute = 麦克风打开时播放静音

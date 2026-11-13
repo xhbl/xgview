@@ -791,6 +791,20 @@ pub enum RtspStage {
     Play,
 }
 
+/// A waker that does nothing, for polling a writer once.
+///
+/// `Waker::noop` would say this in one line, but it arrived in Rust 1.85 and
+/// the crate keeps to the 1.80 it declares. Nothing here is ever woken - the
+/// poll returns `Pending` and the caller stops - so a waker with no work is
+/// what the contract wants.
+fn a_waker_that_does_nothing() -> std::task::Waker {
+    struct Noop;
+    impl std::task::Wake for Noop {
+        fn wake(self: std::sync::Arc<Self>) {}
+    }
+    std::task::Waker::from(std::sync::Arc::new(Noop))
+}
+
 /// An RTSP session over a single TCP connection using interleaved framing.
 #[derive(Debug)]
 pub struct RtspClient {
@@ -1841,8 +1855,8 @@ impl RtspClient {
     /// read times out, and the session reconnects. Polling the write instead of
     /// waiting for it keeps the read going; see [`Self::send_interleaved`].
     pub fn flush_outbox(&mut self) {
-        let waker = std::task::Waker::noop();
-        let mut cx = std::task::Context::from_waker(waker);
+        let waker = a_waker_that_does_nothing();
+        let mut cx = std::task::Context::from_waker(&waker);
         while let Some((frame, offset)) = self.outbox.front_mut() {
             match std::pin::Pin::new(&mut self.writer).poll_write(&mut cx, &frame[*offset..]) {
                 std::task::Poll::Ready(Ok(0)) => break,

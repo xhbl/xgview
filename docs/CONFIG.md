@@ -15,12 +15,14 @@ behind the decoder and the cameras, see [DevMemo.md](DevMemo.md).
 | Target | Needs |
 |---|---|
 | Windows / Linux desktop (default build) | Rust 1.80+ (Edition 2021, via [rustup](https://rustup.rs)); the FFmpeg **development** libraries, found through `VCPKG_ROOT` (`vcpkg install ffmpeg:x64-windows`); **libclang** for `bindgen` (`winget install LLVM.LLVM`, then set `LIBCLANG_PATH`) |
-| Linux package (`scripts/build-linux.sh`) | gcc / make, `pkg-config`, `nasm` (the x86 SIMD paths) and **libclang**; the FFmpeg source is fetched and built by the script itself, or by the container image with `--docker` |
+| Linux package (`scripts/build-linux.sh`) | gcc / make, `pkg-config`, `meson`, `ninja` and the **libdrm** headers (the script builds libva beside FFmpeg, and stops if any is missing), **libclang**; `nasm` is optional - without it the x86 SIMD paths are left out (`--disable-x86asm`); the FFmpeg source is fetched and built by the script itself, or by the container image with `--docker` |
 | macOS package (`scripts/build-macos.sh`) | the Xcode Command Line Tools (for `clang`, and for `install_name_tool`, `lipo`, `codesign`, `otool` and `ditto`), a Rust toolchain with the targets being built, and FFmpeg found through `pkg-config` - Homebrew's, or one built from source |
 | Windows / Linux / macOS desktop (runtime) | the matching FFmpeg libraries beside the executable or on `PATH`; the Linux package and the macOS bundle carry their own |
 | Android | the Android NDK (r25+), the `aarch64-linux-android` and `armv7-linux-androideabi` targets and `cargo-ndk`; a JDK, Gradle and the Android SDK for the APK |
 
-Neither FFmpeg nor OpenH264 is used on Android - decoding is `AMediaCodec`.
+Neither FFmpeg nor OpenH264 is used on Android for the normal path - decoding is
+`AMediaCodec`. OpenH264 is there as the software fallback for an H.264 stream the
+platform codec refuses; it is not used for anything else.
 
 The FFmpeg build details (why `VCPKG_ROOT` is enough, why `libclang` is needed,
 which DLLs to copy) are in [DevMemo.md](DevMemo.md) §4.
@@ -50,8 +52,9 @@ The viewer persists everything to one JSON file, created on first launch:
   going no further than a machine you trust; like the "Only import the cameras"
   box, it lasts for the session and is not saved. **Import reads either form**: a
   sealed file asks for its passphrase, and a `xgvconfig.json` in clear is read as
-  it always was. Only the clear form is accepted - a file sealed by an earlier
-  version is not recognised, and neither form is interchangeable with the other.
+  it always was. A sealed file carries the mark `xgv-seal/v1`, and one without it
+  - an empty file, or something that is not a sealed document at all - is refused
+  rather than read as a configuration.
 - An **import keeps what it replaces**: the configuration it supersedes is left
   beside it as `xgvconfig.json.bak` before the new one is adopted, and a JSON
   document that is not an XGView configuration is refused rather than read as an
@@ -269,9 +272,11 @@ or `C:\Android` by default.
 **The device** needs Android 8.1 (API 27) or newer, and a GPU the renderer can
 use. The viewer draws through wgpu, which wants **Vulkan 1.1** or
 **OpenGL ES 3.2 / `GL_KHR_debug`**; a box with only OpenGL ES 2.0 - an Amlogic
-S905 / Mali-450 on its stock Android 9, say - has no adapter, and the app closes
-a moment after launch with `No suitable graphics adapter found` in its logcat
-(`adb logcat -s xgview`). A device whose Vulkan driver is older than 1.1
+S905 / Mali-450 on its stock Android 9, say - has no adapter and cannot make a
+surface. About two seconds after launch it puts a notice on the screen saying
+what the viewer needs and what the device offers, with one **Exit** button, and
+the log carries `this device has no graphics backend the viewer can draw with`
+under `adb logcat -s xgview`. A device whose Vulkan driver is older than 1.1
 (Adreno on Android 8.x, Vulkan 1.0) is sent to the GL backend before the renderer
 is built - the activity reads the version and leaves a marker the native side
 acts on - so it comes up on GL from the first launch. If a launch does fail
@@ -453,12 +458,14 @@ xgview/
 * **Non blocking UI** – the egui thread never touches a socket or a decoder. All
   network I/O and decoding run on a tokio runtime; results reach the UI through
   lock free channels (`crossbeam-channel` upward, `tokio::sync::mpsc` downward).
-* **One picture format everywhere** – every backend hands the UI NV12 planes
-  (luma plus one interleaved chroma plane), which are uploaded to two wgpu
-  textures and converted by a fragment shader. On Android `AMediaCodec` decodes
-  into byte buffers rather than a surface, and that buffer is walked into the
-  same two planes; the surface path was given up because it aborts the process
-  on some drivers (see [DevMemo.md](DevMemo.md) §9).
+* **One picture format everywhere** – the desktop backends hand the UI NV12
+  planes (luma plus one interleaved chroma plane), which are uploaded to two wgpu
+  textures and converted by a fragment shader. On Android the usual path skips
+  both steps: `AMediaCodec` renders straight into the picture's own
+  `SurfaceView`, and the compositor scans it out. The byte-buffer path is still
+  there - it is what the viewer falls back to when the surface is suspended (a
+  picture turned a quarter turn, or a device whose surfaces cannot be
+  see-through), and it walks the codec's buffer into the same two planes.
 * **Hardware decoding where it is available** – Windows and Linux prefer a GPU
   decoder (`Direct3D 11` / `CUDA`, `VAAPI` / `CUDA`) and fall back to software
   for a device or a stream the hardware will not take; Android decodes through
