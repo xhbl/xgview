@@ -1034,15 +1034,38 @@ impl RtspClient {
     /// first, under the same timeout this client reads with, and only then the
     /// request - one writer, one packet boundary at a time.
     async fn write_control(&mut self, request: &[u8]) -> Result<()> {
-        let timeout = self.timeout;
-        while let Some((frame, offset)) = self.outbox.pop_front() {
-            let rest = &frame[offset..];
-            tokio::time::timeout(timeout, self.writer.write_all(rest))
-                .await
-                .map_err(|_| {
-                    CoreError::rtsp("control waited for a congested queue that did not drain")
-                })?
-                .map_err(|err| CoreError::rtsp(format!("write control failed: {err}")))?;
+        // One deadline for the whole queue rather than one per frame: this runs
+        // on the task that reads the picture, and a hundred frames each given
+        // the handshake timeout would hold that read for a hundred of them.
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let mut failure = None;
+        while let Some((frame, offset)) = self.outbox.front_mut() {
+            let rest = &frame[*offset..];
+            match tokio::time::timeout_at(deadline, self.writer.write_all(rest)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    failure = Some(format!("write control failed: {err}"));
+                    break;
+                }
+                Err(_) => {
+                    failure = Some(
+                        "control waited for a congested queue that did not drain".to_string(),
+                    );
+                    break;
+                }
+            }
+            // `write_all` either wrote every byte or failed, so the frame is
+            // whole on the socket now and the queue can let go of it.
+            *offset = frame.len();
+            self.outbox.pop_front();
+        }
+        if let Some(message) = failure {
+            // The connection is not worth keeping, and the half-written frame
+            // must not be offered again on it: a later request would start the
+            // queue from a byte the peer already has, and `$` framing has no
+            // way back from that. Dropped, as `flush_outbox` drops it.
+            self.outbox.clear();
+            return Err(CoreError::rtsp(message));
         }
         self.writer
             .write_all(request)

@@ -1222,10 +1222,26 @@ impl AppConfig {
         // The shell's idle time has a slider and a document behind it, and a
         // document is only text: a value that cannot be a duration - infinite,
         // or far beyond the slider - would stop the interface from ever being
-        // able to make one. Kept inside a range the clock can hold.
+        // able to make one. Kept inside a range the clock can hold, and said so
+        // in the log when a hand-written value is the one being changed.
         self.chrome_idle_secs = if self.chrome_idle_secs.is_finite() {
-            self.chrome_idle_secs.clamp(0.0, 600.0)
+            let before = self.chrome_idle_secs;
+            let after = before.clamp(0.0, 600.0);
+            if after != before {
+                tracing::warn!(
+                    target: "xgview::config",
+                    before,
+                    after,
+                    "the shell's idle time is outside the range the interface can use"
+                );
+            }
+            after
         } else {
+            tracing::warn!(
+                target: "xgview::config",
+                value = %self.chrome_idle_secs,
+                "the shell's idle time is not a number; the shell will not hide itself"
+            );
             0.0
         };
         // There is always a group to add to: the built-in one is never removed,

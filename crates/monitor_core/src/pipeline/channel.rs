@@ -84,6 +84,9 @@ pub(super) async fn run_channel(
     talk: Arc<TalkHub>,
     stop: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
+    // Set beside `done` when the ending was "no attempts left" rather than
+    // "nothing left to try" - the one a resume gives another chance to.
+    gave_up: Arc<AtomicBool>,
     wake: Arc<Notify>,
 ) {
     let index = endpoint.index;
@@ -362,6 +365,10 @@ pub(super) async fn run_channel(
             // started it again with the count back at zero, and the limit the
             // user set never held. See `Supervisor::restart_finished`.
             done.store(true, Ordering::Relaxed);
+            // This is the ending a resume may undo: the attempts went into a
+            // network that was gone, not into a camera that refused. See
+            // `Supervisor::wake`.
+            gave_up.store(true, Ordering::Relaxed);
             emit(
                 &events,
                 StreamEvent::State {

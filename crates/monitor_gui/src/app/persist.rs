@@ -92,6 +92,9 @@ impl XgViewApp {
     pub(super) fn save_now(&mut self) {
         if self.persisted == self.config {
             self.dirty = false;
+            // Nothing left to write, so nothing left to wait for either: an
+            // earlier failure must not hold up the edit that comes next.
+            self.save_blocked_until = None;
             return;
         }
         match self.config.save(&self.config_path) {
@@ -108,18 +111,39 @@ impl XgViewApp {
                 // wall is usually switched off at the plug: the next save would
                 // never come. It is retried instead, after a wait, until the
                 // write goes through. See [`SAVE_RETRY`].
+                //
+                // Said on screen once per run of failures: the retry comes
+                // every five seconds and a toast lives six, so a message per
+                // attempt would be a red banner that never leaves the wall -
+                // which is worse than hearing about it once. The attempts
+                // themselves go to the log.
+                let first = self.save_blocked_until.is_none();
                 self.dirty = true;
                 self.save_blocked_until = Some(Instant::now() + SAVE_RETRY);
-                self.flash(
-                    monitor_i18n::tr_args(
-                        "toast-config-save-failed",
-                        &[
-                            ("path", self.config_path.display().to_string().into()),
-                            ("error", err.to_string().into()),
-                        ],
-                    ),
-                    ToastKind::Error,
-                );
+                if first {
+                    self.flash(
+                        monitor_i18n::tr_args(
+                            "toast-config-save-failed",
+                            &[
+                                ("path", self.config_path.display().to_string().into()),
+                                ("error", err.to_string().into()),
+                            ],
+                        ),
+                        ToastKind::Error,
+                    );
+                } else {
+                    // Once per five seconds for as long as the disk refuses,
+                    // so it goes to the log rather than to the screen. Debug
+                    // rather than warn for the same reason: a read-only
+                    // directory would otherwise fill the log with a line every
+                    // five seconds for as long as the wall is up.
+                    tracing::debug!(
+                        target: "xgview::config",
+                        path = %self.config_path.display(),
+                        %err,
+                        "the configuration could not be written again; the change is kept and retried"
+                    );
+                }
             }
         }
     }
@@ -130,6 +154,9 @@ impl XgViewApp {
         }
         if self.persisted == self.config {
             self.dirty = false;
+            // Everything is on disk again, so a failure that was waiting for
+            // its next attempt has nothing to wait for.
+            self.save_blocked_until = None;
             return;
         }
         // A write that failed is waiting for its next turn. The change is still
@@ -583,6 +610,13 @@ impl XgViewApp {
             // start-up builds it - from the layout of the shape the wall is
             // drawn in, because the document keeps one layout per shape and
             // taking the other one would be overwritten by the first `sync`.
+            // Whether the sink has anything to learn from the document, asked
+            // before the old one is replaced. Only the device: the volume and
+            // the sound switch are applied to the sink that is already open,
+            // and reopening it for those would stop the stream the call or the
+            // wall is listening to - and leave no sound at all if the device
+            // that was working cannot be opened a second time.
+            let audio_changed = imported.audio_output != self.config.audio_output;
             self.config = imported;
             let (layout, page, focus) = {
                 let view = self.config.group();
@@ -600,7 +634,11 @@ impl XgViewApp {
             // would be half an import: a muted wall stays muted, a wall told to
             // stay awake sleeps.
             self.sound_on = self.config.sound_on;
-            self.reopen_audio_sink();
+            if audio_changed {
+                self.reopen_audio_sink();
+            } else {
+                self.apply_audio();
+            }
             self.apply_power_for_blackout();
         }
         self.config.normalize();

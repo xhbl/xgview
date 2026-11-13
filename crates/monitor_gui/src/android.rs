@@ -268,9 +268,10 @@ pub fn start_video_surface(window: *mut std::ffi::c_void, mode: i32) -> u64 {
         }
         return VIDEO_TICKET.current();
     }
-    // A different window: the surface the codec was pointing at is gone, so its
-    // reference goes back with it. The codec is repointed below.
-    release_native_window(previous);
+    // A different window: the codec is repointed first, and only then is the
+    // old reference given back - the same order `stop_video_surface` keeps, so
+    // that nothing on the decode side is left naming a window this side has
+    // already released.
     let token = VIDEO_TICKET.take();
     let (replaced, switched) = match mode {
         2 => (true, false),
@@ -278,6 +279,7 @@ pub fn start_video_surface(window: *mut std::ffi::c_void, mode: i32) -> u64 {
         _ => (false, false),
     };
     monitor_codec::amediacodec::set_surface_window(window, replaced, switched);
+    release_native_window(previous);
     token
 }
 

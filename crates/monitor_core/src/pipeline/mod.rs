@@ -1036,6 +1036,15 @@ struct ChannelRuntime {
     /// its last frame, a camera that will not be talked to again - so that the
     /// watchdog does not take it for a task that died and start it over.
     done: Arc<AtomicBool>,
+    /// Set when the session ended because it ran out of attempts rather than
+    /// because there was nothing left to try.
+    ///
+    /// The two spell the same `done`, and both stay down until something moves
+    /// the channel - but a backgrounded app used up its attempts against a
+    /// network that was gone, and coming back is a reason to try again. A
+    /// camera that answered "not with this password" is not; see
+    /// [`ChannelCommand::Wake`].
+    gave_up: Arc<AtomicBool>,
 }
 
 /// Credentials configured for a camera, if any.

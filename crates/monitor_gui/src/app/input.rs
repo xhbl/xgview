@@ -1029,11 +1029,14 @@ impl XgViewApp {
         // the exception while the strip has the focus - there they are the
         // events, and a bar that went down on them would take the strip with it.
         let pages_are_the_strips = self.strip_has_focus(ctx);
-        if keys.settings
-            || keys.devices
-            || keys.fullscreen
-            || (!pages_are_the_strips && (keys.page_prev || keys.page_next))
-            || keys.layout.iter().any(|pressed| *pressed)
+        // A key spent under a dialog is spent doing nothing, so it must not take
+        // the magnified viewport's bar down as a side effect either.
+        if !dialog_open
+            && (keys.settings
+                || keys.devices
+                || keys.fullscreen
+                || (!pages_are_the_strips && (keys.page_prev || keys.page_next))
+                || keys.layout.iter().any(|pressed| *pressed))
         {
             self.tile_bar.hide();
         }

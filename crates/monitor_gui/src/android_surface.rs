@@ -535,6 +535,13 @@ pub fn start(window: *mut c_void, internal: String, external: String, density: f
     if window.is_null() {
         return 0;
     }
+    // The same surface reported as created a second time: what the activity
+    // handed over is one more reference to the window this side already has,
+    // so it goes straight back rather than being taken for a second wall.
+    if window == WINDOW.load(Ordering::Acquire) {
+        crate::android::release_native_window(window);
+        return WALL_TICKET.current();
+    }
     if density > 0.0 {
         DENSITY.store((density * 1000.0) as u32, Ordering::Release);
     }

@@ -207,6 +207,7 @@ impl Supervisor {
         // [`ChannelRuntime::stop`].
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
+        let gave_up = Arc::new(AtomicBool::new(false));
         let task = self.handle.spawn(run_channel(
             endpoint.clone(),
             self.prefer_hardware,
@@ -218,9 +219,13 @@ impl Supervisor {
             self.talk.clone(),
             stop.clone(),
             done.clone(),
+            gave_up.clone(),
             wake.clone(),
         ));
-        self.channels.insert(index, ChannelRuntime { endpoint, task, wake, stop, done });
+        self.channels.insert(
+            index,
+            ChannelRuntime { endpoint, task, wake, stop, done, gave_up },
+        );
     }
 
     fn activate(
@@ -241,7 +246,11 @@ impl Supervisor {
         };
         let endpoint = endpoint_for(&source, stream, index);
         if let Some(existing) = self.channels.get(&index) {
-            if existing.endpoint.is_same_stream(&endpoint) {
+            // A channel whose task has ended is not one to leave alone: the
+            // request is a reason to start it again, even for the stream it was
+            // already on. A channel that gave up retrying is exactly this, and
+            // zooming it used to find the endpoint unchanged and return.
+            if existing.endpoint.is_same_stream(&endpoint) && !existing.task.is_finished() {
                 return;
             }
         }
@@ -456,6 +465,36 @@ impl Supervisor {
     }
 
     fn wake(&mut self) {
+        // A channel that used up its retries while the app was in the
+        // background has no task left and no waiter to notify: its attempt
+        // budget died with the network that was gone. Coming back is a new
+        // chance, so it is started again from the endpoint it last had.
+        //
+        // Only that ending: a camera that answered "not with this password" is
+        // one nothing about returning changes, and a recording that reached its
+        // last frame is not restarted because the app came forward.
+        let gave_up: Vec<usize> = self
+            .channels
+            .iter()
+            .filter(|(_, runtime)| {
+                runtime.task.is_finished()
+                    && runtime.gave_up.load(Ordering::Relaxed)
+                    && matches!(runtime.endpoint.kind, EndpointKind::Live)
+            })
+            .map(|(index, _)| *index)
+            .collect();
+        for index in gave_up {
+            let Some(runtime) = self.channels.remove(&index) else {
+                continue;
+            };
+            tracing::debug!(
+                target: "xgview::pipeline",
+                index,
+                "the channel gave up while the app was away; starting it again"
+            );
+            self.stats.clear(index);
+            self.spawn_channel(runtime.endpoint, runtime.wake);
+        }
         // Only the channels waiting out a backoff care. `notify_waiters`
         // leaves no permit behind, so one that is streaming is untouched
         // and one that is connecting finishes its attempt.
