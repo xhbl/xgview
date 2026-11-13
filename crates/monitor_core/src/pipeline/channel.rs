@@ -360,15 +360,15 @@ pub(super) async fn run_channel(
             // attempt that has just ended is dropped here rather than left for
             // a renderer to read as if the channel were still running.
             stats.clear(index);
-            // Giving up is an ending too. Said only in the event, it was still
-            // a task that had ended without being told to - so the supervisor
-            // started it again with the count back at zero, and the limit the
+            // Giving up is an ending too: said only in the event, it was still
+            // a task that had ended without being told to, so the supervisor
+            // started it again with the count back at zero and the limit the
             // user set never held. See `Supervisor::restart_finished`.
-            done.store(true, Ordering::Relaxed);
-            // This is the ending a resume may undo: the attempts went into a
-            // network that was gone, not into a camera that refused. See
-            // `Supervisor::wake`.
-            gave_up.store(true, Ordering::Relaxed);
+            //
+            // The event goes out before the flags: a resume reads `gave_up` and
+            // starts the channel again straight away, and a flag set before
+            // this last word is out would let the old session's "gave up"
+            // overtake the new one's "connecting".
             emit(
                 &events,
                 StreamEvent::State {
@@ -378,6 +378,11 @@ pub(super) async fn run_channel(
                     detail: format!("{failure} (gave up after {attempt} attempts)"),
                 },
             );
+            done.store(true, Ordering::Relaxed);
+            // This is the ending a resume may undo: the attempts went into a
+            // network that was gone, not into a camera that refused. See
+            // `Supervisor::wake`.
+            gave_up.store(true, Ordering::Relaxed);
             return;
         }
 

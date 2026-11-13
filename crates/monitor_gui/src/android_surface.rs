@@ -135,35 +135,94 @@ pub fn start_bar(window: *mut c_void, width: i32, height: i32) -> u64 {
         return BAR_TICKET.current();
     }
     let token = BAR_TICKET.take();
-    attach_bar(window, width, height);
+    // The bar's surface that this one replaces: if none was ever made from it,
+    // the loop has no record of its reference - see [`ORPHANS`].
+    orphan(attach_bar(window, width, height));
     token
 }
 
 /// The bar's surface went away, and only this identity of it.
 pub fn stop_bar(token: u64) {
     if BAR_TICKET.retire(token) {
-        attach_bar(std::ptr::null_mut(), 0, 0);
+        orphan(attach_bar(std::ptr::null_mut(), 0, 0));
     }
 }
 
-/// Gives back a window's reference once the surface made from it is gone.
+/// Gives back a window's reference, once no surface is drawing into it.
 ///
-/// `ANativeWindow_fromSurface` hands this side one reference per call, and that
-/// reference is owed back when the surface behind it is finished with. `held` is
-/// the window whose reference this side still owns; called with the window the
-/// next surface will be built from, it keeps a reference that is still in use
-/// and gives back one that has been replaced.
+/// `ANativeWindow_fromSurface` hands this side one reference per call, and the
+/// surface built from that window is its only user - so the reference can only
+/// go back after that surface is gone, which only the loop knows. It is left in
+/// [`ORPHANS`] and given back there: one list and one releaser, so a reference
+/// is never given back twice, and never while a surface still needs it.
+///
+/// `current` is the window the loop would build its next surface from: the same
+/// surface coming back after a relayout keeps the reference it already has.
 fn let_go_of_window(held: *mut c_void, current: *mut c_void) {
     if !held.is_null() && held != current {
-        crate::android::release_native_window(held);
+        orphan(held);
     }
 }
 
-fn attach_bar(window: *mut c_void, width: i32, height: i32) {
+/// Windows this side has a reference to that no surface was built from.
+///
+/// The activity takes one `ANativeWindow` reference per call out of
+/// `ANativeWindow_fromSurface`, and the surface made from that window is the
+/// only thing that uses it - so the reference can only go back once that
+/// surface is gone. A window that is replaced or stopped before the loop ever
+/// made a surface from it is not reachable from the loop's own bookkeeping
+/// (`held` is set only where a surface was made), and nothing else knows how to
+/// give it back. It waits here and the loop hands it over. See
+/// [`release_orphans`].
+///
+/// The pointers are kept as numbers because a raw pointer is not `Send`, and a
+/// `static` mutex has to be.
+static ORPHANS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// Leaves a window's reference for the loop to give back.
+fn orphan(window: *mut c_void) {
+    if window.is_null() {
+        return;
+    }
+    let Ok(mut waiting) = ORPHANS.lock() else {
+        return;
+    };
+    // Once is enough. The same window can be left here twice - by the activity
+    // replacing it, and by the loop replacing the surface made from it - and
+    // two entries would be two releases of one reference.
+    if !waiting.contains(&(window as usize)) {
+        waiting.push(window as usize);
+    }
+}
+
+/// Gives back every window left for the loop that none of `in_use` names.
+///
+/// The one place a window's reference is released, and the reason a window is
+/// never released while a surface is still drawing into it. A window that is
+/// still in use keeps its reference: that one is `held`'s, and it is left here
+/// to be given back when the surface built from it is replaced - it is taken
+/// off the list all the same, since [`let_go_of_window`] puts it back when that
+/// happens.
+fn release_orphans(in_use: &[*mut c_void]) {
+    let waiting = match ORPHANS.lock() {
+        Ok(mut orphans) => std::mem::take(&mut *orphans),
+        Err(_) => return,
+    };
+    for window in waiting {
+        let window = window as *mut c_void;
+        if window.is_null() || in_use.iter().any(|held| *held == window) {
+            continue;
+        }
+        crate::android::release_native_window(window);
+    }
+}
+
+fn attach_bar(window: *mut c_void, width: i32, height: i32) -> *mut c_void {
     // The window first: the wake below may run the loop, and the loop reads the
     // window and the size together.
-    BAR_WINDOW.store(window, Ordering::Release);
+    let previous = BAR_WINDOW.swap(window, Ordering::Release);
     attach_bar_sizes(width, height);
+    previous
 }
 
 /// Records the bar's size without touching its window.
@@ -360,7 +419,9 @@ pub fn stop(token: u64) {
     if !WALL_TICKET.retire(token) {
         return;
     }
-    WINDOW.store(std::ptr::null_mut(), Ordering::Release);
+    // The same for the window that is going: the surface that used it may never
+    // have been made, in which case the loop's `held` never named it.
+    orphan(WINDOW.swap(std::ptr::null_mut(), Ordering::Release));
     // The surface that took the fingers is gone, and the cancel that would have
     // lifted them may never come: the count is cleared here so the next surface
     // starts at none. See [`forget_fingers`].
@@ -549,7 +610,10 @@ pub fn start(window: *mut c_void, internal: String, external: String, density: f
         *directories = Some((PathBuf::from(internal), PathBuf::from(external)));
     }
     let token = WALL_TICKET.take();
-    WINDOW.store(window, Ordering::Release);
+    // The window this one replaces: if no surface was ever made from it - the
+    // activity lost it before the loop got there - its reference is ours and
+    // nothing knows it, so it is left for the loop to give back. See [`ORPHANS`].
+    orphan(WINDOW.swap(window, Ordering::Release));
     // A new surface is a new gesture: whatever was on the glass when the last
     // one went away is not on this one.
     forget_fingers();
@@ -792,7 +856,32 @@ fn run() -> anyhow::Result<()> {
     // try once it is, so the loop stops making surfaces and only sleeps.
     let mut notice_shown = false;
     loop {
+        let window = WINDOW.load(Ordering::Acquire);
+        // Windows whose surface never came into being, or was replaced before
+        // one did: nothing here uses them, so their references go back now.
+        // Before the branches below, so that a loop waiting out a failed launch
+        // gives them back as well as one that is drawing.
+        release_orphans(&[held, window, bar_held, BAR_WINDOW.load(Ordering::Acquire)]);
         if notice_shown {
+            // Nothing will be drawn on this launch again, so the surfaces go
+            // and the references they were built from with them. Without this
+            // the loop never comes past the detach below, `held` keeps its
+            // window for ever, and every later stop from the activity is
+            // dropped as "in use".
+            surface = None;
+            bar = None;
+            attached = std::ptr::null_mut();
+            bar_attached = std::ptr::null_mut();
+            // The windows too: a reference is only given back once nothing here
+            // names it, and this loop will never build another surface from
+            // either. A start that arrives after this is left here by the next
+            // pass and given back the one after.
+            orphan(WINDOW.swap(std::ptr::null_mut(), Ordering::Release));
+            orphan(BAR_WINDOW.swap(std::ptr::null_mut(), Ordering::Release));
+            orphan(held);
+            orphan(bar_held);
+            held = std::ptr::null_mut();
+            bar_held = std::ptr::null_mut();
             std::thread::sleep(Duration::from_millis(250));
             continue;
         }
@@ -803,7 +892,6 @@ fn run() -> anyhow::Result<()> {
             // The reference stays ours: the window has not been given back by
             // the activity, and the next surface may well be made from it.
         }
-        let window = WINDOW.load(Ordering::Acquire);
         if window.is_null() {
             // Detached: the surface went away and no new one has arrived. The
             // app stays built, so coming back is a surface, not a restart.

@@ -892,7 +892,7 @@ async fn read_limited_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -
         let available = reader
             .fill_buf()
             .await
-            .map_err(|err| CoreError::rtsp(format!("read line: {err}")))?;
+            .map_err(|err| CoreError::network(format!("read line: {err}")))?;
         if available.is_empty() {
             break;
         }
@@ -936,6 +936,11 @@ impl RtspClient {
         credentials: Option<(String, String)>,
         timeout: Duration,
     ) -> Result<Self> {
+        // The timeout times the connect and then bounds every deadline this
+        // session builds: `Instant::now() + Duration::MAX` overflows and
+        // panics, and zero would expire before the first byte. Kept inside a
+        // range a session can use, whoever asks for the connection.
+        let timeout = timeout.clamp(Duration::from_millis(50), Duration::from_secs(300));
         let parsed = RtspUrl::parse(url)?;
         let credentials = credentials.or_else(|| {
             parsed
@@ -943,10 +948,13 @@ impl RtspClient {
                 .map(|(user, pass)| (user.to_string(), pass.to_string()))
         });
         let address = format!("{}:{}", parsed.host, parsed.effective_port());
+        // A `Timeout` is a peer that answered and then went quiet; this is one
+        // that never came up, which is the address's problem - so it is a
+        // network failure, whichever of the two ways it failed.
         let stream = tokio::time::timeout(timeout, TcpStream::connect(&address))
             .await
-            .map_err(|_| CoreError::rtsp(format!("connect to {address} timed out")))?
-            .map_err(|err| CoreError::rtsp(format!("connect to {address} failed: {err}")))?;
+            .map_err(|_| CoreError::network(format!("connect to {address} timed out")))?
+            .map_err(|err| CoreError::network(format!("connect to {address} failed: {err}")))?;
         stream.set_nodelay(true).ok();
         let peer_addr = stream.peer_addr().ok();
         let (read_half, write_half) = stream.into_split();
@@ -1038,19 +1046,17 @@ impl RtspClient {
         // on the task that reads the picture, and a hundred frames each given
         // the handshake timeout would hold that read for a hundred of them.
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let mut failure = None;
+        let mut failure: Option<CoreError> = None;
         while let Some((frame, offset)) = self.outbox.front_mut() {
             let rest = &frame[*offset..];
             match tokio::time::timeout_at(deadline, self.writer.write_all(rest)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
-                    failure = Some(format!("write control failed: {err}"));
+                    failure = Some(CoreError::network(format!("write control failed: {err}")));
                     break;
                 }
                 Err(_) => {
-                    failure = Some(
-                        "control waited for a congested queue that did not drain".to_string(),
-                    );
+                    failure = Some(CoreError::timeout("control queue did not drain"));
                     break;
                 }
             }
@@ -1059,22 +1065,41 @@ impl RtspClient {
             *offset = frame.len();
             self.outbox.pop_front();
         }
-        if let Some(message) = failure {
+        if let Some(error) = failure {
             // The connection is not worth keeping, and the half-written frame
             // must not be offered again on it: a later request would start the
             // queue from a byte the peer already has, and `$` framing has no
             // way back from that. Dropped, as `flush_outbox` drops it.
             self.outbox.clear();
-            return Err(CoreError::rtsp(message));
+            return Err(error);
         }
-        self.writer
-            .write_all(request)
-            .await
-            .map_err(|err| CoreError::rtsp(format!("write control failed: {err}")))?;
-        self.writer
-            .flush()
-            .await
-            .map_err(|err| CoreError::rtsp(format!("flush control failed: {err}")))?;
+        let written = tokio::time::timeout_at(deadline, self.writer.write_all(request)).await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                self.outbox.clear();
+                return Err(CoreError::network(format!("write control failed: {err}")));
+            }
+            Err(_) => {
+                // The queue above may have taken the whole budget, or the peer
+                // has stopped reading: either way the request is not going out,
+                // and waiting on it would hold the task that reads the picture.
+                self.outbox.clear();
+                return Err(CoreError::timeout("control write timed out"));
+            }
+        }
+        let flushed = tokio::time::timeout_at(deadline, self.writer.flush()).await;
+        match flushed {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                self.outbox.clear();
+                return Err(CoreError::network(format!("flush control failed: {err}")));
+            }
+            Err(_) => {
+                self.outbox.clear();
+                return Err(CoreError::timeout("flush control timed out"));
+            }
+        }
         Ok(())
     }
 
@@ -1141,10 +1166,10 @@ impl RtspClient {
             let buffered = reader
                 .fill_buf()
                 .await
-                .map_err(|err| CoreError::rtsp(format!("read failed: {err}")))?;
+                .map_err(|err| CoreError::network(format!("read failed: {err}")))?;
             if buffered.is_empty() {
                 *state = RtspSessionState::Closed;
-                return Err(CoreError::rtsp("connection closed by peer"));
+                return Err(CoreError::network("connection closed by peer"));
             }
             buffered[0]
         };
@@ -1154,7 +1179,7 @@ impl RtspClient {
             reader
                 .read_exact(&mut header)
                 .await
-                .map_err(|err| CoreError::rtsp(format!("read interleaved header: {err}")))?;
+                .map_err(|err| CoreError::network(format!("read interleaved header: {err}")))?;
             let channel = header[1];
             let length = u16::from_be_bytes([header[2], header[3]]) as usize;
             // The length is a u16, so it cannot exceed 64 KiB: no separate
@@ -1164,7 +1189,7 @@ impl RtspClient {
             reader
                 .read_exact(&mut payload)
                 .await
-                .map_err(|err| CoreError::rtsp(format!("read interleaved payload: {err}")))?;
+                .map_err(|err| CoreError::network(format!("read interleaved payload: {err}")))?;
             *state = RtspSessionState::Playing;
             return Ok(RtspPacket::Interleaved { channel, payload });
         }
@@ -1219,7 +1244,7 @@ impl RtspClient {
             reader
                 .read_exact(&mut body)
                 .await
-                .map_err(|err| CoreError::rtsp(format!("read body: {err}")))?;
+                .map_err(|err| CoreError::network(format!("read body: {err}")))?;
         }
 
         Ok(RtspResponse { status, reason, headers, body })
@@ -1490,10 +1515,10 @@ impl RtspClient {
     pub async fn setup_udp(&mut self, control: &str) -> Result<()> {
         let ipv6 = self.peer_addr.map(|addr| addr.is_ipv6()).unwrap_or(false);
         let (rtp, rtcp) = bind_rtp_pair(ipv6)
-            .map_err(|err| CoreError::rtsp(format!("cannot bind RTP / RTCP ports: {err}")))?;
+            .map_err(|err| CoreError::network(format!("cannot bind RTP / RTCP ports: {err}")))?;
         let client_port = rtp
             .local_addr()
-            .map_err(|err| CoreError::rtsp(format!("cannot read the RTP port: {err}")))?
+            .map_err(|err| CoreError::network(format!("cannot read the RTP port: {err}")))?
             .port();
         let track_uri = self.resolve_control(control);
         let transport = format!("RTP/AVP;unicast;client_port={client_port}-{}", client_port + 1);
@@ -1511,7 +1536,7 @@ impl RtspClient {
         let ip = self
             .peer_addr
             .map(|addr| addr.ip())
-            .ok_or_else(|| CoreError::rtsp("the RTSP peer address is unknown"))?;
+            .ok_or_else(|| CoreError::network("the RTSP peer address is unknown"))?;
         self.rtp_server = Some(SocketAddr::new(ip, server_rtp));
         self.rtcp_server = Some(SocketAddr::new(ip, server_rtcp));
         self.rtp = Some(rtp);
@@ -2005,7 +2030,7 @@ impl RtspClient {
             tokio::select! {
                 result = rtp.recv(&mut buffer[..]) => {
                     let length =
-                        result.map_err(|err| CoreError::rtsp(format!("read rtp failed: {err}")))?;
+                        result.map_err(|err| CoreError::network(format!("read rtp failed: {err}")))?;
                     if length == buffer.len() {
                         tracing::warn!(
                             target: "xgview::rtsp",
@@ -2016,7 +2041,7 @@ impl RtspClient {
                     return Ok(MediaPacket::Rtp(buffer[..length].to_vec()));
                 }
                 result = rtcp.recv(&mut scratch[..]) => {
-                    result.map_err(|err| CoreError::rtsp(format!("read rtcp failed: {err}")))?;
+                    result.map_err(|err| CoreError::network(format!("read rtcp failed: {err}")))?;
                 }
                 result = self.reader.fill_buf() => {
                     // Media travels on UDP, but the TCP connection still carries
@@ -2028,10 +2053,10 @@ impl RtspClient {
                     // and everything after a half-read packet is read at the
                     // wrong offset.
                     let length = result
-                        .map_err(|err| CoreError::rtsp(format!("read control failed: {err}")))?
+                        .map_err(|err| CoreError::network(format!("read control failed: {err}")))?
                         .len();
                     if length == 0 {
-                        return Err(CoreError::rtsp("connection closed by peer"));
+                        return Err(CoreError::network("connection closed by peer"));
                     }
                     self.reader.consume(length);
                 }
@@ -2050,21 +2075,21 @@ impl RtspClient {
         let (Some(rtp), Some(rtcp)) = (self.rtp.as_ref(), self.rtcp.as_ref()) else {
             return match self.reader.fill_buf().await {
                 Ok(buffered) if !buffered.is_empty() => Ok(()),
-                Ok(_) => Err(CoreError::rtsp("connection closed by peer")),
-                Err(err) => Err(CoreError::rtsp(format!("read failed: {err}"))),
+                Ok(_) => Err(CoreError::network("connection closed by peer")),
+                Err(err) => Err(CoreError::network(format!("read failed: {err}"))),
             };
         };
         tokio::select! {
             result = rtp.readable() => {
-                result.map_err(|err| CoreError::rtsp(format!("rtp socket failed: {err}")))
+                result.map_err(|err| CoreError::network(format!("rtp socket failed: {err}")))
             }
             result = rtcp.readable() => {
-                result.map_err(|err| CoreError::rtsp(format!("rtcp socket failed: {err}")))
+                result.map_err(|err| CoreError::network(format!("rtcp socket failed: {err}")))
             }
             result = self.reader.fill_buf() => match result {
                 Ok(buffered) if !buffered.is_empty() => Ok(()),
-                Ok(_) => Err(CoreError::rtsp("connection closed by peer")),
-                Err(err) => Err(CoreError::rtsp(format!("read failed: {err}"))),
+                Ok(_) => Err(CoreError::network("connection closed by peer")),
+                Err(err) => Err(CoreError::network(format!("read failed: {err}"))),
             },
         }
     }

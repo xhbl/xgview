@@ -477,8 +477,11 @@ impl Supervisor {
             .channels
             .iter()
             .filter(|(_, runtime)| {
-                runtime.task.is_finished()
-                    && runtime.gave_up.load(Ordering::Relaxed)
+                // Not `task.is_finished()`: the flag is set just before the
+                // task returns, and a resume that arrives in that gap would
+                // find a channel that had given up and leave it down until
+                // the next one.
+                runtime.gave_up.load(Ordering::Relaxed)
                     && matches!(runtime.endpoint.kind, EndpointKind::Live)
             })
             .map(|(index, _)| *index)
@@ -487,6 +490,10 @@ impl Supervisor {
             let Some(runtime) = self.channels.remove(&index) else {
                 continue;
             };
+            // Nothing more to publish from the ending session, whether or not
+            // it has returned yet.
+            runtime.stop.store(true, Ordering::Relaxed);
+            runtime.task.abort();
             tracing::debug!(
                 target: "xgview::pipeline",
                 index,

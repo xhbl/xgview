@@ -84,6 +84,11 @@ impl XgViewApp {
         let group = self.config.group().clone();
         let layout =
             if self.orientation.is_portrait() { group.portrait_layout } else { group.layout };
+        // The length of the group first: `set_page` and `set_focus` keep to the
+        // grid that is there, and a group that arrived with more cameras than
+        // the one being left would otherwise have its page and its focus cut
+        // down to the old size - and `sync` would write the loss back.
+        self.scheduler.set_channel_count(self.config.enabled_count());
         self.scheduler.set_layout(layout);
         self.scheduler.set_page(group.page);
         self.scheduler.set_focus(group.focus);

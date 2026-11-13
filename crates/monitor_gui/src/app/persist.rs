@@ -2,6 +2,7 @@
 //! and the file dialog they go through.
 
 use super::*;
+use monitor_core::scheduler::ScheduleChange;
 
 /// How long a press waits for the storage permission it has asked for.
 ///
@@ -601,6 +602,10 @@ impl XgViewApp {
             self.config.cameras = imported.cameras;
             self.config.groups = imported.groups;
             self.config.active_group = imported.active_group;
+            // Before anything reads the document: a hand-edited file can name
+            // a group that is not there, and normalising it may move cameras
+            // between groups and clamp page and focus.
+            self.config.normalize();
             self.load_group_view();
         } else {
             // Everything is taken from the document, but the path this
@@ -617,7 +622,24 @@ impl XgViewApp {
             // wall is listening to - and leave no sound at all if the device
             // that was working cannot be opened a second time.
             let audio_changed = imported.audio_output != self.config.audio_output;
+            // A recording belongs to a camera of the document being replaced.
+            // The scheduler below is new, but the session behind the magnified
+            // viewport is not held by the scheduler: it would go on asking the
+            // old source for its recording, and the wall would show it under a
+            // new document that has nothing to do with it.
+            self.leave_playback();
+            // How long the wall was before the document arrived. A scheduler
+            // built from scratch remembers no plan, so `refresh` can only say
+            // what to start - never what the last wall had and this one does
+            // not. Those are told to stop by hand below.
+            let before = self.config.enabled_count();
             self.config = imported;
+            // The document is read by the planner and by `sync` below; both
+            // must see the same cameras, groups, page and focus. A hand-edited
+            // file can name a group that is not there, and normalising it moves
+            // those cameras and clamps the page - after the planner had run,
+            // that would leave the two disagreeing about which channels live.
+            self.config.normalize();
             let (layout, page, focus) = {
                 let view = self.config.group();
                 let layout = if self.orientation.is_portrait() {
@@ -628,6 +650,21 @@ impl XgViewApp {
                 (layout, view.page, view.focus)
             };
             self.scheduler = Scheduler::new(layout, page, focus, self.config.enabled_count());
+            // Cameras no longer on the wall's plan. A scheduler built from
+            // scratch remembers no plan, so the first `refresh` can only say
+            // what to start: a channel that is on the new page is activated and
+            // one on another page is simply absent, not suspended. Without this
+            // the old task would go on pulling a stream for a tile the wall no
+            // longer draws - and the supervisor's watchdog would start it again
+            // whenever it ended.
+            let plan = self.scheduler.schedule(&self.config.active_cameras());
+            let changes: Vec<ScheduleChange> = (0..before)
+                .filter(|index| plan.mode_of(*index).is_suspended())
+                .map(|index| ScheduleChange::Suspend { index, camera_id: String::new() })
+                .collect();
+            if !changes.is_empty() {
+                self.manager.apply(&changes, &[]);
+            }
             // The sound and the power are part of the document too. Start-up
             // reads them beside building the scheduler, and an import that
             // took everything else but left these on the old configuration
@@ -641,7 +678,6 @@ impl XgViewApp {
             }
             self.apply_power_for_blackout();
         }
-        self.config.normalize();
         self.needs_sync = true;
         self.mark_dirty();
         count
