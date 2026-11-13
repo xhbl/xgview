@@ -194,9 +194,12 @@ Two kinds of device fall below that floor and are refused rather than half run: 
 box that offers only **OpenGL ES 2.0** - an Amlogic S905 / Mali-450 on its stock
 Android 9, for instance - has no adapter to draw with, and one whose OpenGL ES
 3.x driver lacks `GL_KHR_debug` cannot be given the resource labels the GL
-backend asks for. In both cases the viewer says so in its log and closes. The
-floor is the same for both ABIs: a 32-bit package does not make a device with
-OpenGL ES 2.0 draw, it only lets a 32-bit system install the viewer at all.
+backend asks for. In both cases the viewer says so in its log. A device that
+cannot make a surface at all also says it on the screen - what the viewer needs,
+which OpenGL ES level the device offers, and a button that ends it - because
+there is no wall to draw a message on. The floor is the same for both ABIs: a
+32-bit package does not make a device with OpenGL ES 2.0 draw, it only lets a
+32-bit system install the viewer at all.
 
 If a launch does fail before the renderer comes up, the failure is written to the
 log and the app brings itself back on the GL backend a few seconds later - no

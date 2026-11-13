@@ -331,6 +331,42 @@ mod tests {
     /// answers nothing: the wait for it can only see the viewer come back, and
     /// has to end there - granted or not - instead of leaving the press held.
     #[test]
+    fn a_device_that_cannot_draw_is_told_so_and_offered_a_way_out() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let surface = std::fs::read_to_string(root.join("monitor_gui/src/android_surface.rs"))
+            .expect("cannot read android_surface.rs");
+        let android = std::fs::read_to_string(root.join("monitor_gui/src/android.rs"))
+            .expect("cannot read android.rs");
+        assert!(
+            surface.contains("SURFACE_FAILURES_BEFORE_NOTICE")
+                && surface.contains("notice_shown = true")
+                && surface.contains("crate::android::show_unsupported_device("),
+            "a surface that can never be made must end in the notice, not an endless retry"
+        );
+        assert!(
+            surface.contains("monitor_i18n::tr(\"unsupported-title\")")
+                && surface.contains("monitor_i18n::tr(\"unsupported-body\")")
+                && surface.contains("monitor_i18n::tr(\"unsupported-exit\")"),
+            "the notice is the viewer's text and belongs in the language packs"
+        );
+        assert!(
+            android.contains("showUnsupported")
+                && android.contains("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+            "the native side must call the activity's notice with three strings"
+        );
+        assert!(
+            MAIN.contains("public static void showUnsupported(")
+                && MAIN.contains("setCancelable(false)")
+                && MAIN.contains("Process.killProcess"),
+            "the notice has to be modal and end the viewer when acknowledged"
+        );
+        assert!(
+            MAIN.contains("reqGlEsVersion"),
+            "the notice names the OpenGL ES level the device actually offers"
+        );
+    }
+
+    #[test]
     fn an_import_offers_the_all_files_switch_and_waits_for_the_trip_back() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let gui = std::fs::read_to_string(root.join("monitor_gui/src/app/persist.rs"))

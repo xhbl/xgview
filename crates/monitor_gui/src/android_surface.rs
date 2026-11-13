@@ -548,6 +548,25 @@ pub fn start(window: *mut c_void, internal: String, external: String, density: f
     token
 }
 
+/// Puts the "this device cannot draw" notice on screen; true when it got there.
+///
+/// The ways a launch can fail before its first frame - no surface at all, no
+/// adapter for the one that was made, no device from that adapter - mean the
+/// same thing to the viewer, so they are said the same way. The words come from
+/// the language packs, loaded before the loop for exactly this.
+fn show_unsupported_notice(reason: &str) -> bool {
+    tracing::error!(
+        target: "xgview",
+        reason,
+        "this device has no graphics backend the viewer can draw with"
+    );
+    crate::android::show_unsupported_device(
+        &monitor_i18n::tr("unsupported-title"),
+        &monitor_i18n::tr("unsupported-body"),
+        &monitor_i18n::tr("unsupported-exit"),
+    )
+}
+
 fn run() -> anyhow::Result<()> {
     crate::init_android_logging();
     crate::install_panic_hook();
@@ -580,6 +599,16 @@ fn run() -> anyhow::Result<()> {
         supervised: false,
         extra_lang_dir: Some(external.join("langs")),
     };
+
+    // The interface language, before anything can need it. The app initialises
+    // it too, but a device whose graphics cannot come up never builds the app -
+    // and the notice that says why is drawn by the activity, in the viewer's
+    // language, so the packs have to be in place before the loop starts.
+    let mut language_dirs = vec![monitor_core::config::config_dir().join("langs")];
+    if let Some(dir) = options.extra_lang_dir.as_ref() {
+        language_dirs.push(dir.clone());
+    }
+    monitor_i18n::init(&options.config.language, &language_dirs);
 
     // Held for the life of this loop: it writes the marker before Vulkan is
     // tried, takes it away on the first frame that gets through, and leaves it
@@ -684,7 +713,24 @@ fn run() -> anyhow::Result<()> {
     // Set when the surface under us went away; the option itself cannot be
     // cleared where that is noticed, because the frame's work holds it borrowed.
     let mut lost = false;
+    // A surface that cannot be made at all, rather than one that is briefly
+    // gone. The retry below is what carries the wall across a surface the
+    // activity takes away and hands back, but a GPU below wgpu's floor - only
+    // OpenGL ES 2.0, no Vulkan, as on a Mali-450 with Android 9 - fails here on
+    // every attempt, and retrying for ever leaves a black screen and a log
+    // being written twenty times a second. Forty attempts is two seconds: after
+    // that the viewer is told why on the screen, and the loop waits for the
+    // process to end instead of trying again.
+    const SURFACE_FAILURES_BEFORE_NOTICE: u32 = 40;
+    let mut surface_failures: u32 = 0;
+    // Whether the notice is up. There is nothing to draw and nothing left to
+    // try once it is, so the loop stops making surfaces and only sleeps.
+    let mut notice_shown = false;
     loop {
+        if notice_shown {
+            std::thread::sleep(Duration::from_millis(250));
+            continue;
+        }
         if lost {
             lost = false;
             surface = None;
@@ -723,11 +769,27 @@ fn run() -> anyhow::Result<()> {
             let fresh = match fresh {
                 Ok(fresh) => fresh,
                 Err(error) => {
-                    tracing::warn!(target: "xgview", %error, "no surface to draw into");
+                    surface_failures += 1;
+                    if !notice_shown && surface_failures >= SURFACE_FAILURES_BEFORE_NOTICE {
+                        notice_shown = true;
+                        if !show_unsupported_notice(&error.to_string()) {
+                            // Nowhere to say it and nothing to draw: leave
+                            // rather than spin with the screen dark and the
+                            // reason only in the log.
+                            return Err(anyhow::anyhow!(
+                                "no surface to draw into, and the notice could not be shown: {error}"
+                            ));
+                        }
+                    } else if !notice_shown && surface_failures <= 3 {
+                        // Three lines say the shape of it; twenty a second say
+                        // nothing more and bury everything else.
+                        tracing::warn!(target: "xgview", %error, "no surface to draw into");
+                    }
                     std::thread::sleep(Duration::from_millis(50));
                     continue;
                 }
             };
+            surface_failures = 0;
             let (width, height) = (WIDTH.load(Ordering::Acquire), HEIGHT.load(Ordering::Acquire));
 
             if let Some((_, render_state, _)) = built.as_ref() {
@@ -761,13 +823,25 @@ fn run() -> anyhow::Result<()> {
                 continue;
             }
 
-            let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            let adapter = match block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&fresh),
                 force_fallback_adapter: false,
             }))
             .ok_or_else(|| anyhow::anyhow!("no runtime for the adapter request"))?
-            .map_err(|error| anyhow::anyhow!("no adapter for the activity's surface: {error}"))?;
+            {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    notice_shown = true;
+                    let reason = format!("no adapter for the activity's surface: {error}");
+                    if !show_unsupported_notice(&reason) {
+                        return Err(anyhow::anyhow!(
+                            "{reason}, and the notice could not be shown"
+                        ));
+                    }
+                    continue;
+                }
+            };
             // What the device is asked for, on the same terms eframe asks: the
             // GL backend on an old phone offers GLES 3.1, whose limits are the
             // WebGL 2 floor - 4 storage buffers per shader stage against the
@@ -791,11 +865,21 @@ fn run() -> anyhow::Result<()> {
                 },
                 ..Default::default()
             };
-            let (device, queue) = block_on(adapter.request_device(&descriptor))
-                    .ok_or_else(|| anyhow::anyhow!("no runtime for the device request"))?
-                    .map_err(|error| {
-                        anyhow::anyhow!("no device for the activity's surface: {error}")
-                    })?;
+            let (device, queue) = match block_on(adapter.request_device(&descriptor))
+                .ok_or_else(|| anyhow::anyhow!("no runtime for the device request"))?
+            {
+                Ok(pair) => pair,
+                Err(error) => {
+                    notice_shown = true;
+                    let reason = format!("no device for the activity's surface: {error}");
+                    if !show_unsupported_notice(&reason) {
+                        return Err(anyhow::anyhow!(
+                            "{reason}, and the notice could not be shown"
+                        ));
+                    }
+                    continue;
+                }
+            };
 
             let Some(fresh_config) = fresh.get_default_config(&adapter, width, height) else {
                 // A surface the activity has already let go of offers nothing,

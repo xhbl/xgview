@@ -551,3 +551,8 @@ input-copy = 复制
 input-paste = 粘贴
 input-clear = 清空
 input-done = 完成
+
+## 设备不满足图形条件（Android 原生对话框）
+unsupported-title = 无法在此设备上运行 XGView
+unsupported-body = XGView 需要 Vulkan 1.1，或带 GL_KHR_debug 的 OpenGL ES 3.2，才能绘制监控墙。这台设备没有可用的图形后端。
+unsupported-exit = 退出

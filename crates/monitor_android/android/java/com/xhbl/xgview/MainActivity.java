@@ -143,6 +143,70 @@ public class MainActivity extends NativeActivity {
         return self != null ? self : SurfaceActivity.current();
     }
 
+    /** Whether the "this device cannot draw" notice is already up. */
+    private static volatile boolean unsupportedShown;
+
+    /**
+     * Says on screen that this device cannot run the viewer, and why.
+     *
+     * <p>Called from the native side when not one surface can be made. A GPU
+     * below wgpu's floor - OpenGL ES 2.0 and no Vulkan, as on a Mali-450 with
+     * Android 9 - leaves the wall nothing to draw <em>or</em> a message with,
+     * so the notice is an ordinary {@code AlertDialog} over the empty surface,
+     * built on the activity's UI thread. It carries the requirement, the
+     * OpenGL ES level the device actually offers, and one button, which ends
+     * the viewer: there is no state in which it could usefully continue.
+     *
+     * <p>A dialog rather than a toast because this is not a passing remark -
+     * the viewer has to read why the box it was installed on cannot show a
+     * picture, and then acknowledge it.
+     */
+    public static void showUnsupported(final String title, final String body, final String exit) {
+        final Activity host = wall();
+        if (host == null) {
+            android.util.Log.w("xgview", "no activity to put the device notice on");
+            return;
+        }
+        host.runOnUiThread(() -> {
+            if (unsupportedShown || host.isFinishing()) {
+                return;
+            }
+            unsupportedShown = true;
+            final String gles = glesVersion(host);
+            final String message = body + (gles == null ? "" : "\n\nOpenGL ES " + gles);
+            new android.app.AlertDialog.Builder(host)
+                    .setTitle(title)
+                    .setMessage(message)
+                    .setCancelable(false)
+                    .setPositiveButton(exit, (dialog, which) -> {
+                        host.finishAffinity();
+                        android.os.Process.killProcess(android.os.Process.myPid());
+                    })
+                    .show();
+        });
+    }
+
+    /**
+     * The OpenGL ES level the platform reports, as {@code "2.0"}, or null.
+     *
+     * <p>Shown under the notice so the gap between this device and the
+     * requirement is visible rather than inferred. Read from the activity
+     * manager's configuration, which is the same answer the package manager
+     * checks the manifest's features against.
+     */
+    private static String glesVersion(final Activity host) {
+        final android.app.ActivityManager manager =
+                (android.app.ActivityManager) host.getSystemService(Activity.ACTIVITY_SERVICE);
+        if (manager == null) {
+            return null;
+        }
+        final int version = manager.getDeviceConfigurationInfo().reqGlEsVersion;
+        if (version == 0) {
+            return null;
+        }
+        return (version >> 16) + "." + (version & 0xffff);
+    }
+
     /**
      * Whether {@code monitor_android} is loaded, so a native method may be called.
      *

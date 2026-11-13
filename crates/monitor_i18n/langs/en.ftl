@@ -606,3 +606,8 @@ input-copy = Copy
 input-paste = Paste
 input-clear = Clear
 input-done = Done
+
+## Unsupported device (no graphics backend)
+unsupported-title = XGView cannot run on this device
+unsupported-body = XGView draws the wall through Vulkan 1.1, or through OpenGL ES 3.2 with GL_KHR_debug. This device offers no graphics backend the viewer can use.
+unsupported-exit = Exit

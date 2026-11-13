@@ -672,6 +672,49 @@ fn call_void(method: &str) {
     let _ = env.call_static_method(class, method, "()V", &[]);
 }
 
+/// Puts the "this device cannot draw" notice on screen, and says whether it got there.
+///
+/// A device whose GPU is below wgpu's floor - OpenGL ES 2.0 and no Vulkan, as
+/// on a Mali-450 with Android 9 - cannot make a surface at all, and the wall
+/// cannot paint a message either, for the same reason. So the notice is the
+/// activity's: an `AlertDialog` over the empty surface carrying the
+/// requirement and one button, which ends the viewer. `android_surface` counts
+/// the failed attempts and calls this rather than retrying with nothing on
+/// screen; the strings are the caller's, so they are translated where the rest
+/// of the interface is.
+pub fn show_unsupported_device(title: &str, body: &str, exit: &str) -> bool {
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return false;
+    };
+    let (Ok(title), Ok(body), Ok(exit)) = (
+        env.new_string(title),
+        env.new_string(body),
+        env.new_string(exit),
+    ) else {
+        return false;
+    };
+    let called = env.call_static_method(
+        class,
+        "showUnsupported",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        &[
+            JValue::Object(&title),
+            JValue::Object(&body),
+            JValue::Object(&exit),
+        ],
+    );
+    let reached = match called {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!(target: "xgview", %error, "the device notice was not shown");
+            env.exception_describe().ok();
+            false
+        }
+    };
+    clear_exception(&mut env);
+    reached
+}
+
 /// Asks Android to keep the CPU running and/or the screen on.
 ///
 /// Installed as `monitor_core::power`'s Android implementation, because the two
