@@ -30,11 +30,11 @@ paging beyond that. No cloud, no account, MIT licensed.
 
 | Platform                            | File                                                                                                                    |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Android / Android TV (arm64, 8.1+)  | [`xgview-2.2.69-android-arm64-v8a.apk`](../../releases/download/xgview-v2.2.69/xgview-2.2.69-android-arm64-v8a.apk)     |
-| Android / Android TV (32-bit, 8.1+) | [`xgview-2.2.69-android-armeabi-v7a.apk`](../../releases/download/xgview-v2.2.69/xgview-2.2.69-android-armeabi-v7a.apk) |
-| Windows x64                         | [`xgview-2.2.69-windows-x86_64.zip`](../../releases/download/xgview-v2.2.69/xgview-2.2.69-windows-x86_64.zip)           |
-| Linux x64                           | [`xgview-2.2.69-linux-x86_64.tar.gz`](../../releases/download/xgview-v2.2.69/xgview-2.2.69-linux-x86_64.tar.gz)         |
-| macOS (universal)                   | [`xgview-2.2.69-macos-universal.zip`](../../releases/download/xgview-v2.2.69/xgview-2.2.69-macos-universal.zip)         |
+| Android / Android TV (arm64, 8.1+)  | [`xgview-2.2.77-android-arm64-v8a.apk`](../../releases/download/xgview-v2.2.77/xgview-2.2.77-android-arm64-v8a.apk)     |
+| Android / Android TV (32-bit, 8.1+) | [`xgview-2.2.77-android-armeabi-v7a.apk`](../../releases/download/xgview-v2.2.77/xgview-2.2.77-android-armeabi-v7a.apk) |
+| Windows x64                         | [`xgview-2.2.77-windows-x86_64.zip`](../../releases/download/xgview-v2.2.77/xgview-2.2.77-windows-x86_64.zip)           |
+| Linux x64                           | [`xgview-2.2.77-linux-x86_64.tar.gz`](../../releases/download/xgview-v2.2.77/xgview-2.2.77-linux-x86_64.tar.gz)         |
+| macOS (universal)                   | [`xgview-2.2.77-macos-universal.zip`](../../releases/download/xgview-v2.2.77/xgview-2.2.77-macos-universal.zip)         |
 
 **Note: This is a personal project, shared as-is, with no warranty.** It was developed with **AI assistance** under my direction and testing; please review the code before using
 it in sensitive setups.
@@ -308,12 +308,14 @@ Everything is stored in one `xgvconfig.json`:
 | Android           | the app's private data folder                                                    |
 | Any               | set `XGVIEW_CONFIG_DIR` to override the folder, or pass `--config <PATH>`        |
 
-The **About** tab exports and imports the file (on Android, export writes to
-`Download/xgview` and import opens the system file picker). On the desktop both
-open a file browser drawn **inside the wall** rather than a dialog
+The **About** tab exports and imports the file (on Android, an export writes
+straight to `Download/xgview`). On every platform an import - and on the desktop
+an export - opens a file browser drawn **inside the wall** rather than a dialog
 of the desktop's, so it looks and behaves the same everywhere and needs no
-desktop session behind it. An export is **sealed with a passphrase** by default -
-a `xgvconfig.seal` document holding the whole configuration, encrypted with
+desktop session behind it. From Android 11 on, importing a configuration copied
+in from elsewhere needs *All files access* granted in the system settings.
+An export is **sealed with a passphrase** by default - a `xgvconfig.seal`
+document holding the whole configuration, encrypted with
 XChaCha20-Poly1305 under a key stretched from the passphrase by
 PBKDF2-HMAC-SHA256, so the copy you carry between machines is of no use to anyone
 who finds it - and the passphrase is asked for twice and stored nowhere. A box
@@ -717,8 +719,9 @@ managers can; a Wayland session cannot - winit has no way to ask for it there -
 and neither can an XFCE session, where xfwm4 refuses to hold a full screen window
 above the others, nor Android, which has nothing to stay above. Where it cannot
 be honoured the switch is greyed out rather than offered and ignored. It is also
-set aside by itself while the viewer opens something that has to come up in front
-of the wall: a file dialog for export or import, or a page in the browser.
+set aside by itself while a link opens a page in the browser in front of the
+wall; the viewer's own file window is drawn inside the wall and needs no such
+handover.
 
 ### One instance per configuration
 

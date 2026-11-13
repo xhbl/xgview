@@ -3,6 +3,22 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 2.2.77
+
+Changes since 2.2.69.
+
+- **One file window for import and export on every platform**, drawn by the
+  viewer instead of the system picker. It works with arrows or a remote, stays
+  clear of the picture on a television, asks before overwriting, and shows only
+  files of the right kind.
+- **Android exports go to `Download/xgview`** and wait for storage permission;
+  the first export after a grant no longer fails.
+- **An Android 11+ device can import a configuration copied onto it** - the
+  About tab offers the system's *All files access* setting when needed.
+- **Fixed:** a stalled hardware decoder no longer holds up other cameras; Back
+  and Esc close the file window; an empty folder no longer blocks the keyboard;
+  the import/export hints are shorter.
+
 ## 2.2.69
 
 Changes since 2.1.88. **On Android a magnified 1080p picture plays at its full
