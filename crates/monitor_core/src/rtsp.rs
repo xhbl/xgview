@@ -1010,6 +1010,37 @@ impl RtspClient {
         Some(challenge)
     }
 
+    /// Sends a request without cutting into an interleaved frame.
+    ///
+    /// Media and control share one socket. [`Self::send_interleaved`] writes
+    /// only what the socket takes and leaves the rest of a frame in the
+    /// outbox when it fills up; a request written straight after that would
+    /// land inside the `$` frame, and nothing on the far side can resynchronise
+    /// from a stream that starts mid-packet. So the rest of the queue goes
+    /// first, under the same timeout this client reads with, and only then the
+    /// request - one writer, one packet boundary at a time.
+    async fn write_control(&mut self, request: &[u8]) -> Result<()> {
+        let timeout = self.timeout;
+        while let Some((frame, offset)) = self.outbox.pop_front() {
+            let rest = &frame[offset..];
+            tokio::time::timeout(timeout, self.writer.write_all(rest))
+                .await
+                .map_err(|_| {
+                    CoreError::rtsp("control waited for a congested queue that did not drain")
+                })?
+                .map_err(|err| CoreError::rtsp(format!("write control failed: {err}")))?;
+        }
+        self.writer
+            .write_all(request)
+            .await
+            .map_err(|err| CoreError::rtsp(format!("write control failed: {err}")))?;
+        self.writer
+            .flush()
+            .await
+            .map_err(|err| CoreError::rtsp(format!("flush control failed: {err}")))?;
+        Ok(())
+    }
+
     /// Sends a request and returns its CSeq.
     async fn send_request(
         &mut self,
@@ -1040,14 +1071,7 @@ impl RtspClient {
             request.push_str(body);
         }
 
-        self.writer
-            .write_all(request.as_bytes())
-            .await
-            .map_err(|err| CoreError::rtsp(format!("write {method} failed: {err}")))?;
-        self.writer
-            .flush()
-            .await
-            .map_err(|err| CoreError::rtsp(format!("flush {method} failed: {err}")))?;
+        self.write_control(request.as_bytes()).await?;
         Ok(cseq)
     }
 

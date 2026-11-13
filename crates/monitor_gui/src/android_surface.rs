@@ -221,6 +221,22 @@ pub fn push_key(code: i32, pressed: bool, repeat: bool, meta: i32, unicode: i32)
 /// How many fingers are on the glass, so a tap and a pinch can be told apart.
 static FINGERS: AtomicU32 = AtomicU32::new(0);
 
+/// Forgets the fingers that were on the glass.
+///
+/// The count is what separates a tap from a pinch, and a gesture that is cut off
+/// - the activity replaced while two fingers were down, or the surface going
+/// away before `ACTION_CANCEL` arrives - would leave it above one for the rest
+/// of the process. Every later tap is then read as part of a pinch: the pointer
+/// is never pressed, and the wall stops answering to touch until it is
+/// restarted. Called where a surface is attached and where it is let go.
+fn forget_fingers() {
+    if FINGERS.swap(0, Ordering::AcqRel) > 0 {
+        // A finger that is no longer there is a pointer that is no longer
+        // down; without this the wall keeps the drag it was in the middle of.
+        push_event(egui::Event::PointerGone);
+    }
+}
+
 /// Translates one Android touch pointer and hands it to the next frame.
 ///
 /// `phase` is the pointer's own phase rather than the event's action, because a
@@ -345,6 +361,10 @@ pub fn stop(token: u64) {
         return;
     }
     WINDOW.store(std::ptr::null_mut(), Ordering::Release);
+    // The surface that took the fingers is gone, and the cancel that would have
+    // lifted them may never come: the count is cleared here so the next surface
+    // starts at none. See [`forget_fingers`].
+    forget_fingers();
     wake();
 }
 
@@ -523,6 +543,9 @@ pub fn start(window: *mut c_void, internal: String, external: String, density: f
     }
     let token = WALL_TICKET.take();
     WINDOW.store(window, Ordering::Release);
+    // A new surface is a new gesture: whatever was on the glass when the last
+    // one went away is not on this one.
+    forget_fingers();
     if !STARTED.swap(true, Ordering::AcqRel) {
         std::thread::spawn(|| {
             // A failure here does not take the activity with it: this thread

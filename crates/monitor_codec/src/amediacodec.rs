@@ -979,11 +979,18 @@ impl AMediaCodecDecoder {
                 let mut uv = vec![0u8; padded * chroma_height];
                 let u_base = stride * height;
                 let v_base = u_base + chroma_stride * chroma_height;
+                // The row a codec pads to can be longer than the picture's own
+                // colour row: the hint above derives it from what the buffer
+                // has left over, and a 640-wide picture with 384 bytes of it is
+                // a real shape. What is written here is one interleaved row of
+                // `width` bytes, so the columns that fit are what the codec
+                // gave, capped at the half-picture the output has room for.
+                let columns = chroma_stride.min(width / 2);
                 for row in 0..chroma_height {
                     let u_row = data.get(u_base + row * chroma_stride..u_base + (row + 1) * chroma_stride)?;
                     let v_row = data.get(v_base + row * chroma_stride..v_base + (row + 1) * chroma_stride)?;
                     let out = uv.get_mut(row * padded..row * padded + width)?;
-                    for column in 0..chroma_stride {
+                    for column in 0..columns {
                         out[column * 2] = u_row[column];
                         out[column * 2 + 1] = v_row[column];
                     }
@@ -1035,6 +1042,17 @@ impl VideoDecoder for AMediaCodecDecoder {
         // A new session starts its own count: the one that came before it was
         // judged on a codec that no longer exists.
         self.starved = 0;
+        // And its own shape. The buffer layout is worked out once per session -
+        // the same stream can come back as NV12 in one and I420 in the next,
+        // which is exactly what the note beside `layout` describes - so a
+        // remembered one would read every row of the new session at the old
+        // session's lengths, and the picture would come out in green and purple
+        // bands. The geometry is re-read with it, or the log would not mention
+        // the new shape either.
+        self.layout = None;
+        self.geometry_logged = false;
+        self.stride = 0;
+        self.slice_height = 0;
         if let Some(codec) = self.handle.take() {
             if self.started {
                 unsafe { AMediaCodec_stop(codec) };
