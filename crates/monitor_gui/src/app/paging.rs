@@ -119,7 +119,11 @@ impl XgViewApp {
         if changed {
             let layout = self.scheduler.layout();
             let total = self.config.enabled_count();
-            let outgoing = PageView { layout, cells: grid::page_cells(layout, previous, total) };
+            let outgoing = PageView {
+                layout,
+                first: previous * layout.capacity(),
+                cells: grid::page_cells(layout, previous, total),
+            };
             self.slide.start(if forward { 1.0 } else { -1.0 }, Some(outgoing));
             self.needs_sync = true;
             self.mark_dirty();
@@ -146,7 +150,11 @@ impl XgViewApp {
         let outgoing = if matches!(outcome, NavigateOutcome::PageTurned { .. }) {
             let layout = self.scheduler.layout();
             let total = self.config.enabled_count();
-            Some(PageView { layout, cells: grid::page_cells(layout, previous_page, total) })
+            Some(PageView {
+                layout,
+                first: previous_page * layout.capacity(),
+                cells: grid::page_cells(layout, previous_page, total),
+            })
         } else {
             None
         };
@@ -207,7 +215,11 @@ impl XgViewApp {
         // behind it would play on unseen - a request to the server and a
         // decoder held for a camera nobody is looking at.
         self.leave_playback();
-        let outgoing = PageView { layout: GridLayout::G1x1, cells: vec![Some(current)] };
+        let outgoing = PageView {
+            layout: GridLayout::G1x1,
+            first: current,
+            cells: vec![Some(current)],
+        };
         self.slide.start(if forward { 1.0 } else { -1.0 }, Some(outgoing));
         // The channel that slides in comes up whole, the way a magnify does: the
         // window was the last camera's, and a part of it is not a part of this

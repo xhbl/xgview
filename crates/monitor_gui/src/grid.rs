@@ -113,6 +113,11 @@ pub struct Tile<'a> {
     pub id: Id,
     /// Global channel index.
     pub index: Option<usize>,
+    /// The cell's place in the whole camera list, zero based and continuous
+    /// across pages. A cell past the last camera has no `index`, but it still
+    /// has a number - the place a camera would take if one were added. The
+    /// wall passes this in, so the grid stays unaware of pagination.
+    pub number: usize,
     pub camera: Option<&'a CameraSource>,
     pub channel: Option<&'a ChannelUi>,
     /// Newest decoded picture of the channel, `None` until the first frame.
@@ -507,8 +512,12 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
     // tiles is the wall showing through the room the grid leaves around them,
     // so a tile paints no border of its own and keeps no inset. The only thing
     // over the picture is the on-screen display the settings panel asked for.
+    // An empty cell is not a channel that failed: it says which place in the
+    // camera list has no camera in it, quietly enough that a wall of them
+    // still lets the pictures lead. See `empty_tile`.
     if tile.camera.is_none() {
         painter.rect_filled(rect, CornerRadius::ZERO, dim(theme::TILE_EMPTY));
+        empty_tile(&painter, rect, tile.number, tile.dim);
         if tile.focused {
             ring(&painter, rect);
         }
@@ -1364,6 +1373,100 @@ fn waiting_for_video(painter: &egui::Painter, rect: Rect, tier: Tier) {
     );
 }
 
+/// The number a cell with no camera shows: its place in the whole camera list,
+/// two digits so a 4x4 wall counts from 01 to 16 without the digits jumping
+/// about. The count does not start over on a new page.
+fn empty_cell_label(number: usize) -> String {
+    format!("{:02}", number + 1)
+}
+
+/// The number is the one part of an empty cell meant to be read from a couch,
+/// so it is larger than an OSD name by this fixed factor. Everything about how
+/// it scales - the shorter side of the tile, the cap, the screen factor and
+/// pixels-per-point - is the OSD's own measure; see `OsdMetrics::of`.
+const EMPTY_NUMBER_SCALE: f32 = 3.0;
+
+/// The wording is larger than an OSD name (`NAME_SCALE`): a name is read in
+/// the corner of a moving picture, while this is all the cell has to say, and
+/// it has to carry from across a room. It still rides the OSD's measure of the
+/// tile rather than having a point size of its own.
+const EMPTY_WORDING_SCALE: f32 = 1.6;
+
+/// `osd_corner` spaces its lines by `1.25` of their size. Measured on the
+/// number, that spread left too much air between the two lines of an empty
+/// cell; three quarters of it reads as one label without crowding the digits.
+const EMPTY_LEAD_SCALE: f32 = 1.25 * 0.75;
+
+/// Both sizes of an empty cell's text, taken from the same measure the corner
+/// display uses, so the two grow and shrink together with the tile instead of
+/// each having a hard-coded point size.
+fn empty_cell_font(metrics: &OsdMetrics) -> (f32, f32) {
+    (metrics.font * EMPTY_NUMBER_SCALE, metrics.font * EMPTY_WORDING_SCALE)
+}
+
+/// Half the distance between the two lines, so the pair stays centred on the
+/// cell. It follows the number - the larger of the two sizes - and therefore
+/// keeps the same proportions however small the tile gets.
+fn empty_cell_lead(number_size: f32) -> f32 {
+    number_size * EMPTY_LEAD_SCALE * 0.5
+}
+
+/// Paints a cell with no camera configured: a reserved place in the camera
+/// list, not a stream that went dark.
+///
+/// A black tile is what a broken channel looks like, and the wall already has
+/// four louder states that say exactly what is wrong with a channel. This one
+/// says nothing is wrong - there is simply no camera here - using the dimmest
+/// text the theme has, a dashed outline rather than the camera icon of a stream
+/// waiting for its first frame, and no motion at all. It stays out of
+/// `state_layer`: an empty cell has no channel, no picture frame and no rotated
+/// equivalent, and it never draws the on-screen display, which has no name to
+/// show. Every colour goes through the page's dim so a page sliding out fades
+/// as a whole.
+///
+/// Unlike a state panel it never drops a line as the cell shrinks: every empty
+/// cell says the same two things, its global number and `grid-empty-slot`.
+/// Both are sized by the OSD's own measure of the tile, so they shrink with the
+/// corner text instead of holding a fixed point size that would overrun a
+/// small cell. Their leading is a tightened fraction of the OSD's, so they
+/// read as one label rather than two separate captions.
+fn empty_tile(painter: &egui::Painter, rect: Rect, number: usize, dim: bool) {
+    let tint = |color: Color32| if dim { color.gamma_multiply(0.5) } else { color };
+    let frame = rect.shrink(rect.width().min(rect.height()) * 0.10);
+    let corners = [
+        frame.left_top(),
+        frame.right_top(),
+        frame.right_bottom(),
+        frame.left_bottom(),
+        frame.left_top(),
+    ];
+    for dash in Shape::dashed_line(&corners, Stroke::new(1.0_f32, tint(theme::TILE_BORDER)), 8.0, 6.0) {
+        painter.add(dash);
+    }
+
+    let ctx = painter.ctx();
+    let ppp = ctx.pixels_per_point();
+    let screen_min = ctx.screen_rect().size().min_elem() * ppp;
+    let metrics = OsdMetrics::of(rect, ppp, screen_min);
+    let (number_size, wording_size) = empty_cell_font(&metrics);
+    let lead = empty_cell_lead(number_size);
+    let centre = frame.center();
+    painter.text(
+        centre - vec2(0.0, lead),
+        Align2::CENTER_CENTER,
+        empty_cell_label(number),
+        FontId::monospace(number_size),
+        tint(theme::TEXT_HINT),
+    );
+    painter.text(
+        centre + vec2(0.0, lead),
+        Align2::CENTER_CENTER,
+        monitor_i18n::tr("grid-empty-slot"),
+        FontId::monospace(wording_size),
+        tint(theme::TEXT_HINT),
+    );
+}
+
 pub(crate) fn ring(painter: &egui::Painter, rect: Rect) {
     painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(theme::FOCUS_WIDTH, theme::FOCUS), StrokeKind::Inside);
 }
@@ -1397,6 +1500,54 @@ pub fn empty_state(ui: &mut Ui, area: Rect, message: &str, hint: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The number keeps counting across pages: the second page of a 3x3 wall
+    /// starts at 10, and a list past 99 keeps every digit.
+    #[test]
+    fn an_empty_cell_is_numbered_by_its_place_in_the_list() {
+        assert_eq!(empty_cell_label(0), "01");
+        assert_eq!(empty_cell_label(8), "09");
+        assert_eq!(empty_cell_label(9), "10");
+        assert_eq!(empty_cell_label(15), "16");
+        assert_eq!(empty_cell_label(99), "100");
+    }
+
+    /// Both lines of an empty cell are sized by the OSD's own measure of the
+    /// tile, not by point sizes of their own. Grow the tile and both grow with
+    /// it; the wording is larger than an OSD name but still follows its scale.
+    #[test]
+    fn an_empty_cell_scales_its_text_like_the_osd() {
+        let small = OsdMetrics::of(Rect::from_min_size(egui::Pos2::ZERO, vec2(320.0, 155.0)), 1.0, 1080.0);
+        let large = OsdMetrics::of(Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 311.0)), 1.0, 1080.0);
+        let (small_number, small_wording) = empty_cell_font(&small);
+        let (large_number, large_wording) = empty_cell_font(&large);
+        assert_eq!(small_wording, small.font * EMPTY_WORDING_SCALE);
+        assert_eq!(large_wording, large.font * EMPTY_WORDING_SCALE);
+        assert_eq!(small_number, small.font * EMPTY_NUMBER_SCALE);
+        assert_eq!(large_number, large.font * EMPTY_NUMBER_SCALE);
+        assert!(small_wording > small.font * NAME_SCALE && large_wording > large.font * NAME_SCALE);
+        assert!(large_wording > small_wording && large_number > small_number);
+        assert!(small_number > small_wording && large_number > large_wording);
+    }
+
+    /// The two lines sit a quarter closer than the OSD's leading, and the gap
+    /// is a fraction of the number's size: it shrinks with the tile instead of
+    /// holding a fixed pixel distance that would collide in a small cell.
+    #[test]
+    fn an_empty_cell_keeps_its_two_lines_close() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        assert!(near(EMPTY_LEAD_SCALE / 1.25, 0.75));
+        let small = OsdMetrics::of(Rect::from_min_size(egui::Pos2::ZERO, vec2(320.0, 155.0)), 1.0, 1080.0);
+        let large = OsdMetrics::of(Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 311.0)), 1.0, 1080.0);
+        let (small_number, _) = empty_cell_font(&small);
+        let (large_number, _) = empty_cell_font(&large);
+        let pair = |n: f32| empty_cell_lead(n) * 2.0;
+        assert!(near(pair(small_number), small_number * EMPTY_LEAD_SCALE));
+        assert!(near(pair(large_number), large_number * EMPTY_LEAD_SCALE));
+        assert!(pair(small_number) < small_number * 1.25);
+        assert!(near(pair(large_number) / pair(small_number), large_number / small_number));
+        assert!(pair(large_number) > pair(small_number));
+    }
 
     /// A state panel over a turned picture is the picture's frame: a block the
     /// reader sees centred stays centred, and its sides trade on the screen -

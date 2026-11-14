@@ -323,6 +323,8 @@ wall-empty-title = No camera configured
 wall-empty-title-group = { wall-empty-title } ({ $group })
 wall-empty-hint = Click "+" or press F2 to scan for network cameras or manually add one
 wall-empty-hint-portrait = Switch to landscape to add a camera
+wall-empty-page-title = No cameras on this page
+wall-empty-page-hint = { $count } cameras in total · press ← / → to change page
 exit-hint = Press BACK again to quit
 
 ## Toasts
@@ -466,6 +468,7 @@ grid-suspended = suspended
 grid-switching-to = Switching to { $stream }…
 grid-holding-last = holding last { $tag } frame
 grid-waiting-video = waiting for video
+grid-empty-slot = No camera
 
 ## Add devices dialog
 dialog-add-devices = Add devices

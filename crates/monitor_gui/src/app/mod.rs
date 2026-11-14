@@ -340,6 +340,10 @@ impl ChannelUi {
 #[derive(Debug, Clone)]
 struct PageView {
     layout: GridLayout,
+    /// Global index of this page's first slot. An empty cell is numbered from
+    /// here, so the numbers keep counting across pages instead of starting
+    /// over at 01 on every page.
+    first: usize,
     cells: Vec<Option<usize>>,
 }
 

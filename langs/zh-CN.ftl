@@ -317,6 +317,8 @@ wall-empty-title = 未配置摄像头
 wall-empty-title-group = { wall-empty-title } ({ $group })
 wall-empty-hint = 点击“+”或按 F2 扫描网络摄像头或手动添加
 wall-empty-hint-portrait = 请切换到横屏模式添加摄像头
+wall-empty-page-title = 本页没有摄像头
+wall-empty-page-hint = 共 { $count } 台摄像头，按 ← / → 切换到有画面的页
 exit-hint = 再按一次返回退出
 
 ## 提示
@@ -437,6 +439,7 @@ grid-suspended = 已挂起
 grid-switching-to = 切换到 { $stream }…
 grid-holding-last = 保留上一{ $tag }码流帧
 grid-waiting-video = 等待画面
+grid-empty-slot = 无摄像头
 
 ## 添加设备对话框
 dialog-add-devices = 添加设备

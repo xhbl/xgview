@@ -6,10 +6,15 @@ use super::*;
 impl XgViewApp {
     pub(super) fn current_view(&self, total: usize) -> PageView {
         match self.scheduler.zoom() {
-            Some(index) if index < total => PageView { layout: GridLayout::G1x1, cells: vec![Some(index)] },
+            Some(index) if index < total => PageView {
+                layout: GridLayout::G1x1,
+                first: index,
+                cells: vec![Some(index)],
+            },
             _ => {
                 let layout = self.scheduler.layout();
-                PageView { layout, cells: grid::page_cells(layout, self.scheduler.page(), total) }
+                let page = self.scheduler.page();
+                PageView { layout, first: page * layout.capacity(), cells: grid::page_cells(layout, page, total) }
             }
         }
     }
@@ -19,14 +24,18 @@ impl XgViewApp {
         if self.scheduler.is_zoomed() {
             let focus = self.scheduler.focus()?;
             let index = if forward { focus + 1 } else { focus.checked_sub(1)? };
-            return (index < total).then_some(PageView { layout: GridLayout::G1x1, cells: vec![Some(index)] });
+            return (index < total).then_some(PageView {
+                layout: GridLayout::G1x1,
+                first: index,
+                cells: vec![Some(index)],
+            });
         }
         let page = if forward { self.scheduler.page() + 1 } else { self.scheduler.page().checked_sub(1)? };
         if page >= self.scheduler.page_count() {
             return None;
         }
         let layout = self.scheduler.layout();
-        Some(PageView { layout, cells: grid::page_cells(layout, page, total) })
+        Some(PageView { layout, first: page * layout.capacity(), cells: grid::page_cells(layout, page, total) })
     }
 
     /// Where the magnified viewport's picture is drawn this frame, if it has one.
@@ -501,6 +510,7 @@ impl XgViewApp {
                     let tile = self.tile_of(
                         Id::new("xgview-overlay-tile"),
                         Some(index),
+                        index,
                         &cameras,
                         1,
                         true,
@@ -598,6 +608,7 @@ impl XgViewApp {
         &'a self,
         id: Id,
         index: Option<usize>,
+        number: usize,
         cameras: &'a [CameraSource],
         cells: usize,
         interactive: bool,
@@ -606,6 +617,7 @@ impl XgViewApp {
         Tile {
             id,
             index,
+            number,
             camera: index.and_then(|index| cameras.get(index)),
             // The picture, and the channel behind it, come from the
             // slot's view: a camera showing a recording is still that
@@ -711,6 +723,7 @@ impl XgViewApp {
                 self.tile_of(
                     Id::new(("xgview-tile", tag, cell, index.unwrap_or(usize::MAX))),
                     *index,
+                    view.first + cell,
                     cameras,
                     view.cells.len(),
                     interactive,
@@ -779,6 +792,21 @@ impl XgViewApp {
         }
 
         let view = self.current_view(total);
+
+        // A page past the last camera has no cells at all. It is not a wall of
+        // empty channels: the cameras exist, they are simply on another page -
+        // which happens when cameras are removed and the page has not stepped
+        // back yet. Normal paging never lands here, and the magnified view
+        // always names a camera, so this is a guard rather than a state.
+        if view.cells.iter().all(Option::is_none) {
+            grid::empty_state(
+                ui,
+                area,
+                &monitor_i18n::tr("wall-empty-page-title"),
+                &monitor_i18n::tr_args("wall-empty-page-hint", &[("count", total.into())]),
+            );
+            return;
+        }
 
         // The wall's own colour is the grid line: the tiles leave one line's
         // width around and between themselves, and it shows through. Drawing
