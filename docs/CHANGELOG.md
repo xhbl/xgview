@@ -3,7 +3,7 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 2.2.77
+## 2.2.84
 
 Changes since 2.2.69.
 
@@ -18,6 +18,13 @@ Changes since 2.2.69.
 - **Fixed:** a stalled hardware decoder no longer holds up other cameras; Back
   and Esc close the file window; an empty folder no longer blocks the keyboard;
   the import/export hints are shorter.
+- **A device that cannot draw the wall now explains why on screen** - the
+  graphics support the viewer needs, the level this device has, and a button to
+  quit - instead of hanging on a black picture.
+- **Fixed:** a failed save is retried instead of being forgotten; a camera that
+  gave up reconnecting comes back when the app returns to the foreground; an
+  import keeps the sound, audio and power settings; a failed save no longer
+  leaves a permanent error banner.
 
 ## 2.2.69
 
