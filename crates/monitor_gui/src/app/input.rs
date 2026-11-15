@@ -1645,7 +1645,7 @@ impl XgViewApp {
                     // this is only ever reached for one that can act.
                     if self.tile_bar_available(action) {
                         ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
-                        self.tile_bar_activate(action);
+                        self.tile_bar_activate(action, ctx);
                         return;
                     }
                 }

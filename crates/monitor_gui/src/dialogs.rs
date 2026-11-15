@@ -698,10 +698,10 @@ pub fn start_go2rtc(handle: &Handle, events: &Sender<BackgroundEvent>, config: G
 /// The bar is this tall whether or not the dialog has a cross, so that every
 /// dialog's title sits at the same height.
 pub const CLOSE_SIDE: f32 = 28.0;
-const TITLE_EDGE: f32 = 1.0;
+pub(crate) const TITLE_EDGE: f32 = 1.0;
 pub const TITLE_BAR_H: f32 = CLOSE_SIDE + 2.0 * TITLE_EDGE;
 /// Gap between the dialog's left border and the title text.
-const TITLE_INSET: f32 = 4.0;
+pub(crate) const TITLE_INSET: f32 = 4.0;
 /// Nudge of the title text, to correct the glyphs' optical centre (+ is down).
 const TITLE_DY: f32 = 0.0;
 

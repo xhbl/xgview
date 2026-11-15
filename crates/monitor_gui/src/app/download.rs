@@ -27,6 +27,7 @@ use monitor_core::recording_download::{
 use tokio::task::AbortHandle;
 
 use crate::dialogs::BackgroundEvent;
+use crate::icons::{self, Icon};
 use crate::nav::{Axis, Dir, Exit, ScopeDef};
 use crate::{dialogs, theme, tilebar};
 use super::{Answer, ToastKind, XgViewApp};
@@ -50,6 +51,19 @@ const HINT_WINDOW: Duration = Duration::from_secs(6);
 /// scheduler's own answer.
 fn bar_returns_after(was_open: bool, is_open: bool, recording: bool, magnified: bool) -> bool {
     was_open && !is_open && recording && magnified
+}
+
+/// Where the focus goes back to when the panel closes, as a pure rule.
+///
+/// The button that opened it - but only when the focus was standing on that
+/// button already, which is what a remote walking onto it leaves behind. A
+/// pointer press moves no focus anywhere in this program, so a panel it opened
+/// must not appear to move it either: the ring would come up on a button nobody
+/// had aimed at, and stay lit for the ring's whole idle after the panel had
+/// gone. See [`super::Modal::from`], which states the same rule for every window
+/// here, and the toolbar's layout picker, which reads it off the press itself.
+fn focus_returns_to(button: Option<egui::Id>, focused: Option<egui::Id>) -> Option<egui::Id> {
+    button.filter(|id| focused == Some(*id))
 }
 
 /// What the last download answered, while it is still worth showing.
@@ -266,51 +280,321 @@ impl XgViewApp {
 
 /// The panel's navigation scopes, declared beside the panel they walk.
 ///
-/// The lengths and the button under them are two scopes rather than one, because
-/// the two orientations arrange the lengths differently: a phone stacks them and
-/// walks them with Up / Down, a wide screen puts them side by side and walks them
-/// with Left / Right. What both have in common is where Down goes - to the one
-/// button - and Up out of it - back to the lengths. The four names are the whole
-/// of the difference, and a scope that names an exit that does not exist is a
-/// dead key rather than a compile error, so the test at the foot of this file
-/// walks them.
-const LENGTHS_STACKED: &str = "download-lengths-stacked";
-const LENGTHS_BESIDE: &str = "download-lengths-beside";
-const SAVE_UNDER_STACK: &str = "download-save-under-stack";
-const SAVE_UNDER_ROW: &str = "download-save-under-row";
+/// The lengths and the button under them are two scopes rather than one: the
+/// three lengths are a row on every screen - a phone held upright has the width
+/// for `[1 minute] [5 minutes] [10 minutes]`, and stacking them made the panel
+/// longer than the choice was worth - and the walk along that row is Left /
+/// Right. What joins the two is where Down goes, to the one button, and where Up
+/// out of it goes, back to the lengths. A scope naming an exit that does not
+/// exist is a dead key rather than a compile error, so the test at the foot of
+/// this file walks them.
+const LENGTHS: &str = "download-lengths";
+const SAVE: &str = "download-save";
+/// The same two scopes as a viewer holding a turned picture reads them.
+///
+/// A quarter turn clockwise puts the panel's own rows down the screen: what
+/// was a row of lengths is a column, so Up / Down pick one, and what the viewer
+/// calls Down - out of the lengths to the button under them - is a press to the
+/// screen's left. `tilebar::scope` reads the same turn for the bar's controls.
+const LENGTHS_TURNED: &str = "download-lengths-turned";
+const SAVE_TURNED: &str = "download-save-turned";
 
 pub(super) fn scopes() -> [(&'static str, ScopeDef); 4] {
     [
+        (LENGTHS, ScopeDef::new(Axis::Row).scrolling().exit(Dir::Down, Exit::Scope(SAVE))),
+        (SAVE, ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope(LENGTHS))),
         (
-            LENGTHS_STACKED,
-            ScopeDef::new(Axis::Column).scrolling().exit(Dir::Down, Exit::Scope(SAVE_UNDER_STACK)),
+            LENGTHS_TURNED,
+            ScopeDef::new(Axis::Column).exit(Dir::Left, Exit::Scope(SAVE_TURNED)),
         ),
-        (
-            LENGTHS_BESIDE,
-            ScopeDef::new(Axis::Row).scrolling().exit(Dir::Down, Exit::Scope(SAVE_UNDER_ROW)),
-        ),
-        (SAVE_UNDER_STACK, ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope(LENGTHS_STACKED))),
-        (SAVE_UNDER_ROW, ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope(LENGTHS_BESIDE))),
+        (SAVE_TURNED, ScopeDef::new(Axis::Column).exit(Dir::Right, Exit::Scope(LENGTHS_TURNED))),
     ]
 }
 
-/// Draws the three lengths, in the order the walk uses.
+/// Everything the panel has to say this frame, worked out once.
 ///
-/// The ring starts on the length that is chosen, not on the first one: opening a
-/// panel with 5 minutes picked and the ring on 1 minute reads as though the
-/// panel disagreed with itself. Where there is a button to press, that button
-/// takes the ring instead - see the foot of the body - because the press that
-/// opened this window already said what it wanted.
-fn draw_lengths(app: &mut XgViewApp, ui: &mut egui::Ui, choice: &mut DownloadChoice, labels: &[String]) {
-    for (index, label) in labels.iter().enumerate() {
-        let button = app.nav.tracked(ui.selectable_label(choice.choice == index, label.clone()));
-        if index == choice.choice {
-            app.download_panel.anchor = Some(button.id);
-        }
-        if button.clicked() {
-            choice.choice = index;
+/// Two ways draw it: `egui::Modal` on a level picture, and a hand-painted
+/// window over one turned a quarter turn, because egui has no rotated layer.
+/// What the two say must not drift, so the words, the interval and the name are
+/// all made here and both renderers only place them.
+struct View {
+    camera: String,
+    labels: Vec<String>,
+    selected: usize,
+    plan: ClipWindow,
+    /// Small print, in the order it is read.
+    notes: Vec<String>,
+    /// The two ways out of a hole, and the moment each jumps to.
+    jumps: Vec<(String, i64)>,
+    /// The word on the button, absent when there is nothing to save.
+    save: Option<String>,
+    /// The name a confirmation would give the file.
+    name: String,
+}
+
+impl View {
+    fn of(choice: &DownloadChoice) -> Self {
+        let seconds = DURATION_CHOICES[choice.choice.min(DURATION_CHOICES.len() - 1)];
+        let plan = rules::clamp_window(&choice.stretches, choice.cursor, seconds);
+        let labels = DURATION_CHOICES
+            .iter()
+            .map(|s| monitor_i18n::tr_args("download-minutes", &[("count", (s / 60).into())]))
+            .collect();
+        let (notes, jumps, save, name) = match plan {
+            ClipWindow::Ready { from, to, shortened } => {
+                let name = rules::clip_file_name(
+                    &choice.camera,
+                    &choice.frigate_camera,
+                    from,
+                    to - from,
+                );
+                let mut notes = vec![
+                    monitor_i18n::tr_args(
+                        "download-range",
+                        &[("from", stamp(from).into()), ("to", stamp(to).into())],
+                    ),
+                    monitor_i18n::tr_args("download-actual", &[("seconds", (to - from).into())]),
+                ];
+                if shortened {
+                    notes.push(monitor_i18n::tr("download-shortened"));
+                }
+                notes.push(monitor_i18n::tr_args("download-file", &[("name", name.clone().into())]));
+                notes.push(monitor_i18n::tr_args(
+                    "download-to",
+                    &[("path", choice.dir.clone().into())],
+                ));
+                (notes, Vec::new(), Some(monitor_i18n::tr("download-confirm")), name)
+            }
+            ClipWindow::Gap { before, after } => {
+                let mut jumps = Vec::new();
+                if let Some(at) = before {
+                    jumps.push((monitor_i18n::tr("download-jump-before"), at));
+                }
+                if let Some(at) = after {
+                    jumps.push((monitor_i18n::tr("download-jump-after"), at));
+                }
+                (vec![monitor_i18n::tr("download-gap")], jumps, None, String::new())
+            }
+            ClipWindow::Empty => {
+                (vec![monitor_i18n::tr("download-none")], Vec::new(), None, String::new())
+            }
+        };
+        Self {
+            camera: choice.camera.clone(),
+            labels,
+            selected: choice.choice,
+            plan,
+            notes,
+            jumps,
+            save,
+            name,
         }
     }
+
+    fn ready(&self) -> Option<(i64, i64)> {
+        match self.plan {
+            ClipWindow::Ready { from, to, .. } => Some((from, to)),
+            _ => None,
+        }
+    }
+}
+
+/// What either renderer's controls answered this frame.
+#[derive(Default)]
+struct Actions {
+    selected: Option<usize>,
+    confirm: bool,
+    close: bool,
+    jump: Option<i64>,
+}
+
+/// The one answer to a press, whichever way the panel was drawn.
+fn resolve(
+    app: &mut XgViewApp,
+    choice: &mut DownloadChoice,
+    view: &View,
+    actions: Actions,
+) -> Answer {
+    if let Some(index) = actions.selected {
+        choice.choice = index;
+    }
+    if actions.confirm {
+        tracing::info!(target: "xgview::app", ready = view.ready().is_some(), "the save panel was confirmed");
+        if let Some((from, to)) = view.ready() {
+            let camera = choice.camera.clone();
+            app.start_download(
+                ClipRequest {
+                    base_url: choice.base_url.clone(),
+                    camera: choice.frigate_camera.clone(),
+                    from,
+                    to,
+                    credentials: choice.credentials.clone(),
+                    name: view.name.clone(),
+                },
+                camera,
+            );
+            return Answer::CLOSE;
+        }
+    }
+    if let Some(at) = actions.jump {
+        app.seek(at);
+        return Answer::CLOSE;
+    }
+    if actions.close {
+        Answer::CLOSE
+    } else {
+        Answer::STAY
+    }
+}
+
+/// A point of a turned picture's frame on the screen.
+///
+/// The picture's own frame swaps the screen's sides - its `x` runs down the
+/// screen and its `y` runs left from the tile's right edge. `tilebar::to_screen`
+/// puts the bar in the same frame, and `grid` the corners and the wording.
+fn turned_at(tile: egui::Rect, p: egui::Pos2) -> egui::Pos2 {
+    egui::pos2(tile.right() - p.y, tile.top() + p.x)
+}
+
+/// [`turned_at`] for a rectangle: a quarter turn keeps an axis-aligned
+/// rectangle axis-aligned, so both corners are enough.
+fn turned_rect(tile: egui::Rect, r: egui::Rect) -> egui::Rect {
+    egui::Rect::from_two_pos(turned_at(tile, r.min), turned_at(tile, r.max))
+}
+
+/// The picture's own frame: the tile's sides, traded.
+fn turned_frame(tile: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(tile.height(), tile.width()))
+}
+
+/// A panel centred in that frame, never bigger than the frame itself.
+fn turned_panel_box(frame: egui::Rect, size: egui::Vec2) -> egui::Rect {
+    let size = egui::vec2(size.x.min(frame.width()), size.y.min(frame.height()));
+    egui::Rect::from_center_size(frame.center(), size)
+}
+
+/// Lines laid out in the panel's own frame; a turned line reads down the
+/// screen, so the galley's width is still the width it is wrapped at.
+fn turned_galley(
+    ctx: &egui::Context,
+    text: &str,
+    font: &egui::FontId,
+    color: egui::Color32,
+    wrap: f32,
+) -> std::sync::Arc<egui::Galley> {
+    ctx.fonts(|fonts| fonts.layout(text.to_owned(), font.clone(), color, wrap))
+}
+
+/// One line of the turned panel. A galley's own `x` is the reading direction,
+/// which on the screen is down, so the text starts at the local top-left and is
+/// drawn with a quarter turn about it - exactly as `chrome::paint_toast_turned`
+/// places a turned toast.
+fn turned_text(
+    ui: &egui::Ui,
+    tile: egui::Rect,
+    local: egui::Rect,
+    galley: std::sync::Arc<egui::Galley>,
+    color: egui::Color32,
+) {
+    let at = turned_at(
+        tile,
+        egui::pos2(
+            local.min.x,
+            local.min.y + (local.height() - galley.size().y) * 0.5,
+        ),
+    );
+    ui.painter().add(
+        egui::epaint::TextShape::new(at, galley, color)
+            .with_angle(std::f32::consts::FRAC_PI_2),
+    );
+}
+
+/// The panel on a level picture: an `egui::Modal`, whose backdrop and keyboard
+/// behaviour are the same as every other window of this program.
+fn draw_level(
+    app: &mut XgViewApp,
+    ctx: &egui::Context,
+    width: f32,
+    max_height: f32,
+    view: &View,
+) -> Actions {
+    let mut actions = Actions::default();
+    egui::Modal::new(egui::Id::new("xgview-download-panel")).show(ctx, |ui| {
+        ui.set_width(width);
+        // The cross stays outside the scroll area, where every other window
+        // puts it: a body long enough to scroll must not carry the way out off
+        // the top of the screen with it.
+        let bar = dialogs::title_bar(
+            ui,
+            &monitor_i18n::tr("download-title"),
+            true,
+            &monitor_i18n::tr("dialog-close"),
+        );
+        if bar.close.is_some_and(|button| button.clicked()) {
+            actions.close = true;
+        }
+
+        egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
+            ui.label(egui::RichText::new(&view.camera).strong());
+            ui.add_space(theme::space::M);
+
+            app.nav.open(LENGTHS);
+            ui.horizontal(|ui| {
+                for (index, label) in view.labels.iter().enumerate() {
+                    let button =
+                        app.nav.tracked(ui.selectable_label(index == view.selected, label.clone()));
+                    if index == view.selected {
+                        app.download_panel.anchor = Some(button.id);
+                    }
+                    if button.clicked() {
+                        actions.selected = Some(index);
+                    }
+                }
+            });
+            for text in &view.notes {
+                note(ui, text.clone());
+            }
+            for (label, at) in &view.jumps {
+                let button = app.nav.tracked(ui.button(label.clone()));
+                if button.clicked() {
+                    actions.jump = Some(*at);
+                }
+            }
+            app.nav.close();
+            ui.add_space(theme::space::M);
+
+            // A button that cannot act is not a control: it takes no focus, so
+            // it is registered only when it can be pressed. Its absence is what
+            // leaves Down from the last length with nowhere to go, which is the
+            // honest answer for a hole.
+            if let Some(save_label) = &view.save {
+                ui.horizontal(|ui| {
+                    ui.add_space(XgViewApp::center_offset(ui, &[save_label]));
+                    app.nav.open(SAVE);
+                    let save = app.nav.tracked(ui.button(save_label.clone()));
+                    // The panel opens on the save: the press that opened it was
+                    // a request to save this recording, and the length still
+                    // shows what it will save.
+                    app.download_panel.anchor = Some(save.id);
+                    app.nav.close();
+                    if save.clicked() {
+                        actions.confirm = true;
+                    }
+                });
+            }
+        });
+    });
+    actions
+}
+
+/// A line of small print under the choices.
+///
+/// The answer to "what exactly will this save" is reference, not a heading: it
+/// is read once, against the length chosen, and the same size as the text would
+/// put it in competition with the choices above it. Every other window of this
+/// program carries its asides this way - see the hints in `dialogs`.
+fn note(ui: &mut egui::Ui, text: String) {
+    ui.label(egui::RichText::new(text).small().color(theme::TEXT_DIM));
 }
 
 /// What the panel was opened on, frozen while the viewer chooses.
@@ -349,7 +633,9 @@ impl XgViewApp {
     /// An entirely empty timeline is answered with a toast instead: there is
     /// nothing to choose. A home that cannot be written to is answered here
     /// rather than after a request the box has already started cutting.
-    pub(super) fn open_download_panel(&mut self) {
+    /// `ctx` is read once, for where the focus stood when the panel was asked
+    /// for - see the assignment of `from` below.
+    pub(super) fn open_download_panel(&mut self, ctx: &egui::Context) {
         if self.download.is_active() {
             return;
         }
@@ -397,10 +683,14 @@ impl XgViewApp {
         // `hand_off_when` picks it up as soon as this frame's is known.
         self.download_panel.anchor = None;
         // Where the focus goes when the window closes: the button that opened
-        // it, as every other window of this program does. Without this the panel
-        // took the focus and gave it back nowhere, so the strip came back with a
-        // remote that had to arm it with Enter before an arrow did anything.
-        self.download_panel.from = self.download_button();
+        // it, as every other window of this program does - but only when the
+        // focus stood on that button already. Without this a remote that opened
+        // the panel had nowhere to come back to, and the strip had to be armed
+        // with Enter again before an arrow did anything; with it unconditional,
+        // a panel opened with a finger lit the ring on a button no one had
+        // aimed at. See `focus_returns_to`.
+        self.download_panel.from =
+            focus_returns_to(self.download_button(), ctx.memory(|memory| memory.focused()));
         self.download_panel.open(DownloadChoice {
             camera: label,
             frigate_camera: source.origin.camera.clone(),
@@ -415,12 +705,12 @@ impl XgViewApp {
 
     /// Draws the panel that asks how much of the recording to save.
     ///
-    /// A width that fits a phone, a height that fits a landscape television, and
-    /// the two scopes [above](scopes): the three lengths are a row on a wide
-    /// screen and a column on a narrow one, and Down from either is the button.
     /// The actual interval and the file name are shown *before* confirmation,
     /// because a window slid away from a hole is not the moment the viewer
-    /// pointed at, and a short stretch is not the length they chose.
+    /// pointed at, and a short stretch is not the length they chose. Both ways
+    /// of drawing it - a level `egui::Modal`, or one painted into a picture's
+    /// turned frame - read the same [`View`], so neither can say something the
+    /// other does not.
     ///
     /// The way out is the cross in the title bar and the Back key, as in every
     /// other window of this program - there is no Cancel button beside the
@@ -429,172 +719,23 @@ impl XgViewApp {
     pub(super) fn download_panel_window(&mut self, ctx: &egui::Context) {
         let screen = ctx.screen_rect();
         let width = 420.0_f32.min(screen.width() - 48.0).max(260.0);
-        let stacked = screen.width() < screen.height();
         let max_height = screen.height() * 0.8;
-        self.modal_frame(
-            ctx,
-            "xgview-download-panel",
-            width,
-            |app| &mut app.download_panel,
-            move |app, ui, choice| {
-                let seconds = DURATION_CHOICES[choice.choice.min(DURATION_CHOICES.len() - 1)];
-                let plan = rules::clamp_window(&choice.stretches, choice.cursor, seconds);
-                let ready = match plan {
-                    ClipWindow::Ready { from, to, .. } => Some((from, to)),
-                    _ => None,
-                };
-                let mut request: Option<ClipRequest> = None;
-                let mut confirm = false;
-                let mut close = false;
-                let mut jump: Option<i64> = None;
-
-                // The cross stays outside the scroll area, where every other
-                // window puts it: a body long enough to scroll must not carry
-                // the way out off the top of the screen with it.
-                let bar = dialogs::title_bar(
-                    ui,
-                    &monitor_i18n::tr("download-title"),
-                    true,
-                    &monitor_i18n::tr("dialog-close"),
-                );
-                if bar.close.is_some_and(|button| button.clicked()) {
-                    close = true;
-                }
-
-                egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
-                    ui.label(egui::RichText::new(&choice.camera).strong());
-                    ui.add_space(theme::space::M);
-
-                    let labels: Vec<String> = DURATION_CHOICES
-                        .iter()
-                        .map(|s| {
-                            monitor_i18n::tr_args("download-minutes", &[("count", (s / 60).into())])
-                        })
-                        .collect();
-                    app.nav.open(if stacked { LENGTHS_STACKED } else { LENGTHS_BESIDE });
-                    if stacked {
-                        draw_lengths(app, ui, choice, &labels);
-                    } else {
-                        ui.horizontal(|ui| draw_lengths(app, ui, choice, &labels));
-                    }
-                    // A hole in the recording has nothing to save, and the two
-                    // ways out of it are the lengths' own: the walk reaches them
-                    // after the last one, and Down from there is the exit to a
-                    // button that stays out of the reach while the window is a
-                    // hole.
-                    if let ClipWindow::Gap { before, after } = plan {
-                        ui.add_space(theme::space::S);
-                        ui.label(monitor_i18n::tr("download-gap"));
-                        if let Some(at) = before {
-                            let button =
-                                app.nav.tracked(ui.button(monitor_i18n::tr("download-jump-before")));
-                            if button.clicked() {
-                                jump = Some(at);
-                            }
-                        }
-                        if let Some(at) = after {
-                            let button =
-                                app.nav.tracked(ui.button(monitor_i18n::tr("download-jump-after")));
-                            if button.clicked() {
-                                jump = Some(at);
-                            }
-                        }
-                    }
-                    app.nav.close();
-                    ui.add_space(theme::space::M);
-
-                    match plan {
-                        ClipWindow::Ready { from, to, shortened } => {
-                            let name = rules::clip_file_name(
-                                &choice.camera,
-                                &choice.frigate_camera,
-                                from,
-                                to - from,
-                            );
-                            ui.label(monitor_i18n::tr_args(
-                                "download-range",
-                                &[("from", stamp(from).into()), ("to", stamp(to).into())],
-                            ));
-                            ui.label(monitor_i18n::tr_args(
-                                "download-actual",
-                                &[("seconds", (to - from).into())],
-                            ));
-                            if shortened {
-                                ui.label(
-                                    egui::RichText::new(monitor_i18n::tr("download-shortened"))
-                                        .small()
-                                        .color(theme::TEXT_DIM),
-                                );
-                            }
-                            ui.label(monitor_i18n::tr_args("download-file", &[("name", name.into())]));
-                            ui.label(monitor_i18n::tr_args(
-                                "download-to",
-                                &[("path", choice.dir.clone().into())],
-                            ));
-                        }
-                        ClipWindow::Gap { .. } => {}
-                        ClipWindow::Empty => {
-                            ui.label(monitor_i18n::tr("download-none"));
-                        }
-                    }
-                    ui.add_space(theme::space::M);
-                    // A button that cannot act is not a control: it takes no
-                    // focus, so it is registered only when it can be pressed.
-                    // Its absence is what leaves Down from the last length with
-                    // nowhere to go, which is the honest answer for a hole.
-                    if ready.is_some() {
-                        let save_label = monitor_i18n::tr("download-confirm");
-                        ui.horizontal(|ui| {
-                            ui.add_space(Self::center_offset(ui, &[&save_label]));
-                            app.nav.open(if stacked { SAVE_UNDER_STACK } else { SAVE_UNDER_ROW });
-                            let save = app.nav.tracked(ui.button(save_label));
-                            // The panel opens on the save: the press that
-                            // opened it was a request to save this recording,
-                            // and the length still shows what it will save.
-                            app.download_panel.anchor = Some(save.id);
-                            app.nav.close();
-                            if save.clicked() {
-                                confirm = true;
-                            }
-                        });
-                    }
-                });
-
-                if confirm {
-                    tracing::info!(target: "xgview::app", ready = ready.is_some(), "the save panel was confirmed");
-                    if let Some((from, to)) = ready {
-                        let name = rules::clip_file_name(
-                            &choice.camera,
-                            &choice.frigate_camera,
-                            from,
-                            to - from,
-                        );
-                        request = Some(ClipRequest {
-                            base_url: choice.base_url.clone(),
-                            camera: choice.frigate_camera.clone(),
-                            from,
-                            to,
-                            credentials: choice.credentials.clone(),
-                            name,
-                        });
-                    }
-                }
-                if let Some(request) = request {
-                    let camera = choice.camera.clone();
-                    app.start_download(request, camera);
-                    return Answer::CLOSE;
-                }
-                if let Some(at) = jump {
-                    app.seek(at);
-                    return Answer::CLOSE;
-                }
-                if close {
-                    Answer::CLOSE
-                } else {
-                    Answer::STAY
-                }
-            },
-        );
+        // A picture turned a quarter turn takes its whole frame with it - the
+        // bar, the corners, the toast. A level window over it would be the one
+        // thing the viewer has to turn their head for, so this one is laid out
+        // in the picture's frame and drawn turned. egui has no rotated layer;
+        // see `draw_turned`.
+        let turned = self.magnified_rotated();
+        let tile = self.magnified_tile().unwrap_or(screen);
+        self.modal_lifecycle(|app| &mut app.download_panel, |app, choice| {
+            let view = View::of(choice);
+            let actions = if turned {
+                draw_turned(app, ctx, tile, &view)
+            } else {
+                draw_level(app, ctx, width, max_height, &view)
+            };
+            resolve(app, choice, &view, actions)
+        });
 
         // A panel over the wall takes the magnified bar down - it would be in
         // the way of the form - and this is the one panel opened from a
@@ -622,6 +763,273 @@ impl XgViewApp {
             self.tile_bar.show(tilebar::Dock::Bottom, Instant::now());
         }
     }
+}
+
+/// The rows of the turned panel's body, in the order a viewer reads them.
+///
+/// The title is not one of them: it has a bar of its own at the panel's head,
+/// laid out by [`turned_title_bar`].
+enum TurnedRow {
+    Camera,
+    Lengths,
+    Note(usize),
+    Jump(usize),
+    Save,
+}
+
+/// The panel's own frame over a turned picture: its height and the room around
+/// it, in the picture's points.
+const TURNED_EDGE: f32 = 20.0;
+const TURNED_PAD: f32 = 14.0;
+const TURNED_GAP: f32 = 8.0;
+const TURNED_ROW_H: f32 = 30.0;
+
+/// The turned panel's title bar, in the picture's own frame.
+///
+/// A level dialog's [`dialogs::title_bar`] is a strip across the whole window:
+/// the words at one end and the cross at the other, with a rule under the
+/// whole strip. Turned, that strip runs down the screen instead of across it,
+/// but it is still the same bar: the words at its head, the cross at its foot,
+/// and the rule between it and the body for its whole length. Its depth, the
+/// inset, the cross and the edge around it are the level dialog's own
+/// constants, so the two read as one bar seen a quarter turn apart.
+struct TurnedTitleBar {
+    /// Where the words are laid out; their `x` runs down the screen.
+    text: egui::Rect,
+    /// The close square, at the bar's far end - never beside the words.
+    cross: egui::Rect,
+    /// The rule under the whole bar, separating it from the body.
+    rule: egui::Rect,
+}
+
+/// How far the words may run before they wrap, leaving the bar's far end to
+/// the cross - the same room a level title leaves for it.
+fn turned_title_wrap(panel_width: f32) -> f32 {
+    (panel_width - dialogs::TITLE_INSET - dialogs::TITLE_BAR_H - TURNED_PAD).max(80.0)
+}
+
+/// Lays the turned title bar out. `title_width` is the words' galley width and
+/// `rule_width` is the style's stroke - the same stroke a level title bar uses.
+fn turned_title_bar(panel: egui::Rect, title_width: f32, rule_width: f32) -> TurnedTitleBar {
+    let bar = egui::Rect::from_min_size(
+        egui::pos2(panel.min.x, panel.min.y),
+        egui::vec2(panel.width(), dialogs::TITLE_BAR_H),
+    );
+    let text_x = bar.min.x + dialogs::TITLE_INSET;
+    let cross_x = bar.max.x - dialogs::TITLE_EDGE - dialogs::CLOSE_SIDE;
+    TurnedTitleBar {
+        text: egui::Rect::from_min_size(
+            egui::pos2(text_x, bar.min.y),
+            egui::vec2(title_width, bar.height()),
+        ),
+        cross: egui::Rect::from_min_size(
+            egui::pos2(cross_x, bar.min.y + dialogs::TITLE_EDGE),
+            egui::vec2(dialogs::CLOSE_SIDE, dialogs::CLOSE_SIDE),
+        ),
+        rule: egui::Rect::from_min_size(
+            egui::pos2(bar.min.x, bar.max.y),
+            egui::vec2(bar.width(), rule_width),
+        ),
+    }
+}
+
+/// The save panel painted into a picture's turned frame.
+///
+/// egui lays every widget out in the screen's axes and has no rotated layer, so
+/// an `egui::Modal` here would stand level over a sideways picture. What egui
+/// *can* still do is the modal itself: its backdrop, its layer and its presses.
+/// This takes that layer and places each control by hand - a local rectangle in
+/// the picture's frame, mapped to a screen rectangle by [`turned_rect`], given
+/// to `ui.interact` so a finger and the keyboard find it, and painted with the
+/// words turned a quarter turn. The bar and the toast over the same picture are
+/// placed the same way; see `tilebar::to_screen` and `chrome::paint_toast_turned`.
+fn draw_turned(
+    app: &mut XgViewApp,
+    ctx: &egui::Context,
+    tile: egui::Rect,
+    view: &View,
+) -> Actions {
+    let frame = turned_frame(tile);
+    let width = 420.0_f32.min(frame.width() - 2.0 * TURNED_EDGE).max(240.0);
+    let inner = width - 2.0 * TURNED_PAD;
+    let style = ctx.style();
+    let heading = style.text_styles[&egui::TextStyle::Heading].clone();
+    let body = style.text_styles[&egui::TextStyle::Body].clone();
+    let small = style.text_styles[&egui::TextStyle::Small].clone();
+    let stroke = style.visuals.widgets.noninteractive.bg_stroke;
+
+    // A turned line is as tall as its own galley, wrapped at the panel's inner
+    // width. Measure every body row first: the panel cannot be centred until
+    // its height is known, and a line of small print that wraps is two lines
+    // tall.
+    let mut rows: Vec<(TurnedRow, f32)> = vec![(
+        TurnedRow::Camera,
+        turned_galley(ctx, &view.camera, &body, theme::TEXT, inner).size().y.max(TURNED_ROW_H),
+    )];
+    rows.push((TurnedRow::Lengths, TURNED_ROW_H));
+    for index in 0..view.notes.len() {
+        let h = turned_galley(ctx, &view.notes[index], &small, theme::TEXT_DIM, inner).size().y;
+        rows.push((TurnedRow::Note(index), h));
+    }
+    for index in 0..view.jumps.len() {
+        rows.push((TurnedRow::Jump(index), TURNED_ROW_H));
+    }
+    if view.save.is_some() {
+        rows.push((TurnedRow::Save, TURNED_ROW_H));
+    }
+    // The title is no longer a row: it has its own bar at the panel's head,
+    // followed by the rule and then the body, exactly as in a level dialog.
+    let body_height = rows.iter().map(|(_, h)| *h).sum::<f32>()
+        + TURNED_GAP * rows.len().saturating_sub(1) as f32;
+    let height = dialogs::TITLE_BAR_H + stroke.width + 2.0 * TURNED_PAD + body_height;
+    let panel = turned_panel_box(frame, egui::vec2(width, height));
+    let title = monitor_i18n::tr("download-title");
+    let title_galley = turned_galley(
+        ctx,
+        &title,
+        &heading,
+        theme::TEXT,
+        turned_title_wrap(panel.width()),
+    );
+    let title_bar = turned_title_bar(panel, title_galley.size().x, stroke.width);
+
+    let mut actions = Actions::default();
+    // The modal keeps its own backdrop and its place above the wall; the frame
+    // is ours, so the stock one is taken away. Its content `Ui` is on the
+    // modal's foreground layer with the screen as its clip rect, which is all
+    // the hand-placed controls below need.
+    egui::Modal::new(egui::Id::new("xgview-download-turned"))
+        .frame(egui::Frame::NONE)
+        .show(ctx, |ui| {
+            let popup = egui::Frame::popup(ui.style());
+            ui.painter().rect(
+                turned_rect(tile, panel),
+                popup.corner_radius,
+                popup.fill,
+                popup.stroke,
+                egui::StrokeKind::Inside,
+            );
+
+            // The head: the words at one end, the cross at the other, and a
+            // rule under the whole of it. A level dialog's title_bar is this
+            // same bar seen without the turn, so both use its own stroke,
+            // its inset and its cross.
+            turned_text(ui, tile, title_bar.text, title_galley.clone(), theme::TEXT);
+            let close = icons::button_in(
+                ui,
+                turned_rect(tile, title_bar.cross),
+                egui::Id::new("xgview-download-turned-close"),
+                Icon::Close,
+                false,
+                false,
+                &monitor_i18n::tr("dialog-close"),
+                true,
+            );
+            if close.clicked() {
+                actions.close = true;
+            }
+            ui.painter().rect_filled(turned_rect(tile, title_bar.rule), 0.0, stroke.color);
+
+            let mut y = title_bar.rule.max.y + TURNED_PAD;
+            let row = |y: f32, h: f32| {
+                egui::Rect::from_min_size(
+                    egui::pos2(panel.min.x + TURNED_PAD, y),
+                    egui::vec2(inner, h),
+                )
+            };
+            for (kind, h) in &rows {
+                let local = row(y, *h);
+                match kind {
+                    TurnedRow::Camera => turned_text(
+                        ui,
+                        tile,
+                        local,
+                        turned_galley(ctx, &view.camera, &body, theme::TEXT, inner),
+                        theme::TEXT,
+                    ),
+                    TurnedRow::Lengths => {
+                        let gap = theme::space::S;
+                        let each = (inner - gap * (view.labels.len().saturating_sub(1) as f32))
+                            / view.labels.len().max(1) as f32;
+                        app.nav.open(LENGTHS_TURNED);
+                        for (index, label) in view.labels.iter().enumerate() {
+                            let at = egui::Rect::from_min_size(
+                                egui::pos2(local.min.x + index as f32 * (each + gap), y),
+                                egui::vec2(each, *h),
+                            );
+                            let button = app.nav.tracked(icons::selectable_label_in(
+                                ui,
+                                turned_rect(tile, at),
+                                egui::Id::new(("xgview-download-turned-length", index)),
+                                label,
+                                "",
+                                true,
+                                false,
+                                index == view.selected,
+                            ));
+                            if index == view.selected {
+                                app.download_panel.anchor = Some(button.id);
+                            }
+                            if button.clicked() {
+                                actions.selected = Some(index);
+                            }
+                        }
+                        app.nav.close();
+                    }
+                    TurnedRow::Note(index) => turned_text(
+                        ui,
+                        tile,
+                        local,
+                        turned_galley(ctx, &view.notes[*index], &small, theme::TEXT_DIM, inner),
+                        theme::TEXT_DIM,
+                    ),
+                    TurnedRow::Jump(index) => {
+                        let (label, at) = &view.jumps[*index];
+                        app.nav.open(LENGTHS_TURNED);
+                        let button = app.nav.tracked(icons::selectable_label_in(
+                            ui,
+                            turned_rect(tile, local),
+                            egui::Id::new(("xgview-download-turned-jump", *index)),
+                            label,
+                            "",
+                            true,
+                            false,
+                            false,
+                        ));
+                        app.nav.close();
+                        if button.clicked() {
+                            actions.jump = Some(*at);
+                        }
+                    }
+                    TurnedRow::Save => {
+                        let label = view.save.as_deref().unwrap_or_default();
+                        let side = inner.min(160.0);
+                        let at = egui::Rect::from_min_size(
+                            egui::pos2(local.min.x + (inner - side) * 0.5, y),
+                            egui::vec2(side, *h),
+                        );
+                        app.nav.open(SAVE_TURNED);
+                        let save = app.nav.tracked(icons::selectable_label_in(
+                            ui,
+                            turned_rect(tile, at),
+                            egui::Id::new("xgview-download-turned-save"),
+                            label,
+                            "",
+                            true,
+                            false,
+                            false,
+                        ));
+                        app.download_panel.anchor = Some(save.id);
+                        app.nav.close();
+                        if save.clicked() {
+                            actions.confirm = true;
+                        }
+                    }
+                }
+                y += h + TURNED_GAP;
+            }
+        });
+    actions
 }
 
 #[cfg(test)]
@@ -654,33 +1062,21 @@ mod tests {
     }
 
     #[test]
-    fn down_from_the_lengths_reaches_the_button_in_both_orientations() {
-        for (lengths, save) in
-            [(LENGTHS_STACKED, SAVE_UNDER_STACK), (LENGTHS_BESIDE, SAVE_UNDER_ROW)]
-        {
-            let (mut nav, ids, save_id) = panel(lengths, save);
-            assert_eq!(nav.step(ids[2], Dir::Down), Some(save_id), "{lengths}: Down reaches it");
-            assert_eq!(nav.step(save_id, Dir::Up), Some(ids[0]), "{save}: Up comes back");
-        }
+    fn down_from_the_lengths_reaches_the_button_and_up_comes_back() {
+        let (mut nav, ids, save_id) = panel(LENGTHS, SAVE);
+        assert_eq!(nav.step(ids[2], Dir::Down), Some(save_id), "Down reaches the button");
+        assert_eq!(nav.step(save_id, Dir::Up), Some(ids[0]), "Up comes back to the lengths");
     }
 
-    /// A phone stacks the lengths, so the arrows that pick one are Up and Down.
-    /// A sideways press is spent rather than wandering out of the panel.
+    /// The three lengths are one row on every screen, including a phone held
+    /// upright: that is the arrows that pick one, and a vertical press is spent
+    /// on the row rather than walking out of it.
     #[test]
-    fn a_stacked_panel_is_walked_up_and_down() {
-        let (mut nav, ids, _) = panel(LENGTHS_STACKED, SAVE_UNDER_STACK);
-        assert_eq!(nav.step(ids[0], Dir::Down), Some(ids[1]));
-        assert_eq!(nav.step(ids[1], Dir::Up), Some(ids[0]));
-        assert_eq!(nav.step(ids[1], Dir::Left), None, "a column has no sideways walk");
-    }
-
-    /// A wide screen puts them side by side, and then the arrows that pick one
-    /// are Left and Right - the ones a viewer tries first on a row.
-    #[test]
-    fn a_panel_beside_is_walked_left_and_right() {
-        let (mut nav, ids, save_id) = panel(LENGTHS_BESIDE, SAVE_UNDER_ROW);
+    fn the_lengths_are_walked_left_and_right_whatever_the_screen() {
+        let (mut nav, ids, save_id) = panel(LENGTHS, SAVE);
         assert_eq!(nav.step(ids[0], Dir::Right), Some(ids[1]));
         assert_eq!(nav.step(ids[1], Dir::Left), Some(ids[0]));
+        assert_eq!(nav.step(ids[0], Dir::Up), None, "a row has no walk of its own upwards");
         assert_eq!(nav.step(ids[0], Dir::Down), Some(save_id), "and Down still leaves the row");
     }
 
@@ -781,5 +1177,124 @@ mod tests {
         assert!(!bar_returns_after(true, true, true, true), "still up");
         assert!(!bar_returns_after(true, false, false, true), "left the recording");
         assert!(!bar_returns_after(true, false, true, false), "back on the wall");
+    }
+
+    /// A ring comes back to the save button only when a remote left it there.
+    /// Handing the focus back unconditionally put it on a button a finger had
+    /// pressed, where it stayed lit for the ring's whole idle after the panel
+    /// had closed - and a pointer press is not aiming at anything.
+    #[test]
+    fn only_a_remote_gets_the_ring_back_on_the_save_button() {
+        let button = Id::new(("control", 11));
+        let seat = Id::new("seat");
+        assert_eq!(
+            focus_returns_to(Some(button), Some(button)),
+            Some(button),
+            "the remote walked onto the button, so it goes back there"
+        );
+        assert_eq!(
+            focus_returns_to(Some(button), Some(seat)),
+            None,
+            "a pointer left the focus on the seat: the panel must not move it"
+        );
+        assert_eq!(focus_returns_to(Some(button), None), None, "nothing had the focus");
+        assert_eq!(focus_returns_to(None, Some(button)), None, "this bar has no save button");
+    }
+
+    /// A window over a picture turned a quarter turn is laid out in the
+    /// picture's own frame, whose sides are the screen's traded. Its own width
+    /// therefore becomes height on the screen, and its centre does not move -
+    /// the same mapping the bar and the toast are placed with.
+    #[test]
+    fn a_turned_panel_lies_across_the_picture() {
+        let tile = egui::Rect::from_min_size(egui::pos2(0.0, 97.0), egui::vec2(360.0, 700.0));
+        let frame = turned_frame(tile);
+        assert_eq!(frame.size(), egui::vec2(700.0, 360.0), "the frame's sides trade");
+        let panel = turned_panel_box(frame, egui::vec2(420.0, 260.0));
+        let on_screen = turned_rect(tile, panel);
+        assert_eq!(
+            on_screen.size(),
+            egui::vec2(260.0, 420.0),
+            "what was wide now runs down the screen"
+        );
+        assert!((on_screen.center().x - tile.center().x).abs() < 0.01, "{on_screen:?}");
+        assert!((on_screen.center().y - tile.center().y).abs() < 0.01, "{on_screen:?}");
+        assert_eq!(
+            turned_at(tile, panel.min),
+            egui::pos2(on_screen.max.x, on_screen.min.y),
+            "the panel's top-left is the screen's top-right corner"
+        );
+        let too_big = turned_panel_box(frame, egui::vec2(10000.0, 10000.0));
+        assert!(too_big.width() <= frame.width() && too_big.height() <= frame.height());
+    }
+
+    /// The arrows over a turned picture walk the panel in the frame the viewer
+    /// reads: Up / Down along the row of lengths, Left down to the button, Right
+    /// back. A sideways press on the row is spent, not an exit.
+    #[test]
+    fn a_turned_panel_is_walked_in_the_pictures_frame() {
+        let (mut nav, ids, save_id) = panel(LENGTHS_TURNED, SAVE_TURNED);
+        assert_eq!(nav.step(ids[0], Dir::Down), Some(ids[1]), "the row runs down the screen");
+        assert_eq!(nav.step(ids[1], Dir::Up), Some(ids[0]));
+        assert_eq!(nav.step(ids[2], Dir::Left), Some(save_id), "the panel's Down is the screen's Left");
+        assert_eq!(nav.step(save_id, Dir::Right), Some(ids[0]), "and its Up is Right");
+        assert_eq!(nav.step(ids[0], Dir::Right), None, "a column has no sideways walk");
+    }
+
+    /// The turned title bar is the level dialog's bar seen a quarter turn
+    /// apart: its depth, the inset before the words, the edge around the cross
+    /// and the stroke under it are `dialogs::title_bar`'s own constants. The
+    /// cross belongs at the bar's far end - the right of a level title, the
+    /// foot of a turned one - not tucked in behind the words.
+    #[test]
+    fn a_turned_title_bar_puts_its_cross_at_the_far_end() {
+        let panel = egui::Rect::from_min_size(egui::pos2(30.0, 40.0), egui::vec2(420.0, 300.0));
+        let wrap = turned_title_wrap(panel.width());
+        let rule_width = 1.0;
+        let bar = turned_title_bar(panel, 190.0_f32.min(wrap), rule_width);
+
+        assert_eq!(bar.text.min.y, panel.min.y, "the bar starts at the panel's own edge");
+        assert_eq!(bar.text.height(), dialogs::TITLE_BAR_H, "the level dialog's depth");
+        assert_eq!(bar.text.min.x - panel.min.x, dialogs::TITLE_INSET);
+        assert_eq!(bar.cross.size(), egui::Vec2::splat(dialogs::CLOSE_SIDE));
+        assert_eq!(bar.cross.min.y - panel.min.y, dialogs::TITLE_EDGE);
+        assert_eq!(
+            bar.cross.max.x,
+            panel.max.x - dialogs::TITLE_EDGE,
+            "the cross is at the far end, as at the right of a level title"
+        );
+        assert!(
+            bar.cross.min.x > bar.text.max.x + TURNED_GAP,
+            "it does not follow the words"
+        );
+        assert_eq!(bar.rule.min.y, panel.min.y + dialogs::TITLE_BAR_H, "under the bar");
+        assert_eq!(bar.rule.height(), rule_width, "the level dialog's own stroke");
+        assert_eq!(bar.rule.width(), panel.width(), "the rule runs the whole bar");
+
+        // Even the longest wording stops before the cross: the wrap keeps the
+        // bar's far end for it.
+        let longest = turned_title_bar(panel, wrap, rule_width);
+        assert!(longest.text.max.x < longest.cross.min.x);
+    }
+
+    /// On the screen the turned bar runs down the panel: the words at its
+    /// head, the cross at its foot, and the rule between it and the body for
+    /// the whole length - the level title bar rotated a quarter turn.
+    #[test]
+    fn a_turned_title_bar_is_the_level_bar_a_quarter_turn_apart() {
+        let tile = egui::Rect::from_min_size(egui::pos2(0.0, 97.0), egui::vec2(360.0, 700.0));
+        let panel = turned_panel_box(turned_frame(tile), egui::vec2(420.0, 300.0));
+        let bar = turned_title_bar(panel, 190.0, 1.0);
+        let cross = turned_rect(tile, bar.cross);
+        let rule = turned_rect(tile, bar.rule);
+        let whole = turned_rect(tile, panel);
+
+        assert_eq!(rule.height(), whole.height(), "the rule runs the panel's whole length");
+        assert!(rule.min.x < whole.max.x, "on the inside of the title's own column");
+        assert!(cross.min.x >= rule.max.x, "the cross is on the title's side of the rule");
+        assert!(
+            cross.max.y > whole.max.y - dialogs::TITLE_BAR_H,
+            "the cross sits at the foot of the turned bar"
+        );
     }
 }

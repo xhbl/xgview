@@ -1252,7 +1252,7 @@ impl XgViewApp {
                     let talking = self.talking;
                     self.tile_bar.touch(now);
                     if let Some((_, action)) = entries.get(index) {
-                        self.tile_bar_activate(*action);
+                        self.tile_bar_activate(*action, ui.ctx());
                     }
                     if self.talking != talking {
                         // The microphone has become the handset and the ring goes
@@ -1437,10 +1437,9 @@ impl XgViewApp {
 
     /// The same, read off the controls a strip is drawn with.
     ///
-    /// Split out so the answer can be pinned by a test: the save button is the
-    /// seventh of nine on a phone held upright and the twelfth of thirteen on a
-    /// wide picture, and the close of the panel hands the focus to it by that
-    /// number.
+    /// Split out so the answer can be pinned by a test: the save button's
+    /// place is not the same on a phone held upright and on a wide or turned
+    /// picture, and the close of the panel hands the focus to it by that place.
     pub(super) fn download_button_in(entries: &[(tilebar::Control, TileBarAction)]) -> Option<egui::Id> {
         entries
             .iter()
@@ -1451,10 +1450,11 @@ impl XgViewApp {
     /// The recording's controls and where their lines break, as a pure rule.
     ///
     /// Kept apart from the wall's state so the order a remote walks can be
-    /// pinned down by a test: on a wide picture one line with the save just
-    /// before the way out; on a phone held upright three lines, `[Live]` alone
-    /// first and the six timeline keys last. The sound switch is the one control
-    /// a camera may not have, and both sets of breaks follow its absence.
+    /// pinned down by a test: on a wide picture - and on a portrait one turned
+    /// a quarter turn - one line with the save just after the day picker; on a
+    /// phone held upright three lines, `[Live]` alone first and the six
+    /// timeline keys last. The sound switch is the one control a camera may
+    /// not have, and both sets of breaks follow its absence.
     fn recording_entries(
         play: Icon,
         speed: tilebar::Control,
@@ -1495,11 +1495,15 @@ impl XgViewApp {
                 entries.push(icon(glyph, action));
             }
             entries.push(icon(Icon::Calendar, TileBarAction::Date));
+            // A wide picture and a portrait picture turned a quarter turn read
+            // the same one line. The save follows the day picker: both ask
+            // which stretch of the recording is in question, so a remote walks
+            // from one to the other without crossing the picture's controls.
+            entries.push((download, TileBarAction::Download));
             entries.push(icon(Icon::AspectRatio, TileBarAction::Fit));
             if let Some(sound) = sound {
                 entries.push(icon(sound, TileBarAction::Sound));
             }
-            entries.push((download, TileBarAction::Download));
             entries.push(icon(Icon::Live, TileBarAction::Live));
         }
         (entries, breaks)
@@ -1635,8 +1639,9 @@ impl XgViewApp {
     ///
     /// It is the action of the control the cursor is on for a key and of the one
     /// a finger landed on - a press acts on what it hit without moving the
-    /// cursor.
-    pub(super) fn tile_bar_activate(&mut self, action: TileBarAction) {
+    /// cursor. `ctx` is passed on to the one control that opens a window, which
+    /// has to know where the focus stood when it was asked for.
+    pub(super) fn tile_bar_activate(&mut self, action: TileBarAction, ctx: &egui::Context) {
         tracing::debug!(target: "xgview::app", ?action, "tile bar control pressed");
         match action {
             TileBarAction::Hangup => {
@@ -1675,7 +1680,7 @@ impl XgViewApp {
                 // held down can reach the action twice in one frame; the state
                 // is the second line of defence.
                 if !self.download.is_active() {
-                    self.open_download_panel();
+                    self.open_download_panel(ctx);
                 }
             }
             TileBarAction::Live => self.leave_playback(),
@@ -1725,16 +1730,19 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_recording_puts_the_save_just_before_the_way_out() {
+    fn a_wide_or_turned_recording_puts_the_save_after_the_date_picker() {
         let (actions, breaks) = controls(true, false);
-        assert!(breaks.is_empty(), "one line on a wide picture");
+        assert!(breaks.is_empty(), "one line on a wide or turned picture");
         assert_eq!(actions.len(), 13);
-        assert_eq!(actions[actions.len() - 2], TileBarAction::Download);
+        let date = actions.iter().position(|a| *a == TileBarAction::Date).expect("a day picker");
+        assert_eq!(actions[date + 1], TileBarAction::Download, "the save follows the day picker");
+        assert_eq!(actions[date + 2], TileBarAction::Fit);
         assert_eq!(actions.last(), Some(&TileBarAction::Live));
         // A camera without audio loses one control, not its order.
         let (without, _) = controls(false, false);
         assert_eq!(without.len(), 12);
-        assert_eq!(without[without.len() - 2], TileBarAction::Download);
+        let date = without.iter().position(|a| *a == TileBarAction::Date).expect("a day picker");
+        assert_eq!(without[date + 1], TileBarAction::Download);
         assert_eq!(without.last(), Some(&TileBarAction::Live));
     }
 

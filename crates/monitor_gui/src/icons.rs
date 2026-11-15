@@ -250,11 +250,43 @@ pub fn label_in(
     turned: bool,
     muted: bool,
 ) -> Response {
+    label_in_selected(ui, rect, id, text, tooltip, turned, muted, false)
+}
+
+/// [`label_in`] for a control that can be the chosen one of a set.
+///
+/// The save panel over a turned picture is painted by hand, and its three
+/// lengths still have to say which one is picked. egui's `selectable_label` is
+/// not available to a turned control, so the selected look is the same one
+/// [`paint_button`] gives a selected icon.
+pub fn selectable_label_in(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    text: &str,
+    tooltip: &str,
+    turned: bool,
+    muted: bool,
+    selected: bool,
+) -> Response {
+    label_in_selected(ui, rect, id, text, tooltip, turned, muted, selected)
+}
+
+fn label_in_selected(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    text: &str,
+    tooltip: &str,
+    turned: bool,
+    muted: bool,
+    selected: bool,
+) -> Response {
     // A muted label is inert, exactly like a muted icon button: nothing can
     // press it, and the remote's walk steps over it.
     let response = ui.interact(rect, id, if muted { Sense::hover() } else { Sense::click() });
     if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact(&response);
+        let visuals = ui.style().interact_selectable(&response, selected);
         let corner = CornerRadius::same(theme::radius::M);
         let frame = rect.expand(visuals.expansion);
         ui.painter().rect_filled(frame, corner, visuals.weak_bg_fill);

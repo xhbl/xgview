@@ -1442,22 +1442,24 @@ impl XgViewApp {
     /// passphrase stretching on a thread. What they all do *around* that is the
     /// same, and it is here: take the payload, draw it in a modal of the given
     /// width, then put it back or close it and give the focus back.
-    fn modal_frame<T>(
+    /// The life every window shares: take its payload, draw it once, then put it
+    /// back, close it, or close it and hand the focus back.
+    ///
+    /// How a window is *drawn* is not one of those things. Nearly all of them
+    /// are an `egui::Modal`; the save panel over a picture turned a quarter turn
+    /// is painted by hand, because egui has no rotated layer. What both need
+    /// around the drawing is exactly this, and a window that took its payload
+    /// twice would flicker. See [`Self::modal_frame`] and `download`'s turned
+    /// panel.
+    fn modal_lifecycle<T>(
         &mut self,
-        ctx: &egui::Context,
-        id: &str,
-        width: f32,
         slot: impl Fn(&mut Self) -> &mut Modal<T>,
-        body: impl FnOnce(&mut Self, &mut egui::Ui, &mut T) -> Answer,
+        draw: impl FnOnce(&mut Self, &mut T) -> Answer,
     ) -> Answer {
         let Some(mut payload) = slot(self).take() else {
             return Answer::STAY;
         };
-        let mut answer = Answer::STAY;
-        egui::Modal::new(Id::new(id)).show(ctx, |ui| {
-            ui.set_width(width);
-            answer = body(self, ui, &mut payload);
-        });
+        let answer = draw(self, &mut payload);
         if answer.keep {
             slot(self).open(payload);
         } else if answer.restore {
@@ -1467,6 +1469,24 @@ impl XgViewApp {
             slot(self).close();
         }
         answer
+    }
+
+    fn modal_frame<T>(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+        width: f32,
+        slot: impl Fn(&mut Self) -> &mut Modal<T>,
+        body: impl FnOnce(&mut Self, &mut egui::Ui, &mut T) -> Answer,
+    ) -> Answer {
+        self.modal_lifecycle(slot, |app, payload| {
+            let mut answer = Answer::STAY;
+            egui::Modal::new(Id::new(id)).show(ctx, |ui| {
+                ui.set_width(width);
+                answer = body(app, ui, payload);
+            });
+            answer
+        })
     }
 
     /// Builds the wall.
@@ -4642,7 +4662,7 @@ mod tests {
             "the press belongs to the bar only while the bar is up"
         );
         assert!(
-            rest[index..].contains("self.tile_bar_activate(action)"),
+            rest[index..].contains("self.tile_bar_activate(action, ctx)"),
             "the control the ring is on is the one that gets pressed"
         );
     }
