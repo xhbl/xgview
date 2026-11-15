@@ -338,6 +338,27 @@ toast-no-sub = no sub stream pattern recognized
 toast-no-microphone = no microphone to talk into
 toast-microphone-permission = allow microphone access, then press it again
 toast-no-recording = Nothing recorded here yet
+
+## Saving a recording
+tilebar-download-tip = Save this recording
+tilebar-download-running-tip = Saving { $camera }'s recording
+toast-download-done = Recording saved to { $path }
+toast-download-failed = Could not save the recording: { $error }
+download-hint-done = Saved to { $path }
+download-hint-failed = Download failed: { $error }
+download-title = Save a recording
+download-minutes = { $count } min
+download-range = { $from } to { $to }
+download-actual = { $seconds } seconds of video
+download-shortened = This stretch is shorter; the whole of it will be saved
+download-file = File: { $name }
+download-to = Saved to: { $path }
+download-gap = Nothing was recorded at this moment. Jump to a nearby stretch first.
+download-jump-before = Previous stretch
+download-jump-after = Next stretch
+download-none = This camera has no recording to save
+download-no-storage = Storage permission is needed to save into Downloads. Grant it and try again.
+download-confirm = Download
 toast-talk-unavailable = this camera has nothing to talk into
 toast-talk-failed = the call could not be opened
 toast-reorder = Reorder: Up / Down to move · Confirm to apply · Back to cancel

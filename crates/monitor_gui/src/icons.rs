@@ -94,6 +94,8 @@ pub enum Icon {
     /// Back to the camera as it is now: a video camera, body and lens - the
     /// picture itself, since that is what the button switches to.
     Live,
+    /// Save the recording being watched: an arrow going down into a tray.
+    Download,
 }
 
 /// Side of the square an icon button occupies, in points.
@@ -235,10 +237,22 @@ pub fn danger_in(
 ///
 /// The speed a recording plays at is the one control whose state cannot be a
 /// shape: a picture of a fast-forward cannot say whether it is two times or
-/// four. `turned` turns the word with the picture, the way [`button_in`] turns a
-/// glyph.
-pub fn label_in(ui: &mut Ui, rect: Rect, id: Id, text: &str, tooltip: &str, turned: bool) -> Response {
-    let response = ui.interact(rect, id, Sense::click());
+/// four. A download in flight is the other: a percentage or a count of megabytes
+/// is the whole of what the button has to say. `turned` turns the word with the
+/// picture, the way [`button_in`] turns a glyph. `muted` keeps it in place but
+/// out of the walk while the download runs.
+pub fn label_in(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    text: &str,
+    tooltip: &str,
+    turned: bool,
+    muted: bool,
+) -> Response {
+    // A muted label is inert, exactly like a muted icon button: nothing can
+    // press it, and the remote's walk steps over it.
+    let response = ui.interact(rect, id, if muted { Sense::hover() } else { Sense::click() });
     if ui.is_rect_visible(rect) {
         let visuals = ui.style().interact(&response);
         let corner = CornerRadius::same(theme::radius::M);
@@ -247,10 +261,11 @@ pub fn label_in(ui: &mut Ui, rect: Rect, id: Id, text: &str, tooltip: &str, turn
         if visuals.bg_stroke.width > 0.0 {
             ui.painter().rect_stroke(frame, corner, visuals.bg_stroke, StrokeKind::Inside);
         }
-        let colour = ui
-            .visuals()
-            .override_text_color
-            .unwrap_or_else(|| visuals.text_color());
+        let colour = if muted {
+            theme::TEXT_DIM
+        } else {
+            ui.visuals().override_text_color.unwrap_or_else(|| visuals.text_color())
+        };
         let font = FontId::proportional((rect.height() * 0.34).clamp(10.0, 15.0));
         let galley = ui.fonts(|fonts| fonts.layout_no_wrap(text.to_owned(), font, colour));
         let size = galley.size();
@@ -577,6 +592,19 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
                 vec![at(0.63, 0.44), at(0.93, 0.25), at(0.93, 0.75), at(0.63, 0.56)],
                 stroke,
             ));
+        }
+        Icon::Download => {
+            // An arrow down into a tray: the shaft, its head, and the open box
+            // underneath. Unlike the tray-with-a-bar a browser draws, the arrow
+            // keeps its point so the shape still reads at forty points.
+            painter.add(line(&[at(0.5, 0.06), at(0.5, 0.60)]));
+            painter.add(chevron(rect, turned, (0.5, 0.66), (0.0, 1.0), 0.20, stroke));
+            painter.add(line(&[
+                at(0.14, 0.62),
+                at(0.14, 0.92),
+                at(0.86, 0.92),
+                at(0.86, 0.62),
+            ]));
         }
         Icon::Calendar => {
             painter.rect_stroke(

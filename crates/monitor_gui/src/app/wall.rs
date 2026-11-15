@@ -198,6 +198,7 @@ impl XgViewApp {
             || self.camera_edit.is_open()
             || self.remove_confirm.is_open()
             || self.system_confirm.is_open()
+            || self.download_panel.is_open()
             || self.discovery.open
     }
 
@@ -430,7 +431,7 @@ impl XgViewApp {
         }
         let entries = self.tile_bar_entries().0;
         let widths = vec![tilebar::icon_width(); entries.len()];
-        let break_after = self.tile_bar_break();
+        let breaks = self.tile_bar_break();
         let margin = self.tile_bar_margin();
         let dock = self.tile_bar.dock();
         // The tile is given a timeline on the same terms the picture is: only a
@@ -447,9 +448,9 @@ impl XgViewApp {
         let rotated = self.magnified_rotated();
         let playing = self.scheduler.zoom().is_some_and(|slot| self.is_playing_back(slot));
         let timeline = playing
-            && tilebar::fits_timeline(body, rotated, margin, &widths, break_after);
+            && tilebar::fits_timeline(body, rotated, margin, &widths, &breaks);
         let layout = tilebar::layout(
-            body, rotated, dock, margin, &widths, break_after, timeline,
+            body, rotated, dock, margin, &widths, &breaks, timeline,
         );
         let controls: Vec<tilebar::Control> = entries.iter().map(|(control, _)| *control).collect();
         let muted: Vec<bool> = entries
@@ -1120,19 +1121,19 @@ impl XgViewApp {
         // same frame it changes it. Every control is a square.
         let controls = self.tile_bar_controls();
         let widths = vec![tilebar::icon_width(); controls.len()];
-        let break_after = self.tile_bar_break();
+        let breaks = self.tile_bar_break();
         // How deep the panel is depends on how many lines the controls need, so
         // the timeline is only promised to a tile that has room for both.
         let margin = self.tile_bar_margin();
         let timeline =
-            playing && tilebar::fits_timeline(rect, rotated, margin, &widths, break_after);
+            playing && tilebar::fits_timeline(rect, rotated, margin, &widths, &breaks);
         let layout = tilebar::layout(
             rect,
             rotated,
             self.tile_bar.dock(),
             margin,
             &widths,
-            break_after,
+            &breaks,
             timeline,
         );
         let now = Instant::now();
@@ -1198,14 +1199,14 @@ impl XgViewApp {
         // one.
         let entries = self.tile_bar_entries().0;
         let widths = vec![tilebar::icon_width(); entries.len()];
-        let break_after = self.tile_bar_break();
+        let breaks = self.tile_bar_break();
         let layout = tilebar::layout(
             rect,
             rotated,
             self.tile_bar.dock(),
             margin,
             &widths,
-            break_after,
+            &breaks,
             timeline,
         );
 
@@ -1311,6 +1312,12 @@ impl XgViewApp {
     /// be a claim this side cannot make. **A control that is right most of the
     /// time is worse than one that never claims to know.**
     pub(super) fn tile_bar_available(&self, action: TileBarAction) -> bool {
+        // One download at a time. The mute is what stops a second press, and
+        // `start_download` checks again in case a path around the focus walk
+        // ever reaches it.
+        if matches!(action, TileBarAction::Download) {
+            return !self.download.is_active();
+        }
         let Some(playback) = self.playback.as_ref() else {
             return true;
         };
@@ -1354,9 +1361,9 @@ impl XgViewApp {
         ctx.memory_mut(|memory| memory.request_focus(target));
     }
 
-    pub(super) fn tile_bar_entries(&self) -> (Vec<(tilebar::Control, TileBarAction)>, Option<usize>) {
+    pub(super) fn tile_bar_entries(&self) -> (Vec<(tilebar::Control, TileBarAction)>, Vec<usize>) {
         if self.talking {
-            return (vec![(tilebar::Control::Hangup, TileBarAction::Hangup)], None);
+            return (vec![(tilebar::Control::Hangup, TileBarAction::Hangup)], Vec::new());
         }
         let mut entries = Vec::new();
         let playing = self.scheduler.zoom().is_some_and(|channel| self.is_playing_back(channel));
@@ -1375,48 +1382,14 @@ impl XgViewApp {
             let speed = tilebar::Control::Label(self.playback_speed_label());
             let sound = tilebar::SOUND && self.magnified_has_audio();
             let sound_icon = if self.sound_on { Icon::Sound } else { Icon::Mute };
-            let mut break_after = None;
-            // Two lines on a phone held upright, and one line everywhere else.
-            // Turned, the strip runs down the screen - the long side of it - and
-            // twelve controls fit in that: a second line there would be a second
-            // column beside the picture, which is a panel nobody asked for.
-            if self.is_portrait() && !self.magnified_rotated() {
-                // What is done to the picture, then what is done to the
-                // timeline.
-                entries.push((tilebar::Control::Icon(play), TileBarAction::PlayPause));
-                entries.push((speed, TileBarAction::Speed));
-                entries.push((tilebar::Control::Icon(Icon::Calendar), TileBarAction::Date));
-                entries.push((tilebar::Control::Icon(Icon::AspectRatio), TileBarAction::Fit));
-                if sound {
-                    entries.push((tilebar::Control::Icon(sound_icon), TileBarAction::Sound));
-                }
-                entries.push((tilebar::Control::Icon(Icon::Live), TileBarAction::Live));
-                break_after = Some(entries.len());
-                entries.push((tilebar::Control::Icon(Icon::EventBack), TileBarAction::PrevEvent));
-                entries.push((tilebar::Control::Icon(Icon::EventForward), TileBarAction::NextEvent));
-                entries.push((tilebar::Control::Icon(Icon::StepBack), TileBarAction::StepBack));
-                entries.push((tilebar::Control::Icon(Icon::StepForward), TileBarAction::StepForward));
-                entries.push((tilebar::Control::Icon(Icon::TimelineZoomIn), TileBarAction::ZoomIn));
-                entries.push((tilebar::Control::Icon(Icon::TimelineZoomOut), TileBarAction::ZoomOut));
-            } else {
-                // One line on a wide picture, the transport first and the way
-                // out last.
-                entries.push((tilebar::Control::Icon(play), TileBarAction::PlayPause));
-                entries.push((speed, TileBarAction::Speed));
-                entries.push((tilebar::Control::Icon(Icon::EventBack), TileBarAction::PrevEvent));
-                entries.push((tilebar::Control::Icon(Icon::EventForward), TileBarAction::NextEvent));
-                entries.push((tilebar::Control::Icon(Icon::StepBack), TileBarAction::StepBack));
-                entries.push((tilebar::Control::Icon(Icon::StepForward), TileBarAction::StepForward));
-                entries.push((tilebar::Control::Icon(Icon::TimelineZoomIn), TileBarAction::ZoomIn));
-                entries.push((tilebar::Control::Icon(Icon::TimelineZoomOut), TileBarAction::ZoomOut));
-                entries.push((tilebar::Control::Icon(Icon::Calendar), TileBarAction::Date));
-                entries.push((tilebar::Control::Icon(Icon::AspectRatio), TileBarAction::Fit));
-                if sound {
-                    entries.push((tilebar::Control::Icon(sound_icon), TileBarAction::Sound));
-                }
-                entries.push((tilebar::Control::Icon(Icon::Live), TileBarAction::Live));
-            }
-            return (entries, break_after);
+            let (controls, breaks) = Self::recording_entries(
+                play,
+                speed,
+                sound.then_some(sound_icon),
+                self.download_control(),
+                self.is_portrait() && !self.magnified_rotated(),
+            );
+            return (controls, breaks);
         }
         entries.push((tilebar::Control::Icon(Icon::AspectRatio), TileBarAction::Fit));
         if tilebar::SOUND && self.magnified_has_audio() {
@@ -1437,7 +1410,99 @@ impl XgViewApp {
         if self.magnified_camera().is_some_and(|camera| camera.frigate.is_some()) {
             entries.push((tilebar::Control::Icon(Icon::History), TileBarAction::Playback));
         }
-        (entries, None)
+        (entries, Vec::new())
+    }
+
+    /// The save button is a shape until a clip is being saved, and the word of
+    /// its progress while one is. The width does not change: a label asks for
+    /// the same square an icon does.
+    fn download_control(&self) -> tilebar::Control {
+        match self.download.progress() {
+            Some(progress) => tilebar::Control::Progress(progress),
+            None => tilebar::Control::Icon(Icon::Download),
+        }
+    }
+
+    /// Where the save button stands in the strip this frame, as the focus knows
+    /// it.
+    ///
+    /// The button's place rather than a copy of its id: the set of controls
+    /// changes with the picture - a recording has no microphone, a live picture
+    /// has no save - so the place is asked of the entries being drawn rather
+    /// than remembered. `None` while the bar carries no save button at all,
+    /// which is every picture but a recording.
+    pub(super) fn download_button(&self) -> Option<egui::Id> {
+        Self::download_button_in(&self.tile_bar_entries().0)
+    }
+
+    /// The same, read off the controls a strip is drawn with.
+    ///
+    /// Split out so the answer can be pinned by a test: the save button is the
+    /// seventh of nine on a phone held upright and the twelfth of thirteen on a
+    /// wide picture, and the close of the panel hands the focus to it by that
+    /// number.
+    pub(super) fn download_button_in(entries: &[(tilebar::Control, TileBarAction)]) -> Option<egui::Id> {
+        entries
+            .iter()
+            .position(|(_, action)| *action == TileBarAction::Download)
+            .map(tilebar::control)
+    }
+
+    /// The recording's controls and where their lines break, as a pure rule.
+    ///
+    /// Kept apart from the wall's state so the order a remote walks can be
+    /// pinned down by a test: on a wide picture one line with the save just
+    /// before the way out; on a phone held upright three lines, `[Live]` alone
+    /// first and the six timeline keys last. The sound switch is the one control
+    /// a camera may not have, and both sets of breaks follow its absence.
+    fn recording_entries(
+        play: Icon,
+        speed: tilebar::Control,
+        sound: Option<Icon>,
+        download: tilebar::Control,
+        three_lines: bool,
+    ) -> (Vec<(tilebar::Control, TileBarAction)>, Vec<usize>) {
+        let keys = [
+            (Icon::EventBack, TileBarAction::PrevEvent),
+            (Icon::EventForward, TileBarAction::NextEvent),
+            (Icon::StepBack, TileBarAction::StepBack),
+            (Icon::StepForward, TileBarAction::StepForward),
+            (Icon::TimelineZoomIn, TileBarAction::ZoomIn),
+            (Icon::TimelineZoomOut, TileBarAction::ZoomOut),
+        ];
+        let icon = |icon: Icon, action: TileBarAction| (tilebar::Control::Icon(icon), action);
+        let mut entries = Vec::new();
+        let mut breaks = Vec::new();
+        if three_lines {
+            entries.push(icon(Icon::Live, TileBarAction::Live));
+            breaks.push(entries.len());
+            entries.push(icon(play, TileBarAction::PlayPause));
+            entries.push((speed, TileBarAction::Speed));
+            entries.push(icon(Icon::Calendar, TileBarAction::Date));
+            entries.push(icon(Icon::AspectRatio, TileBarAction::Fit));
+            if let Some(sound) = sound {
+                entries.push(icon(sound, TileBarAction::Sound));
+            }
+            entries.push((download, TileBarAction::Download));
+            breaks.push(entries.len());
+            for (glyph, action) in keys {
+                entries.push(icon(glyph, action));
+            }
+        } else {
+            entries.push(icon(play, TileBarAction::PlayPause));
+            entries.push((speed, TileBarAction::Speed));
+            for (glyph, action) in keys {
+                entries.push(icon(glyph, action));
+            }
+            entries.push(icon(Icon::Calendar, TileBarAction::Date));
+            entries.push(icon(Icon::AspectRatio, TileBarAction::Fit));
+            if let Some(sound) = sound {
+                entries.push(icon(sound, TileBarAction::Sound));
+            }
+            entries.push((download, TileBarAction::Download));
+            entries.push(icon(Icon::Live, TileBarAction::Live));
+        }
+        (entries, breaks)
     }
 
     /// Where the timeline row is on screen this frame, if there is one.
@@ -1452,10 +1517,10 @@ impl XgViewApp {
             return None;
         }
         let rotated = self.magnified_rotated();
-        let (controls, break_after) = self.tile_bar_entries();
+        let (controls, breaks) = self.tile_bar_entries();
         let widths = vec![tilebar::icon_width(); controls.len()];
         let margin = self.tile_bar_margin();
-        if !tilebar::fits_timeline(tile, rotated, margin, &widths, break_after) {
+        if !tilebar::fits_timeline(tile, rotated, margin, &widths, &breaks) {
             return None;
         }
         let layout = tilebar::layout(
@@ -1464,7 +1529,7 @@ impl XgViewApp {
             self.tile_bar.dock(),
             margin,
             &widths,
-            break_after,
+            &breaks,
             true,
         );
         layout.timeline
@@ -1485,8 +1550,11 @@ impl XgViewApp {
         }
     }
 
-    /// Where a recording's second line of controls begins, or `None`.
-    pub(super) fn tile_bar_break(&self) -> Option<usize> {
+    /// The indices at which a recording's controls start a new line. Empty on
+    /// a wide picture, `[1, 7]` on a phone held upright (or `[1, 6]` when the
+    /// camera has no audio): live alone, then the transport and the save, then
+    /// the timeline's own keys.
+    pub(super) fn tile_bar_break(&self) -> Vec<usize> {
         self.tile_bar_entries().1
     }
 
@@ -1538,6 +1606,26 @@ impl XgViewApp {
                 tr(if days { "tilebar-date-back-tip" } else { "tilebar-date-tip" })
             }
             TileBarAction::Live => tr("tilebar-live-tip"),
+            TileBarAction::Download => {
+                if self.download.is_active() {
+                    monitor_i18n::tr_args(
+                        "tilebar-download-running-tip",
+                        &[("camera", self.download.camera().unwrap_or_default().into())],
+                    )
+                } else {
+                    match self.download.hint() {
+                        Some(super::download::Last::Done { path, .. }) => monitor_i18n::tr_args(
+                            "download-hint-done",
+                            &[("path", path.clone().into())],
+                        ),
+                        Some(super::download::Last::Failed { reason, .. }) => monitor_i18n::tr_args(
+                            "download-hint-failed",
+                            &[("error", reason.clone().into())],
+                        ),
+                        None => tr("tilebar-download-tip"),
+                    }
+                }
+            }
         }
     }
 
@@ -1549,6 +1637,7 @@ impl XgViewApp {
     /// a finger landed on - a press acts on what it hit without moving the
     /// cursor.
     pub(super) fn tile_bar_activate(&mut self, action: TileBarAction) {
+        tracing::debug!(target: "xgview::app", ?action, "tile bar control pressed");
         match action {
             TileBarAction::Hangup => {
                 // A call is up, and its one control is the way out.
@@ -1581,6 +1670,14 @@ impl XgViewApp {
             TileBarAction::ZoomOut => self.zoom_timeline(false),
             TileBarAction::Speed => self.cycle_speed(),
             TileBarAction::Date => self.toggle_calendar(),
+            TileBarAction::Download => {
+                // The button is muted while a clip is being saved, but a key
+                // held down can reach the action twice in one frame; the state
+                // is the second line of defence.
+                if !self.download.is_active() {
+                    self.open_download_panel();
+                }
+            }
             TileBarAction::Live => self.leave_playback(),
             TileBarAction::Fit => {
                 // The fit this writes is the magnified viewport's own: it is kept
@@ -1607,5 +1704,93 @@ impl XgViewApp {
                 self.flash_centered(monitor_i18n::tr(next.label()), ToastKind::Info);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The order a remote walks, with and without a sound switch, on a wide
+    /// picture and on a phone held upright.
+    fn controls(sound: bool, three_lines: bool) -> (Vec<TileBarAction>, Vec<usize>) {
+        let (entries, breaks) = XgViewApp::recording_entries(
+            Icon::Pause,
+            tilebar::Control::Label("1x"),
+            sound.then_some(Icon::Sound),
+            tilebar::Control::Icon(Icon::Download),
+            three_lines,
+        );
+        (entries.into_iter().map(|(_, action)| action).collect(), breaks)
+    }
+
+    #[test]
+    fn a_wide_recording_puts_the_save_just_before_the_way_out() {
+        let (actions, breaks) = controls(true, false);
+        assert!(breaks.is_empty(), "one line on a wide picture");
+        assert_eq!(actions.len(), 13);
+        assert_eq!(actions[actions.len() - 2], TileBarAction::Download);
+        assert_eq!(actions.last(), Some(&TileBarAction::Live));
+        // A camera without audio loses one control, not its order.
+        let (without, _) = controls(false, false);
+        assert_eq!(without.len(), 12);
+        assert_eq!(without[without.len() - 2], TileBarAction::Download);
+        assert_eq!(without.last(), Some(&TileBarAction::Live));
+    }
+
+    /// The ring goes back to the button that opened the save panel, and it is
+    /// found by its place in the row rather than by a remembered id: the set of
+    /// controls is not the same on a phone held upright, and a remembered id
+    /// would point at whatever took the save's place there.
+    #[test]
+    fn the_save_button_is_where_the_focus_goes_back_to() {
+        for (sound, three_lines) in [(true, false), (false, false), (true, true), (false, true)] {
+            let (entries, _) = XgViewApp::recording_entries(
+                Icon::Pause,
+                tilebar::Control::Label("1x"),
+                sound.then_some(Icon::Sound),
+                tilebar::Control::Icon(Icon::Download),
+                three_lines,
+            );
+            let place = entries
+                .iter()
+                .position(|(_, action)| *action == TileBarAction::Download)
+                .expect("a recording always has a save button");
+            assert_eq!(
+                XgViewApp::download_button_in(&entries),
+                Some(crate::tilebar::control(place)),
+                "sound={sound} three_lines={three_lines}"
+            );
+        }
+        // A picture that is not a recording has no save button, and the answer
+        // is no focus at all rather than the wrong one.
+        let live = vec![
+            (tilebar::Control::Icon(Icon::AspectRatio), TileBarAction::Fit),
+            (tilebar::Control::Icon(Icon::History), TileBarAction::Playback),
+        ];
+        assert_eq!(XgViewApp::download_button_in(&live), None);
+    }
+
+    #[test]
+    fn a_portrait_recording_starts_with_live_and_ends_with_the_timeline() {
+        let (actions, breaks) = controls(true, true);
+        assert_eq!(breaks, vec![1, 7]);
+        assert_eq!(actions[0], TileBarAction::Live);
+        assert_eq!(actions[6], TileBarAction::Download, "the save took live's old place");
+        assert_eq!(
+            actions[7..].to_vec(),
+            vec![
+                TileBarAction::PrevEvent,
+                TileBarAction::NextEvent,
+                TileBarAction::StepBack,
+                TileBarAction::StepForward,
+                TileBarAction::ZoomIn,
+                TileBarAction::ZoomOut,
+            ]
+        );
+        // The break before the timeline keys follows the missing sound switch.
+        let (without, breaks) = controls(false, true);
+        assert_eq!(breaks, vec![1, 6]);
+        assert_eq!(without[5], TileBarAction::Download);
     }
 }

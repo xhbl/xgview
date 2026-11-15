@@ -26,6 +26,8 @@
 //! * [`reboot`]     – whether this process may restart the machine, and how.
 //! * [`blackout`]   – the local clock and the evaluation behind the scheduled
 //!   blank that saves the display at night.
+//! * [`recording_download`] – the rules behind saving a stretch of a recording
+//!   as a file: the window, the address and the name on the file.
 //! * [`supervise`]  – the policy over the viewer's restarts, and the exit codes
 //!   that say which restarts are worth making.
 //! * [`sealed`]     – the configuration sealed with a passphrase for the trip to
@@ -49,6 +51,7 @@ pub mod mse;
 pub mod pipeline;
 pub mod power;
 pub mod reboot;
+pub mod recording_download;
 pub mod rtcp;
 pub mod rtsp;
 pub mod scheduler;

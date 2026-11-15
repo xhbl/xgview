@@ -23,6 +23,7 @@ use monitor_core::discovery::frigate::{
 };
 use monitor_core::discovery::go2rtc::{mse_url as go2rtc_mse_url, restream_url as go2rtc_rtsp_url};
 use monitor_core::model::{infer_sub_stream, is_stream_url, CameraSource, FrigateOrigin, TalkMode};
+use monitor_core::recording_download::Progress;
 
 use crate::controls;
 use crate::icons::{self, Icon};
@@ -193,6 +194,17 @@ pub enum BackgroundEvent {
         to: i64,
         segments: Option<Vec<Segment>>,
     },
+    /// Bytes of a clip being saved, from the task that owns it.
+    ///
+    /// `id` is the number [`crate::app::download::DownloadState`] gave the
+    /// task. A cancelled download is aborted at its next await point, but a
+    /// progress event may already be in the queue; the id says it is not the
+    /// current one's.
+    DownloadProgress { id: u64, progress: Progress },
+    /// A clip arrived whole and has its final name on disk.
+    DownloadDone { id: u64, path: String },
+    /// A clip could not be saved. The reason is shown once, as a toast.
+    DownloadFailed { id: u64, reason: String },
 }
 
 /// Tab of the "Add devices" window.
@@ -503,6 +515,11 @@ impl DiscoveryUi {
             BackgroundEvent::SegmentsReady { .. } => {}
             BackgroundEvent::DaysReady { .. } => {}
             BackgroundEvent::EventsReady { .. } => {}
+            // A saved clip is answered by the wall's download state, not by a
+            // device panel.
+            BackgroundEvent::DownloadProgress { .. } => {}
+            BackgroundEvent::DownloadDone { .. } => {}
+            BackgroundEvent::DownloadFailed { .. } => {}
             BackgroundEvent::Discovery(event) => match event {
                 DiscoveryEvent::Phase(phase) => self.phase = phase,
                 DiscoveryEvent::DeviceFound(device) => self.push_device(&device),

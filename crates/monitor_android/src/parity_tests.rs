@@ -407,4 +407,77 @@ mod tests {
             "a wait that ends without the grant has to say what is missing"
         );
     }
+
+    /// A saved recording is not a configuration export. It is a whole mp4 the
+    /// native side finished writing into its private `.part`, and the activity
+    /// publishes it into Download/xgview. Two clips from the same second are
+    /// two files: the export's `findDownload` + `"wt"` replacement is exactly
+    /// the behaviour a recording must not inherit, and a `.mp4` written under
+    /// the sealed MIME type would be invisible to every player on the device.
+    #[test]
+    fn a_saved_clip_is_published_not_exported() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let android = std::fs::read_to_string(root.join("monitor_gui/src/android.rs"))
+            .expect("cannot read android.rs");
+        let download = std::fs::read_to_string(root.join("monitor_gui/src/app/download.rs"))
+            .expect("cannot read app/download.rs");
+        let zh = std::fs::read_to_string(root.join("../langs/zh-CN.ftl"))
+            .expect("cannot read the bundled Chinese catalogue");
+        let en = std::fs::read_to_string(root.join("monitor_i18n/langs/en.ftl"))
+            .expect("cannot read the embedded English catalogue");
+
+        assert!(
+            MAIN.contains("public static String copyToDownload(String srcPath, String name)"),
+            "the activity must offer one entry point for a finished clip"
+        );
+        assert!(
+            MAIN.contains("if (name.endsWith(\".mp4\"))")
+                && MAIN.contains("return \"video/mp4\";"),
+            "a clip has to be indexed as video/mp4, not as a sealed configuration"
+        );
+        assert!(
+            MAIN.contains("values.put(MediaStore.Downloads.IS_PENDING, 1)")
+                && MAIN.contains("publish.put(MediaStore.Downloads.IS_PENDING, 0)"),
+            "the Downloads row stays pending until the last byte has landed"
+        );
+        // Only the MediaStore half, not the whole file: the export legitimately
+        // uses findDownload, and the recording must not.
+        let media = MAIN.find("private static String copyViaMediaStore").unwrap();
+        let legacy = MAIN.find("private static String copyViaPublicDownload(Activity self").unwrap();
+        let media_store = &MAIN[media..legacy];
+        assert!(
+            !media_store.contains("findDownload")
+                && media_store.contains("resolver.insert(collection, values)"),
+            "a clip must insert a fresh row rather than overwrite an earlier one"
+        );
+        assert!(
+            MAIN.contains("downloadName(resolver, target, name)"),
+            "the viewer is told the name the provider actually made, suffixes included"
+        );
+        assert!(
+            MAIN.contains("staging.renameTo(finished)")
+                && MAIN.contains("uniqueName(folder, name)"),
+            "Android 9 has no pending row: it needs a whole staging file and its own (N) suffix"
+        );
+        assert!(
+            android.contains("pub fn publish_download(temp: &Path, name: &str)")
+                && android.contains("\"copyToDownload\""),
+            "the native bridge must call the activity's publishing entry point"
+        );
+        assert!(
+            android.contains("pub fn download_dirs() -> Result<(PathBuf, PathBuf), String>")
+                && android.contains("external.join(\".parts\")"),
+            "the .part must live in the app's own files, where no permission is needed"
+        );
+        assert!(
+            download.contains("crate::android::publish_download(&clip.temp, &clip.name)")
+                && download.contains("crate::android::download_dirs()")
+                && !download.contains("not wired yet"),
+            "both Android branches in the download panel must be wired, not placeholders"
+        );
+        assert!(
+            zh.contains("download-no-storage =") && en.contains("download-no-storage ="),
+            "an Android 9 refusal has to say what is missing in both catalogues"
+        );
+    }
 }

@@ -332,6 +332,27 @@ toast-no-sub = 未识别出辅码流地址规则
 toast-no-microphone = 没有可用的麦克风
 toast-microphone-permission = 请允许使用麦克风后再按一次
 toast-no-recording = 这段时间没有录像
+
+## 录像下载
+tilebar-download-tip = 下载这段录像
+tilebar-download-running-tip = 正在下载 { $camera } 的录像
+toast-download-done = 录像已保存到 { $path }
+toast-download-failed = 录像下载失败：{ $error }
+download-hint-done = 已保存到 { $path }
+download-hint-failed = 下载失败：{ $error }
+download-title = 下载录像
+download-minutes = { $count } 分钟
+download-range = { $from } 至 { $to }
+download-actual = 实际时长 { $seconds } 秒
+download-shortened = 该段录像比所选时长短，将下载整段
+download-file = 文件名：{ $name }
+download-to = 保存到：{ $path }
+download-gap = 当前时刻没有录像，跳到相邻录像段后再下载
+download-jump-before = 跳到前一段
+download-jump-after = 跳到后一段
+download-none = 这台相机没有可下载的录像
+download-no-storage = 需要存储权限才能保存到下载目录，请授权后再试
+download-confirm = 开始下载
 toast-talk-unavailable = 这台相机没有可对讲的喇叭
 toast-talk-failed = 对讲连接失败
 toast-reorder = 重排：上 / 下移动 · 确认应用 · 返回取消

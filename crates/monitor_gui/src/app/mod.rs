@@ -489,6 +489,8 @@ enum TileBarAction {
     Speed,
     /// Show the days, or go back to the stretch of one.
     Date,
+    /// Save the recording being watched to a file.
+    Download,
     /// Leave the recording and go back to the camera.
     Live,
 }
@@ -1237,6 +1239,24 @@ pub struct XgViewApp {
     /// The recording playing in the magnified viewport, when one is. See
     /// [`crate::app::playback`].
     playback: Option<playback::Playback>,
+    /// A clip being saved, and the short memory of the last one.
+    ///
+    /// Deliberately *beside* `playback`, not inside it: leaving playback takes
+    /// that whole value apart, while a download keeps running on its own task.
+    /// Coming back - even on another camera - has to find the same state. See
+    /// [`download::DownloadState`].
+    download: DownloadState,
+    /// The panel that asks how much of the recording to save. It belongs to the
+    /// playback context and is closed on the way out of it; a download already
+    /// confirmed does not, and keeps running on the state above.
+    download_panel: Modal<DownloadChoice>,
+    /// Whether the save panel was up at the end of the last frame.
+    ///
+    /// The recording's bar comes back on the frame that panel goes away, and on
+    /// that frame only: a bar put up whenever the panel is closed would stand
+    /// again the moment Back put it down, leaving the viewer unable to dismiss
+    /// it at all. See [`XgViewApp::download_panel_window`].
+    download_panel_was_open: bool,
     /// Whether the microphone is switched on, the bar's talk control driving it.
     ///
     /// The bar is a toggle rather than a push-to-talk button: a remote control
@@ -1392,6 +1412,7 @@ pub struct XgViewApp {
 mod bars;
 mod cameras;
 mod chrome;
+mod download;
 mod file_picker;
 mod input;
 mod paging;
@@ -1401,6 +1422,7 @@ pub use persist::public_download_dir;
 pub use persist::EXPORT_SUBFOLDER;
 mod playback;
 use playback::Source;
+use download::{DownloadChoice, DownloadState};
 mod pickers;
 mod settings;
 mod streams;
@@ -1563,6 +1585,10 @@ impl XgViewApp {
             manager.audio().set_output(Some(sink.clone()));
         }
         let sound_on = config.sound_on;
+        // A process killed mid-download cannot clean up after itself. Nothing
+        // but this start can tell an orphan `.part` from one still being
+        // written, and nothing ever reads a `.part` as a video, so old ones go.
+        download::cleanup_on_start();
         let (events_tx, events_rx) = unbounded();
         let capabilities = monitor_codec::capabilities();
 
@@ -1599,10 +1625,15 @@ impl XgViewApp {
             // to walk to, and Back is the way out.
             ("tile-bar-row", ScopeDef::new(Axis::Row)),
             ("tile-bar-column", ScopeDef::new(Axis::Column)),
+            // The save panel: chosen lengths and the one button under them. Its
+            // scopes are declared with the panel that walks them; see
+            // `download::scopes`.
         ];
         // The picker's own scopes are declared with the window that walks them;
-        // see `file_picker::scopes`.
+        // see `file_picker::scopes`. The save panel's, likewise, beside the
+        // panel: see `download::scopes`.
         scopes.extend(file_picker::scopes());
+        scopes.extend(download::scopes());
 
         let mut app = Self {
             persisted: config.clone(),
@@ -1693,6 +1724,9 @@ impl XgViewApp {
             tile_bar: tilebar::Bar::new(),
             sound_on,
             playback: None,
+            download: DownloadState::default(),
+            download_panel: Modal::default(),
+            download_panel_was_open: false,
             talking: false,
             talk_index: None,
             mic: None,
@@ -1791,6 +1825,16 @@ impl XgViewApp {
             self.portrait_aspect_picker.anchor
         } else if self.combined_info_picker.is_open() {
             self.combined_info_picker.anchor
+        } else if self.download_panel.is_open() {
+            // The save panel is opened from the recording's bar, and the bar is
+            // still on screen behind it - `tile_bar.is_open()` is true the whole
+            // time. The rule at the end of the frame that puts a stray focus
+            // back on the bar's seat does so only while this answers `None`, so
+            // leaving the panel out of here took the focus out of it on every
+            // frame: the arrows walked nothing, and Enter pressed the control
+            // the ring was on behind the window, which reopened the panel and
+            // threw away its anchor. See `Handoff`.
+            self.download_panel.anchor
         } else if self.reorder.is_some() {
             self.reorder_anchor
         } else if self.show_settings {
@@ -2146,6 +2190,32 @@ impl XgViewApp {
                         ToastKind::Error,
                     ));
                 }
+                BackgroundEvent::DownloadProgress { id, progress } => {
+                    // Drained on every frame, not only while playback is open:
+                    // the clip keeps arriving after the viewer leaves it.
+                    self.download.note_progress(*id, *progress);
+                }
+                BackgroundEvent::DownloadDone { id, path } => {
+                    if self.download.finish_done(*id, path.clone()) {
+                        tracing::info!(target: "xgview::app", path = %path, "the clip was saved");
+                        toast = Some((
+                            monitor_i18n::tr_args("toast-download-done", &[("path", path.clone().into())]),
+                            ToastKind::Info,
+                        ));
+                    }
+                }
+                BackgroundEvent::DownloadFailed { id, reason } => {
+                    if self.download.finish_failed(*id, reason.clone()) {
+                        tracing::warn!(target: "xgview::app", reason = %reason, "the clip could not be saved");
+                        toast = Some((
+                            monitor_i18n::tr_args(
+                                "toast-download-failed",
+                                &[("error", reason.clone().into())],
+                            ),
+                            ToastKind::Error,
+                        ));
+                    }
+                }
                 _ => {}
             }
             self.discovery.apply(event);
@@ -2423,6 +2493,17 @@ impl eframe::App for XgViewApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // The window's X is an exit `quit()` never sees. It is read here rather
+        // than in `on_exit` because that method's signature is the renderer's,
+        // not this view's: with eframe's `glow` feature it takes a glow context
+        // and without it takes nothing, and this crate enables glow on the
+        // desktop only. `close_requested()` arrives before either goes away, so
+        // one line covers both. A `.part` left behind is swept on the next
+        // start; what this buys is the task being stopped while the process is
+        // still whole.
+        if ctx.input(|input| input.viewport().close_requested()) {
+            self.download.cancel();
+        }
         self.frame(ctx);
     }
 }
@@ -2608,6 +2689,14 @@ impl XgViewApp {
         opened |= self.remove_confirm.hand_off(ctx, false);
         opened |= self.system_confirm.hand_off(ctx, false);
         opened |= self.passphrase.hand_off(ctx, true);
+        // The save panel is asked for by a control on the bar and drawn on the
+        // frame after, so its first control does not exist yet when it opens.
+        // Waiting for the anchor is what puts the focus inside it at all - a
+        // panel whose focus stayed on the wall took no key at all, and its
+        // buttons could not be reached by a remote.
+        let download_ready =
+            self.download_panel.is_open() && self.download_panel.anchor.is_some();
+        opened |= self.download_panel.hand_off_when(ctx, download_ready, false);
         // The picker is opened from a control in the settings panel, so its
         // rows do not exist until the following frame. Wait for the first row
         // before spending the hand-off, or the focus stays on the wall and its
@@ -3258,6 +3347,7 @@ impl XgViewApp {
         if self.passphrase_window(ctx) {
             self.mark_dirty();
         }
+        self.download_panel_window(ctx);
 
         self.draw_layout_picker(ctx);
         self.draw_portrait_aspect_picker(ctx);
@@ -3622,6 +3712,29 @@ mod tests {
         );
     }
 
+    /// A window of this program owns the ring's two ends as well: its arrows
+    /// are not an aim at the picture behind it, and the ring is not drawn while
+    /// it is up. Both halves are needed - the first keeps a ring from being
+    /// armed inside a form, the second keeps one that was already standing when
+    /// the form opened from showing outside it, since a magnified picture's ring
+    /// is drawn around its edge and the window does not cover that.
+    #[test]
+    fn a_window_of_this_program_keeps_the_ring_off_the_picture() {
+        let now = Instant::now();
+        let arrow_in_a_form = Keys { down: true, ..Default::default() };
+        assert!(
+            XgViewApp::ring_keys(&arrow_in_a_form, true),
+            "on the wall the same key is an aim"
+        );
+        assert!(!XgViewApp::ring_armed_by(&arrow_in_a_form, true, true), "a form has it");
+        assert!(XgViewApp::ring_armed_by(&arrow_in_a_form, true, false));
+
+        let armed = Some(now - Duration::from_secs(1));
+        assert!(XgViewApp::ring_visible(armed, false, now));
+        assert!(!XgViewApp::ring_visible(armed, true, now), "a window covers it");
+        assert!(!XgViewApp::ring_visible(None, false, now));
+    }
+
     /// The bars are the ring's only connection, and it is at the two ends of
     /// their life: they arm it as they appear and take it with them as they go.
     /// Neither of them is a gate the ring is drawn behind - a wall driven with
@@ -3645,6 +3758,31 @@ mod tests {
         assert_eq!(follows(used, false, false, now), used, "the bars were away and stay away");
         assert_eq!(follows(used, true, true, now), used, "the bars were up and stay up");
         assert_eq!(follows(None, false, false, now), None, "the bars were away and stay away");
+    }
+
+    /// The picture's own surfaces are not the menus: the recording's strip and
+    /// the save panel it opens. Asking for the bars from either is visible
+    /// damage - they take their height from the wall, so the picture shrinks
+    /// under the form the viewer is filling in.
+    #[test]
+    fn a_press_on_the_pictures_own_surfaces_does_not_ask_for_the_bars() {
+        let control = crate::tilebar::control(0);
+        let elsewhere = Id::new("a tile");
+        let surface = XgViewApp::on_picture_surface;
+
+        // The save panel: any focus at all inside it is the panel's, and a
+        // frame in which it has not asked for a control yet counts too.
+        assert!(surface(false, true, Some(control), false), "the save panel is up");
+        assert!(surface(false, true, None, false), "the save panel, before its first focus");
+        // The strip: only its own controls, or the strip itself.
+        assert!(surface(true, false, Some(control), false), "a control of the strip");
+        assert!(surface(true, false, None, true), "the strip has the focus");
+        // A strip that is merely up leaves the remote on the wall.
+        assert!(!surface(true, false, Some(elsewhere), false), "a strip that is only drawn");
+        assert!(!surface(true, false, None, false), "nothing focused at all");
+        // Nothing of the picture's is open: the bars are the viewer's to ask
+        // for, by the keys `menus_input` and `wall_event` name.
+        assert!(!surface(false, false, Some(elsewhere), false), "the menus themselves");
     }
 
     /// What arms the ring is a key that walks it, and never a key that changes
@@ -4480,6 +4618,32 @@ mod tests {
         assert!(
             !source[off_start..off_end].contains("first_arrow_target"),
             "the rule grew a second copy behind the old branch"
+        );
+    }
+
+    /// The bar's controls are drawn by hand, and egui only turns Enter into a
+    /// click for the widgets it implements itself - so the confirm key has to
+    /// be answered here or the remote could walk the bar and do nothing with
+    /// it. Reads the source rather than driving a frame because the rule is
+    /// about which branch owns the press, which is what would go wrong if it
+    /// were put back behind one of the early returns.
+    #[test]
+    fn the_confirm_key_presses_the_bar_control_the_ring_is_on() {
+        let source = include_str!("input.rs");
+        let handle = source.find("fn handle_keys(").unwrap();
+        let rest = &source[handle..];
+        let index = rest.find("focused.and_then(tilebar::index_of)").unwrap();
+        assert!(
+            rest[..index].contains("keys.enter && keys.enter_fresh"),
+            "a held confirm key must not fire the control every frame"
+        );
+        assert!(
+            rest[..index].contains("self.tile_bar.is_open()"),
+            "the press belongs to the bar only while the bar is up"
+        );
+        assert!(
+            rest[index..].contains("self.tile_bar_activate(action)"),
+            "the control the ring is on is the one that gets pressed"
         );
     }
 

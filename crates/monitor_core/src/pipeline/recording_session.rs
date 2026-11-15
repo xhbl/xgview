@@ -1271,31 +1271,62 @@ fn fetch_ahead(
 /// without it minted another - 952 ms of the 1.05 s entering a recording took.
 /// A box with authentication switched off has never made one, so nothing is sent
 /// that it did not ask for.
-async fn open_request(
+///
+/// One login for every request the viewer's actions make - a window, a
+/// fragment, the export a download is cut from, the download itself. A `401`
+/// on the first try is the box withdrawing a token this process held, and the
+/// answer is one fresh login rather than a failure the viewer sees.
+pub(crate) async fn send_with_login(
+    method: reqwest::Method,
     uri: &str,
+    body: Option<serde_json::Value>,
     credentials: Option<&(String, String)>,
     token: Option<&str>,
 ) -> Result<(reqwest::Response, Option<String>)> {
-    let http = frigate_http();
-
     let base = api_base(uri);
     let known = match (base, credentials) {
         (Some(base), Some((user, _))) => cached_login(base, user),
         _ => None,
     };
     let mut token = token.map(str::to_string).or(known);
-    let mut response = match &token {
-        Some(token) => http.get(uri).bearer_auth(token).send().await?,
-        None => http.get(uri).send().await?,
-    };
-    if let (reqwest::StatusCode::UNAUTHORIZED, Some((user, pass))) = (response.status(), credentials) {
-        let base = base.ok_or_else(|| crate::error::CoreError::network("not an http address"))?;
+    let mut response = send(method.clone(), uri, body.as_ref(), token.as_deref()).await?;
+    if let (reqwest::StatusCode::UNAUTHORIZED, Some((user, pass))) = (response.status(), credentials)
+    {
+        let base =
+            base.ok_or_else(|| crate::error::CoreError::network("not an http address"))?;
         // The box has withdrawn the login this process was holding.
         forget_login(base, user);
         let fresh = frigate_api_login(base, user, pass, Duration::from_secs(10)).await?;
-        response = http.get(uri).bearer_auth(&fresh).send().await?;
+        response = send(method, uri, body.as_ref(), Some(&fresh)).await?;
         token = Some(fresh);
     }
+    Ok((response, token))
+}
+
+/// Sends one request with the login, if there is one, and nothing else.
+async fn send(
+    method: reqwest::Method,
+    uri: &str,
+    body: Option<&serde_json::Value>,
+    token: Option<&str>,
+) -> Result<reqwest::Response> {
+    let mut request = frigate_http().request(method, uri);
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    Ok(request.send().await?)
+}
+
+pub(crate) async fn open_request(
+    uri: &str,
+    credentials: Option<&(String, String)>,
+    token: Option<&str>,
+) -> Result<(reqwest::Response, Option<String>)> {
+    let (response, token) =
+        send_with_login(reqwest::Method::GET, uri, None, credentials, token).await?;
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {

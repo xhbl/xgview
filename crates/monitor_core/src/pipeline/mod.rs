@@ -88,6 +88,8 @@ use supervisor::Supervisor;
 // The MSE socket is opened by the discovery probe as well as by the channel
 // that streams it, so it keeps the name it had before the split.
 pub(crate) use ws_session::open_mse;
+// Saving a clip asks the same box with the same login as playing one.
+pub(crate) use recording_session::{open_request, send_with_login};
 
 /// What a channel reads afresh before each attempt.
 ///

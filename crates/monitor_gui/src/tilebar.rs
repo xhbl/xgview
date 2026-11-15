@@ -34,6 +34,7 @@ use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Stroke, StrokeKind, vec
 
 use crate::icons::{self, Icon};
 use crate::nav::Nav;
+use monitor_core::recording_download::Progress;
 
 /// How long the bar stays after the last operation on it.
 ///
@@ -100,18 +101,18 @@ pub fn depth(rows: usize, timeline: bool) -> f32 {
 /// where the alternative - balancing the lines - would move a control the viewer
 /// has just learned the place of every time one was added.
 ///
-/// `break_after` is what makes a recording's two lines the two lines it means:
-/// the transport on one and the timeline's own controls on the other, rather
-/// than whatever a greedy fill happens to leave on each. It is the index of the
-/// control the second line starts at, and `None` when the strip is short enough
-/// that fitting is the only question.
-fn wrap(widths: &[f32], available: f32, break_after: Option<usize>) -> Vec<Vec<usize>> {
+/// `breaks` is what makes a recording's lines the lines it means: on a phone
+/// held upright the way back to live on the first, the transport and the save
+/// on the second, and the timeline's own controls on the third, rather than
+/// whatever a greedy fill happens to leave on each. Each entry is the index a
+/// new line starts at; an empty slice leaves the width to decide.
+fn wrap(widths: &[f32], available: f32, breaks: &[usize]) -> Vec<Vec<usize>> {
     let mut rows: Vec<Vec<usize>> = Vec::new();
     let mut row: Vec<usize> = Vec::new();
     let mut used = 0.0;
     for (index, width) in widths.iter().enumerate() {
         let wider = if row.is_empty() { *width } else { used + GAP + *width };
-        let broken = break_after == Some(index);
+        let broken = breaks.contains(&index);
         if !row.is_empty() && (broken || wider + 2.0 * PAD > available) {
             rows.push(std::mem::take(&mut row));
             used = *width;
@@ -162,12 +163,15 @@ pub const DEPTH: f32 = EDGE + THICK;
 
 /// Side of a control across the strip, and of a square icon control along it.
 ///
-/// Forty, where the plan said forty-four. A recording carries twelve controls -
-/// the whole of a transport and the whole of a timeline's zoom - and six of them
-/// have to stand in one line on a phone held upright: 6 x 40 + 5 x 6 + 12 is 282
-/// inside the 363 a 411-wide picture leaves, and 318 with the edge margins, which
-/// is what a 320-wide screen has. At forty-four they would not fit, and the
-/// alternative - three lines on a phone - is a panel deeper than the picture.
+/// Forty, where the plan said forty-four. A recording carries thirteen
+/// controls - the transport, the timeline's zoom, the way back to live and the
+/// save - and a phone held upright puts them on three deliberately short lines:
+/// `[Live]`, `[play 1x calendar fit sound save]`, and the six timeline keys.
+/// Six at forty points, their gaps and the edge margins fit the 363 a 411-wide
+/// picture leaves. Three lines fit because an unrotated portrait tile is about
+/// 1350 points deep and the bar sits in the letterbox's black below the picture:
+/// the old worry that a third line would make the panel deeper than the picture
+/// belonged to a narrow fit where the bar covered the picture itself.
 const BUTTON_H: f32 = 40.0;
 
 /// Gap between two controls on one line.
@@ -205,6 +209,11 @@ pub enum Control {
     /// `4×`. The one control whose state cannot be a shape - a picture cannot
     /// say whether it is two times or four.
     Label(&'static str),
+    /// A download in flight, drawn in the save button's own place: a percentage
+    /// when the box said how long the file would be, a count of megabytes when
+    /// it did not. It is a label rather than a shape because no shape can say
+    /// how much of a clip has arrived.
+    Progress(Progress),
     /// The one control a call has: a red button carrying the handset that ends
     /// the talk-back. It takes over the whole bar while the viewer is talking,
     /// so that hanging up is one press and nothing else can be pressed by
@@ -217,17 +226,44 @@ pub fn icon_width() -> f32 {
     BUTTON_H
 }
 
+/// The word the save button carries while a clip is arriving.
+///
+/// An exported file comes from the box's disk with a length, so the answer is
+/// usually a percentage; a chunked answer has none and is counted in megabytes
+/// instead. Both have to fit a forty-point square, hence four characters.
+pub fn progress_text(progress: Progress) -> String {
+    // Nothing counted yet: the box is still cutting the file, or the first
+    // bytes are still on their way. Zero percent says a download has begun and
+    // is at its beginning; a dash said only that there was no number to show
+    // and read as nothing happening at all.
+    if progress.preparing || progress.received == 0 {
+        return "0%".into();
+    }
+    match progress.percent() {
+        Some(percent) => format!("{percent}%"),
+        None => {
+            let megabytes = progress.megabytes();
+            if megabytes < 10.0 {
+                format!("{megabytes:.1}M")
+            } else {
+                format!("{megabytes:.0}M")
+            }
+        }
+    }
+}
+
 /// How many controls the bar can carry at once.
 ///
-/// Nine, which is a recording's row: the quarter turn on a portrait wall, the
-/// two steps, play, the two event jumps, the timeline's width, the sound switch
-/// and the way back to the camera. The live bar is shorter - five - and a call
-/// takes all of them away and leaves the handset in the first place.
+/// Thirteen: a recording's whole row - the quarter turn on a portrait wall, the
+/// two steps, play, the two event jumps, the timeline's width, the sound switch,
+/// the save and the way back to the camera - with a place for each. The live bar
+/// is shorter, and a call takes all of them away and leaves the handset in the
+/// first place.
 ///
 /// A focus on any of these ids is a focus the bar owns, whether or not that
 /// control is on screen this frame - the microphone a call has just turned into
 /// the handset is one, and the handset it becomes is another.
-pub const CONTROLS: usize = 12;
+pub const CONTROLS: usize = 13;
 
 /// Which edge of the picture the bar is docked to, in the picture's own frame.
 ///
@@ -427,11 +463,11 @@ pub fn fits_timeline(
     rotated: bool,
     margin: f32,
     widths: &[f32],
-    break_after: Option<usize>,
+    breaks: &[usize],
 ) -> bool {
     let across = if rotated { tile.width() } else { tile.height() };
     let local = if rotated { vec2(tile.height(), tile.width()) } else { tile.size() };
-    let rows = wrap(widths, (local.x - 2.0 * EDGE).max(0.0), break_after);
+    let rows = wrap(widths, (local.x - 2.0 * EDGE).max(0.0), breaks);
     across >= margin + depth(rows.len(), true)
 }
 
@@ -498,14 +534,14 @@ pub fn layout(
     dock: Dock,
     margin: f32,
     widths: &[f32],
-    break_after: Option<usize>,
+    breaks: &[usize],
     timeline: bool,
 ) -> Layout {
     let local = if rotated { vec2(tile.height(), tile.width()) } else { tile.size() };
     // The room a line of controls has: the picture's own length, less the margin
     // the panel keeps from each end.
     let available = (local.x - 2.0 * EDGE).max(0.0);
-    let rows = wrap(widths, available, break_after);
+    let rows = wrap(widths, available, breaks);
     let widest = rows.iter().map(|row| row_width(row, widths)).fold(0.0, f32::max);
     // A timeline wants the width of the picture, less the margin it keeps from
     // the edge - and no more than `WIDEST`, where a scrub would ask the eye to
@@ -691,8 +727,17 @@ pub fn draw(
                 icons::button_in(ui, *rect, self::control(index), *icon, false, muted, tip, rotated)
             }
             Control::Label(text) => {
-                icons::label_in(ui, *rect, self::control(index), text, tip, rotated)
+                icons::label_in(ui, *rect, self::control(index), text, tip, rotated, muted)
             }
+            Control::Progress(progress) => icons::label_in(
+                ui,
+                *rect,
+                self::control(index),
+                &progress_text(*progress),
+                tip,
+                rotated,
+                muted,
+            ),
             Control::Hangup => {
                 icons::danger_in(ui, *rect, self::control(index), Icon::Hangup, tip, rotated)
             }
@@ -714,6 +759,11 @@ mod tests {
 
     fn landscape() -> Rect {
         Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1080.0))
+    }
+
+    /// Bytes counted while the file is being sent.
+    fn at(received: u64, total: Option<u64>) -> Progress {
+        Progress { received, total, preparing: false }
     }
 
     /// A control is known by its place, and the seat is not one of them: the
@@ -747,12 +797,12 @@ mod tests {
     }
 
     fn placed(tile: Rect, rotated: bool, dock: Dock, widths: &[f32]) -> Layout {
-        layout(tile, rotated, dock, EDGE, widths, None, false)
+        layout(tile, rotated, dock, EDGE, widths, &[], false)
     }
 
     /// The same, with a timeline row under the controls.
     fn playing(tile: Rect, dock: Dock, widths: &[f32]) -> Layout {
-        layout(tile, false, dock, EDGE, widths, None, true)
+        layout(tile, false, dock, EDGE, widths, &[], true)
     }
 
     /// With a timeline the panel is deeper and wider, and its controls rise by
@@ -898,29 +948,29 @@ mod tests {
     #[test]
     fn a_timeline_is_given_to_a_tile_with_room_for_both_rows() {
         let five = [icon_width(); 5];
-        assert!(fits_timeline(landscape(), false, EDGE, &five, None));
-        assert!(fits_timeline(portrait(), false, EDGE, &five, None));
-        assert!(fits_timeline(portrait(), true, EDGE, &five, None));
-        assert!(fits_timeline(landscape(), true, EDGE, &five, None));
+        assert!(fits_timeline(landscape(), false, EDGE, &five, &[]));
+        assert!(fits_timeline(portrait(), false, EDGE, &five, &[]));
+        assert!(fits_timeline(portrait(), true, EDGE, &five, &[]));
+        assert!(fits_timeline(landscape(), true, EDGE, &five, &[]));
 
         // A strip of a tile has room for the controls and not for the row.
         let shallow = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 100.0));
-        assert!(!fits_timeline(shallow, false, EDGE, &five, None));
-        assert!(fits_timeline(shallow, true, EDGE, &five, None), "its width is the depth when turned");
+        assert!(!fits_timeline(shallow, false, EDGE, &five, &[]));
+        assert!(fits_timeline(shallow, true, EDGE, &five, &[]), "its width is the depth when turned");
         let narrow = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 1920.0));
-        assert!(!fits_timeline(narrow, true, EDGE, &five, None));
-        assert!(fits_timeline(narrow, false, EDGE, &five, None));
+        assert!(!fits_timeline(narrow, true, EDGE, &five, &[]));
+        assert!(fits_timeline(narrow, false, EDGE, &five, &[]));
         // And the edge it keeps clear of the picture edge is part of the room.
         let exact = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, EDGE + FULL));
-        assert!(fits_timeline(exact, false, EDGE, &five, None));
-        assert!(!fits_timeline(exact.shrink2(vec2(0.0, 1.0)), false, EDGE, &five, None), "a point short");
+        assert!(fits_timeline(exact, false, EDGE, &five, &[]));
+        assert!(!fits_timeline(exact.shrink2(vec2(0.0, 1.0)), false, EDGE, &five, &[]), "a point short");
 
         // Wrapping makes the panel deeper, so a tile that holds one row of five
         // need not hold two.
         let eight = [icon_width(); 8];
         let narrow_tile = Rect::from_min_size(Pos2::ZERO, vec2(320.0, 150.0));
-        assert!(fits_timeline(narrow_tile, false, EDGE, &five, None));
-        assert!(!fits_timeline(narrow_tile, false, EDGE, &eight, None), "a second line needs 64 more");
+        assert!(fits_timeline(narrow_tile, false, EDGE, &five, &[]));
+        assert!(!fits_timeline(narrow_tile, false, EDGE, &eight, &[]), "a second line needs 64 more");
     }
 
     /// The controls keep a little off the panel's own edge: at both ends when
@@ -958,7 +1008,7 @@ mod tests {
         // Each line is centred on its own, so two lines of different lengths
         // stack as a block rather than against a common edge.
         let widths = [icon_width(); 5];
-        let two = layout(portrait(), false, Dock::Bottom, EDGE, &widths, Some(3), true);
+        let two = layout(portrait(), false, Dock::Bottom, EDGE, &widths, &[3], true);
         for line in [&two.buttons[..3], &two.buttons[3..]] {
             let first = line[0];
             let last = line[line.len() - 1];
@@ -974,13 +1024,13 @@ mod tests {
     fn a_narrow_picture_wraps_the_controls() {
         let widths = [icon_width(); 8];
         // A 1920 wide picture holds all eight on one line.
-        let wide = layout(landscape(), false, Dock::Bottom, EDGE, &widths, None, true);
+        let wide = layout(landscape(), false, Dock::Bottom, EDGE, &widths, &[], true);
         assert_eq!(wide.buttons.len(), 8);
         assert!(wide.buttons.iter().all(|rect| rect.center().y == wide.buttons[0].center().y));
         // A phone in portrait is 411 wide: 363 for the panel, which is six
         // controls a line - 316 - and not seven, which needs 368.
         let phone = Rect::from_min_size(Pos2::ZERO, vec2(411.0, 800.0));
-        let narrow = layout(phone, false, Dock::Bottom, EDGE, &widths, None, true);
+        let narrow = layout(phone, false, Dock::Bottom, EDGE, &widths, &[], true);
         assert_eq!(narrow.buttons.len(), 8);
         let lines: Vec<f32> = {
             let mut seen: Vec<f32> = Vec::new();
@@ -1008,6 +1058,61 @@ mod tests {
     /// The seat sits in the bar's top-left corner: egui's geometric walk can
     /// only find the first button below it or to its right. All four arrows
     /// mean the same thing here, so the answer must not depend on geometry.
+    /// A phone held upright asks for three lines on purpose: the way back to
+    /// live alone, then the transport and the save, then the timeline's own
+    /// keys. The tile is the whole 1x1 cell, so three rows fit in the letterbox
+    /// black below the picture and the timeline keeps its height.
+    #[test]
+    fn three_breaks_put_a_portrait_recording_on_three_centred_lines() {
+        let widths = [icon_width(); CONTROLS];
+        let phone = Rect::from_min_size(Pos2::ZERO, vec2(720.0, 1350.0));
+        let breaks = [1, 7];
+        let laid = layout(phone, false, Dock::Bottom, EDGE, &widths, &breaks, true);
+        let mut centres: Vec<f32> = Vec::new();
+        for button in &laid.buttons {
+            if !centres.iter().any(|y| (*y - button.center().y).abs() < 0.5) {
+                centres.push(button.center().y);
+            }
+        }
+        assert_eq!(centres.len(), 3, "three lines, not a greedy two");
+        assert!((laid.buttons[0].center().y - centres[0]).abs() < 0.5);
+        assert!((laid.buttons[1].center().y - centres[1]).abs() < 0.5);
+        assert!((laid.buttons[7].center().y - centres[2]).abs() < 0.5);
+        assert!(laid.timeline.is_some(), "the timeline was not squeezed out");
+        assert!(fits_timeline(phone, false, EDGE, &widths, &breaks));
+        for line in [&laid.buttons[..1], &laid.buttons[1..7], &laid.buttons[7..]] {
+            let left = line[0].left() - laid.bar.left();
+            let right = laid.bar.right() - line[line.len() - 1].right();
+            assert!((left - right).abs() < 1.0, "each line is centred on its own");
+        }
+    }
+
+    /// A progress word has four characters at most, because the button it goes
+    /// in is a forty-point square and a chunked answer has no length to divide.
+    #[test]
+    fn a_progress_word_fits_its_square() {
+        assert_eq!(progress_text(at(0, None)), "0%");
+        assert_eq!(progress_text(at(0, Some(4800))), "0%", "a length but no byte yet");
+        assert_eq!(progress_text(at(50, Some(100))), "50%");
+        assert_eq!(progress_text(at(100, Some(100))), "100%");
+        assert_eq!(progress_text(at(3 * 1024 * 1024, None)), "3.0M");
+        assert_eq!(progress_text(at(12 * 1024 * 1024, None)), "12M");
+    }
+
+    /// The box cuts the file before it sends it, and on a long clip that wait
+    /// is most of the download. The button has to say something during it, or
+    /// the press looks like it did nothing.
+    #[test]
+    fn a_clip_being_cut_says_so_rather_than_counting_nothing() {
+        let cutting = Progress { received: 0, total: None, preparing: true };
+        assert_eq!(progress_text(cutting), "0%");
+        assert_eq!(
+            progress_text(Progress { preparing: true, ..at(9 * 1024 * 1024, None) }),
+            "0%",
+            "no byte has arrived while the box is cutting, whatever the count says"
+        );
+    }
+
     #[test]
     fn every_arrow_off_the_seat_names_the_first_button() {
         assert_eq!(first_arrow_target(true, Some(seat()), true), Some(control(0)));

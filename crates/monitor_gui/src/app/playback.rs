@@ -489,6 +489,7 @@ impl XgViewApp {
     /// it answers arrives as an event.
     pub(super) fn enter_playback(&mut self) {
         let Some(channel) = self.scheduler.zoom() else {
+            tracing::debug!(target: "xgview::app", "enter playback: nothing magnified");
             return;
         };
         let Some((origin, camera_id, credentials)) = self.magnified_camera().and_then(|camera| {
@@ -497,10 +498,16 @@ impl XgViewApp {
                 .mse_username
                 .clone()
                 .map(|user| (user, camera.mse_password.clone().unwrap_or_default()));
+            // The identifier, not the label: this is what the box lists the
+            // camera under, and every later answer is checked against it. A
+            // name a viewer can change must not be the thing that decides a
+            // recording still belongs to the camera in front of it.
             Some((origin, camera.id.clone(), credentials))
         }) else {
+            tracing::debug!(target: "xgview::app", "enter playback: the camera names no server");
             return;
         };
+        tracing::debug!(target: "xgview::app", channel, camera = %camera_id, "enter playback: asking the box");
         start_window(
             &self.handle,
             &self.events_tx,
@@ -1105,7 +1112,7 @@ impl XgViewApp {
     /// screen, and the strip slides under the cursor as the picture plays. A
     /// seek that has not arrived yet is already there, and a finger on the strip
     /// has taken the cursor with it.
-    fn centre_of(&self, playback: &Playback) -> i64 {
+    pub(super) fn centre_of(&self, playback: &Playback) -> i64 {
         // The finger first, then the seek that has not arrived, then the picture.
         // The finger has to come first or the strip does not move until it is let
         // go of: the frame store holds the picture the drag began from, and it is
@@ -1592,6 +1599,10 @@ impl XgViewApp {
         let Some(playback) = self.playback.take() else {
             return;
         };
+        // The question about how much to save needs the cursor it was opened
+        // on. A clip already confirmed does not: it lives on the download state
+        // and keeps arriving on its own task.
+        self.download_panel.close();
         // The bar's row is not the row it was: the recording's controls are gone
         // and the camera's are back. The focus was on a place in the old row, and
         // the place means something else now - so it goes to the seat, where the
@@ -3485,7 +3496,7 @@ impl XgViewApp {
     /// rather than refused: the viewer is pointing at a place on a timeline, and
     /// the answer "there is nothing there, here is the closest there is" is one
     /// they can act on.
-    fn seek(&mut self, at: i64) {
+    pub(super) fn seek(&mut self, at: i64) {
         // A look past a hole belonged to the moment the picture stopped at, and
         // the picture is being taken somewhere else: whatever it would have said
         // is about a place nobody is going. And the seek is numbered: the range

@@ -50,8 +50,10 @@ import android.view.WindowInsetsController;
 import android.view.WindowManager;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
@@ -1855,12 +1857,18 @@ public class MainActivity extends NativeActivity {
     }
 
     /**
-     * The MIME type to record for an export named {@code name}: the sealed type
-     * for the passphrase-sealed file (xgvconfig.seal), plain JSON for the clear
-     * export (xgvconfig.json). A wrong type would send the wrong entry to the
-     * system picker's filter and mislabel the file in Downloads.
+     * The MIME type to record for a file named {@code name}: a saved recording
+     * is {@code video/mp4}, the clear configuration export is
+     * {@code application/json}, and the passphrase-sealed one is the sealed
+     * type. A wrong type would send the wrong entry to the system picker's
+     * filter, mislabel it in Downloads, and - on the Downloads provider, which
+     * appends the extension a type maps to - silently rename a file that
+     * already carries its own.
      */
     private static String mimeFor(String name) {
+        if (name.endsWith(".mp4")) {
+            return "video/mp4";
+        }
         return name.endsWith(".json") ? "application/json" : SEALED_MIME_TYPE;
     }
 
@@ -2110,6 +2118,181 @@ public class MainActivity extends NativeActivity {
         }
         final String said = message.toLowerCase(java.util.Locale.ROOT);
         return said.contains("eacces") || said.contains("permission denied");
+    }
+
+
+    // --------------------------------------------------------- recording download
+    //
+    // A clip the viewer asked for is fetched by the native side into the app's
+    // own files directory under a `.part` name, and only this call publishes
+    // it: the response has ended cleanly by then, so the public folder never
+    // holds half an mp4. This is also the one place that knows how a file
+    // reaches Download/xgview on each Android version.
+
+    /**
+     * Copies a whole recording into {@link #EXPORT_FOLDER} and returns the
+     * path to show the viewer.
+     *
+     * <p>Deliberately not {@link #writeDownloadFile}. An export is one file
+     * whose name the viewer knows, and exporting twice replaces it; a clip is
+     * a new file every time, and two clips cut from the same second must not
+     * overwrite each other. So this never calls {@link #findDownload} and
+     * never opens an existing row with {@code "wt"}: it inserts a fresh row
+     * and reads back the name the provider made unique out of the one it was
+     * given.
+     *
+     * <p>Returns null when Android 9's storage permission is not held - the
+     * native side asks for it and the viewer tries again. Everything else that
+     * goes wrong is thrown. Called from a background task, not the UI thread.
+     */
+    public static String copyToDownload(String srcPath, String name) throws Exception {
+        final Activity self = wall();
+        if (self == null) {
+            throw new IllegalStateException("the activity is not up");
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return copyViaMediaStore(self, srcPath, name);
+        }
+        return copyViaPublicDownload(self, srcPath, name);
+    }
+
+    /**
+     * Android 10+: a pending row in the Downloads collection. `IS_PENDING`
+     * keeps the copy out of the file manager until the last byte is down, and
+     * the provider gives a same-named file its own {@code (1)} suffix rather
+     * than replacing it. No storage permission is needed on this route.
+     */
+    private static String copyViaMediaStore(Activity self, String srcPath, String name)
+            throws Exception {
+        final ContentResolver resolver = self.getContentResolver();
+        final String folder = Environment.DIRECTORY_DOWNLOADS + "/xgview";
+        final Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+
+        final ContentValues values = new ContentValues();
+        values.put(MediaStore.Downloads.DISPLAY_NAME, name);
+        values.put(MediaStore.Downloads.RELATIVE_PATH, folder);
+        values.put(MediaStore.Downloads.MIME_TYPE, mimeFor(name));
+        values.put(MediaStore.Downloads.IS_PENDING, 1);
+        final Uri target = resolver.insert(collection, values);
+        if (target == null) {
+            throw new IOException("cannot create " + EXPORT_FOLDER + "/" + name);
+        }
+        boolean written = false;
+        try {
+            // "wt" rather than "w": a pending row is ours alone, but a provider
+            // that hands back a non-empty stream must not leave its old bytes
+            // ahead of the clip.
+            try (InputStream source = new FileInputStream(srcPath);
+                 OutputStream stream = resolver.openOutputStream(target, "wt")) {
+                if (stream == null) {
+                    throw new IOException("cannot open " + target);
+                }
+                written = copyClip(source, stream) > 0;
+            }
+        } finally {
+            if (!written) {
+                // An empty or broken clip: no row to publish, and no litter.
+                resolver.delete(target, null, null);
+            } else {
+                final ContentValues publish = new ContentValues();
+                publish.put(MediaStore.Downloads.IS_PENDING, 0);
+                resolver.update(target, publish, null, null);
+            }
+        }
+        if (!written) {
+            throw new IOException("the clip at " + srcPath + " is empty");
+        }
+        return EXPORT_FOLDER + "/" + downloadName(resolver, target, name);
+    }
+
+    /**
+     * Android 9: the public Downloads directory itself. There is no
+     * `MediaStore` route at that level, so the copy needs
+     * `WRITE_EXTERNAL_STORAGE`; a call that arrives without it answers null
+     * rather than asking for the dialog a second time.
+     *
+     * <p>`IS_PENDING` does not exist there, so the bytes go into a staging
+     * file and are renamed only once the copy is whole. An {@code *.mp4} is
+     * never left half written - the same rule the native side's `.part` keeps
+     * on every platform.
+     */
+    @SuppressWarnings("deprecation")
+    private static String copyViaPublicDownload(Activity self, String srcPath, String name)
+            throws Exception {
+        if (self.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+            return null;
+        }
+        final File folder = new File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                "xgview");
+        if (!folder.isDirectory() && !folder.mkdirs()) {
+            throw new IOException("cannot create " + folder);
+        }
+        final String unique = uniqueName(folder, name);
+        final File staging = new File(folder, unique + ".part");
+        final File finished = new File(folder, unique);
+        try {
+            try (InputStream source = new FileInputStream(srcPath);
+                 OutputStream stream = new FileOutputStream(staging)) {
+                if (copyClip(source, stream) == 0) {
+                    throw new IOException("the clip at " + srcPath + " is empty");
+                }
+            }
+            if (!staging.renameTo(finished)) {
+                throw new IOException("cannot publish " + finished);
+            }
+        } finally {
+            // A killed process can leave the staging file behind. It is not an
+            // mp4 and the next copy makes a fresh one, so it is harmless - but
+            // a normal finish owes the folder none.
+            if (staging.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                staging.delete();
+            }
+        }
+        MediaScannerConnection.scanFile(
+                self, new String[] { finished.getAbsolutePath() },
+                new String[] { "video/mp4" }, null);
+        return EXPORT_FOLDER + "/" + unique;
+    }
+
+    /** Copies one clip, answering how many bytes moved. */
+    private static long copyClip(InputStream source, OutputStream stream) throws IOException {
+        final byte[] buffer = new byte[64 * 1024];
+        long moved = 0;
+        int read;
+        while ((read = source.read(buffer)) != -1) {
+            if (read == 0) {
+                continue;
+            }
+            stream.write(buffer, 0, read);
+            moved += read;
+        }
+        return moved;
+    }
+
+    /**
+     * The first free {@code name (N).mp4} in {@code folder}.
+     *
+     * <p>The desktop side of the download does the same thing before a rename;
+     * Android 9 has no provider to make the name unique, so it is done here.
+     * A clip is never a replacement for an earlier one.
+     */
+    private static String uniqueName(File folder, String name) {
+        if (!new File(folder, name).exists()) {
+            return name;
+        }
+        final int dot = name.lastIndexOf('.');
+        final String base = dot > 0 ? name.substring(0, dot) : name;
+        final String extension = dot > 0 ? name.substring(dot) : "";
+        for (int n = 1; n < 10_000; n++) {
+            final String candidate = base + " (" + n + ")" + extension;
+            if (!new File(folder, candidate).exists()) {
+                return candidate;
+            }
+        }
+        throw new IllegalStateException("no free name for " + name);
     }
 
     // ---------------------------------------------------------------- boot start

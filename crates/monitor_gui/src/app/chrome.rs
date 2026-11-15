@@ -159,9 +159,17 @@ impl XgViewApp {
         // ids - without it here, Up out of the strip put the focus on a control
         // and this read the frame's key as "the viewer is in the menus", so the
         // bars came up over a full screen picture.
-        if self.tile_bar.is_open()
-            && (focused.is_some_and(tilebar::owns) || self.strip_has_focus(ctx))
-        {
+        //
+        // The save panel the strip opens is the same surface again, and it is
+        // the one that showed the damage: an arrow inside it woke the bars, the
+        // wall lost their height, and the picture moved under a form the viewer
+        // was still reading. See [`Self::on_picture_surface`].
+        if Self::on_picture_surface(
+            self.tile_bar.is_open(),
+            self.download_panel.is_open(),
+            focused,
+            self.strip_has_focus(ctx),
+        ) {
             return false;
         }
         // The remote's focus is in a bar, in the settings panel or in a window:
@@ -187,6 +195,31 @@ impl XgViewApp {
                 Self::wall_event(bands, self.back_is_a_door(), band_is_a_door, event)
             })
         })
+    }
+
+    /// Whether the focus is on a surface of the picture rather than on the
+    /// wall's own bars.
+    ///
+    /// Two surfaces belong to the picture: the recording's strip, which is drawn
+    /// over the picture and is the picture's own controls, and the save panel,
+    /// which the strip opens. Neither is the menus, so a press in either is not
+    /// a request for the bars - and asking for them there is visible damage: the
+    /// bars take their height from the wall, so the picture shrinks under the
+    /// very form being filled in, and comes back up while a clip is still being
+    /// described. The windows that *do* need the bars - the settings, the
+    /// pickers - are held up by [`Self::chrome_visible`] itself.
+    ///
+    /// A strip that is merely up is not enough: the upright default leaves the
+    /// remote on the wall, and an arrow off it is a press that asks for the
+    /// bars. Only the strip's own controls, and the strip itself, count.
+    pub(super) fn on_picture_surface(
+        strip_open: bool,
+        save_panel_open: bool,
+        focused: Option<egui::Id>,
+        strip_has_focus: bool,
+    ) -> bool {
+        save_panel_open
+            || (strip_open && (focused.is_some_and(tilebar::owns) || strip_has_focus))
     }
 
     /// Whether the top and bottom bars are drawn this frame.
@@ -219,8 +252,21 @@ impl XgViewApp {
     /// the viewer makes one, which is what keeps a fresh run's wall free of a
     /// cursor. The bars have no say here; what they do to the ring they do at
     /// the moment they come and go. See [`Self::ring_follows_bars`].
+    ///
+    /// A window of this program is the other exception, and it is not a clock of
+    /// its own: a cursor standing on the picture behind a window points at
+    /// something the viewer cannot press. On a magnified picture the ring is
+    /// drawn around the picture's edge, outside the window that covers it, so
+    /// it stays in sight the whole time - which is how arrows spent in the save
+    /// panel lit a box on the recording behind it.
     pub(super) fn ring_shown(&self) -> bool {
-        Self::ring_standing(self.ring_seen, Instant::now())
+        Self::ring_visible(self.ring_seen, self.modal_is_up(), Instant::now())
+    }
+
+    /// [`Self::ring_shown`], with the window and the clock given: the rule we
+    /// can test.
+    pub(super) fn ring_visible(armed: Option<Instant>, window_up: bool, now: Instant) -> bool {
+        !window_up && Self::ring_standing(armed, now)
     }
 
     /// [`Self::ring_shown`], with its clock given: the rule we can test.

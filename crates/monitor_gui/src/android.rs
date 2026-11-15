@@ -9,7 +9,7 @@
 //! reasoning for attaching the VM to the UI thread permanently. Only compiled
 //! on Android.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI8, AtomicPtr, AtomicU64, Ordering};
 
 use jni::objects::{GlobalRef, JString, JValue};
@@ -897,6 +897,93 @@ pub fn write_download(name: &str, text: &str) -> Result<ExportOutcome, String> {
         Some(path) => ExportOutcome::Written(path),
         None => ExportOutcome::NeedsStoragePermission,
     })
+}
+
+/// The two places a saved recording needs on Android.
+///
+/// `dir` is the public `Download/xgview` folder, but only as a path to *show*
+/// in the panel: from Android 10 on the bytes reach it through `MediaStore`,
+/// never through `std::fs`. `parts` is a subdirectory of the app's own files,
+/// where the native downloader writes its `.part` - private, writable without
+/// any permission, and swept at the next start when a killed process left one
+/// behind.
+///
+/// Unlike the desktop's `recording_download::desktop_dirs`, the public folder
+/// is deliberately not probed for writability. It is not writable by path on
+/// Android 10+, and asking for Android 9's storage permission here would put a
+/// dialog up on every start, because `cleanup_on_start()` calls this too. The
+/// permission belongs to the publishing step, where it is actually needed.
+pub fn download_dirs() -> Result<(PathBuf, PathBuf), String> {
+    let external = external_files_dir()
+        .ok_or_else(|| "the app's own files directory is not known".to_owned())?;
+    let dir = export_folder()
+        .ok_or_else(|| "the public Download folder is not known".to_owned())?;
+    let parts = external.join(".parts");
+    let word = || format!("{} is not writable", parts.display());
+    std::fs::create_dir_all(&parts).map_err(|err| format!("{}: {err}", word()))?;
+    let probe = parts.join(".probe");
+    std::fs::write(&probe, b"xgview").map_err(|err| format!("{}: {err}", word()))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok((dir, parts))
+}
+
+/// Publishes a whole `.part` into the public `Download/xgview` folder.
+///
+/// The native side has finished the response and synced the file by now; the
+/// activity copies it into a pending MediaStore row - or, on Android 9, a
+/// staging file renamed only once complete - and answers the path the viewer
+/// is told about. That answer names the file the provider actually made,
+/// because a clip cut twice from the same second must not replace the first.
+///
+/// A null answer is Android 9's permission still being refused. The dialog is
+/// asked for here rather than at startup, so a viewer who never downloads a
+/// clip never sees it.
+pub fn publish_download(temp: &Path, name: &str) -> Result<String, String> {
+    if !storage_granted() {
+        request_storage();
+        return Err(monitor_i18n::tr("download-no-storage"));
+    }
+    let src = temp.to_string_lossy();
+    let (Some(class), Some(mut env)) = (class(), attach()) else {
+        return Err("the activity is not up".to_owned());
+    };
+    let (Ok(src), Ok(name)) = (env.new_string(src.as_ref()), env.new_string(name)) else {
+        return Err("cannot hand the clip to the activity".to_owned());
+    };
+    let result = env.call_static_method(
+        class,
+        "copyToDownload",
+        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+        &[JValue::Object(&src), JValue::Object(&name)],
+    );
+    let answer = match result {
+        Ok(value) => match value.l() {
+            // Android 9 without the grant answers null; see `copyToDownload`.
+            Ok(object) if object.is_null() => None,
+            Ok(object) => {
+                let object = JString::from(object);
+                // `get_string` borrows `object`, and the borrow has to end
+                // inside this arm: a `match` on the borrowed result leaves the
+                // temporary alive past `object`'s own drop. Binding the owned
+                // string first is what ends it at the call.
+                let path = env.get_string(&object).map(String::from);
+                match path {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        return Err(take_exception(&mut env).unwrap_or_else(|| error.to_string()))
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(take_exception(&mut env).unwrap_or_else(|| error.to_string()))
+            }
+        },
+        Err(error) => {
+            return Err(take_exception(&mut env).unwrap_or_else(|| error.to_string()))
+        }
+    };
+    clear_exception(&mut env);
+    answer.ok_or_else(|| monitor_i18n::tr("download-no-storage"))
 }
 
 /// The app's own folder on the shared volume, remembered from the entry point.

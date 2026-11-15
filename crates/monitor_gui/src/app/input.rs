@@ -230,6 +230,18 @@ impl XgViewApp {
             || keys.devices
     }
 
+    /// Whether this frame's keys arm the ring: the keys that walk it - see
+    /// [`Self::ring_keys`] - and only while no window of this program is up.
+    ///
+    /// A window's arrows are that window's. Arming the ring for them left a
+    /// focus box standing on the picture behind the save panel, and on a
+    /// magnified picture that box is drawn around the picture's edge, outside
+    /// the window covering it: the viewer pressed an arrow in a form and a ring
+    /// lit up on the recording behind it.
+    pub(super) fn ring_armed_by(keys: &Keys, wall_owns: bool, window_up: bool) -> bool {
+        !window_up && Self::ring_keys(keys, wall_owns)
+    }
+
     /// Keys that act on the wall and nowhere else.
     ///
     /// Enter and Space magnify the focused viewport and unwind it again;
@@ -369,6 +381,10 @@ impl XgViewApp {
     /// simply asked to close, and the close request saves and stops the runtime
     /// through the path already there.
     pub(super) fn quit(&mut self, ctx: &egui::Context) {
+        // The download is the one background task with a file in progress. On
+        // Android the process ends below without running a destructor, and on
+        // the desktop the runtime is dropped with the task still attached.
+        self.download.cancel();
         #[cfg(target_os = "android")]
         {
             let _ = ctx;
@@ -1340,6 +1356,10 @@ impl XgViewApp {
             (self.camera_edit.is_open(), self.camera_edit.anchor),
             (self.remove_confirm.is_open(), self.remove_confirm.anchor),
             (self.system_confirm.is_open(), self.system_confirm.anchor),
+            // The save panel is opened by a press on the bar, and a press moves
+            // no focus in this program - so the ring stayed on the bar behind
+            // the window, and every arrow walked the bar instead of the panel.
+            (self.download_panel.is_open(), self.download_panel.anchor),
         ] {
             if open {
                 return anchor;
@@ -1457,7 +1477,8 @@ impl XgViewApp {
         if ((self.passphrase.payload.as_ref().is_some_and(|prompt| !prompt.working))
             || self.camera_edit.is_open()
             || self.remove_confirm.is_open()
-            || self.system_confirm.is_open())
+            || self.system_confirm.is_open()
+            || self.download_panel.is_open())
             && self.dialog_back_pressed(ctx)
         {
             if self.passphrase.is_open() {
@@ -1473,6 +1494,8 @@ impl XgViewApp {
                 self.restore_focus = self.system_confirm.close_restoring();
             } else if self.camera_edit.is_open() {
                 self.restore_focus = self.camera_edit.close_restoring();
+            } else if self.download_panel.is_open() {
+                self.restore_focus = self.download_panel.close_restoring();
             }
             return;
         }
@@ -1578,7 +1601,13 @@ impl XgViewApp {
         // The focus ring is armed here, before any of these keys is acted on:
         // what arms it is the keys that walk it, whatever else they end up
         // doing. See `ring_keys`.
-        if Self::ring_keys(&keys, self.owner == Owner::Grid) {
+        //
+        // Not while a window of this program is up: the arrows are that
+        // window's, and the ring is the wall's cursor - arming it here left a
+        // focus box standing on the picture behind the save panel, drawn
+        // around the magnified picture's own edge and outside the window that
+        // was covering it, for the ring's whole idle after the window had gone.
+        if Self::ring_armed_by(&keys, self.owner == Owner::Grid, self.modal_is_up()) {
             self.ring_seen = Some(Instant::now());
             self.ring_aimed = true;
         }
@@ -1592,6 +1621,35 @@ impl XgViewApp {
             && (keys.left || keys.right || keys.up || keys.down || keys.enter || keys.back)
         {
             self.tile_bar.touch(Instant::now());
+        }
+
+        // The confirm key is a press on the control the ring is on. The bar's
+        // controls are drawn by hand rather than built from `egui::Button`, and
+        // egui only turns Enter into a click for the widgets it implements
+        // itself - so without this the remote could walk the bar and then had
+        // no way to *do* anything with it, which reads as the bar being dead.
+        // A fresh press only: a held key would fire the control again every
+        // frame, and the one that starts a download would start it once and
+        // then refuse the rest, one at a time.
+        //
+        // Not while a window of this program is up: the bar stays on screen
+        // behind one - a recording's bar behind the save panel it opened - and
+        // a focus left on it would re-run the control that opened the window on
+        // every press, closing and reopening it and throwing away the anchor the
+        // focus was about to land on.
+        if self.tile_bar.is_open() && keys.enter && keys.enter_fresh && !self.modal_is_up() {
+            let focused = ctx.memory(|memory| memory.focused());
+            if let Some(index) = focused.and_then(tilebar::index_of) {
+                if let Some((_, action)) = self.tile_bar_entries().0.get(index).copied() {
+                    // A greyed control is not a control: it takes no focus, so
+                    // this is only ever reached for one that can act.
+                    if self.tile_bar_available(action) {
+                        ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
+                        self.tile_bar_activate(action);
+                        return;
+                    }
+                }
+            }
         }
 
         // The reorder mode owns Back: it drops the arrangement and nothing
