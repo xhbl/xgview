@@ -718,9 +718,15 @@ fn call_bool(method: &str) -> bool {
     let (Some(class), Some(mut env)) = (class(), attach()) else {
         return false;
     };
-    env.call_static_method(class, method, "()Z", &[])
+    let answer = env
+        .call_static_method(class, method, "()Z", &[])
         .and_then(|value| value.z())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    // A Java exception left pending aborts the process on the next JNI call.
+    // These queries are asked on the way into a publish, so a silent `false`
+    // must not leave one behind for the call that follows it.
+    clear_exception(&mut env);
+    answer
 }
 
 fn call_void(method: &str) {
@@ -728,6 +734,7 @@ fn call_void(method: &str) {
         return;
     };
     let _ = env.call_static_method(class, method, "()V", &[]);
+    clear_exception(&mut env);
 }
 
 /// Puts the "this device cannot draw" notice on screen, and says whether it got there.
@@ -948,6 +955,7 @@ pub fn publish_download(temp: &Path, name: &str) -> Result<String, String> {
         return Err("the activity is not up".to_owned());
     };
     let (Ok(src), Ok(name)) = (env.new_string(src.as_ref()), env.new_string(name)) else {
+        clear_exception(&mut env);
         return Err("cannot hand the clip to the activity".to_owned());
     };
     let result = env.call_static_method(

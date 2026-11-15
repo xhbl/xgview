@@ -480,4 +480,50 @@ mod tests {
             "an Android 9 refusal has to say what is missing in both catalogues"
         );
     }
+
+    /// A finished clip owes two cleanups: the private copy on the phone, and
+    /// the export it made on the box. Aborting the task on the way out would
+    /// skip both, so leaving only sets a flag.
+    #[test]
+    fn a_saved_clip_cleans_up_after_itself() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let download = std::fs::read_to_string(root.join("monitor_gui/src/app/download.rs"))
+            .expect("cannot read app/download.rs");
+        let core = std::fs::read_to_string(root.join("monitor_core/src/recording_download.rs"))
+            .expect("cannot read recording_download.rs");
+
+        assert!(
+            download.contains("remove_file(&clip.temp)"),
+            "Android publishes by copying: the private original must not stay behind"
+        );
+        assert!(
+            !download.contains(".abort.abort()"),
+            "aborting the future would skip delete_export and the part's removal"
+        );
+        assert!(
+            download.contains("active.cancel.store(true, Ordering::Relaxed)"),
+            "the flag is what lets the task unwind and clean up"
+        );
+        assert!(
+            download.contains("storage_granted()") && download.contains("request_storage()"),
+            "Android 9's permission is asked before the clip is fetched, not after"
+        );
+        assert!(
+            core.contains("fn part_path(parts: &Path, name: &str) -> PathBuf"),
+            "two viewers saving the same second must not truncate each other's part"
+        );
+        assert!(
+            core.contains("tokio::time::timeout(EXPORT_PREPARE, waiting)"),
+            "the whole wait has a clock, not only the sleeps between polls"
+        );
+        assert!(
+            MAIN.contains("written = moved > 0;")
+                && MAIN.contains("resolver.update(target, publish, null, null) < 1"),
+            "close() must succeed before the row is published, and a row left pending is a failure"
+        );
+        assert!(
+            MAIN.contains("finished.exists() || !staging.renameTo(finished)"),
+            "Android 9's rename must not silently replace a file that appeared meanwhile"
+        );
+    }
 }

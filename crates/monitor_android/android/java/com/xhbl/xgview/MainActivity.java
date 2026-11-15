@@ -2179,6 +2179,7 @@ public class MainActivity extends NativeActivity {
         }
         boolean written = false;
         try {
+            long moved = 0;
             // "wt" rather than "w": a pending row is ours alone, but a provider
             // that hands back a non-empty stream must not leave its old bytes
             // ahead of the clip.
@@ -2187,16 +2188,28 @@ public class MainActivity extends NativeActivity {
                 if (stream == null) {
                     throw new IOException("cannot open " + target);
                 }
-                written = copyClip(source, stream) > 0;
+                moved = copyClip(source, stream);
             }
+            // Only once close() has flushed the provider's stream. A close
+            // that throws jumps straight to the finally with `written` still
+            // false, so a half-flushed clip can never be published.
+            written = moved > 0;
         } finally {
             if (!written) {
                 // An empty or broken clip: no row to publish, and no litter.
                 resolver.delete(target, null, null);
             } else {
+                // Only the pending flag changes: the row was inserted with its
+                // name, type and folder already, and some providers refuse an
+                // update that rewrites those columns while a row is pending.
+                // A row left pending is invisible in the file manager, so a
+                // zero-row update is a failure rather than a reported save.
                 final ContentValues publish = new ContentValues();
                 publish.put(MediaStore.Downloads.IS_PENDING, 0);
-                resolver.update(target, publish, null, null);
+                if (resolver.update(target, publish, null, null) < 1) {
+                    resolver.delete(target, null, null);
+                    throw new IOException("cannot publish " + target);
+                }
             }
         }
         if (!written) {
@@ -2239,7 +2252,11 @@ public class MainActivity extends NativeActivity {
                     throw new IOException("the clip at " + srcPath + " is empty");
                 }
             }
-            if (!staging.renameTo(finished)) {
+            // The `exists` in uniqueName and this rename are two steps: a file
+            // manager or a second activity may have taken the name meanwhile,
+            // and POSIX rename would silently replace it. A clip is never a
+            // replacement for an earlier one.
+            if (finished.exists() || !staging.renameTo(finished)) {
                 throw new IOException("cannot publish " + finished);
             }
         } finally {
@@ -2280,7 +2297,9 @@ public class MainActivity extends NativeActivity {
      * A clip is never a replacement for an earlier one.
      */
     private static String uniqueName(File folder, String name) {
-        if (!new File(folder, name).exists()) {
+        // A killed process can leave its staging .part behind; a fresh copy
+        // must not choose the name that staging file was working towards.
+        if (!new File(folder, name).exists() && !new File(folder, name + ".part").exists()) {
             return name;
         }
         final int dot = name.lastIndexOf('.');
@@ -2288,7 +2307,8 @@ public class MainActivity extends NativeActivity {
         final String extension = dot > 0 ? name.substring(dot) : "";
         for (int n = 1; n < 10_000; n++) {
             final String candidate = base + " (" + n + ")" + extension;
-            if (!new File(folder, candidate).exists()) {
+            if (!new File(folder, candidate).exists()
+                    && !new File(folder, candidate + ".part").exists()) {
                 return candidate;
             }
         }

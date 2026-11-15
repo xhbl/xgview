@@ -1,11 +1,12 @@
 //! The rules behind saving a piece of a recording as a file.
 //!
-//! Everything here is arithmetic and strings: which stretch of Frigate's
+//! The first half is arithmetic and strings: which stretch of Frigate's
 //! timeline a download may ask for, what address asks for it, what the file is
-//! called, and how often a progress report is worth sending. Nothing opens a
-//! socket or touches a disk, so the awkward cases - a cursor in a hole, a
-//! stretch shorter than the chosen length, a camera name full of punctuation -
-//! can be pinned down by tests before any of them reach a device.
+//! called, and how often a progress report is worth sending. Those are pinned
+//! down by tests before any of them reach a device. The second half is the
+//! transfer itself: an export is asked for, polled, fetched into a `.part` and
+//! taken away again, with a deadline on every step and a test box that answers
+//! the requests.
 //!
 //! Frigate's `clip.mp4` is assembled on the box while it answers, and for a
 //! range of five minutes or more the box cannot cut it fast enough: nginx gives
@@ -26,9 +27,9 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::blackout::local_at;
 use crate::discovery::frigate::Segment;
@@ -310,6 +311,44 @@ pub fn should_report(last: Progress, now: Progress, since_ms: u64) -> bool {
 /// Half a minute of nothing is a server that stopped, not a file being made.
 const STALL: Duration = Duration::from_secs(30);
 
+/// How long one request to the box may take to answer.
+///
+/// The shared client has a connect timeout but deliberately no overall one: a
+/// recording is read for as long as the viewer watches it. An export's start,
+/// poll and delete are short answers, not streams, so a box that accepts the
+/// connection and then never sends a byte must not hold the save button for
+/// ever. This covers one `send_with_login`, which may also re-login on a 401
+/// (its own ten-second deadline) and send the request again - hence thirty
+/// seconds rather than one request's worth. The file's own fetch is the
+/// exception - it uses [`STALL`] per chunk.
+const REQUEST: Duration = Duration::from_secs(30);
+
+/// How many polls a missing export record is believed to be "not written yet".
+///
+/// Frigate writes the record as the job starts, so the first poll can beat it.
+/// A 404 that never stops is an id the box does not know - a typo, a cleaned
+/// export, a base url pointing at a different site - and without a grace it
+/// would hold the button for the whole [`EXPORT_PREPARE`]. Six polls at
+/// [`EXPORT_POLL`] is about three seconds: far longer than a record takes to
+/// appear, far shorter than five minutes of a button that cannot be pressed.
+const NOT_FOUND_GRACE: u32 = 6;
+
+/// How long an export's own id and file name may be in a URL.
+///
+/// Both come back from the box and are put straight into a path. A camera's id
+/// and an export's file name are words a person may have put spaces or Chinese
+/// into, so this refuses what would change the *shape* of the address rather
+/// than what the word says: separators, a query or fragment, an encoded
+/// separator, control characters, and a name that walks out of the folder.
+fn safe_component(word: &str) -> bool {
+    !word.is_empty()
+        && word != "."
+        && word != ".."
+        && !word
+            .chars()
+            .any(|ch| matches!(ch, '/' | '\\' | '?' | '#' | '%') || ch.is_control())
+}
+
 /// How long a `.part` left by a process that was killed is kept.
 ///
 /// A day rather than "delete on sight": a viewer who starts the program twice
@@ -366,6 +405,24 @@ const EXPORT_POLL: Duration = Duration::from_millis(500);
 /// box that has stopped is reported rather than waited on for ever.
 const EXPORT_PREPARE: Duration = Duration::from_secs(300);
 
+/// A scratch name no other download can collide with.
+///
+/// The public name is made from the camera and the second the clip starts, so
+/// two viewers - or a viewer and a leftover from a killed process - can ask
+/// for the very same file in the very same second. `File::create` truncates,
+/// which would let the second download ruin the first one's bytes. A process
+/// id, a nanosecond stamp and a counter make the private name unique; the
+/// `.part` extension stays, because that is what the sweep looks for.
+fn part_path(parts: &Path, name: &str) -> PathBuf {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|age| age.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    parts.join(format!("{name}.{stamp:x}-{}-{seq}.part", std::process::id()))
+}
+
 /// Fetches one clip into a `.part` file and hands it back for publishing.
 ///
 /// Nothing is written under its final name until the file has arrived whole, so
@@ -374,11 +431,11 @@ const EXPORT_PREPARE: Duration = Duration::from_secs(300);
 /// on the desktop it is [`desktop_dirs`]' second answer, on Android it is the
 /// app's private files directory.
 ///
-/// `cancel` is checked between chunks and between polls. The caller also aborts
-/// the task on the way out, but an abort only takes effect at an await point;
-/// the flag is what stops a task that happens to be writing when the process is
-/// leaving. `progress` is called once while the box is cutting, after a change
-/// worth showing, and once at the end.
+/// `cancel` is checked between polls and between chunks. The caller only sets
+/// the flag on the way out: aborting the task would skip `delete_export` and
+/// the removal of its own part. Every request has a deadline, so the task
+/// unwinds quickly either way. `progress` is called once while the box is
+/// cutting, after a change worth showing, and once at the end.
 pub async fn download_clip<F>(
     request: &ClipRequest,
     parts: &Path,
@@ -388,7 +445,7 @@ pub async fn download_clip<F>(
 where
     F: Fn(Progress) + Send,
 {
-    let temp = parts.join(format!("{}.part", request.name));
+    let temp = part_path(parts, &request.name);
     match export_and_fetch(request, &temp, &cancel, &progress).await {
         Ok(bytes) => Ok(DownloadedClip { temp, name: request.name.clone(), bytes }),
         Err(err) => {
@@ -416,7 +473,7 @@ where
     if cancel.load(Ordering::Relaxed) {
         return Err(CoreError::network("the download was cancelled"));
     }
-    // The button says `…` from here until the first byte, which on a long clip
+    // The button says 0% from here until the first byte, which on a long clip
     // is most of the wait. Without it a download that is being cut looks like
     // a press that did nothing.
     progress(Progress { received: 0, total: None, preparing: true });
@@ -437,15 +494,47 @@ where
     answer
 }
 
+/// One short request to the box, with a deadline on the answer's headers.
+///
+/// The shared client has no overall timeout on purpose, and a box that accepts
+/// a connection then says nothing would otherwise hold the save button for
+/// ever. The file's own fetch is not one of these requests: it has [`STALL`]
+/// per chunk instead, because a whole file may take longer than this to read.
+async fn timed_send(
+    method: reqwest::Method,
+    uri: &str,
+    body: Option<serde_json::Value>,
+    credentials: Option<&(String, String)>,
+) -> Result<reqwest::Response> {
+    let (response, _) = tokio::time::timeout(
+        REQUEST,
+        crate::pipeline::send_with_login(method, uri, body, credentials, None),
+    )
+    .await
+    .map_err(|_| CoreError::timeout("the box did not answer the export request"))??;
+    Ok(response)
+}
+
+/// The JSON body of one short answer, with the same deadline.
+async fn timed_json(response: reqwest::Response) -> Result<serde_json::Value> {
+    let body = tokio::time::timeout(REQUEST, response.json())
+        .await
+        .map_err(|_| CoreError::timeout("the box did not finish its answer"))?
+        .map_err(CoreError::from)?;
+    Ok(body)
+}
+
 /// Asks the box to cut one stretch into a file of its own.
 async fn start_export(request: &ClipRequest) -> Result<String> {
+    if !safe_component(&request.camera) {
+        return Err(CoreError::network("the camera's name cannot be put in an address"));
+    }
     let uri = export_uri(&request.base_url, &request.camera, request.from, request.to);
-    let (response, _) = crate::pipeline::send_with_login(
+    let response = timed_send(
         reqwest::Method::POST,
         &uri,
         Some(serde_json::json!({})),
         request.credentials.as_ref(),
-        None,
     )
     .await?;
     let status = response.status();
@@ -454,9 +543,10 @@ async fn start_export(request: &ClipRequest) -> Result<String> {
             "the box would not cut the clip: {status}"
         )));
     }
-    let body: serde_json::Value = response.json().await?;
+    let body = timed_json(response).await?;
     body.get("export_id")
         .and_then(|id| id.as_str())
+        .filter(|id| safe_component(id))
         .map(str::to_string)
         .ok_or_else(|| CoreError::network("the box cut the clip without naming it"))
 }
@@ -464,67 +554,68 @@ async fn start_export(request: &ClipRequest) -> Result<String> {
 /// Waits for the export to be finished, and answers the file it wrote.
 ///
 /// A `404` is not an error here: the record is written when the job starts, and
-/// the first poll can arrive before it does.
+/// the first poll can arrive before it does. One that never stops being a 404
+/// is not a slow write but an id the box does not know, so the grace is finite.
+/// The whole wait has its own clock, so a box that keeps answering "still
+/// cutting" cannot hold the save button for ever either.
 async fn wait_for_export(request: &ClipRequest, id: &str, cancel: &AtomicBool) -> Result<String> {
     let uri = format!("{}/api/exports/{id}", request.base_url.trim_end_matches('/'));
-    let deadline = Instant::now() + EXPORT_PREPARE;
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(CoreError::network("the download was cancelled"));
-        }
-        match crate::pipeline::send_with_login(
-            reqwest::Method::GET,
-            &uri,
-            None,
-            request.credentials.as_ref(),
-            None,
-        )
-        .await
-        {
-            Ok((response, _)) if response.status().is_success() => {
-                let body: serde_json::Value = response.json().await?;
-                let cutting =
-                    body.get("in_progress").and_then(|v| v.as_bool()).unwrap_or(false);
-                if !cutting {
-                    let file = body
-                        .get("video_path")
-                        .and_then(|v| v.as_str())
-                        .and_then(|path| path.rsplit('/').next())
-                        .filter(|name| !name.is_empty())
-                        .ok_or_else(|| {
-                            CoreError::network("the box finished the clip without a file")
-                        })?;
-                    return Ok(file.to_string());
+    let waiting = async {
+        let mut missing = 0u32;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(CoreError::network("the download was cancelled"));
+            }
+            match timed_send(reqwest::Method::GET, &uri, None, request.credentials.as_ref()).await {
+                Ok(response) if response.status().is_success() => {
+                    let body = timed_json(response).await?;
+                    let cutting =
+                        body.get("in_progress").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if !cutting {
+                        let file = body
+                            .get("video_path")
+                            .and_then(|v| v.as_str())
+                            .and_then(|path| path.rsplit('/').next())
+                            .filter(|name| safe_component(name))
+                            .ok_or_else(|| {
+                                CoreError::network("the box finished the clip without a file")
+                            })?;
+                        return Ok(file.to_string());
+                    }
                 }
+                Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+                    missing += 1;
+                    if missing > NOT_FOUND_GRACE {
+                        return Err(CoreError::network("the box does not know this export"));
+                    }
+                }
+                Ok(response) => {
+                    return Err(CoreError::network(format!(
+                        "the box would not say how the clip is: {}",
+                        response.status()
+                    )))
+                }
+                Err(err) => return Err(err),
             }
-            Ok((response, _)) if response.status() == reqwest::StatusCode::NOT_FOUND => {}
-            Ok((response, _)) => {
-                return Err(CoreError::network(format!(
-                    "the box would not say how the clip is: {}",
-                    response.status()
-                )))
-            }
-            Err(err) => return Err(err),
+            tokio::time::sleep(EXPORT_POLL).await;
         }
-        if Instant::now() >= deadline {
-            return Err(CoreError::timeout(format!(
-                "the box took longer than {} s to cut the clip",
-                EXPORT_PREPARE.as_secs()
-            )));
-        }
-        tokio::time::sleep(EXPORT_POLL).await;
-    }
+    };
+    tokio::time::timeout(EXPORT_PREPARE, waiting).await.unwrap_or_else(|_| {
+        Err(CoreError::timeout(format!(
+            "the box took longer than {} s to cut the clip",
+            EXPORT_PREPARE.as_secs()
+        )))
+    })
 }
 
 /// Takes the export away, so the box's own list does not fill with them.
 async fn delete_export(request: &ClipRequest, id: &str) -> Result<()> {
     let uri = format!("{}/api/exports/delete", request.base_url.trim_end_matches('/'));
-    let (response, _) = crate::pipeline::send_with_login(
+    let response = timed_send(
         reqwest::Method::POST,
         &uri,
         Some(serde_json::json!({ "ids": [id] })),
         request.credentials.as_ref(),
-        None,
     )
     .await?;
     if !response.status().is_success() {
@@ -551,11 +642,36 @@ where
         return Err(CoreError::network("the download was cancelled"));
     }
     // The same request the playback session makes: the same client, the same
-    // cached login, and one re-login when the box has withdrawn it.
-    let (mut response, _) = crate::pipeline::open_request(uri, credentials, None).await?;
+    // cached login, and one re-login when the box has withdrawn it. Only the
+    // headers have a deadline; the body is read chunk by chunk under STALL.
+    let (mut response, _) =
+        tokio::time::timeout(REQUEST, crate::pipeline::open_request(uri, credentials, None))
+            .await
+            .map_err(|_| CoreError::timeout("the box did not answer the clip request"))??;
+
+    // A proxy or an expired login can answer 200 with a login page. A page
+    // labelled `text/plain` may still be a real mp4, though: the type is only
+    // a suspicion, and the bytes below are what decide. A request redirected
+    // away from /exports/ is not the clip we cut at all.
+    let kind = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if kind.starts_with("text/html")
+        || kind.starts_with("application/json")
+        || kind.starts_with("text/plain")
+    {
+        tracing::warn!(target: "xgview::download", %kind, "the clip was labelled as a page");
+    }
+    if !response.url().path().contains("/exports/") {
+        return Err(CoreError::network("the clip was redirected away from the export"));
+    }
     let total = response.content_length();
     let mut file = BufWriter::new(File::create(temp)?);
     let mut received = 0u64;
+    let mut head = Vec::with_capacity(12);
     let mut last = Progress::default();
     let mut sent = Instant::now();
 
@@ -576,6 +692,10 @@ where
                 )))
             }
         };
+        if head.len() < 12 {
+            let take = (12 - head.len()).min(chunk.len());
+            head.extend_from_slice(&chunk[..take]);
+        }
         file.write_all(&chunk[..])?;
         received += chunk.len() as u64;
         let now = Progress { received, total, preparing: false };
@@ -587,6 +707,13 @@ where
     }
     file.flush()?;
     file.get_ref().sync_all()?;
+
+    // The box cuts an mp4. A response that ends cleanly but starts with an
+    // HTML page, a JSON error or anything else is not a clip, even when its
+    // own length agrees with what arrived.
+    if head.len() < 12 || &head[4..8] != b"ftyp" {
+        return Err(CoreError::network("the clip did not start like an mp4"));
+    }
 
     // A length the box did state is a promise about the whole file. Without
     // one, a clean end of the response is all a chunked answer can offer.
@@ -631,10 +758,23 @@ pub fn desktop_dirs() -> Result<(PathBuf, PathBuf)> {
 /// chosen here, and the rename is atomic, so the directory never holds a file
 /// that is only part of a clip. The answered path is what the toast shows.
 pub fn publish_desktop(temp: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
-    let name = next_available_name(name, |candidate| dir.join(candidate).exists());
-    let finished = dir.join(&name);
-    fs::rename(temp, &finished)?;
-    Ok(finished)
+    // Picking a free name and renaming into it are two steps: another viewer,
+    // or a file manager, can take the name between them. On Windows a rename
+    // onto an existing file fails instead of replacing it, so ask for the next
+    // free name rather than throwing a clip that arrived whole away.
+    for _ in 0..16 {
+        let candidate = next_available_name(name, |candidate| dir.join(candidate).exists());
+        let finished = dir.join(&candidate);
+        match fs::rename(temp, &finished) {
+            Ok(()) => return Ok(finished),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(CoreError::config(format!(
+        "no free name for {name} in {}",
+        dir.display()
+    )))
 }
 
 /// Sweeps away `.part` files a process that was killed left behind.
@@ -672,19 +812,25 @@ mod transfer_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    /// The smallest answer that still begins with an mp4's `ftyp` box. Tests
+    /// deal in bytes, not in a real encoder, but the header is one of the
+    /// things the downloader checks before it publishes anything.
+    const MP4: &[u8] = b"\0\0\0\x18ftypmp42\0\0\0\0mp42isom";
+
     /// One answer, closed after it: the client opens a connection per request.
     async fn answer(
         socket: &mut tokio::net::TcpStream,
         status: &str,
         body: &[u8],
         declare: Option<usize>,
+        kind: &str,
     ) {
         let head = match declare {
             Some(len) => format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
             ),
             None => format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
             ),
         };
         let _ = socket.write_all(head.as_bytes()).await;
@@ -702,88 +848,129 @@ mod transfer_tests {
 
     /// Answers a JSON body, with the length it promises.
     async fn json(socket: &mut tokio::net::TcpStream, status: &str, body: &'static [u8]) {
-        answer(socket, status, body, Some(body.len())).await;
+        answer(socket, status, body, Some(body.len()), "application/json").await;
+    }
+
+    /// What a pretend box answers: one field per thing a test may want wrong.
+    #[derive(Clone, Copy)]
+    struct PretendBox {
+        file: &'static [u8],
+        declare: Option<usize>,
+        polls: usize,
+        start: &'static [u8],
+        ready: &'static [u8],
+        fetch: &'static str,
+        kind: &'static str,
+    }
+
+    impl PretendBox {
+        fn whole(file: &'static [u8]) -> Self {
+            Self {
+                file,
+                declare: Some(file.len()),
+                polls: 0,
+                start: br#"{"success":true,"export_id":"clip1","status":"queued"}"#,
+                ready: br#"{"id":"clip1","camera":"cam_living_room","in_progress":false,"video_path":"/media/frigate/exports/clip1.mp4"}"#,
+                fetch: "200 OK",
+                kind: "application/octet-stream",
+            }
+        }
     }
 
     /// A box that answers the four requests one download makes: the export is
-    /// queued, it becomes ready after `polls_before_ready` asks that miss it,
-    /// its file is `body`, and the export is removed again.
+    /// queued, it becomes ready after `polls` asks that miss it, its file is
+    /// `file`, and the export is removed again.
     ///
-    /// `declare` may promise more than is actually sent, which is what a body
-    /// that stops short looks like from here.
-    async fn serve(
-        body: &'static [u8],
-        declare: Option<usize>,
-        polls_before_ready: usize,
+    /// The server itself has a clock. Without one, a regression that forgets
+    /// to delete the export would leave `server.await` waiting for ever and
+    /// the test would hang instead of failing its assertion.
+    async fn serve_box(
+        pretend: PretendBox,
     ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("a local port");
         let port = listener.local_addr().expect("an address").port();
         let removed = Arc::new(AtomicUsize::new(0));
         let counter = removed.clone();
         let task = tokio::spawn(async move {
-            let mut polls = 0usize;
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    break;
-                };
-                let mut head = Vec::new();
-                let mut byte = [0u8; 1];
-                while !head.ends_with(b"\r\n\r\n") {
-                    match socket.read(&mut byte).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => head.push(byte[0]),
+            let _ = tokio::time::timeout(Duration::from_secs(20), async {
+                let mut polls = 0usize;
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        match socket.read(&mut byte).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => head.push(byte[0]),
+                        }
                     }
-                }
-                let head = String::from_utf8_lossy(&head).to_string();
-                let path = head
-                    .lines()
-                    .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .unwrap_or("")
-                    .to_string();
-                let length = head
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().ok())?
-                    })
-                    .unwrap_or(0);
-                if length > 0 {
-                    let mut sent = vec![0u8; length];
-                    let _ = socket.read_exact(&mut sent).await;
-                }
-                if path.starts_with("/api/export/") {
-                    json(
-                        &mut socket,
-                        "202 Accepted",
-                        br#"{"success":true,"export_id":"clip1","status":"queued"}"#,
-                    )
-                    .await;
-                } else if path.starts_with("/api/exports/delete") {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    json(&mut socket, "200 OK", br#"{"success":true}"#).await;
-                    break;
-                } else if path.starts_with("/api/exports/") {
-                    polls += 1;
-                    if polls <= polls_before_ready {
-                        json(&mut socket, "404 Not Found", br#"{"detail":"Not Found"}"#).await;
-                    } else {
-                        json(
+                    let head = String::from_utf8_lossy(&head).to_string();
+                    let path = head
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("")
+                        .to_string();
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if length > 0 {
+                        let mut sent = vec![0u8; length];
+                        let _ = socket.read_exact(&mut sent).await;
+                    }
+                    if path.starts_with("/api/export/") {
+                        json(&mut socket, "202 Accepted", pretend.start).await;
+                    } else if path.starts_with("/api/exports/delete") {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        json(&mut socket, "200 OK", br#"{"success":true}"#).await;
+                        break;
+                    } else if path.starts_with("/api/exports/") {
+                        polls += 1;
+                        if polls <= pretend.polls {
+                            json(&mut socket, "404 Not Found", br#"{"detail":"Not Found"}"#).await;
+                        } else {
+                            json(&mut socket, "200 OK", pretend.ready).await;
+                        }
+                    } else if path.starts_with("/exports/") {
+                        answer(
                             &mut socket,
-                            "200 OK",
-                            br#"{"id":"clip1","camera":"cam_living_room","in_progress":false,"video_path":"/media/frigate/exports/clip1.mp4"}"#,
+                            pretend.fetch,
+                            pretend.file,
+                            pretend.declare,
+                            pretend.kind,
                         )
                         .await;
+                    } else {
+                        json(&mut socket, "404 Not Found", br#"{"detail":"Not Found"}"#).await;
                     }
-                } else if path.starts_with("/exports/") {
-                    answer(&mut socket, "200 OK", body, declare).await;
-                } else {
-                    json(&mut socket, "404 Not Found", br#"{"detail":"Not Found"}"#).await;
                 }
-            }
+            })
+            .await;
         });
         (format!("http://127.0.0.1:{port}"), removed, task)
+    }
+
+    /// The plain, successful box. `declare` may promise more than is sent,
+    /// which is what a body that stops short looks like from here.
+    async fn serve(
+        body: &'static [u8],
+        declare: Option<usize>,
+        polls_before_ready: usize,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        serve_box(PretendBox {
+            file: body,
+            declare,
+            polls: polls_before_ready,
+            ..PretendBox::whole(body)
+        })
+        .await
     }
 
     fn request(base_url: String) -> ClipRequest {
@@ -799,7 +986,7 @@ mod transfer_tests {
 
     #[tokio::test]
     async fn a_clip_is_written_to_a_part_and_then_published() {
-        let body: &'static [u8] = b"0123456789";
+        let body: &'static [u8] = MP4;
         let (base, removed, server) = serve(body, Some(body.len()), 0).await;
         let temp = tempfile::tempdir().expect("a scratch directory");
         let parts = temp.path().join("parts");
@@ -813,7 +1000,7 @@ mod transfer_tests {
         .expect("a whole clip");
         server.await.expect("the server finished");
 
-        assert_eq!(downloaded.bytes, 10);
+        assert_eq!(downloaded.bytes, MP4.len() as u64);
         assert_eq!(fs::read(&downloaded.temp).expect("the part"), body);
         assert!(seen.load(Ordering::Relaxed) >= 1, "the final progress is always reported");
         assert_eq!(
@@ -832,7 +1019,7 @@ mod transfer_tests {
 
     #[tokio::test]
     async fn a_chunked_clip_without_a_length_is_written_whole() {
-        let body: &'static [u8] = b"a chunked answer has no length";
+        let body: &'static [u8] = MP4;
         let (base, _removed, server) = serve(body, None, 0).await;
         let temp = tempfile::tempdir().expect("a scratch directory");
         let downloaded =
@@ -845,8 +1032,8 @@ mod transfer_tests {
 
     #[tokio::test]
     async fn a_body_that_stops_short_leaves_no_part() {
-        let body: &'static [u8] = b"short";
-        let (base, _removed, server) = serve(body, Some(100), 0).await;
+        let body: &'static [u8] = MP4;
+        let (base, _removed, server) = serve(body, Some(1000), 0).await;
         let temp = tempfile::tempdir().expect("a scratch directory");
         let result =
             download_clip(&request(base), temp.path(), Arc::new(AtomicBool::new(false)), |_| {}).await;
@@ -855,12 +1042,142 @@ mod transfer_tests {
         assert_eq!(fs::read_dir(temp.path()).expect("the directory").count(), 0, "no half file left");
     }
 
+    /// A proxy whose login has expired can answer 200 with an HTML page. Its
+    /// bytes are not a clip, and the export made for it is still taken away.
+    #[tokio::test]
+    async fn a_page_is_not_saved_as_a_clip() {
+        let html: &'static [u8] = b"<html><body>please log in</body></html>";
+        let (base, removed, server) = serve_box(PretendBox {
+            file: html,
+            declare: Some(html.len()),
+            kind: "text/html",
+            ..PretendBox::whole(html)
+        })
+        .await;
+        let temp = tempfile::tempdir().expect("a scratch directory");
+        let result =
+            download_clip(&request(base), temp.path(), Arc::new(AtomicBool::new(false)), |_| {}).await;
+        server.await.expect("the server finished");
+        assert!(result.is_err(), "a login page is not a clip");
+        assert_eq!(fs::read_dir(temp.path()).expect("the directory").count(), 0, "nothing written");
+        assert_eq!(removed.load(Ordering::Relaxed), 1, "the export is still removed");
+    }
+
+    /// A body can end cleanly and still not be a clip. An mp4 begins with an
+    /// `ftyp` box; a JSON error served as a stream of bytes does not.
+    #[tokio::test]
+    async fn a_file_without_an_mp4_header_is_refused() {
+        let junk: &'static [u8] = br#"{"detail":"no such export"}"#;
+        let (base, removed, server) = serve_box(PretendBox {
+            file: junk,
+            declare: Some(junk.len()),
+            ..PretendBox::whole(junk)
+        })
+        .await;
+        let temp = tempfile::tempdir().expect("a scratch directory");
+        let result =
+            download_clip(&request(base), temp.path(), Arc::new(AtomicBool::new(false)), |_| {}).await;
+        server.await.expect("the server finished");
+        assert!(result.is_err(), "an error page is not an mp4");
+        assert_eq!(fs::read_dir(temp.path()).expect("the directory").count(), 0, "no part left");
+        assert_eq!(removed.load(Ordering::Relaxed), 1, "the export is still removed");
+    }
+
+    /// The export has to be taken away even when the fetch failed: a file left
+    /// in the box's Exports page is a mess the viewer cannot clean up here.
+    #[tokio::test]
+    async fn a_failed_fetch_still_removes_the_export() {
+        let (base, removed, server) = serve_box(PretendBox {
+            fetch: "500 Internal Server Error",
+            ..PretendBox::whole(MP4)
+        })
+        .await;
+        let temp = tempfile::tempdir().expect("a scratch directory");
+        let result =
+            download_clip(&request(base), temp.path(), Arc::new(AtomicBool::new(false)), |_| {}).await;
+        server.await.expect("the server finished");
+        assert!(result.is_err(), "the fetch failed");
+        assert_eq!(removed.load(Ordering::Relaxed), 1, "and the export is still removed");
+        assert_eq!(fs::read_dir(temp.path()).expect("the directory").count(), 0, "no part was opened");
+    }
+
+    /// A record that never appears is not a slow write but an id the box does
+    /// not know. Without the grace the button would be held for five minutes.
+    #[tokio::test]
+    async fn a_missing_export_record_gives_up_after_the_grace() {
+        let (base, removed, server) =
+            serve(MP4, Some(MP4.len()), NOT_FOUND_GRACE as usize + 2).await;
+        let temp = tempfile::tempdir().expect("a scratch directory");
+        let request = request(base);
+        let result =
+            download_clip(&request, temp.path(), Arc::new(AtomicBool::new(false)), |_| {});
+        let result = tokio::time::timeout(Duration::from_secs(10), result)
+            .await
+            .expect("the grace ends long before the five-minute deadline")
+            .expect_err("a 404 that never ends is a refusal");
+        assert!(
+            result.to_string().contains("does not know this export"),
+            "the refusal names its reason: {result}"
+        );
+        server.await.expect("the server finished");
+        assert_eq!(removed.load(Ordering::Relaxed), 1, "and the export is still removed");
+    }
+
+    /// Names the box gives back go straight into an address. An empty id would
+    /// make every poll ask the list endpoint instead of one record.
+    #[tokio::test]
+    async fn a_box_without_a_usable_export_id_is_refused() {
+        let (base, _removed, server) = serve_box(PretendBox {
+            start: br#"{"export_id":""}"#,
+            ..PretendBox::whole(MP4)
+        })
+        .await;
+        let temp = tempfile::tempdir().expect("a scratch directory");
+        let result =
+            download_clip(&request(base), temp.path(), Arc::new(AtomicBool::new(false)), |_| {}).await;
+        assert!(result.is_err(), "an empty id is not an export");
+        assert_eq!(fs::read_dir(temp.path()).expect("the directory").count(), 0);
+        server.abort(); // no id was ever made, so no delete is owed
+    }
+
+    /// The same for the finished file: `..` would walk out of `/exports/`.
+    #[tokio::test]
+    async fn a_box_that_names_a_path_outside_exports_is_refused() {
+        let (base, removed, server) = serve_box(PretendBox {
+            ready: br#"{"in_progress":false,"video_path":"/exports/.."}"#,
+            ..PretendBox::whole(MP4)
+        })
+        .await;
+        let temp = tempfile::tempdir().expect("a scratch directory");
+        let result =
+            download_clip(&request(base), temp.path(), Arc::new(AtomicBool::new(false)), |_| {}).await;
+        server.await.expect("the server finished");
+        assert!(result.is_err(), "a parent path is not a file");
+        assert_eq!(removed.load(Ordering::Relaxed), 1, "the export is still removed");
+    }
+
+    /// Two viewers asking for the same second must not open the same scratch
+    /// file: `File::create` would truncate the first one's bytes.
+    #[test]
+    fn two_downloads_do_not_share_a_part() {
+        let one = part_path(Path::new("parts"), "door_300s.mp4");
+        let two = part_path(Path::new("parts"), "door_300s.mp4");
+        assert_ne!(one, two);
+        assert_eq!(one.extension().and_then(|ext| ext.to_str()), Some("part"));
+        assert_eq!(two.extension().and_then(|ext| ext.to_str()), Some("part"));
+    }
+
     #[tokio::test]
     async fn a_cancelled_download_never_opens_a_file() {
         let temp = tempfile::tempdir().expect("a scratch directory");
         let request = request("http://127.0.0.1:1".into());
         let result = download_clip(&request, temp.path(), Arc::new(AtomicBool::new(true)), |_| {}).await;
-        assert!(result.is_err());
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|err| err.to_string().contains("was cancelled")),
+            "the flag ends it before any request, not a refused connection: {result:?}"
+        );
         assert_eq!(fs::read_dir(temp.path()).expect("the directory").count(), 0);
     }
 
@@ -869,7 +1186,7 @@ mod transfer_tests {
         let temp = tempfile::tempdir().expect("a scratch directory");
         let not_a_directory = temp.path().join("file");
         fs::write(&not_a_directory, b"not a directory").expect("a file");
-        let (base, _removed, server) = serve(b"body", Some(4), 0).await;
+        let (base, _removed, server) = serve(MP4, Some(MP4.len()), 0).await;
         let result = download_clip(
             &request(base),
             &not_a_directory,
@@ -911,6 +1228,24 @@ mod tests {
     /// A report of bytes arriving, which is what these rules are about.
     fn progress(received: u64, total: Option<u64>) -> Progress {
         Progress { received, total, preparing: false }
+    }
+
+    /// The box's own names go into an address. A real camera may carry spaces
+    /// or Chinese; what must not get through is anything that changes the
+    /// shape of the URL or walks out of the folder it names.
+    #[test]
+    fn a_name_from_the_box_cannot_escape_the_path() {
+        assert!(safe_component("clip1.mp4"));
+        assert!(safe_component("front_door-2026.11.14"));
+        assert!(safe_component("客厅 摄像头"));
+        assert!(!safe_component(""));
+        assert!(!safe_component("."));
+        assert!(!safe_component(".."));
+        assert!(!safe_component("clip?download=1"));
+        assert!(!safe_component("clip#fragment"));
+        assert!(!safe_component("clip%2Fetc"));
+        assert!(!safe_component("clip/../../etc"));
+        assert!(!safe_component("clip\n.mp4"));
     }
 
     fn runs() -> Vec<Segment> {

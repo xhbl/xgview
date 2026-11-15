@@ -24,7 +24,6 @@ use monitor_core::recording_download::{
     self as rules, ClipRequest, ClipWindow, DownloadedClip, Progress, DURATION_CHOICES,
     DEFAULT_DURATION,
 };
-use tokio::task::AbortHandle;
 
 use crate::dialogs::BackgroundEvent;
 use crate::icons::{self, Icon};
@@ -79,10 +78,11 @@ struct Active {
     /// The camera label at the moment the download was confirmed.
     camera: String,
     progress: Progress,
-    /// Set on the way out. Checked between chunks as well as aborted at the
-    /// task's next await point, since a write in progress is not at one.
+    /// Set on the way out. Checked between chunks and at every poll, so the
+    /// task can still remove the export it made on the box and its own part.
+    /// There is deliberately no abort handle: cancelling the future at its
+    /// next await point would skip both of those.
     cancel: Arc<AtomicBool>,
-    abort: AbortHandle,
 }
 
 /// Everything the wall knows about saving clips.
@@ -108,8 +108,8 @@ impl DownloadState {
         self.next_id
     }
 
-    pub(super) fn start(&mut self, id: u64, camera: String, cancel: Arc<AtomicBool>, abort: AbortHandle) {
-        self.active = Some(Active { id, camera, progress: Progress::default(), cancel, abort });
+    pub(super) fn start(&mut self, id: u64, camera: String, cancel: Arc<AtomicBool>) {
+        self.active = Some(Active { id, camera, progress: Progress::default(), cancel });
         self.last = None;
     }
 
@@ -167,14 +167,16 @@ impl DownloadState {
 
     /// Stops a running download on the way out.
     ///
-    /// Called from `quit()` and from `eframe::App::on_exit`, the two exits that
-    /// reliably run code. The `.part` is not deleted here: on Windows an open
-    /// file cannot be removed, and a process killed outright never gets here at
-    /// all. The next start's sweep is what owns that cleanup.
+    /// Called from `quit()` and from `close_requested()`. Only the flag is set:
+    /// aborting the task at its next await point would drop the future before
+    /// it could delete the export it made on the box or remove its own `.part`.
+    /// A process that stays up lets the task unwind and clean up. One ended
+    /// outright cannot, and its orphaned part is swept at the next start;
+    /// the box's export is then the one thing no client can make atomic with
+    /// its own death.
     pub(super) fn cancel(&mut self) {
         if let Some(active) = self.active.take() {
             active.cancel.store(true, Ordering::Relaxed);
-            active.abort.abort();
         }
     }
 }
@@ -238,6 +240,15 @@ impl XgViewApp {
             tracing::info!(target: "xgview::app", "a download is already running");
             return;
         }
+        // Android 9 cannot reach the public Downloads folder without a grant.
+        // Asking for it at publish time would throw away a clip that had
+        // already been cut and fetched, so the question comes first.
+        #[cfg(target_os = "android")]
+        if !crate::android::storage_granted() {
+            crate::android::request_storage();
+            self.flash(monitor_i18n::tr("download-no-storage"), ToastKind::Error);
+            return;
+        }
         let (dir, parts) = match download_dirs() {
             Ok(dirs) => dirs,
             Err(err) => {
@@ -260,9 +271,27 @@ impl XgViewApp {
             .await;
             let answer = match result {
                 Ok(clip) => match publish(&clip, &dir) {
-                    Ok(path) => BackgroundEvent::DownloadDone { id, path },
-                    Err(reason) => {
+                    Ok(path) => {
+                        // A desktop publish renames the part away. The Android
+                        // bridge copies it into MediaStore instead, so without
+                        // this a second full-size mp4 would sit in the app's
+                        // own files after every successful save.
                         let _ = std::fs::remove_file(&clip.temp);
+                        BackgroundEvent::DownloadDone { id, path }
+                    }
+                    Err(reason) => {
+                        // Publishing is retryable - a storage grant withdrawn
+                        // mid-download, a full disk, a provider that refused
+                        // the row - while the bytes here are whole and the
+                        // box's export has already been taken away. Keep the
+                        // part rather than lose the only copy; the next
+                        // start's sweep owns it after a day.
+                        tracing::warn!(
+                            target: "xgview::app",
+                            path = %clip.temp.display(),
+                            %reason,
+                            "the whole clip was kept in the scratch directory"
+                        );
                         BackgroundEvent::DownloadFailed { id, reason }
                     }
                 },
@@ -270,11 +299,10 @@ impl XgViewApp {
             };
             let _ = events.send(answer);
         });
-        let abort = task.abort_handle();
-        // Dropping the handle does not stop the task; the abort handle is what
-        // `cancel()` keeps for the way out.
+        // Dropping the handle detaches the task: it keeps running, and on the
+        // way out it still has the chance to remove the export and its part.
         drop(task);
-        self.download.start(id, camera, cancel, abort);
+        self.download.start(id, camera, cancel);
     }
 }
 
@@ -298,6 +326,20 @@ const SAVE: &str = "download-save";
 /// screen's left. `tilebar::scope` reads the same turn for the bar's controls.
 const LENGTHS_TURNED: &str = "download-lengths-turned";
 const SAVE_TURNED: &str = "download-save-turned";
+
+/// Room under the last control. A level window's frame gives the button only a
+/// few points before its edge, while the gap above it is a whole group space;
+/// the turned window measures its own height and can give it the same. Both
+/// read this one constant, so the button does not sit on the window's bottom
+/// edge whichever way the picture is held. Only the theme's smallest gap is
+/// needed: half a group space still reads as an empty row under the button.
+const SAVE_FOOT: f32 = theme::space::XS;
+
+/// Only a window with a save button has a last control to give room to: a hole
+/// in the recording ends in small print and a jump, which have their own gap.
+fn save_foot(save: Option<&String>) -> f32 {
+    if save.is_some() { SAVE_FOOT } else { 0.0 }
+}
 
 pub(super) fn scopes() -> [(&'static str, ScopeDef); 4] {
     [
@@ -581,6 +623,10 @@ fn draw_level(
                         actions.confirm = true;
                     }
                 });
+                // Without this the button sits on the frame's own few points of
+                // margin, while the jump buttons above it get a whole group
+                // space. The turned window adds the same room to its height.
+                ui.add_space(save_foot(view.save.as_ref()));
             }
         });
     });
@@ -784,6 +830,12 @@ const TURNED_PAD: f32 = 14.0;
 const TURNED_GAP: f32 = 8.0;
 const TURNED_ROW_H: f32 = 30.0;
 
+/// The turned window measures its own height: the title bar, its rule, the
+/// padding around the body, the rows, and the room under the last control.
+fn turned_panel_height(body_height: f32, stroke_width: f32, save: Option<&String>) -> f32 {
+    dialogs::TITLE_BAR_H + stroke_width + 2.0 * TURNED_PAD + body_height + save_foot(save)
+}
+
 /// The turned panel's title bar, in the picture's own frame.
 ///
 /// A level dialog's [`dialogs::title_bar`] is a strip across the whole window:
@@ -881,7 +933,7 @@ fn draw_turned(
     // followed by the rule and then the body, exactly as in a level dialog.
     let body_height = rows.iter().map(|(_, h)| *h).sum::<f32>()
         + TURNED_GAP * rows.len().saturating_sub(1) as f32;
-    let height = dialogs::TITLE_BAR_H + stroke.width + 2.0 * TURNED_PAD + body_height;
+    let height = turned_panel_height(body_height, stroke.width, view.save.as_ref());
     let panel = turned_panel_box(frame, egui::vec2(width, height));
     let title = monitor_i18n::tr("download-title");
     let title_galley = turned_galley(
@@ -1080,22 +1132,23 @@ mod tests {
         assert_eq!(nav.step(ids[0], Dir::Down), Some(save_id), "and Down still leaves the row");
     }
 
-    /// An abort handle for a task that has already finished is enough for the
-    /// state machine: what these tests read is the state, not a running task.
-    fn handle() -> AbortHandle {
-        let runtime = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
-        let task = runtime.spawn(async {});
-        let handle = task.abort_handle();
-        runtime.block_on(task).ok();
-        handle
-    }
-
     fn begun() -> (DownloadState, u64, Arc<AtomicBool>) {
         let mut state = DownloadState::default();
         let cancel = Arc::new(AtomicBool::new(false));
         let id = state.allocate_id();
-        state.start(id, "门口".into(), cancel.clone(), handle());
+        state.start(id, "门口".into(), cancel.clone());
         (state, id, cancel)
+    }
+
+    /// Leaving must not abort the task: it still owes the box a delete and
+    /// the scratch directory its part. Only the flag is set.
+    #[test]
+    fn cancelling_tells_the_task_to_unwind_without_dropping_it() {
+        let (mut state, _, cancel) = begun();
+        assert!(!cancel.load(Ordering::Relaxed));
+        state.cancel();
+        assert!(cancel.load(Ordering::Relaxed), "the task is told to stop");
+        assert!(!state.is_active(), "the button is free for the next press");
     }
 
     #[test]
@@ -1295,6 +1348,29 @@ mod tests {
         assert!(
             cross.max.y > whole.max.y - dialogs::TITLE_BAR_H,
             "the cross sits at the foot of the turned bar"
+        );
+    }
+
+    /// The last control has room under it in both renderers, from one constant:
+    /// a level window adds it to the scroll area, a turned one to its measured
+    /// height. A hole has no button, so neither window grows for it.
+    #[test]
+    fn a_save_button_does_not_sit_on_the_windows_edge() {
+        let save = String::from("Download");
+        assert_eq!(SAVE_FOOT, theme::space::XS, "one small gap, not a group space");
+        assert!(SAVE_FOOT < theme::space::M / 2.0, "and less than half of one");
+        assert_eq!(save_foot(Some(&save)), SAVE_FOOT);
+        assert_eq!(save_foot(None), 0.0, "a hole ends in small print, not a button");
+
+        let body = 180.0;
+        let stroke = 1.0;
+        let with = turned_panel_height(body, stroke, Some(&save));
+        let without = turned_panel_height(body, stroke, None);
+        assert_eq!(with - without, SAVE_FOOT, "the same room the level window adds");
+        assert_eq!(
+            without,
+            dialogs::TITLE_BAR_H + stroke + 2.0 * TURNED_PAD + body,
+            "and no other part of the window moved"
         );
     }
 }

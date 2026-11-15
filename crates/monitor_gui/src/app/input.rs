@@ -384,6 +384,11 @@ impl XgViewApp {
         // The download is the one background task with a file in progress. On
         // Android the process ends below without running a destructor, and on
         // the desktop the runtime is dropped with the task still attached.
+        // Setting the flag is all a dying process can do: a task that reaches
+        // its next check before the end removes its export and its part, and
+        // one that does not leaves a part the next start sweeps. An export
+        // whose delete had not gone out is left on the box - no client can
+        // make a server-side cleanup atomic with its own death.
         self.download.cancel();
         #[cfg(target_os = "android")]
         {
