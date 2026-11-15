@@ -323,6 +323,18 @@ impl XgViewApp {
         self.magnified_rect
     }
 
+    /// The band the pinned strip stands in, in wall points, or `None` where the
+    /// strip floats over the picture.
+    ///
+    /// As the frame painted it: the wall's own rectangle, with the page's slide
+    /// already taken out. The overlay paints a copy of this band over a picture
+    /// the surface is showing and is handed the tile the page has slid to, so it
+    /// needs the band's own rectangle rather than a division of that tile - one
+    /// measured there would travel with the page. See [`Self::draw_overlay_only`].
+    pub fn strip_band(&self) -> Option<egui::Rect> {
+        self.strip_band
+    }
+
     /// What the magnified picture is showing of itself: the whole of it, or the
     /// window a pinch has left it at.
     ///
@@ -371,6 +383,25 @@ impl XgViewApp {
         self.view_texture(index).map(|entry| entry.surface.size)
     }
 
+    /// The picture's region and the strip's band, or `None` where the strip has
+    /// no band of its own.
+    ///
+    /// Landscape, and a picture drawn turned, keep the strip floating over the
+    /// picture where it has always been: nothing asks for a band there, and none
+    /// is given. Upright and not turned, the strip is pinned and has one, and
+    /// this is where the two regions come from - asked of the controls the
+    /// frame is about to draw, so that the band deepens in the frame a recording
+    /// starts rather than in the one after it.
+    pub(super) fn panel_split(&self, area: Rect) -> Option<PanelSplit> {
+        if !self.tile_bar_pinned() {
+            return None;
+        }
+        let (entries, breaks) = self.tile_bar_entries();
+        let widths = vec![tilebar::icon_width(); entries.len()];
+        let playing = self.scheduler.zoom().is_some_and(|slot| self.is_playing_back(slot));
+        Some(split_panel(area, &widths, &breaks, playing, self.tile_bar_margin()))
+    }
+
     pub(super) fn magnified_area(
         &self,
         cameras: &[CameraSource],
@@ -381,6 +412,12 @@ impl XgViewApp {
         let index = self.scheduler.zoom()?;
         let cell = view.cells.iter().position(|slot| *slot == Some(index))?;
         let rect = grid::tile_rect(wall.translate(vec2(dx, 0.0)), view.layout, cell, grid::LINE);
+        // Upright and not turned, the picture has the region above the strip's
+        // band, and the strip sits under it rather than over it. See `split_panel`.
+        let rect = match self.panel_split(rect) {
+            Some(split) => split.video,
+            None => rect,
+        };
         let camera = cameras.get(index)?;
         let size = self.picture_size(index)?;
         let aspect = self.tile_aspect(camera);
@@ -434,11 +471,13 @@ impl XgViewApp {
         let breaks = self.tile_bar_break();
         let margin = self.tile_bar_margin();
         let dock = self.tile_bar.dock();
-        // The tile is given a timeline on the same terms the picture is: only a
-        // recording has one to draw, and only a panel that fits the tile is a
-        // strip of controls. Which is asked of the tile, because the tile is
-        // what has to hold it; where it goes is asked of the tile too, because
-        // that is where the bar belongs.
+        // Where the strip floats over the picture - landscape, and a picture
+        // drawn turned - it is given a timeline on the same terms the wall's own
+        // copy is: only a recording has one to draw, and only a panel that fits
+        // the tile is a strip of controls. Which is asked of the tile, because
+        // the tile is what has to hold it; where it goes is asked of the tile
+        // too, because that is where the bar belongs. A pinned strip has a band
+        // and has answered both already. See `split_panel`.
         //
         // Turned, the strip runs down the side of the picture and its glyphs
         // turn with it. The wall lays out and draws its copy with `rotated`, so
@@ -447,10 +486,42 @@ impl XgViewApp {
         // on either side of the switch still have to agree.
         let rotated = self.magnified_rotated();
         let playing = self.scheduler.zoom().is_some_and(|slot| self.is_playing_back(slot));
-        let timeline = playing
-            && tilebar::fits_timeline(body, rotated, margin, &widths, &breaks);
+        // Upright and not turned the strip has a band of its own under the
+        // picture, and the wall laid the bar out in that band: this copy has to
+        // be laid out against the same one, or the two are a band apart. The
+        // band's depth and whether it carries a timeline are the wall's answers
+        // too - `split_panel` is where both are worked out, and the width it
+        // asks about is the same width. See `split_panel`.
+        //
+        // The band is asked of the wall rather than of this tile: the tile
+        // carries the page's slide, and the band does not travel with the page.
+        // A band measured on the sliding tile left the picture's canvas standing
+        // where the band had been, for as long as the finger was down. The
+        // picture's region is still this tile's, and travels with it.
+        let panel = self.panel_split(body);
+        // The band comes from the wall's own frame, carried across into this
+        // one. The division of the tile is the fallback for the one frame the
+        // wall drew nothing at all - a page with no cells, a window down to a
+        // postage stamp - and there is no band to stand in then, nor a picture
+        // under it to show.
+        let band = self
+            .strip_band()
+            .map(|band| band.translate(picture.min - strip.min))
+            .or_else(|| panel.map(|panel| panel.bar));
+        let (bar_body, timeline, backdrop) = match (panel, band) {
+            (Some(panel), Some(band)) => (band, panel.timeline, tilebar::Backdrop::Bare),
+            _ => (
+                body,
+                playing && tilebar::fits_timeline(body, rotated, margin, &widths, &breaks),
+                tilebar::Backdrop::Floating,
+            ),
+        };
+        // The picture's region, which is the tile everywhere but upright and
+        // unturned: the corner display, the ring and the letterbox are all the
+        // picture's, and the band below is the strip's.
+        let video = panel.map_or(body, |panel| panel.video);
         let layout = tilebar::layout(
-            body, rotated, dock, margin, &widths, &breaks, timeline,
+            bar_body, rotated, dock, margin, &widths, &breaks, timeline,
         );
         let controls: Vec<tilebar::Control> = entries.iter().map(|(control, _)| *control).collect();
         let muted: Vec<bool> = entries
@@ -480,10 +551,20 @@ impl XgViewApp {
                 // view past its box, and the spill is covered rather than
                 // clipped, which a surface cannot be. Without a pinch they are
                 // the letterbox's own bars, in the same colour the wall used.
+                // They are the picture's and reach no further than the
+                // picture's region, so the band under them is never covered by
+                // one. See `paint_band`.
+                if let Some(band) = band {
+                    paint_band(ui.painter(), band);
+                }
                 if let Some(box_) = self.picture_rect {
                     let box_ = box_.translate(picture.min - strip.min);
-                    for band in bands_around(body, box_) {
-                        ui.painter().rect_filled(band, egui::CornerRadius::ZERO, theme::CANVAS);
+                    for letterbox in bands_around(video, box_) {
+                        ui.painter().rect_filled(
+                            letterbox,
+                            egui::CornerRadius::ZERO,
+                            theme::CANVAS,
+                        );
                     }
                 }
                 ui.painter().rect_stroke(
@@ -531,10 +612,10 @@ impl XgViewApp {
                         let state_frame = tile
                             .state_frame
                             .map(|frame| frame.translate(picture.min - strip.min))
-                            .unwrap_or(body);
+                            .unwrap_or(video);
                         grid::state_layer(ui.painter(), state_frame, &tile, channel.state);
                     }
-                    grid::osd(ui.painter(), body, &tile);
+                    grid::osd(ui.painter(), video, &tile);
                     // The cursor, on the tile: the ring the wall draws on that
                     // same rectangle. It is here and not there for the reason
                     // the corners are - the picture is over the wall - and on a
@@ -542,11 +623,11 @@ impl XgViewApp {
                     // two bands are, which reads as a frame with its top and
                     // bottom run through.
                     if tile.focused {
-                        grid::ring(ui.painter(), body);
+                        grid::ring(ui.painter(), video);
                     }
                 }
                 if open {
-                    tilebar::draw(ui, &mut nav, &layout, rotated, &controls, &muted, &tips);
+                    tilebar::draw(ui, &mut nav, &layout, rotated, backdrop, &controls, &muted, &tips);
                     // What the recording holds, in the row the strip's own
                     // geometry put there. The wall draws the same thing over the
                     // picture; this is the copy that can be seen.
@@ -562,7 +643,7 @@ impl XgViewApp {
                 // which already registered both circles.
                 if self.page_arrows_shown() {
                     let focused = ctx.memory(|memory| memory.focused());
-                    for (forward, id, has, center) in self.portrait_page_arrow_sides(body) {
+                    for (forward, id, has, center) in self.portrait_page_arrow_sides(video) {
                         if has {
                             Self::paint_page_arrow(
                                 ui.painter(),
@@ -768,6 +849,9 @@ impl XgViewApp {
 
     pub(super) fn draw_grid(&mut self, ui: &mut egui::Ui) {
         let area = ui.available_rect_before_wrap();
+        // The band is what this frame paints, and no other frame's: a frame that
+        // draws no wall has none to show. See [`Self::strip_band`].
+        self.strip_band = None;
         if area.width() < 24.0 || area.height() < 24.0 {
             return;
         }
@@ -824,6 +908,22 @@ impl XgViewApp {
         }
         let wall = area.shrink(grid::LINE);
 
+        // The strip's band, when it has one. Upright and not turned, the
+        // magnified viewport is the picture above and the strip's band below
+        // rather than one picture with a strip floating over it, and every
+        // gesture that belongs to the picture - a pinch, a wheel, a drag - is
+        // read against the picture's own region: two fingers on the band are
+        // the band's, and a drag that starts there is not the picture moving.
+        // `None` in landscape and for a picture drawn turned, where there is no
+        // band and the whole area is the picture. See `split_panel`.
+        let panel = self.panel_split(wall);
+        let picture_area = panel.map_or(wall, |panel| panel.video);
+        // Recorded for the overlay, which paints a copy of this band over a
+        // picture the surface is showing and is handed only the tile the page
+        // has slid to: the band is the wall's frame and stands where the wall
+        // put it, whatever the picture under it is doing. See `strip_band`.
+        self.strip_band = panel.map(|panel| panel.bar);
+
         // Where the focused tile is: the arrow that walks off the top of the
         // wall should come down into the bar above that tile rather than at one
         // end of the row.
@@ -833,15 +933,38 @@ impl XgViewApp {
         });
 
         // Page sliding out, or the neighbour page revealed by a finger drag.
+        //
+        // A one-cell view is the magnified picture, whichever way it is going:
+        // it slides through the picture's region, the same region the wall
+        // draws the picture at rest in, so the one arriving and the one leaving
+        // are the same size and stand at the same height as they pass. A grid
+        // left behind by a page turn that was still running when the picture
+        // was magnified is a grid, and goes out at the size it came in at - the
+        // band covers its foot, because the band is painted after it.
+        let slide_area = |layout: GridLayout| match layout {
+            GridLayout::G1x1 => picture_area,
+            _ => wall,
+        };
         if let Some(outgoing) = self.slide.outgoing.clone() {
             let dx = (self.slide.offset - self.slide.dir) * area.width() + self.slide.drag;
-            self.paint_view(ui, wall, &cameras, &outgoing, dx, false, 3);
+            self.paint_view(ui, slide_area(outgoing.layout), &cameras, &outgoing, dx, false, 3);
         } else if self.slide.dragging && self.slide.drag.abs() > 1.0 {
             let forward = self.slide.drag < 0.0;
             if let Some(neighbour) = self.neighbour_view(forward, total) {
                 let dx = if forward { self.slide.drag + area.width() } else { self.slide.drag - area.width() };
-                self.paint_view(ui, wall, &cameras, &neighbour, dx, false, 3);
+                self.paint_view(ui, slide_area(neighbour.layout), &cameras, &neighbour, dx, false, 3);
             }
+        }
+
+        // The band is the strip's ground, and the wall's own colour is under the
+        // whole of its area: without this the band would be a slab of
+        // `GRID_LINE` with the controls on it. Painted here rather than by the
+        // strip, because it is the wall's frame - the ring around the area
+        // starts on this paint - and after the pages rather than before them,
+        // because a page on its way past is a picture and the band is not: it
+        // goes behind the band, not over it. See `paint_band`.
+        if let Some(panel) = panel {
+            paint_band(ui.painter(), panel.bar);
         }
 
         let dx = self.slide.offset * area.width() + self.slide.drag;
@@ -879,12 +1002,18 @@ impl XgViewApp {
         // its box is placed by a layout pass and the travel is a translation, so
         // the two arrive in time with different costs. See `picture_slide`.
         self.picture_slide = dx;
-        // And the tile itself, which is where the ring goes - not the picture's
-        // box: the ring is a cursor on the tile, and the tile is the whole wall
-        // whether the picture is letterboxed inside it or not. `paint_view` is
-        // given the same three numbers below - the inset wall, the layout, the
-        // slide - so the overlay draws the ring on exactly the rectangle the
-        // wall would have. See `magnified_rect`.
+        // And the tile itself - not the picture's box: the ring is a cursor on
+        // the tile, and the tile is the whole wall whether the picture is
+        // letterboxed inside it or not. `paint_view` is given the same three
+        // numbers below - the inset wall, the layout, the slide - so the overlay
+        // draws the ring on exactly the rectangle the wall would have. See
+        // `magnified_rect`.
+        //
+        // The tile stays the whole of the area upright and not turned too: the
+        // band the strip stands in is part of the wall's frame, and the ring
+        // around the whole frame is the one the viewer sees. The picture's own
+        // region - which is what the ring is drawn on - is `picture_area`, and
+        // `paint_view` and the overlay both use it. See `split_panel`.
         //
         // Recorded whether or not a surface is drawing the picture there: the
         // overlay needs it while one is, and the toast needs it while the wall
@@ -895,7 +1024,7 @@ impl XgViewApp {
             .scheduler
             .is_zoomed()
             .then(|| grid::tile_rect(wall.translate(vec2(dx, 0.0)), view.layout, 0, grid::LINE));
-        let pinched = ui.ctx().input(|input| pinch_frame(input, area));
+        let pinched = ui.ctx().input(|input| pinch_frame(input, picture_area));
         // Unless it is over the strip: two fingers there are asking for a wider
         // or narrower timeline, and the picture keeps the window it has.
         let pinched =
@@ -906,7 +1035,7 @@ impl XgViewApp {
         // scrolls elsewhere, and the magnified viewport is the one place where
         // there is nothing to scroll. See `wheel_frame`.
         let speed = ui.ctx().options(|options| options.input_options.scroll_zoom_speed);
-        let wheeled = ui.ctx().input(|input| wheel_frame(input, speed, area));
+        let wheeled = ui.ctx().input(|input| wheel_frame(input, speed, picture_area));
         // The fingers are the wall's on the same terms as the keys: while
         // something else owns them - a panel, a window, or the black - a gesture
         // made over the wall is the panel's to answer, and the picture keeps the
@@ -959,17 +1088,22 @@ impl XgViewApp {
                     // magnified viewport answers when there is nothing to look
                     // around. See `keeps_the_page`.
                     let drag = ui.ctx().input(|input| {
-                        drag_frame(input, area).map(|delta| (delta, input.pointer.press_origin()))
+                        drag_frame(input, picture_area).map(|delta| (delta, input.pointer.press_origin()))
                     });
                     if let Some((delta, origin)) = drag {
                         let on_bar = self.tile_bar.is_open()
-                            && origin.is_some_and(|origin| {
-                                in_tile_bar_strip(
+                            && origin.is_some_and(|origin| match panel {
+                                // Upright and not turned, the band is the bar:
+                                // a finger put down anywhere in it belongs to
+                                // the strip, whether or not it landed on a
+                                // control. See `split_panel`.
+                                Some(panel) => panel.bar.contains(origin),
+                                None => in_tile_bar_strip(
                                     origin,
                                     wall,
                                     self.magnified_rotated(),
                                     self.tile_bar.dock(),
-                                )
+                                ),
                             });
                         if !on_bar {
                             self.picture_zoom = self.picture_zoom.panned(delta, dest);
@@ -984,7 +1118,7 @@ impl XgViewApp {
             self.picture_zoom = PictureZoom::FULL;
         }
 
-        let mut actions = self.paint_view(ui, wall, &cameras, &view, dx, true, 2);
+        let mut actions = self.paint_view(ui, picture_area, &cameras, &view, dx, true, 2);
 
         // A drag on the magnified picture is the picture moving, not the page:
         // the wall has one picture on it and nowhere to turn to, and the channel
@@ -1100,10 +1234,29 @@ impl XgViewApp {
             return false;
         };
         let rect = grid::tile_rect(wall.translate(vec2(dx, 0.0)), view.layout, cell, grid::LINE);
+        // Upright and not turned the strip has a band of its own under the
+        // picture, and that band is the tile the bar is laid out in: `layout`
+        // adds this tile's corner to everything it places, so a band measured up
+        // from the bottom of the wall lands exactly where the wall put it. See
+        // `split_panel`.
+        //
+        // Measured on the wall, not on the tile the slide has carried: the band
+        // is the wall's frame and stands still while the picture travels, and a
+        // bar laid out in the travelling tile would cross the band it belongs
+        // to. Drawn and pressed must be the same answer, so it is the band's.
+        let panel = self.panel_split(wall);
         // A window too small to hold the strip and the room it keeps clear of
         // the edge is not given one; this is a picture down to a postage stamp.
-        if rect.width() < 120.0 || rect.height() < 120.0 {
-            self.tile_bar.hide();
+        // A pinned strip is left standing rather than taken down: the net at the
+        // start of every frame holds it up for as long as the picture is
+        // magnified, so hiding it here would be a flag put down every frame and
+        // a strip drawn on none of them. The band stays, empty. See
+        // `tile_bar_pinned`.
+        let picture = panel.map_or(rect, |panel| panel.video);
+        if picture.width() < 120.0 || picture.height() < 120.0 {
+            if !self.tile_bar_pinned() {
+                self.tile_bar.hide();
+            }
             return false;
         }
 
@@ -1124,11 +1277,21 @@ impl XgViewApp {
         let breaks = self.tile_bar_break();
         // How deep the panel is depends on how many lines the controls need, so
         // the timeline is only promised to a tile that has room for both.
+        //
+        // A pinned strip has answered both questions already: its band is as
+        // deep as the row it was measured with, and it gave the row up rather
+        // than take it out of the picture's half. See `split_panel`.
         let margin = self.tile_bar_margin();
-        let timeline =
-            playing && tilebar::fits_timeline(rect, rotated, margin, &widths, &breaks);
+        let (tile, timeline, backdrop) = match panel {
+            Some(panel) => (panel.bar, panel.timeline, tilebar::Backdrop::Bare),
+            None => (
+                rect,
+                playing && tilebar::fits_timeline(rect, rotated, margin, &widths, &breaks),
+                tilebar::Backdrop::Floating,
+            ),
+        };
         let layout = tilebar::layout(
-            rect,
+            tile,
             rotated,
             self.tile_bar.dock(),
             margin,
@@ -1144,7 +1307,18 @@ impl XgViewApp {
         // on the glass, one that slid is a pan being reached for, and a pinch is
         // two fingers - the bar stays through all of them. See `tap_release`.
         let tap = self.tap_release(ui.ctx());
-        if let Some(pos) = actions.click_pos {
+        if let (Some(pos), Some(panel)) = (actions.click_pos, panel) {
+            // Upright and not turned, the strip is pinned: it is up and stays up,
+            // and its band is the bar. A press in the band belongs to the strip
+            // whether or not it landed on a control - the padding between them is
+            // still the bar being used - and a press on the picture above is the
+            // picture's, with nothing here to open or close. See
+            // `tile_bar_pinned`.
+            if panel.bar.contains(pos) {
+                self.tile_bar.touch(now);
+                consumed = true;
+            }
+        } else if let Some(pos) = actions.click_pos {
             let hit = layout.hit(pos);
             if self.tile_bar.is_open() {
                 if matches!(hit, tilebar::Hit::Outside) {
@@ -1201,7 +1375,7 @@ impl XgViewApp {
         let widths = vec![tilebar::icon_width(); entries.len()];
         let breaks = self.tile_bar_break();
         let layout = tilebar::layout(
-            rect,
+            tile,
             rotated,
             self.tile_bar.dock(),
             margin,
@@ -1214,7 +1388,11 @@ impl XgViewApp {
         // viewport being put back: its first press has already opened the bar,
         // and the second is the same gesture.
         if let Some(pos) = actions.double_click_pos {
-            if !matches!(layout.hit(pos), tilebar::Hit::Outside) {
+            let on_bar = match panel {
+                Some(panel) => panel.bar.contains(pos),
+                None => !matches!(layout.hit(pos), tilebar::Hit::Outside),
+            };
+            if on_bar {
                 consumed = true;
             }
         }
@@ -1243,7 +1421,7 @@ impl XgViewApp {
             // the one who does not, the way the toolbars carry theirs.
             let tips = self.tile_bar_tips(&entries);
             if let Some(index) =
-                tilebar::draw(ui, &mut self.nav, &layout, rotated, &controls, &muted, &tips)
+                tilebar::draw(ui, &mut self.nav, &layout, rotated, backdrop, &controls, &muted, &tips)
             {
                 // A window of the viewer's own owns the screen while it is up;
                 // the bar stays drawn behind it. This guard is the counterpart
@@ -1759,9 +1937,184 @@ impl XgViewApp {
     }
 }
 
+/// Where the picture and the strip go when the strip is given a band of its own.
+///
+/// Upright and not turned, the magnified viewport is two regions rather than one
+/// picture with a strip floating over it: the picture above, the bar in a band
+/// along the bottom. This is that division, and the one place it is worked out -
+/// the wall's own copy of the picture, the copy drawn over a picture the surface
+/// is showing, and every gesture that belongs to the picture all read it from
+/// here, so a press and the thing it presses cannot land in different places.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PanelSplit {
+    /// The picture's region: everything above the band.
+    pub video: Rect,
+    /// The strip's band, measured up from the bottom of the area.
+    pub bar: Rect,
+    /// Whether the band carries a timeline under the controls.
+    pub timeline: bool,
+}
+
+/// How deep the band is, and therefore where the picture ends.
+///
+/// As deep as the panel asks - the controls, the timeline when one is coming,
+/// and `margin` above and below them both - and never more than half the area: a
+/// viewer who magnified a picture asked for the picture, and half the screen is
+/// the most the controls may take of it. A band the half clips gives up the
+/// timeline rather than crushing both rows into what is left; the controls alone
+/// are still the bar, and a timeline that cannot be read is not worth the
+/// picture it costs.
+///
+/// Nothing here asks the band how deep it is before measuring it. The panel's
+/// depth is a question for the width alone - see [`tilebar::panel_depth`] - so
+/// the picture and the band are placed in one pass, in the frame they are drawn.
+pub(super) fn split_panel(
+    area: Rect,
+    widths: &[f32],
+    breaks: &[usize],
+    playing: bool,
+    margin: f32,
+) -> PanelSplit {
+    let half = area.height() * 0.5;
+    let across = area.width();
+    let plain = tilebar::panel_depth(across, widths, breaks, false) + 2.0 * margin;
+    let with_row = tilebar::panel_depth(across, widths, breaks, true) + 2.0 * margin;
+    let (want, timeline) = match (playing, with_row <= half) {
+        (false, _) => (plain, false),
+        (true, true) => (with_row, true),
+        (true, false) => (plain, false),
+    };
+    let bar_h = want.min(half);
+    let edge = area.bottom() - bar_h;
+    PanelSplit {
+        video: Rect::from_min_max(area.min, egui::pos2(area.right(), edge)),
+        bar: Rect::from_min_max(egui::pos2(area.left(), edge), area.max),
+        timeline,
+    }
+}
+
+/// Paints the ground the band stands on, and the seam above it.
+///
+/// The band is part of the wall's frame: its floor is [`theme::BACKGROUND`],
+/// darker than the picture's own canvas, and the seam between the two is one
+/// point of the wall's line at three tenths. The ring around the whole of the
+/// area is the strong line; a seam as strong would read as a second frame
+/// inside it. Both copies - the wall's, and the one drawn over a picture the
+/// surface is showing - paint this, and this is why it is one function: two
+/// shades a hand-written pair apart would be a seam that moves when the picture
+/// goes onto the surface.
+fn paint_band(painter: &egui::Painter, bar: Rect) {
+    painter.rect_filled(bar, egui::CornerRadius::ZERO, theme::BACKGROUND);
+    let seam = Rect::from_min_max(
+        bar.left_top(),
+        egui::pos2(bar.right(), bar.top() + grid::LINE),
+    );
+    painter.rect_filled(seam, egui::CornerRadius::ZERO, theme::GRID_LINE.gamma_multiply(0.3));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The band the strip stands in is as deep as the panel asks, never more
+    /// than half the area, and the picture has everything above it: the whole
+    /// width, the foot of the screen for the band, and no point shared between
+    /// the two - a picture and a band that overlapped would leave the seam
+    /// whichever one was drawn second.
+    #[test]
+    fn the_band_is_the_panels_depth_at_the_foot_of_the_area() {
+        let phone = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(411.0, 800.0));
+        let margin = tilebar::EDGE;
+        let three = vec![tilebar::icon_width(); 3];
+
+        // Not a recording: one line of controls, and the band is its depth with
+        // the margin above and below it.
+        let plain = split_panel(phone, &three, &[], false, margin);
+        assert!(!plain.timeline);
+        assert_eq!(plain.bar.height(), 52.0 + 2.0 * margin);
+        assert_eq!(plain.bar.width(), phone.width(), "the whole width");
+        assert_eq!(plain.bar.bottom(), phone.bottom(), "at the foot of the area");
+        assert_eq!(plain.video.bottom(), plain.bar.top(), "and the picture ends where it starts");
+        assert_eq!(plain.video.top(), phone.top());
+        assert_eq!(plain.video.height(), 800.0 - plain.bar.height());
+
+        // A recording is a row deeper, and that row still comes out of the half.
+        let playing = split_panel(phone, &three, &[], true, margin);
+        assert!(playing.timeline);
+        assert_eq!(playing.bar.height(), 109.0 + 2.0 * margin);
+        assert!(playing.video.height() < plain.video.height(), "the picture gives up the row");
+
+        // Three lines with the row under them: the deepest the panel goes.
+        let recording = vec![tilebar::icon_width(); 13];
+        let three_lines = split_panel(phone, &recording, &[1, 7], true, margin);
+        assert!(three_lines.timeline);
+        assert_eq!(three_lines.bar.height(), 203.0 + 2.0 * margin);
+        assert!(three_lines.bar.height() < phone.height() * 0.5, "still inside the half");
+
+        // A screen too shallow for that gives up the row rather than the
+        // picture's half - and then the half itself is what clips the band.
+        let stub = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(411.0, 300.0));
+        let clipped = split_panel(stub, &recording, &[1, 7], true, margin);
+        assert!(!clipped.timeline, "no room for both rows");
+        assert_eq!(clipped.bar.height(), stub.height() * 0.5, "clipped at the half");
+        assert_eq!(clipped.video.height(), stub.height() * 0.5);
+        let alone = split_panel(stub, &recording, &[1, 7], false, margin);
+        assert!(!alone.timeline);
+        assert_eq!(alone.bar.height(), stub.height() * 0.5, "even the controls alone");
+    }
+
+    /// One method's source, from its signature to the next method's.
+    ///
+    /// The guards below are about the order of two calls and about which
+    /// rectangle a call is made with, and both are things the type system cannot
+    /// hold: a guard reads the source, and reading it to the end of the method
+    /// keeps it from seeing the *other* copy's answer.
+    fn method<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source.find(signature).expect("the method is there");
+        let rest = &source[start..];
+        let end = rest
+            .match_indices('\n')
+            .map(|(at, _)| at)
+            .find(|at| {
+                let next = &rest[at + 1..];
+                next.starts_with("    fn ")
+                    || next.starts_with("    pub fn ")
+                    || next.starts_with("    pub(super) fn ")
+            })
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The band is the wall's frame and the pictures are the wall's pictures: a
+    /// page on its way past goes behind the band, not over it. Painted before
+    /// them - which it was - a page leaving the viewport stood in the strip's
+    /// place until it had gone, and the strip came back as it left.
+    #[test]
+    fn the_band_is_painted_after_the_pages() {
+        let grid = method(include_str!("wall.rs"), "fn draw_grid");
+        let pages = grid.find("self.paint_view(ui, slide_area(").expect("the pages still slide");
+        let band = grid.find("paint_band(ui.painter(), panel.bar)").expect("the band is painted");
+        assert!(pages < band, "a page on its way past goes behind the band");
+    }
+
+    /// The band stands where the wall put it. Both copies of the strip - the
+    /// wall's, and the one drawn over a picture the surface is showing - lay the
+    /// bar out in it, and neither may measure it on the tile a slide has carried:
+    /// a band measured there went sideways with the finger, leaving the picture's
+    /// own canvas standing where the band had been. The band is the wall's frame;
+    /// the picture is the thing that travels.
+    #[test]
+    fn the_band_stands_where_the_wall_put_it() {
+        let source = include_str!("wall.rs");
+        assert!(
+            method(source, "fn tile_bar_overlay").contains("self.panel_split(wall)"),
+            "the wall's copy divides the wall, not the tile the slide carried"
+        );
+        assert!(
+            method(source, "fn draw_overlay_only").contains(".strip_band()"),
+            "the overlay paints the band the wall recorded"
+        );
+    }
 
     /// The order a remote walks, with and without a sound switch, on a wide
     /// picture and on a phone held upright.

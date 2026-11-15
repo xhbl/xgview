@@ -362,7 +362,11 @@ impl XgViewApp {
             // showing the handset.
             if self.talking {
                 self.set_talking(false);
-            } else if self.tile_bar.is_open() {
+            } else if self.tile_bar.is_open() && !self.tile_bar_pinned() {
+                // A pinned strip is not a layer to back out of: it is up for as
+                // long as the picture is magnified, and Back is the way out of
+                // the magnification rather than of the strip. See
+                // `tile_bar_pinned`.
                 self.tile_bar.hide();
             } else {
                 self.zoom_out();
@@ -1070,10 +1074,17 @@ impl XgViewApp {
         // the two are never up at once. See [`crate::tilebar`]. The page keys are
         // the exception while the strip has the focus - there they are the
         // events, and a bar that went down on them would take the strip with it.
+        //
+        // A pinned strip is none of their business: it is not a layer the keys
+        // step out of, it is part of the picture, and the picture is what they
+        // act on. Taken down here it would stay down - a page key at the end of
+        // the channel list steps nowhere, and there is no press that brings a
+        // pinned strip back. See [`Self::tile_bar_pinned`].
         let pages_are_the_strips = self.strip_has_focus(ctx);
         // A key spent under a dialog is spent doing nothing, so it must not take
         // the magnified viewport's bar down as a side effect either.
         if !dialog_open
+            && !self.tile_bar_pinned()
             && (keys.settings
                 || keys.devices
                 || keys.fullscreen
@@ -1333,7 +1344,7 @@ impl XgViewApp {
             // same as the handset, and leaves the picture where it is.
             if self.talking {
                 self.set_talking(false);
-            } else if self.tile_bar.is_open() {
+            } else if self.tile_bar.is_open() && !self.tile_bar_pinned() {
                 self.tile_bar.hide();
                 self.leave_controls(ctx);
             } else if self.layout_picker.is_open() {
@@ -1793,5 +1804,21 @@ mod tests {
 
         assert!(pressed(Key::Escape, true), "Escape still closes from the field");
         assert!(pressed(Key::BrowserBack, true), "the remote's Back still closes from the field");
+    }
+
+    /// A pinned strip is part of the picture, not a layer the application's keys
+    /// step out of. Taken down by a page key it stayed down: upright the strip
+    /// has no press that brings it back, and a page key at the end of the
+    /// channel list steps nowhere.
+    #[test]
+    fn a_pinned_bar_is_not_the_application_keys_to_take_down() {
+        let source = include_str!("input.rs");
+        let keys = source.find("let pages_are_the_strips = self.strip_has_focus(ctx);").unwrap();
+        let tail = &source[keys..keys + 800];
+        let hide = tail.find("self.tile_bar.hide();").expect("the keys still clear a floating bar");
+        assert!(
+            tail[..hide].contains("!self.tile_bar_pinned()"),
+            "a pinned strip is left where it is"
+        );
     }
 }

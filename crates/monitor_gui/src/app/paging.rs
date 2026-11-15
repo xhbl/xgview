@@ -203,13 +203,18 @@ impl XgViewApp {
         let Some(current) = self.scheduler.zoom() else {
             return false;
         };
-        // The bar belongs to one picture: stepping to the next one leaves it
-        // behind, the way the window a pinch left behind is.
-        self.tile_bar.hide();
+        // The end of the channel list is a stop, and a stopped step is no
+        // gesture at all: the picture is the one it was, and so is its bar.
+        // Taken down here, the bar would be gone for good - upright it is
+        // pinned, and a pinned bar has no press that brings it back until the
+        // picture changes. See `tile_bar_pinned`.
         if !self.scheduler.zoom_step(forward) {
             self.slide.drag = 0.0;
             return false;
         }
+        // The bar belongs to one picture: stepping to the next one leaves it
+        // behind, the way the window a pinch left behind is.
+        self.tile_bar.hide();
         // The recording belonged to the camera being left, and it is shown
         // nowhere else: it goes with the picture, and its channel stops. Left
         // behind it would play on unseen - a request to the server and a
@@ -454,5 +459,20 @@ mod tests {
     fn a_television_has_no_window_to_resize() {
         assert!(!owes_windowed_size(false, true, true));
         assert!(!owes_windowed_size(false, false, true));
+    }
+
+    /// A step at the end of the channel list goes nowhere, and a step that is
+    /// not taken is no gesture at all: the picture is the one it was, and so is
+    /// its bar. Taken down before the step is asked for, a pinned bar stayed
+    /// down for the rest of the magnification - upright there is no press that
+    /// brings it back, and the band at the foot of the screen was left empty.
+    #[test]
+    fn a_refused_step_leaves_the_bar_alone() {
+        let source = include_str!("paging.rs");
+        let step = source.find("fn step_zoom").unwrap();
+        let body = &source[step..step + 1200];
+        let asked = body.find("if !self.scheduler.zoom_step(forward)").unwrap();
+        let hide = body.find("self.tile_bar.hide();").expect("a step still leaves the old bar");
+        assert!(asked < hide, "only a step that is taken may put the bar away");
     }
 }

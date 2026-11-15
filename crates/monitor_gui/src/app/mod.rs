@@ -1217,6 +1217,15 @@ pub struct XgViewApp {
     /// `draw_grid` from the same rectangle the tile is painted in, so the two
     /// cannot disagree - including while a channel step slides the tile.
     magnified_rect: Option<egui::Rect>,
+    /// The band the pinned strip stands in, in wall points, as the frame drew
+    /// it - or `None` where the strip has no band and floats over the picture.
+    ///
+    /// Kept for the overlay, which paints the band's floor and the seam above it
+    /// over a picture the surface is showing. It is handed the tile the page has
+    /// slid to rather than the wall, and a band measured on that tile travels
+    /// with the page: the band is the wall's frame and stands still. See
+    /// `split_panel` and [`Self::strip_band`].
+    strip_band: Option<egui::Rect>,
     /// When the magnification that is up lets the rest of the page go, or
     /// `None` when nothing is magnified.
     ///
@@ -1741,6 +1750,7 @@ impl XgViewApp {
             picture_rect: None,
             picture_slide: 0.0,
             magnified_rect: None,
+            strip_band: None,
             zoom_park_at: None,
             tile_bar: tilebar::Bar::new(),
             sound_on,
@@ -2684,6 +2694,14 @@ impl XgViewApp {
             || (self.panel_anchor().is_some() && !self.talking)
         {
             self.tile_bar.hide();
+        } else if self.tile_bar_pinned() && !self.tile_bar.is_open() {
+            // And the net holds it up as well as down. Upright, the strip is
+            // part of the picture - pinned - rather than a layer the viewer
+            // asks for, and nothing outside this frame's own reasons may leave
+            // it down: a press that opened it is not what it waits for, and a
+            // step at the end of the channel list that went nowhere must not
+            // be able to strand it. See `tile_bar_pinned`.
+            self.tile_bar.show(crate::tilebar::Dock::Bottom, Instant::now());
         }
         FrameStart { clock: frame_start, bars_was_up, cursor_was }
     }
@@ -4824,6 +4842,23 @@ mod tests {
         let hide = zero + source[zero..].find("self.tile_bar.hide();").unwrap();
         let tail = &source[hide..hide + 400];
         assert!(tail.contains("self.leave_controls(ctx)"), "an idle hide must surrender the focus");
+    }
+
+    /// The net under the bar holds it up as well as down. Upright and magnified
+    /// the strip is pinned, and the frame's own reasons - the grid, the blank, a
+    /// panel over the wall - are the only ones that take it away; a press that
+    /// opened it is not what it waits for, so nothing that leaves it down by
+    /// accident may survive to the next frame.
+    #[test]
+    fn the_frame_puts_a_pinned_bar_back_up() {
+        let source = include_str!("mod.rs");
+        let net = source.find("|| (self.panel_anchor().is_some() && !self.talking)").unwrap();
+        let tail = &source[net..net + 900];
+        assert!(
+            tail.contains("self.tile_bar_pinned() && !self.tile_bar.is_open()"),
+            "a pinned strip is put back rather than waited for"
+        );
+        assert!(tail.contains("self.tile_bar.show("), "and it is put back up");
     }
 
     /// The lock `tilebar::draw`, `Nav::finish` and `timeline_input` each put

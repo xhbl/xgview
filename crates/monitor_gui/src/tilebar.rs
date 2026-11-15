@@ -94,6 +94,43 @@ pub fn depth(rows: usize, timeline: bool) -> f32 {
     }
 }
 
+/// How deep the panel is across a picture `across` points long.
+///
+/// The same number [`layout`] arrives at, asked before the caller has a tile to
+/// lay the bar out in. Upright, the strip has a band of the screen below the
+/// picture rather than the picture's own black, and how deep that band is
+/// depends on how many lines the controls take - which depends on the width
+/// alone. Nothing here looks at a height, so a caller can ask this first and
+/// place the picture afterwards, in the same frame, with no second pass: a band
+/// measured from a panel it has already placed would have to be placed again.
+///
+/// `across` is the length of the edge the strip runs along - the picture's
+/// width for a picture as it arrives, its height for one drawn turned. [`layout`]
+/// asks the same question of the same length, which is what keeps the two
+/// answers one.
+pub fn panel_depth(across: f32, widths: &[f32], breaks: &[usize], timeline: bool) -> f32 {
+    let available = (across - 2.0 * EDGE).max(0.0);
+    depth(wrap(widths, available, breaks).len(), timeline)
+}
+
+/// Whether the bar paints the plate it floats on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backdrop {
+    /// A rounded, half-transparent plate over the picture.
+    ///
+    /// What the strip has always had, and what it still has wherever it lies
+    /// over the picture itself: landscape, and a picture drawn turned.
+    Floating,
+    /// Nothing: the caller has painted the ground the strip lies on.
+    ///
+    /// Upright and not turned, the strip has a band of the screen of its own
+    /// under the picture, and the band is its ground. A plate inside a band
+    /// would be a second frame inside the wall's own - the wall draws one ring
+    /// around the whole of its area, and the bar must not draw another. See
+    /// `XgViewApp::panel_split`.
+    Bare,
+}
+
 /// Which controls go on which line, in order.
 ///
 /// Greedy, and the line breaks where the next control would not fit, or where
@@ -625,8 +662,9 @@ fn to_screen_rect(rect: Rect, tile: Rect, rotated: bool) -> Rect {
 
 /// Draws the bar over the picture and answers the control it was pressed on.
 ///
-/// The strip's backdrop is painted here, and the controls are egui buttons
-/// placed where [`layout`] put them - their lit look, their ring and their
+/// The strip's backdrop is painted here unless the caller has already painted
+/// the ground it lies on - see [`Backdrop`] - and the controls are egui buttons
+/// placed where [`layout`] put them: their lit look, their ring and their
 /// answer to the confirm key are all egui's. `rotated` turns their glyphs with
 /// the picture, the way the picture itself is drawn.
 ///
@@ -638,18 +676,21 @@ pub fn draw(
     nav: &mut Nav,
     layout: &Layout,
     rotated: bool,
+    backdrop: Backdrop,
     controls: &[Control],
     muted: &[bool],
     tips: &[String],
 ) -> Option<usize> {
     let painter = ui.painter();
-    painter.rect_filled(layout.bar, CornerRadius::same(RADIUS), Color32::from_black_alpha(153));
-    painter.rect_stroke(
-        layout.bar,
-        CornerRadius::same(RADIUS),
-        Stroke::new(1.0_f32, Color32::from_white_alpha(28)),
-        StrokeKind::Inside,
-    );
+    if backdrop == Backdrop::Floating {
+        painter.rect_filled(layout.bar, CornerRadius::same(RADIUS), Color32::from_black_alpha(153));
+        painter.rect_stroke(
+            layout.bar,
+            CornerRadius::same(RADIUS),
+            Stroke::new(1.0_f32, Color32::from_white_alpha(28)),
+            StrokeKind::Inside,
+        );
+    }
 
     // The timeline's track, drawn here so the row is a row and not a gap. What
     // goes on it - the stretches that were recorded, the events in them, the
@@ -971,6 +1012,40 @@ mod tests {
         let narrow_tile = Rect::from_min_size(Pos2::ZERO, vec2(320.0, 150.0));
         assert!(fits_timeline(narrow_tile, false, EDGE, &five, &[]));
         assert!(!fits_timeline(narrow_tile, false, EDGE, &eight, &[]), "a second line needs 64 more");
+    }
+
+    /// How deep the panel is can be asked of the width alone, before there is a
+    /// tile to lay the bar out in - and the answer is the one `layout` gives.
+    /// That is what lets a caller give the strip its own band of the screen and
+    /// place the picture above it in one pass rather than two: the band is
+    /// measured from a width, and no height is consulted anywhere along the way.
+    #[test]
+    fn the_panels_depth_is_a_question_for_the_width_alone() {
+        let three = [icon_width(); 3];
+        // A recording on a phone: thirteen controls on the 363 points a 411-wide
+        // picture leaves, broken into the three lines `tile_bar_break` names.
+        let thirteen = [icon_width(); 13];
+        let breaks = [1, 7];
+        let phone = 411.0;
+
+        assert_eq!(depth(1, false), 52.0, "one line");
+        assert_eq!(depth(1, true), 109.0, "one line and a timeline");
+        assert_eq!(depth(3, false), 146.0, "three lines");
+        assert_eq!(depth(3, true), 203.0, "three lines and a timeline");
+
+        assert_eq!(panel_depth(phone, &three, &[], false), 52.0);
+        assert_eq!(panel_depth(phone, &three, &[], true), 109.0);
+        assert_eq!(panel_depth(phone, &thirteen, &breaks, false), 146.0);
+        assert_eq!(panel_depth(phone, &thirteen, &breaks, true), 203.0);
+
+        // And the same answer the bar is laid out at, whatever height the tile
+        // is given: this is a question for the width, and only the width.
+        for height in [200.0, 800.0, 1920.0] {
+            let tile = Rect::from_min_size(Pos2::ZERO, vec2(phone, height));
+            let laid = layout(tile, false, Dock::Bottom, EDGE, &thirteen, &breaks, true);
+            let asked = panel_depth(phone, &thirteen, &breaks, true);
+            assert!((laid.bar.height() - asked).abs() < 0.01, "height {height}");
+        }
     }
 
     /// The controls keep a little off the panel's own edge: at both ends when
