@@ -294,6 +294,7 @@ tilebar-rotate-tip = Turn the picture a quarter
 tilebar-fit-tip = Change how the picture is fitted
 tilebar-sound-on-tip = Turn the sound on
 tilebar-sound-off-tip = Turn the sound off
+tilebar-no-sound-tip = This picture carries no audio track
 tilebar-mic-tip = Talk through this camera
 tilebar-hangup-tip = End the call
 tilebar-playback-tip = Watch this camera's recordings

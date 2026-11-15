@@ -211,6 +211,15 @@ pub struct ChannelUi {
     /// True once the stream has proved to carry an audio track this build can
     /// decode. The magnified bar's sound switch is offered on it.
     pub audio: bool,
+    /// Whether the stream has said anything about its audio yet.
+    ///
+    /// `audio` above is the answer, and before it arrives it is false - but
+    /// false means "not proved", not "there is none". The two are told apart
+    /// here, because the bar's sound switch is a place in the row and a place
+    /// that is taken and given back moves every control after it: a switch that
+    /// appeared once the stream had spoken and vanished while it had not would
+    /// have the whole row jumping under the remote's ring.
+    pub audio_known: bool,
     pub width: Option<u32>,
     pub height: Option<u32>,
     /// The size the **Main** stream last reported, kept after the channel goes
@@ -241,6 +250,7 @@ impl Default for ChannelUi {
             codec: None,
             hardware: false,
             audio: false,
+            audio_known: false,
             width: None,
             height: None,
             main_size: None,
@@ -312,6 +322,10 @@ impl ChannelUi {
         }
         self.hardware = stats.hardware;
         self.audio = stats.audio;
+        // The stream has now said what its audio is, which is not the same as
+        // saying there is any: the switch is offered on a stream that has
+        // spoken and greyed on one that has not. See `audio_known`.
+        self.audio_known = true;
         if stats.width.is_some() {
             self.width = stats.width;
         }
@@ -493,7 +507,45 @@ enum TileBarAction {
     Download,
     /// Leave the recording and go back to the camera.
     Live,
+    /// The place a sound switch would stand in, on a stream with no audio
+    /// track.
+    ///
+    /// The switch is the one control that comes and goes with the picture, and
+    /// a control that comes and goes takes every control after it with it. The
+    /// place is kept, and drawn as a grey speaker rather than left empty, so
+    /// the row does not shift under the remote's ring and the viewer can see
+    /// what is missing. It answers nothing and takes no press. See
+    /// `tilebar::Control::Silent`.
+    NoSound,
 }
+
+/// The control the ring is anchored to, the picture it belongs to, and when the
+/// anchor was set.
+///
+/// The anchor is what holds the ring on a strip whose row is being replaced:
+/// it names the control - the one that undoes the switch - rather than the
+/// place the control stood in, because the place is not the same twice. It is
+/// given a time as well, because a press that asked for something the box
+/// never answered would otherwise leave an anchor behind for good, and an
+/// anchor that outlives its question puts the ring on a control the viewer
+/// was never shown.
+#[derive(Debug, Clone, Copy)]
+struct RingAnchor {
+    /// The control the ring belongs on.
+    action: TileBarAction,
+    /// The picture the anchor was asked for: another picture is another ring.
+    channel: usize,
+    /// When the anchor was set.
+    since: Instant,
+}
+
+/// How long the ring's anchor waits for the row it names.
+///
+/// As long as a box may take to answer a question about a recording, and then
+/// a little: an anchor that gave up early would put the ring nowhere on a slow
+/// answer, and one that never gave up would be an anchor with no question
+/// behind it.
+const ANCHOR_WAIT: Duration = Duration::from_secs(30);
 
 /// Detects the frame a panel appears on.
 ///
@@ -1315,6 +1367,36 @@ pub struct XgViewApp {
     /// closes would be a frame too late, once the panel has had its say. The
     /// request is kept and applied at the start of the next frame instead.
     restore_focus: Option<Id>,
+    /// The control the ring is anchored to, and the channel it belongs to.
+    ///
+    /// A switch of the row under the ring replaces the controls the ring was
+    /// on, and the id it holds names nothing once they are gone: egui drops
+    /// the focus with the widget, and the keyboard falls back to the picture.
+    /// The anchor is the answer - the control that undoes the switch - asked
+    /// of the row as it is drawn, not of the row that was there before: a row
+    /// that is a different length puts it somewhere else, and a row that is
+    /// still being drawn puts it nowhere for a frame. So the ring is put on it
+    /// again every frame while the anchor holds, and it cannot be lost by a
+    /// row that changed under it. See
+    /// [`XgViewApp::ring_follows_the_switch`] and
+    /// [`XgViewApp::place_the_anchored_ring`].
+    ring_anchor: Option<RingAnchor>,
+    /// Whether a direction press asked for the ring on the pinned strip, to be
+    /// put there as the next frame begins.
+    ///
+    /// A press that lands on nothing focused is answered by putting the ring on
+    /// the strip's first control - but not on the frame the press arrives in.
+    /// egui reads the arrows before any of this runs and spends them at the end
+    /// of that same frame, walking the focus out of whatever holds it by
+    /// geometry; a widget given the focus this frame has no lock yet - the lock
+    /// takes hold only on a widget that had it last frame - and the ring was
+    /// walked straight off the control it landed on. Upright, the strip's second
+    /// and third lines sit under its first, so on a recording the ring left the
+    /// first control for the fit button below it: a press that meant "give me
+    /// the ring" left it on the fifth control, which is what a viewer saw. No
+    /// direction is latched on the frame after a press, so the request waits for
+    /// that one. See [`XgViewApp::claim_the_strip`].
+    strip_claim: bool,
     /// Whether an import takes only the camera list, leaving the viewer's own
     /// settings - layout, discovery, reconnect - as they are. Ticked by
     /// default: taking the cameras alone is the import that cannot surprise a
@@ -1650,11 +1732,12 @@ impl XgViewApp {
             ("passphrase-body", ScopeDef::new(Axis::Column)),
             ("juanz-row", ScopeDef::new(Axis::Row)),
             ("aspect-picker", ScopeDef::new(Axis::Column)),
-            // The magnified viewport's bar: a row across the wall, a column down
-            // a turned picture. No exits - a strip has nothing above or below it
-            // to walk to, and Back is the way out.
+            // The magnified viewport's bar: one row, whichever way the picture
+            // is drawn. A turned strip runs down the screen but is still walked
+            // left-to-right, so there is no second scope for it. No exits - a
+            // strip has nothing beyond its ends to walk to, and Back is the way
+            // out.
             ("tile-bar-row", ScopeDef::new(Axis::Row)),
-            ("tile-bar-column", ScopeDef::new(Axis::Column)),
             // The save panel: chosen lengths and the one button under them. Its
             // scopes are declared with the panel that walks them; see
             // `download::scopes`.
@@ -1773,6 +1856,8 @@ impl XgViewApp {
             reveal_next: None,
             swallow_confirm: 0,
             restore_focus: None,
+            ring_anchor: None,
+            strip_claim: false,
             import_cameras_only: true,
             encrypt_export: true,
             passphrase: Modal::default(),
@@ -2159,11 +2244,20 @@ impl XgViewApp {
                         ),
                         // The camera is there and its server answered; there is
                         // simply nothing recorded to play. Said once, and the
-                        // viewport stays where it was.
-                        None => self.flash(
-                            monitor_i18n::tr("toast-no-recording"),
-                            ToastKind::Error,
-                        ),
+                        // viewport stays where it was. The bar's clock is in
+                        // charge again - the question has been answered, and the
+                        // answer was that there is nothing to see. The anchor
+                        // goes with it: the row it named is the row that is
+                        // being drawn, and it carries no way back into a
+                        // recording that is not there.
+                        None => {
+                            self.tile_bar.release(Instant::now());
+                            self.ring_anchor = None;
+                            self.flash(
+                                monitor_i18n::tr("toast-no-recording"),
+                                ToastKind::Error,
+                            )
+                        }
                     }
                 }
                 BackgroundEvent::PlaylistReady { index, camera_id, window, at, playlist, gen } => {
@@ -2481,6 +2575,9 @@ impl XgViewApp {
         // `XgViewApp::read_strip`.
         self.read_strip(ctx);
         let focus_before = self.route_keys(ctx);
+        // The ring the last switch anchored: put on the control it names, if the
+        // row being drawn carries it. See [`XgViewApp::place_the_anchored_ring`].
+        self.place_the_anchored_ring(ctx);
         // The picker is drawn here rather than with the file dialog at the top
         // of the frame: `route_keys` starts the navigation layer, and its rows
         // have to be registered after that or the arrows would have no listing
@@ -2901,7 +2998,17 @@ impl XgViewApp {
         // Not while a panel is up, though: a panel owns the keys while it is
         // open, and a call keeps the bar on screen behind it - taking the focus
         // back every frame would leave the panel's form impossible to walk.
-        if self.tile_bar.is_open() && self.panel_anchor().is_none() {
+        //
+        // And not while the strip is pinned. A pinned strip is not a layer the
+        // viewer opens: it is up for as long as the picture is magnified, so
+        // this net ran every frame of a magnified portrait picture and put the
+        // focus on the seat each time. The wall therefore never held the keys -
+        // `owner` is `Controls` whenever anything is focused - and Back was
+        // answered by the path that hands the keys back to the wall instead of
+        // by `back`, which is the magnification's way out. A press that should
+        // have left the viewport only surrendered the focus, and the next frame
+        // took it back. See `tile_bar_pinned`.
+        if self.tile_bar.is_open() && self.panel_anchor().is_none() && !self.tile_bar_pinned() {
             // A focus on one of the bar's ids is the bar's, whether or not that
             // control is drawn this frame: the microphone a call turns into the
             // handset is one, and the handset it becomes is another. Anything
@@ -3029,6 +3136,11 @@ impl XgViewApp {
                 // the focus away here instead of waiting for that.
                 self.leave_controls(ctx);
             } else {
+                // A bar that is held up - a question the box has not answered
+                // yet - has no time of its own to run, and the time it has left
+                // is the time the hold has left. Asking for a repaint after it
+                // is what brings the wall back to put the bar down when the
+                // hold runs out. See `tilebar::HOLD`.
                 ctx.request_repaint_after(left);
             }
         }
@@ -4717,6 +4829,432 @@ mod tests {
         assert!(
             include_str!("wall.rs").contains("if !self.modal_is_up() && !self.tile_bar.ignoring(now)"),
             "the drawn bar's press path needs the same modal guard"
+        );
+    }
+
+    /// The net that keeps the focus on the bar is for a bar the viewer opened.
+    /// A pinned strip is up for as long as the picture is magnified, so the net
+    /// ran every frame of a magnified portrait picture and put the focus on the
+    /// seat each time - the wall never held the keys, and Back was answered by
+    /// the layer that hands them back instead of by `back`, which is the
+    /// magnification's own way out.
+    #[test]
+    fn the_pinned_strip_leaves_the_focus_with_the_wall() {
+        let source = include_str!("mod.rs");
+        let at = source
+            .find("if self.tile_bar.is_open() && self.panel_anchor().is_none()")
+            .unwrap();
+        let head = &source[at..(at + 160).min(source.len())];
+        assert!(
+            head.contains("&& !self.tile_bar_pinned()"),
+            "a pinned strip is not a layer and must not take the keys every frame"
+        );
+    }
+
+    /// Back with the focus having walked into a pinned strip. The strip is not
+    /// a layer to back out of and the ring is not the magnification either: the
+    /// press takes the ring away and hands the keyboard back to the picture,
+    /// which is where the viewer was before one was asked for. The next Back
+    /// finds nothing focused and is `back`'s own way out. It still comes after
+    /// the panels, which are layers and go first.
+    #[test]
+    fn back_takes_the_ring_and_leaves_the_picture_magnified() {
+        let source = include_str!("input.rs");
+        let start = source.find("fn keys_off_the_grid(").unwrap();
+        let end = source[start..].find("fn handle_keys(").unwrap() + start;
+        let rest = &source[start..end];
+        assert!(
+            !rest.contains("self.zoom_out()"),
+            "the strip's Back is the ring's answer; the magnification is the second Back's"
+        );
+        let leave = rest.find("// Nothing else is a layer").expect("the ring is the last answer");
+        let head = &rest[..leave];
+        for panel in ["layout_picker.is_open()", "portrait_aspect_picker.is_open()", "show_settings"] {
+            assert!(head.contains(panel), "{panel} is a layer and Back must close it first");
+        }
+    }
+
+    /// Up on a pinned strip answers what Back answers: the ring goes and the
+    /// picture keeps the keyboard. It must not leave the magnification as well -
+    /// a press that both dropped the ring and left the picture would be two
+    /// layers at once, and the viewer would have no way to step off the strip
+    /// without losing the picture.
+    #[test]
+    fn up_on_a_pinned_strip_hands_the_keys_back_without_leaving() {
+        let source = include_str!("input.rs");
+        let start = source.find("} else if keys.up && self.tile_bar_pinned()").unwrap();
+        let rest = &source[start..];
+        let end = rest.find("} else if keys.up && self.status_has_focus(ctx)").unwrap();
+        assert!(rest[..end].contains("self.leave_controls(ctx)"), "the ring goes with Up");
+        assert!(
+            !rest[..end].contains("self.zoom_out()"),
+            "Up leaves the picture magnified"
+        );
+    }
+
+    /// The confirm key on a pinned strip is the viewer asking for the ring.
+    ///
+    /// The seat draws nothing, so a press that lands there looks like a press
+    /// the program never heard - which is exactly what a viewer of an upright
+    /// picture saw: Enter, no ring, and the first arrow was needed to light one.
+    /// A floating strip keeps the seat: it is a layer the key opens, and a
+    /// viewer who opened it has not aimed at anything yet.
+    #[test]
+    fn the_confirm_key_lights_a_pinned_strips_first_control() {
+        let source = include_str!("input.rs");
+        let start = source.find("if keys.enter && keys.enter_fresh {").unwrap();
+        let tail = &source[start..(start + 900).min(source.len())];
+        assert!(
+            tail.contains("if self.tile_bar_pinned()"),
+            "a pinned strip is not a layer the key opens"
+        );
+        assert!(
+            tail.contains("self.claim_the_strip(ctx)"),
+            "the ring has to land on a control, not on the invisible seat"
+        );
+        assert!(
+            tail.contains("memory.request_focus(tilebar::seat())"),
+            "a floating strip keeps the seat, as it always has"
+        );
+        let helper = source.find("fn claim_the_strip(").unwrap();
+        let body = &source[helper..(helper + 600).min(source.len())];
+        assert!(body.contains("self.first_live_control()"), "a greyed control takes no ring");
+        assert!(
+            body.contains("unwrap_or_else(tilebar::seat)"),
+            "an all-grey strip still needs somewhere to put the ring"
+        );
+    }
+
+    /// Down on a pinned strip is the same request as the confirm key: the strip
+    /// stands under the picture, so the arrow that points at it asks for the
+    /// ring. It used to hand the keys to the status row, which is under the
+    /// strip - a press that walked past the controls the viewer was aiming at.
+    ///
+    /// The arrow asks rather than does, and the ring is put down a frame later.
+    /// egui latches a direction press before the frame's keys are handed out and
+    /// spends it as the frame ends, walking the focus by geometry - and a widget
+    /// given the focus on that frame has no lock to stop it, because a lock only
+    /// takes hold on a widget that had the focus last frame. The ring therefore
+    /// left the first control for whatever the layout had under it: on a
+    /// recording, three lines deep, the fit button - the fifth control of
+    /// thirteen. Nothing is latched on the frame after a press.
+    #[test]
+    fn down_asks_for_a_pinned_strips_ring_a_frame_ahead() {
+        let source = include_str!("input.rs");
+        let start = source.find("fn keys_of_the_magnified(").unwrap();
+        let rest = &source[start..];
+        let arm = rest.find("if keys.down {").unwrap();
+        let tail = &rest[arm..(arm + 1500).min(rest.len())];
+        assert!(tail.contains("if self.tile_bar_pinned()"), "Down points at the pinned strip");
+        assert!(
+            tail.contains("self.strip_claim = true"),
+            "the arrow asks for the ring; egui would walk off one asked for now"
+        );
+        assert!(
+            !tail.contains("self.claim_the_strip(ctx)"),
+            "and it must not be put down on the frame egui is walking"
+        );
+        let held = tail.find("self.hand_off(ctx, Bar::Status)").unwrap();
+        let claim = tail.find("self.strip_claim = true").unwrap();
+        assert!(claim < held, "the status row is only reached when there is no pinned strip");
+        // And the request is answered as the next frame begins, before any of
+        // that frame's keys can be read against it.
+        let asked = source.find("if std::mem::take(&mut self.strip_claim)").unwrap();
+        let body = &source[asked..(asked + 300).min(source.len())];
+        assert!(body.contains("self.claim_the_strip(ctx)"), "the ring is put down there");
+        assert!(body.contains("self.tile_bar.is_open()"), "and only while the strip is up");
+        assert!(body.contains("self.tile_bar_pinned()"), "and only where it is pinned");
+    }
+
+    /// Starting a call from the microphone replaces the whole row with the
+    /// handset, so the index the ring stood on no longer names the control the
+    /// viewer pressed. The ring has to go with the press rather than be dropped
+    /// with the widget that used to hold it - on every wall, because the row
+    /// changes the same way whether the strip lies across a landscape picture,
+    /// under an upright one, or down the side of a turned one.
+    #[test]
+    fn the_ring_follows_the_microphone_into_the_handset() {
+        let source = include_str!("input.rs");
+        let at = source.find("self.tile_bar_activate(action, ctx);").unwrap();
+        let tail = &source[at..(at + 700).min(source.len())];
+        assert!(
+            tail.contains("self.ring_follows_the_call(ctx, action)"),
+            "the confirm key has to move the ring the row change took away"
+        );
+        let wall = include_str!("wall.rs");
+        let start = wall.find("fn ring_follows_the_call(").unwrap();
+        let body = &wall[start..(start + 1200).min(wall.len())];
+        assert!(
+            body.contains("TileBarAction::Mic | TileBarAction::Hangup"),
+            "only the two ends of the call replace the row"
+        );
+        assert!(
+            body.contains("if !self.bar_has_focus(ctx)"),
+            "a press that never took the keyboard is given no ring"
+        );
+        assert!(
+            body.contains("let turned_into = if self.talking")
+                && body.contains("TileBarAction::Hangup")
+                && body.contains("TileBarAction::Mic"),
+            "the ring lands on the control the press turned into"
+        );
+        assert!(
+            body.contains("memory.request_focus(tilebar::control(index))"),
+            "the ring goes to a control of the new row, not to the seat"
+        );
+    }
+
+    /// The picture and its recording keep the ring, and the ring walks them.
+    ///
+    /// The strip carries the live controls and the recording's, and the two
+    /// share nothing: the row under the ring is replaced whole. Left alone, the
+    /// focus names a widget that is no longer drawn, egui drops it, and the
+    /// arrows change channel instead of walking the controls: the keyboard left
+    /// the strip on the press that asked for the recording. The ring therefore
+    /// goes to the control that undoes the switch, and only a ring that was
+    /// already on the strip is moved - a viewer watching the picture asked for
+    /// no cursor.
+    ///
+    /// Upright the strip is pinned under the picture; landscape and a turned
+    /// picture float it over one. The row is replaced the same way in all
+    /// three, so all three keep the ring - what a floating strip adds is a clock,
+    /// not another answer. It can be put away while the box answers, and a strip
+    /// that is no longer drawn has no ring to keep.
+    ///
+    /// The ring is held by an **anchor** rather than by the place it was put:
+    /// the row is drawn again for every picture, and it is not the same length
+    /// twice - a row that carries a sound switch is one longer, and the switch
+    /// comes and goes with the picture. A ring put on a place is a ring on a
+    /// control that the next row has drawn over, and egui drops such a focus
+    /// with the widget it named. So the anchor names the control - the way back
+    /// to the picture - and the ring is put on it again for as long as the
+    /// anchor holds.
+    #[test]
+    fn the_ring_keeps_the_strip_across_the_recording() {
+        let source = include_str!("input.rs");
+        let at = source.find("self.tile_bar_activate(action, ctx);").unwrap();
+        let tail = &source[at..(at + 1600).min(source.len())];
+        assert!(
+            tail.contains("self.ring_follows_the_switch(ctx, action)"),
+            "a switch of the row has to keep the ring the viewer asked for"
+        );
+        let wall = include_str!("wall.rs");
+        let start = wall.find("fn ring_follows_the_switch(").unwrap();
+        let body = &wall[start..(start + 2200).min(wall.len())];
+        assert!(
+            body.contains("if !self.tile_bar.is_open() || !self.bar_has_focus(ctx)"),
+            "any strip that is up, and only a ring that was on one of its controls"
+        );
+        assert!(
+            !body.contains("tile_bar_pinned"),
+            "a floating strip carries the same row and keeps the ring too"
+        );
+        assert!(
+            body.contains("action: TileBarAction::Live,"),
+            "opening a recording anchors the ring on the way back"
+        );
+        assert!(
+            body.contains("action: TileBarAction::Playback,"),
+            "and leaving one anchors it on the way in"
+        );
+        assert!(
+            body.contains("self.ring_anchor = None;"),
+            "any other control is the viewer's own choice, and the anchor ends"
+        );
+        // The anchor is put on the row as it is drawn, every frame: a row that
+        // is a frame shorter moves it, and a ring that was put on a place is a
+        // ring on a control that is not there.
+        let at = wall.find("fn place_the_anchored_ring(").unwrap();
+        let body = &wall[at..(at + 2600).min(wall.len())];
+        assert!(
+            body.contains("self.the_control_for(action)"),
+            "the anchor is found in the row being drawn"
+        );
+        assert!(
+            body.contains("since.elapsed() > ANCHOR_WAIT"),
+            "an anchor with no question behind it gives up"
+        );
+        assert!(
+            body.contains("!tilebar::owns(id)"),
+            "a ring that has left the strip is not the one the anchor holds"
+        );
+        assert!(
+            body.contains("memory.request_focus(id)"),
+            "and the ring is put on it"
+        );
+        let app = include_str!("mod.rs");
+        let at = app.find("self.place_the_anchored_ring(ctx);").unwrap();
+        assert!(
+            at > 0,
+            "the ring is put on its anchor every frame, not once"
+        );
+        // The remote walking the strip is the viewer taking the ring back, and
+        // a ring handed back to the wall is not one to keep.
+        let at = source.find("if bar_owns && (keys.left || keys.right)").unwrap();
+        let tail = &source[at..(at + 200).min(source.len())];
+        assert!(
+            tail.contains("self.ring_anchor = None"),
+            "the remote walking the strip lets the anchor go"
+        );
+        let chrome = include_str!("chrome.rs");
+        let at = chrome.find("fn leave_controls(").unwrap();
+        assert!(
+            chrome[at..(at + 600).min(chrome.len())].contains("self.ring_anchor = None"),
+            "a ring handed back to the wall is not one to keep"
+        );
+    }
+
+    /// The bar waits for the answer that is on its way to it.
+    ///
+    /// A floating strip has a clock of its own: eight seconds of no answer to
+    /// it and it goes down. A question the box has not answered yet - a
+    /// recording being opened - is an answer on its way, and the row it is
+    /// about to replace is the row the viewer's ring is on. A bar that went
+    /// down in the middle of the wait took the ring with it, and the keyboard
+    /// went back to the picture: the arrows changed channel where the viewer
+    /// was walking the controls. So the bar is held up until the answer lands,
+    /// and the hold is for a while rather than for ever.
+    ///
+    /// The hold is the bar's clock, not a rule beside it: the time the bar has
+    /// left is the time the hold has left, and the wall is asked to come back
+    /// when it runs out - otherwise the bar would wait for an answer that never
+    /// comes and stay up for good. The answer hands the clock back, starting it
+    /// again, because a bar that has been waiting half a minute is not a bar the
+    /// viewer has stopped using.
+    #[test]
+    fn the_bar_waits_for_the_answer_it_is_about_to_get() {
+        let tilebar = include_str!("../tilebar.rs");
+        assert!(
+            tilebar.contains("pub fn hold(&mut self, now: Instant)"),
+            "the bar can be held up"
+        );
+        assert!(
+            tilebar.contains("pub fn held(&self, now: Instant) -> bool"),
+            "and asked whether it is"
+        );
+        assert!(
+            tilebar.contains("pub fn release(&mut self, now: Instant)"),
+            "and let go when the answer lands, with its clock started again"
+        );
+        // The time the bar has left is the time the hold has left: that is what
+        // the wall is asked to come back for.
+        let at = tilebar.find("pub fn remaining(&self, now: Instant)").unwrap();
+        let body = &tilebar[at..(at + 700).min(tilebar.len())];
+        assert!(
+            body.contains("Some(until) if now < until => Some((until - now).max(idle))"),
+            "a held bar's clock is the hold's"
+        );
+        // The idle rule itself is unchanged: the hold is carried by the clock,
+        // not by a second condition beside it.
+        let app = include_str!("mod.rs");
+        let at = app.find("if let Some(left) = self.tile_bar.remaining(Instant::now())").unwrap();
+        let tail = &app[at..(at + 2000).min(app.len())];
+        assert!(
+            !tail.contains("self.tile_bar.held(Instant::now())"),
+            "the hold is the bar's clock, not a rule of its own"
+        );
+        assert!(
+            tail.contains("ctx.request_repaint_after(left)"),
+            "and the wall comes back when it runs out"
+        );
+        // The question holds it, and the answer - a recording, or the box saying
+        // there is none to play - lets it go.
+        let playback = include_str!("playback.rs");
+        let at = playback.find("fn enter_playback(").unwrap();
+        let tail = &playback[at..(at + 2500).min(playback.len())];
+        assert!(
+            tail.contains("self.tile_bar.hold(Instant::now())"),
+            "the question holds the bar up"
+        );
+        let at = playback.find("fn start_playback(").unwrap();
+        let tail = &playback[at..(at + 2500).min(playback.len())];
+        assert!(
+            tail.contains("self.tile_bar.release(Instant::now())"),
+            "the answer lets it go"
+        );
+        let at = app.find("BackgroundEvent::PlaybackReady").unwrap();
+        let tail = &app[at..(at + 2500).min(app.len())];
+        assert!(
+            tail.contains("self.tile_bar.release(Instant::now())"),
+            "and so does the box saying there is nothing to play"
+        );
+        // A press with a finger is the same question the remote asks, and it
+        // gets the same answer: the ring follows the switch.
+        let wall = include_str!("wall.rs");
+        let at = wall.find("self.tile_bar_activate(*action, ui.ctx());").unwrap();
+        let tail = &wall[at..(at + 600).min(wall.len())];
+        assert!(
+            tail.contains("self.ring_follows_the_switch(ui.ctx(), *action)"),
+            "a finger on the strip keeps the ring too"
+        );
+    }
+
+    /// The strip is walked by Left and Right whichever way it lies.
+    ///
+    /// A turned strip runs down the screen and was given Up and Down to walk it -
+    /// which took the vertical pair away from the picture underneath, and left a
+    /// viewer pressing the sideways arrows with nothing moving. The quarter turn
+    /// is how the picture is drawn, not a second axis for the hand: one scope,
+    /// one pair of arrows.
+    #[test]
+    fn a_turned_strip_is_walked_by_the_sideways_arrows() {
+        let source = include_str!("input.rs");
+        let start = source.find("fn parse_keys(").unwrap();
+        let rest = &source[start..];
+        let arm = rest.find("_ if bar_owns =>").unwrap();
+        let tail = &rest[arm..(arm + 1000).min(rest.len())];
+        assert!(
+            tail.contains("keys.left = input.consume_key(none, Key::ArrowLeft)"),
+            "Left walks the strip"
+        );
+        assert!(
+            tail.contains("keys.right = input.consume_key(none, Key::ArrowRight)"),
+            "Right walks the strip"
+        );
+        assert!(
+            !rest[..rest.find("fn handle_keys(").unwrap_or(rest.len())].contains("bar_owns &&"),
+            "there is no second arm for a turned strip"
+        );
+        assert!(!rest.contains("bar_vertical"), "the walk has one axis, not two");
+    }
+
+    /// One scope for the strip, so that no second pair of arrows is left
+    /// answering the same row of controls.
+    #[test]
+    fn the_strip_registers_one_scope() {
+        let source = include_str!("mod.rs");
+        assert!(
+            !source.contains("\"tile-bar-column\""),
+            "a turned strip has no scope of its own"
+        );
+        assert!(source.contains("(\"tile-bar-row\", ScopeDef::new(Axis::Row))"));
+    }
+
+    /// A finger on the strip must not take the keyboard with it.
+    ///
+    /// egui puts the focus on a widget it is clicked on, so a press on a button
+    /// left the ring standing on it - and the next arrow walked the strip
+    /// instead of the picture. The press is still answered; it just does not
+    /// decide who reads the keyboard.
+    #[test]
+    fn a_finger_on_the_strip_does_not_take_the_keys() {
+        let wall = include_str!("wall.rs");
+        let start = wall.find("fn tile_bar_overlay(").unwrap();
+        let rest = &wall[start..];
+        let arm = rest.find("A finger on the strip is not the remote taking it").unwrap();
+        let tail = &rest[arm..(arm + 1400).min(rest.len())];
+        assert!(
+            tail.contains("panel.bar.contains(pos)"),
+            "the band a pinned strip stands in is the strip"
+        );
+        assert!(
+            tail.contains("self.tile_bar_pinned() && ui.input(|input| input.pointer.any_pressed())"),
+            "a floating strip is a layer and keeps the keys; and the press is the pointer's, \
+             because a press on the strip never reaches the tile"
+        );
+        assert!(
+            tail.contains("self.leave_controls(ui.ctx())"),
+            "the ring goes with the finger, so the arrows go back to the picture"
         );
     }
 

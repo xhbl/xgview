@@ -362,6 +362,13 @@ impl XgViewApp {
             // showing the handset.
             if self.talking {
                 self.set_talking(false);
+                // The handset is the call's one control and the microphone is
+                // the control the row goes back to: Back ends the call the same
+                // way the handset does, so the ring lands where the handset's
+                // press would have put it - on the microphone, not on whichever
+                // control happens to hold that index now. See
+                // [`XgViewApp::ring_follows_the_call`].
+                self.ring_follows_the_call(ctx, TileBarAction::Hangup);
             } else if self.tile_bar.is_open() && !self.tile_bar_pinned() {
                 // A pinned strip is not a layer to back out of: it is up for as
                 // long as the picture is magnified, and Back is the way out of
@@ -974,13 +981,19 @@ impl XgViewApp {
                             keys.down = input.consume_key(none, Key::ArrowDown);
                         }
                         _ if bar_owns => {
-                            // The magnified bar is a row with nothing above or
-                            // below it, so the layer has nowhere to put the focus
-                            // on Up or Down. They are left in the queue for the
-                            // strip underneath, which is what they lead to: Down
-                            // takes the focus into it and Up brings it back.
+                            // The bar is a row of controls whichever way the
+                            // picture is drawn - a turned strip runs down the
+                            // screen, but its controls are still walked
+                            // left-to-right, so Left and Right are the pair that
+                            // moves the ring. Up and Down are read but not
+                            // taken: Down is the strip's underneath, which is
+                            // where it leads - see `timeline_input` - and, on a
+                            // pinned strip, Up is the way back to the picture.
+                            // See `XgViewApp::keys_off_the_grid`.
                             keys.left = input.consume_key(none, Key::ArrowLeft);
                             keys.right = input.consume_key(none, Key::ArrowRight);
+                            keys.up = input.key_pressed(Key::ArrowUp);
+                            keys.down = input.key_pressed(Key::ArrowDown);
                         }
                         _ => {
                             // A plain control: all four arrows move the focus.
@@ -1105,6 +1118,15 @@ impl XgViewApp {
             .is_some_and(|id| ctx.memory(|memory| memory.focused()) == Some(id))
     }
 
+    /// Whether the remote's ring stands on one of the strip's controls.
+    ///
+    /// The seat does not count: it draws nothing, so a press answered from it
+    /// is a press nobody can see being answered. A control does.
+    pub(super) fn bar_has_focus(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|memory| memory.focused())
+            .is_some_and(|focused| tilebar::index_of(focused).is_some())
+    }
+
     /// The wall's own keys: the page turns and the layout digits.
     ///
     /// Spent while a picker is up, so that a press cannot change the wall behind
@@ -1184,17 +1206,40 @@ impl XgViewApp {
             self.step_zoom(true);
         }
         if keys.down {
-            self.hand_off(ctx, Bar::Status);
+            // Upright, the pinned strip stands along the bottom of the picture
+            // and Down points straight at it: the ring goes onto its first
+            // control, which is the answer the confirm key gives as well. It
+            // used to hand the keys down to the status row - which on this wall
+            // is under the strip, so the press walked past the controls the
+            // viewer was aiming at.
+            //
+            // Asked for rather than done: the arrows this frame are egui's as
+            // well, and it spends them at the end of the frame walking the focus
+            // by geometry - off the very control this frame has just given it.
+            // See [`Self::claim_the_strip`].
+            if self.tile_bar_pinned() {
+                self.strip_claim = true;
+            } else {
+                // A floating bar is not up unless it has been asked for, and
+                // the status row is what lies below the picture.
+                self.hand_off(ctx, Bar::Status);
+            }
         }
         if keys.up {
             self.hand_off(ctx, Bar::Toolbar);
         }
         // The confirm key brings the viewport's bar up rather than unwinding
         // the magnification: Back is the way out now, a layer at a time. A
-        // held key is not a second press. The bar appears without its
-        // selection drawn - the focus is put on its seat, not on a control -
-        // and the first arrow is what lights it. A bar that is already up is
-        // entered the same way, without being shown again.
+        // held key is not a second press.
+        //
+        // A floating bar appears without its selection drawn - the focus is put
+        // on its seat, not on a control - and the first arrow is what lights
+        // it. A bar that is already up is entered the same way, without being
+        // shown again.
+        //
+        // A pinned strip is not that bar: see [`Self::claim_the_strip`]. The
+        // confirm key latches no direction for egui to spend, so this request
+        // sticks on the frame it is made; only the arrow waits a frame.
         //
         // It comes up along the bottom: the remote asks for it without
         // pointing at an edge, and the status side is where the hand and the
@@ -1203,8 +1248,40 @@ impl XgViewApp {
             if !self.tile_bar.is_open() {
                 self.tile_bar.show(tilebar::Dock::Bottom, Instant::now());
             }
-            ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
+            if self.tile_bar_pinned() {
+                self.claim_the_strip(ctx);
+            } else {
+                ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
+            }
         }
+    }
+
+    /// Puts the ring on the first control of a pinned strip that can be pressed.
+    ///
+    /// A pinned strip is not a layer a key opens - it is part of the picture and
+    /// it is up already - so a press asking for it is the viewer asking for the
+    /// ring, and the ring goes where a press would land. On the seat it drew
+    /// nothing, and a press answered by nothing on screen reads as a press the
+    /// program did not hear. An all-grey strip has no control to hold it and
+    /// keeps the seat, which still takes the keys and still answers Back.
+    ///
+    /// **An arrow cannot be answered here on its own frame.** egui reads the
+    /// arrows before the frame's keys are handed out and spends them when the
+    /// frame ends, walking the focus by geometry from whatever holds it - and a
+    /// widget given the focus on that frame has no lock to stop it: a lock only
+    /// takes hold on a widget that had the focus last frame (`Memory::
+    /// set_focus_lock_filter`). A ring put on the first control by a Down was
+    /// therefore walked off it as the frame ended, onto whatever the layout had
+    /// below: on a recording, whose strip is three lines deep, the fit button on
+    /// the second - the fifth control of thirteen, which is where a viewer saw
+    /// the ring appear and asked why. Nothing is latched on the frame after a
+    /// press, so an arrow asks for the ring through [`Self::strip_claim`] and it
+    /// is put down as the next frame begins. The confirm key latches no
+    /// direction and may ask directly.
+    fn claim_the_strip(&self, ctx: &egui::Context) {
+        let target =
+            self.first_live_control().map(tilebar::control).unwrap_or_else(tilebar::seat);
+        ctx.memory_mut(|memory| memory.request_focus(target));
     }
 
     /// The wall's own arrows: they walk the grid, and the confirm key magnifies
@@ -1344,6 +1421,13 @@ impl XgViewApp {
             // same as the handset, and leaves the picture where it is.
             if self.talking {
                 self.set_talking(false);
+                // The handset is the call's one control and the microphone is
+                // the control the row goes back to: Back ends the call the same
+                // way the handset does, so the ring lands where the handset's
+                // press would have put it - on the microphone, not on whichever
+                // control happens to hold that index now. See
+                // [`XgViewApp::ring_follows_the_call`].
+                self.ring_follows_the_call(ctx, TileBarAction::Hangup);
             } else if self.tile_bar.is_open() && !self.tile_bar_pinned() {
                 self.tile_bar.hide();
                 self.leave_controls(ctx);
@@ -1357,11 +1441,29 @@ impl XgViewApp {
             } else if self.show_settings {
                 self.show_settings = false;
             } else {
+                // Nothing else is a layer, so what is left is the ring. On a
+                // pinned strip it is the ring alone: the strip is not a layer to
+                // back out of - it is up for as long as the picture is magnified
+                // - so Back cannot mean the strip, and it is not the
+                // magnification either. The strip lets go of the keyboard and
+                // the picture takes it back, which is the state the viewer was
+                // in before a ring was asked for. A second Back finds nothing
+                // focused and is `back`'s own answer, the way out. See
+                // [`Self::tile_bar_pinned`].
                 self.leave_controls(ctx);
             }
         } else if keys.down && !self.show_settings && self.toolbar_has_focus(ctx) {
             // Below the bar there is only the wall, so the arrow that walks
             // off the bottom of it hands the keys back.
+            self.leave_controls(ctx);
+        } else if keys.up && self.tile_bar_pinned() && self.scheduler.is_zoomed()
+            && self.bar_has_focus(ctx)
+        {
+            // Upright, the strip stands under the picture, so Up from it points
+            // at the picture - and there is nothing else up there to hand the
+            // keys to. It therefore answers what Back answers: the ring goes and
+            // the picture keeps the keyboard. Up unwinds no magnification of its
+            // own here; that is the second Back, once nothing has the ring.
             self.leave_controls(ctx);
         } else if keys.up && self.status_has_focus(ctx) {
             // The status row is below the wall, so the arrow back to the
@@ -1436,6 +1538,17 @@ impl XgViewApp {
     }
 
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
+        // The ring a direction press asked for, put down before anything of this
+        // frame can be read against it - and before the early ways out below, so
+        // that a request made on the frame a window opened is not left lying
+        // about to be answered a minute later. The press is one frame behind the
+        // request by design: see [`Self::claim_the_strip`].
+        if std::mem::take(&mut self.strip_claim)
+            && self.tile_bar.is_open()
+            && self.tile_bar_pinned()
+        {
+            self.claim_the_strip(ctx);
+        }
         // The old mouse dialog owns the keyboard while it is up. Its own
         // keybindings and egui's focus walk are how a viewer moves around it,
         // and the arrows and Back taken out of the queue below would reach
@@ -1619,6 +1732,13 @@ impl XgViewApp {
         // answers the arrow keys are read against.
         let bar_owns = ctx.memory(|memory| memory.focused()).is_some_and(tilebar::owns);
         let keys = Self::parse_keys(ctx, grid_owns, nav_owns, nav_kind, typing, bar_owns);
+        // The remote is walking the strip itself: the ring is the viewer's own
+        // cursor again, and the anchor that was holding it on one control lets
+        // go. Left and right are the pair that walk the row; up and down are
+        // the picture's, and the timeline's.
+        if bar_owns && (keys.left || keys.right) {
+            self.ring_anchor = None;
+        }
 
         // The bar opens on a seat, which draws nothing: the first arrow steps
         // off it onto the first control, and every direction means the same
@@ -1699,6 +1819,19 @@ impl XgViewApp {
                         ctx.input_mut(|input| consume_any(input, &CONFIRM_KEYS));
                         if keys.enter_fresh {
                             self.tile_bar_activate(action, ctx);
+                            // The microphone and the handset are the two ends of
+                            // one key, and starting or ending a call replaces the
+                            // row under the ring: an index that named the
+                            // microphone names nothing once the call is up. See
+                            // `ring_follows_the_call`.
+                            self.ring_follows_the_call(ctx, action);
+                            // The picture and its recording are the same two
+                            // ends of one key on a pinned strip: a ring kept
+                            // across the switch is the ring the viewer asked for,
+                            // and the place it was on names a control the other
+                            // row does not have. See
+                            // `ring_follows_the_switch`.
+                            self.ring_follows_the_switch(ctx, action);
                             return;
                         }
                     }

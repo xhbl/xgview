@@ -87,6 +87,13 @@ impl XgViewApp {
         self.talking = on;
         self.talk_index = on.then(|| self.scheduler.zoom()).flatten();
         self.manager.talk().set_talking(on);
+        // A call replaces the whole row with the one control that ends it, and
+        // the row that comes back afterwards is the one it was: the anchor the
+        // ring was held on names a control of that row, and it is not the row
+        // the call is about to draw. So the anchor lets go here - the ring
+        // itself is the call's to place, and it is placed by the press that
+        // started or ended it. See [`XgViewApp::ring_follows_the_call`].
+        self.ring_anchor = None;
         // The press is the call: a session of its own, opened while the
         // microphone is already pushing. The hub was told first, so the worker
         // that opens it finds a target and a queue to feed.
@@ -440,13 +447,22 @@ impl XgViewApp {
     /// A camera that has not reported yet counts as having it: the switch shows
     /// with the picture and only goes away once the stream itself says it
     /// carries no audio track, so it never flickers in and out while a session
-    /// is coming up.
+    /// is coming up. That is what `audio_known` is for - the answer and the
+    /// question of whether the stream has answered are two things, and the
+    /// stream's first statistics say "no audio yet" for a stream that is about
+    /// to carry some.
+    ///
+    /// The place the switch stands in is kept either way - see
+    /// `tilebar::Control::Silent` - so a switch that goes does not take every
+    /// control after it with it, and the place is drawn as a grey speaker so
+    /// that a viewer can see why there is nothing to press.
     pub(super) fn magnified_has_audio(&self) -> bool {
         // The picture's channel, not the camera's: a recording that carries
         // sound shows the switch, and one that does not takes it away.
-        self.scheduler
-            .zoom()
-            .map_or(false, |index| self.view_channel(index).map_or(true, |channel| channel.audio))
+        self.scheduler.zoom().map_or(false, |index| {
+            self.view_channel(index)
+                .map_or(true, |channel| channel.audio || !channel.audio_known)
+        })
     }
 
     /// Whether the magnified camera offers a talk-back media.

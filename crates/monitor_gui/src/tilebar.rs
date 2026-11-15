@@ -43,6 +43,17 @@ use monitor_core::recording_download::Progress;
 /// has no business staying once they have stopped using it.
 pub const IDLE: Duration = Duration::from_secs(8);
 
+/// How long a question the box has not answered yet keeps the bar up.
+///
+/// The bar's own clock takes it down after eight seconds of no answer to it.
+/// A question that is on its way - a recording being opened - is an answer the
+/// viewer is waiting for, and the bar is where that answer lands: a bar that
+/// went down in the middle of the wait took the ring with it, and the ring is
+/// the viewer's cursor on the controls the answer is about to replace. The
+/// hold is for a while rather than for ever, so a question the box never
+/// answers does not keep the bar up for good.
+pub const HOLD: Duration = Duration::from_secs(30);
+
 /// How long after it opens the bar ignores presses on itself.
 ///
 /// A double click in the activation band is two clicks: the first opens the bar,
@@ -256,6 +267,17 @@ pub enum Control {
     /// so that hanging up is one press and nothing else can be pressed by
     /// mistake.
     Hangup,
+    /// A place in the row that carries no action, drawn as a grey speaker.
+    ///
+    /// The sound switch is the one control that comes and goes with the
+    /// picture: a stream that has not said whether it carries an audio track
+    /// yet, and one that has said it does not, are both rows without it. The
+    /// place it would have stood is kept, so that the controls after it do not
+    /// move when it does - a row that shifts under the remote's ring is a row
+    /// the viewer cannot aim at. It is kept *visible* too: an empty hole where
+    /// a button belongs reads as something missing, while a grey speaker says
+    /// what is missing. See `XgViewApp::tile_bar_tips`.
+    Silent,
 }
 
 /// How much room an icon control asks for: square, the strip's depth.
@@ -337,6 +359,7 @@ pub struct Bar {
     dock: Dock,
     seen: Instant,
     ignore_until: Option<Instant>,
+    held_until: Option<Instant>,
 }
 
 impl Bar {
@@ -346,6 +369,7 @@ impl Bar {
             dock: Dock::Top,
             seen: Instant::now(),
             ignore_until: None,
+            held_until: None,
         }
     }
 
@@ -378,6 +402,35 @@ impl Bar {
         }
         self.open = false;
         self.ignore_until = None;
+        // A bar that is down is a bar with nothing to hold up: the question it
+        // was waiting for has nowhere to land, and the next opening is the
+        // viewer's own.
+        self.held_until = None;
+    }
+
+    /// Keeps the bar up while a question is on its way.
+    ///
+    /// The answer is the box's to give and in its own time; the bar is where it
+    /// lands, and a bar that went down in the middle of the wait took the
+    /// viewer's cursor with it. See [`HOLD`].
+    pub fn hold(&mut self, now: Instant) {
+        self.held_until = Some(now + HOLD);
+    }
+
+    /// Whether the bar is being held up by a question that has not been answered.
+    pub fn held(&self, now: Instant) -> bool {
+        self.held_until.is_some_and(|until| now < until)
+    }
+
+    /// Lets the bar's own clock take it down again.
+    ///
+    /// The clock starts again here: the hold kept the bar up while the box was
+    /// thinking, and a bar that had been waiting an answer for half a minute is
+    /// not a bar the viewer has stopped using - it is one they are about to
+    /// use, on the row the answer has just put there.
+    pub fn release(&mut self, now: Instant) {
+        self.held_until = None;
+        self.touch(now);
     }
 
     /// Records an operation on the bar, which is what its clock measures from.
@@ -394,8 +447,18 @@ impl Bar {
     ///
     /// The caller asks for a repaint after it, so a wall with no live picture -
     /// which is not repainting on its own - still takes the bar down on time.
+    /// That repaint is also what ends a hold: a bar that is held up is a bar
+    /// with no time of its own to run, so the time it has left is the time the
+    /// hold has left, and the wall is asked to come back when it runs out.
     pub fn remaining(&self, now: Instant) -> Option<Duration> {
-        self.open.then(|| IDLE.saturating_sub(now.saturating_duration_since(self.seen)))
+        if !self.open {
+            return None;
+        }
+        let idle = IDLE.saturating_sub(now.saturating_duration_since(self.seen));
+        match self.held_until {
+            Some(until) if now < until => Some((until - now).max(idle)),
+            _ => Some(idle),
+        }
     }
 }
 
@@ -510,12 +573,17 @@ pub fn fits_timeline(
 
 /// The navigation scope the controls register under.
 ///
-/// A row when the bar lies across the wall, a column when the picture has been
-/// turned and the strip runs down the screen; the arrows that walk it are the
-/// scope's axis and no others. Neither has an exit: a strip has nothing above or
-/// below it to walk to, and `Back` is the way out.
-pub fn scope(rotated: bool) -> &'static str {
-    if rotated { "tile-bar-column" } else { "tile-bar-row" }
+/// One scope for both ways the strip lies, and it is a row either way. A turned
+/// strip runs down the screen and a column of controls is what the eye sees, but
+/// the walk is still the picture's own left-to-right order, and Left and Right
+/// are the arrows that move it: the quarter turn is how the picture is drawn, not
+/// a second axis for the hand. Walking it with Up and Down was tried - the strip
+/// took the vertical arrows and the ring moved against the pair the viewer was
+/// pressing, because on a remote those are the ones that leave a strip, not walk
+/// it. The scope has no exit: a strip has nothing beyond its ends, and `Back` is
+/// the way out.
+pub fn scope() -> &'static str {
+    "tile-bar-row"
 }
 
 /// The bar, in screen coordinates.
@@ -714,7 +782,7 @@ pub fn draw(
         painter.rect_filled(track, CornerRadius::same(1), Color32::from_white_alpha(26));
     }
 
-    nav.open(scope(rotated));
+    nav.open(scope());
     // The seat is a focus target, not a stop of the walk: it is claimed (as
     // nothing) so the focus can be put on it, but it is not registered with the
     // navigation layer. A member would be reachable from the first control by
@@ -781,6 +849,26 @@ pub fn draw(
             ),
             Control::Hangup => {
                 icons::danger_in(ui, *rect, self::control(index), Icon::Hangup, tip, rotated)
+            }
+            // A stream with no audio track still has the switch's place, and
+            // the place says what is missing: a speaker drawn in the dim colour
+            // a greyed control wears. It is not the caller's `muted` flag that
+            // makes it inert - that flag is for a control grey only for a while
+            // - but the place itself, which never carries an action. So it
+            // takes no press and no stop on the walk: a finger on it reaches
+            // the picture under the strip, and the remote passes over it.
+            Control::Silent => {
+                let _ = icons::button_in(
+                    ui,
+                    *rect,
+                    self::control(index),
+                    Icon::Mute,
+                    false,
+                    true,
+                    tip,
+                    rotated,
+                );
+                continue;
             }
         };
         if !muted {
@@ -982,6 +1070,50 @@ mod tests {
         assert!(!standing(now - IDLE - Duration::from_secs(1), now));
     }
 
+    /// A bar waiting for an answer is not an idle bar.
+    ///
+    /// The box takes as long as it takes to answer a question about a
+    /// recording, and the bar is where the answer lands: eight seconds of
+    /// silence would take it down in the middle of the wait, and the viewer's
+    /// cursor with it. So a question on its way holds the bar up - for a while
+    /// rather than for ever - and the wall is asked to come back when the hold
+    /// runs out, which is what the time left is for. The answer then hands the
+    /// bar's own clock back, starting it again: a bar that had been waiting
+    /// half a minute is not a bar the viewer has stopped using.
+    #[test]
+    fn a_held_bar_waits_for_its_answer() {
+        let now = Instant::now();
+        let mut bar = Bar::new();
+        bar.show(Dock::Bottom, now);
+        // Eight seconds of no answer to it, and it is on its way down.
+        assert!(bar.remaining(now + IDLE - Duration::from_millis(100)).is_some());
+        assert_eq!(bar.remaining(now + IDLE).unwrap(), Duration::ZERO);
+
+        // A question on its way holds it up, and the time it has left is the
+        // time the hold has left.
+        bar.hold(now);
+        assert!(bar.held(now + HOLD - Duration::from_secs(1)));
+        assert!(bar.remaining(now).unwrap() > IDLE, "the hold is the longer clock");
+        // And the wall is asked to come back when the hold runs out, which is
+        // what the time left is for: the idle has long since run out, and the
+        // bar is still up.
+        assert_eq!(bar.remaining(now + HOLD - Duration::from_secs(1)).unwrap(), Duration::from_secs(1));
+        // The hold is for a while, not for ever: a question the box never
+        // answers does not keep the bar up for good.
+        assert!(!bar.held(now + HOLD + Duration::from_secs(1)));
+
+        // The answer hands the clock back, and the bar gets a new idle of its
+        // own rather than the one it had before the question.
+        bar.release(now + HOLD);
+        assert!(!bar.held(now + HOLD + Duration::from_secs(1)));
+        assert!(bar.remaining(now + HOLD + Duration::from_secs(1)).unwrap() >= Duration::from_secs(7));
+        // And a bar that is put away is a bar with nothing to hold up.
+        bar.hold(now + HOLD);
+        bar.hide();
+        assert!(!bar.held(now + HOLD + Duration::from_secs(1)));
+        assert!(bar.remaining(now + HOLD + Duration::from_secs(1)).is_none());
+    }
+
     /// The row is given to any tile with room for both of them, wherever the
     /// picture sits in it: a landscape camera fills a landscape tile, and a wall
     /// with no timeline at all is a recording that cannot be scrubbed. Turned,
@@ -1120,12 +1252,12 @@ mod tests {
         assert!(narrow.bar.height() > wide.bar.height(), "and a deeper panel");
     }
 
-    /// The scope is a row across the wall and a column down a turned picture, so
-    /// that the arrows which walk the strip are the ones the viewer would push.
+    /// The strip is walked by Left and Right whichever way it lies, and the
+    /// quarter turn must not have given it a second scope: the two would then
+    /// answer different pairs of arrows for the same row of controls.
     #[test]
-    fn the_scope_turns_with_the_picture() {
-        assert_eq!(scope(false), "tile-bar-row");
-        assert_eq!(scope(true), "tile-bar-column");
+    fn the_scope_does_not_turn_with_the_picture() {
+        assert_eq!(scope(), "tile-bar-row");
         assert_ne!(seat(), control(0), "the seat is not a control");
         assert_ne!(control(0), control(1));
     }

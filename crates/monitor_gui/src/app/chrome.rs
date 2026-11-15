@@ -59,6 +59,11 @@ impl XgViewApp {
         if let Some(id) = ctx.memory(|memory| memory.focused()) {
             ctx.memory_mut(|memory| memory.surrender_focus(id));
         }
+        // The ring is being let go, so there is none to keep across a switch
+        // that is still waiting for its answer: a recording opened after this
+        // press finds a viewer watching the picture, who never asked for a
+        // cursor. See [`Self::ring_follows_the_switch`].
+        self.ring_anchor = None;
     }
 
     /// Whether the top bar is what currently has the remote's focus.

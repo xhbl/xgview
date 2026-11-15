@@ -288,6 +288,7 @@ tilebar-rotate-tip = 画面旋转四分之一圈
 tilebar-fit-tip = 切换画面适配方式
 tilebar-sound-on-tip = 打开声音
 tilebar-sound-off-tip = 关闭声音
+tilebar-no-sound-tip = 此画面没有音轨
 tilebar-mic-tip = 对这台摄像头通话
 tilebar-hangup-tip = 结束通话
 tilebar-playback-tip = 查看这台摄像头的录像

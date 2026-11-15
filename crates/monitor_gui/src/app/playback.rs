@@ -508,6 +508,15 @@ impl XgViewApp {
             return;
         };
         tracing::debug!(target: "xgview::app", channel, camera = %camera_id, "enter playback: asking the box");
+        // The answer is the box's to give and in its own time, and the bar is
+        // where it lands: the row under the viewer's ring is about to be
+        // replaced, and the ring is the cursor that has to survive the wait. A
+        // floating bar has a clock of its own and would go down in the middle
+        // of it, taking the ring with it - so it is held up until the answer
+        // lands, or until the box says there is nothing to play.
+        if self.tile_bar.is_open() {
+            self.tile_bar.hold(Instant::now());
+        }
         start_window(
             &self.handle,
             &self.events_tx,
@@ -537,6 +546,9 @@ impl XgViewApp {
         let index = self.playback_index();
         let from = window.0;
         let begin = begin.map(|at| begin_in(window, at));
+        // The answer has landed, so the bar's own clock is in charge again: it
+        // goes down when the viewer stops using it, and not before.
+        self.tile_bar.release(Instant::now());
         // The camera's own session under this slot is a decoder drawing nothing
         // from here on: the recording is what the viewport shows. Let go of it
         // before the recording's first fragment is asked for, so that the two
@@ -619,9 +631,17 @@ impl XgViewApp {
             covered,
         });
         // The bar's row has changed under the focus: the camera's controls are
-        // gone and the recording's are here, and the place the focus was on means
-        // something else in this row. It goes to the seat, which draws nothing
-        // until an arrow picks a control. See [`Self::leave_playback`].
+        // gone and the recording's are here, and the place the focus was on
+        // means something else in this row. It goes to the seat, which draws
+        // nothing until an arrow picks a control - unless the press that asked
+        // for this recording was made with a ring on the strip: that ring is
+        // the viewer's cursor, and it goes on the control that leaves the
+        // recording, the way it came from the one that entered it. The anchor
+        // is what carries it there, and it is put on the control every frame
+        // while the row is drawn - a row that is a frame shorter puts the
+        // anchor somewhere else, and a ring that was put there once names a
+        // control that is not there. See [`Self::ring_follows_the_switch`] and
+        // [`Self::place_the_anchored_ring`].
         self.restore_focus = Some(tilebar::seat());
         // A new recording starts at normal speed whatever the last one was
         // played at, and says so: the channel's control outlives the request
@@ -1596,6 +1616,11 @@ impl XgViewApp {
     /// The channel is stopped rather than left running: a recording that plays
     /// on unseen is a request to the server and a decoder held for nothing.
     pub(super) fn leave_playback(&mut self) {
+        // The row the anchor names is going away with the recording: the way
+        // back to the picture is not in the live row, and the anchor for it is
+        // set by the press that asked for this - the way in. See
+        // [`Self::ring_follows_the_switch`].
+        self.ring_anchor = None;
         let Some(playback) = self.playback.take() else {
             return;
         };
@@ -1607,6 +1632,10 @@ impl XgViewApp {
         // and the camera's are back. The focus was on a place in the old row, and
         // the place means something else now - so it goes to the seat, where the
         // first arrow picks a control by name rather than by number.
+        //
+        // A ring that was on the strip does not go there: it goes on the way
+        // into the recording, which is where `ring_follows_the_switch` sends it
+        // once this has put the new row back.
         self.restore_focus = Some(tilebar::seat());
         self.manager.stop_clip(playback.index);
         self.channels.remove(&playback.index);

@@ -1437,6 +1437,11 @@ impl XgViewApp {
                     self.tile_bar.touch(now);
                     if let Some((_, action)) = entries.get(index) {
                         self.tile_bar_activate(*action, ui.ctx());
+                        // A press with the ring on the strip is the same
+                        // question the remote asks, and it gets the same
+                        // answer: the ring follows the control that undoes the
+                        // switch. See [`Self::ring_follows_the_switch`].
+                        self.ring_follows_the_switch(ui.ctx(), *action);
                     }
                     if self.talking != talking {
                         // The microphone has become the handset and the ring goes
@@ -1462,7 +1467,44 @@ impl XgViewApp {
             }
         }
 
+        // A finger on the strip is not the remote taking it. The ring is the
+        // keyboard's cursor, and a viewer who pressed a button with a finger
+        // has not asked for the next arrow to walk the strip rather than the
+        // picture. The press itself is answered above; what it must not do is
+        // leave the ring behind - egui puts the focus on a widget it is clicked
+        // on, which is exactly the state that would take the arrows.
+        //
+        // Read from the pointer rather than from the tile's own actions: a
+        // press that lands on the strip never reaches the tile, so the tile has
+        // no press to report and a rule asked of it would never fire.
+        //
+        // A pinned strip only. A floating one is a layer the viewer opened, and
+        // a layer keeps the keys until it is closed: that is what it always did,
+        // and nothing about a band under the picture changes it.
+        if self.tile_bar_pinned() && ui.input(|input| input.pointer.any_pressed()) {
+            let pos = ui.input(|input| input.pointer.interact_pos());
+            let on_bar = pos.is_some_and(|pos| match panel {
+                Some(panel) => panel.bar.contains(pos),
+                None => !matches!(layout.hit(pos), tilebar::Hit::Outside),
+            });
+            if on_bar {
+                self.leave_controls(ui.ctx());
+            }
+        }
+
         consumed
+    }
+
+    /// The first control on the strip that can be pressed, in walk order.
+    ///
+    /// A greyed control is not in the walk and takes no press, so it is not a
+    /// place the ring may land: the confirm key on a pinned strip asks for the
+    /// ring, and a ring put on a control that answers nothing is the same as no
+    /// ring at all. `None` when the whole strip is grey - the ring then falls
+    /// back to the seat, which draws nothing and is where it belongs.
+    pub(super) fn first_live_control(&self) -> Option<usize> {
+        let (entries, _) = self.tile_bar_entries();
+        (0..entries.len()).find(|index| self.tile_bar_available(entries[*index].1))
     }
 
     /// The controls the magnified bar carries, with what each does, in walk
@@ -1496,6 +1538,12 @@ impl XgViewApp {
     /// be a claim this side cannot make. **A control that is right most of the
     /// time is worse than one that never claims to know.**
     pub(super) fn tile_bar_available(&self, action: TileBarAction) -> bool {
+        // A grey speaker is not a control: it is a place kept, and nothing can
+        // land on it or walk onto it. `tilebar` draws it inert on its own as
+        // well, so the two answers cannot disagree about it.
+        if matches!(action, TileBarAction::NoSound) {
+            return false;
+        }
         // One download at a time. The mute is what stops a second press, and
         // `start_download` checks again in case a path around the focus walk
         // ever reaches it.
@@ -1617,10 +1665,17 @@ impl XgViewApp {
             return (controls, breaks);
         }
         entries.push((tilebar::Control::Icon(Icon::AspectRatio), TileBarAction::Fit));
-        if tilebar::SOUND && self.magnified_has_audio() {
+        // The sound switch keeps its place whether the stream has an audio
+        // track or not. A switch that is taken and given back takes every
+        // control after it with it, and the row is drawn again for every
+        // picture: a row that shifts under the remote's ring is a row the
+        // viewer cannot aim at. The place is kept, with a grey speaker in it.
+        entries.push(if tilebar::SOUND && self.magnified_has_audio() {
             let icon = if self.sound_on { Icon::Sound } else { Icon::Mute };
-            entries.push((tilebar::Control::Icon(icon), TileBarAction::Sound));
-        }
+            (tilebar::Control::Icon(icon), TileBarAction::Sound)
+        } else {
+            (tilebar::Control::Silent, TileBarAction::NoSound)
+        });
         // The live bar only: a microphone is something to hold to a camera, and
         // there is nothing behind a recording to hear it.
         if self.magnified_has_backchannel() {
@@ -1679,7 +1734,7 @@ impl XgViewApp {
     /// a quarter turn - one line with the save just after the day picker; on a
     /// phone held upright three lines, `[Live]` alone first and the six
     /// timeline keys last. The sound switch is the one control a camera may
-    /// not have, and both sets of breaks follow its absence.
+    /// not have; its place is kept either way, so the breaks do not move.
     fn recording_entries(
         play: Icon,
         speed: tilebar::Control,
@@ -1705,9 +1760,12 @@ impl XgViewApp {
             entries.push((speed, TileBarAction::Speed));
             entries.push(icon(Icon::Calendar, TileBarAction::Date));
             entries.push(icon(Icon::AspectRatio, TileBarAction::Fit));
-            if let Some(sound) = sound {
-                entries.push(icon(sound, TileBarAction::Sound));
-            }
+            // The sound switch keeps its place whether the recording carries
+            // sound or not - see the live row above.
+            entries.push(match sound {
+                Some(sound) => icon(sound, TileBarAction::Sound),
+                None => (tilebar::Control::Silent, TileBarAction::NoSound),
+            });
             entries.push((download, TileBarAction::Download));
             breaks.push(entries.len());
             for (glyph, action) in keys {
@@ -1726,9 +1784,12 @@ impl XgViewApp {
             // from one to the other without crossing the picture's controls.
             entries.push((download, TileBarAction::Download));
             entries.push(icon(Icon::AspectRatio, TileBarAction::Fit));
-            if let Some(sound) = sound {
-                entries.push(icon(sound, TileBarAction::Sound));
-            }
+            // The sound switch keeps its place whether the recording carries
+            // sound or not - see the live row above.
+            entries.push(match sound {
+                Some(sound) => icon(sound, TileBarAction::Sound),
+                None => (tilebar::Control::Silent, TileBarAction::NoSound),
+            });
             entries.push(icon(Icon::Live, TileBarAction::Live));
         }
         (entries, breaks)
@@ -1835,6 +1896,8 @@ impl XgViewApp {
                 tr(if days { "tilebar-date-back-tip" } else { "tilebar-date-tip" })
             }
             TileBarAction::Live => tr("tilebar-live-tip"),
+            // The grey speaker says why it cannot be pressed.
+            TileBarAction::NoSound => tr("tilebar-no-sound-tip"),
             TileBarAction::Download => {
                 if self.download.is_active() {
                     monitor_i18n::tr_args(
@@ -1909,6 +1972,9 @@ impl XgViewApp {
                 }
             }
             TileBarAction::Live => self.leave_playback(),
+            // The grey speaker answers nothing, and there is nothing to press:
+            // it is a place kept, not a control.
+            TileBarAction::NoSound => {}
             TileBarAction::Fit => {
                 // The fit this writes is the magnified viewport's own: it is kept
                 // per camera, and the wall's landscape and portrait fits - the
@@ -1934,6 +2000,180 @@ impl XgViewApp {
                 self.flash_centered(monitor_i18n::tr(next.label()), ToastKind::Info);
             }
         }
+    }
+
+    /// Keeps the ring on the control the press turned into.
+    ///
+    /// Starting a call replaces the whole row with the handset, and ending one
+    /// puts the microphone back at an index the call's single control never had.
+    /// What the focus holds is `control(index)`, and after the change that index
+    /// no longer names the thing the viewer pressed: the widget is gone, egui
+    /// drops the focus with it, and the handset stood there unlit - a viewer who
+    /// had just started a call from the microphone had to walk to the one
+    /// control left. The ring goes where the press went, because the microphone
+    /// and the handset are the two ends of the same key.
+    ///
+    /// Only a ring that was on the row is moved. A finger that never took the
+    /// keyboard leaves the focus where the pointer rules put it, and the drawn
+    /// bar answers that press itself - see the pointer branch of
+    /// `tile_bar_overlay`, which asks the same question for a finger.
+    pub(super) fn ring_follows_the_call(&self, ctx: &egui::Context, action: TileBarAction) {
+        if !matches!(action, TileBarAction::Mic | TileBarAction::Hangup) {
+            return;
+        }
+        if !self.bar_has_focus(ctx) {
+            return;
+        }
+        let turned_into = if self.talking { TileBarAction::Hangup } else { TileBarAction::Mic };
+        let index =
+            self.tile_bar_entries().0.iter().position(|(_, entry)| *entry == turned_into);
+        if let Some(index) = index {
+            ctx.memory_mut(|memory| memory.request_focus(tilebar::control(index)));
+        }
+    }
+
+    /// Keeps the ring on the strip across the switch between the picture and its
+    /// recording, and back.
+    ///
+    /// The two rows have nothing in common: a live picture carries the way into
+    /// the camera's recordings and none of the recording's controls, and a
+    /// recording carries the way back and none of the live ones. Upright the
+    /// strip is pinned - it outlives the row - so a ring left on a place in the
+    /// old row names a control that is no longer drawn, egui drops it with the
+    /// widget, and the keyboard falls back to the picture: the arrows change
+    /// channel where the viewer was walking the controls, which is one press
+    /// away from a channel they did not ask for. The ring goes to the control
+    /// that undoes the switch instead - the way into the recording after
+    /// leaving it, the way back to the picture after opening it - because that
+    /// is the control a viewer who changed their mind would press. It is the
+    /// same answer the microphone and the handset give.
+    ///
+    /// Only a ring that was on the strip is moved. A viewer watching the picture
+    /// has not asked for a cursor, and one made with a finger never had one: the
+    /// press itself is the answer, and the ring stays where the pointer rules
+    /// left it.
+    ///
+    /// Opening a recording is answered by the box, a request later, so the press
+    /// only records what it was for; the ring is put down when the row it
+    /// belongs to is drawn. Leaving one is answered at once.
+    ///
+    /// The row is the same row wherever the strip is: upright and not turned it
+    /// is pinned under the picture, landscape and a turned picture float it over
+    /// one, and the controls are laid out - and lost - by the same rules either
+    /// way. So the ring is kept either way. What the floating strip adds is a
+    /// clock: it can be put away while the box answers, and a ring on a strip
+    /// that is no longer drawn is only the seat it falls back to.
+    pub(super) fn ring_follows_the_switch(&mut self, ctx: &egui::Context, action: TileBarAction) {
+        if !self.tile_bar.is_open() || !self.bar_has_focus(ctx) {
+            return;
+        }
+        // The anchor is the control that undoes the switch, and the channel it
+        // belongs to: a picture the viewer has since stepped away from is not
+        // the one the ring is waiting for.
+        let Some(channel) = self.scheduler.zoom() else {
+            return;
+        };
+        match action {
+            TileBarAction::Playback => {
+                self.ring_anchor = Some(RingAnchor {
+                    action: TileBarAction::Live,
+                    channel,
+                    since: Instant::now(),
+                });
+            }
+            TileBarAction::Live => {
+                self.ring_anchor = Some(RingAnchor {
+                    action: TileBarAction::Playback,
+                    channel,
+                    since: Instant::now(),
+                });
+            }
+            _ => {
+                // Any other control is the viewer's own choice, and it is the
+                // end of the anchor: the ring is where the viewer put it, and
+                // an anchor that pulls it back to a control they have not asked
+                // for would take the cursor away from the button they just
+                // pressed.
+                self.ring_anchor = None;
+            }
+        }
+    }
+
+    /// Puts the ring on the control its anchor names, if the row carries it.
+    ///
+    /// Asked of the row as it is drawn now, every frame: the anchor is a
+    /// control - "the way back to the picture" - and a row is a list of
+    /// controls that is put together again for every picture and every frame.
+    /// Its length is not fixed - a row that carries a sound switch is one
+    /// longer than a row that does not, and the switch itself comes and goes
+    /// with the picture - so the place of the anchor moves, and a ring that was
+    /// put there once is a ring on a control that has been drawn over by the
+    /// next row. egui drops such a focus with the widget it named, and the
+    /// keyboard falls back to the picture: the arrows change channel where the
+    /// viewer was walking the controls.
+    ///
+    /// So the ring is put on the anchor again as long as the anchor holds, and
+    /// it cannot be lost by a row that changed under it. The anchor is let go
+    /// by the remote walking the strip itself - that is the viewer taking the
+    /// ring back - and by the strip going down.
+    ///
+    /// And by the ring being somewhere else entirely: the timeline under the
+    /// strip, a panel, the picture. The anchor is the strip's business, and a
+    /// ring that has left the strip is not the ring the anchor was holding.
+    pub(super) fn place_the_anchored_ring(&mut self, ctx: &egui::Context) {
+        let Some(anchor) = self.ring_anchor else {
+            return;
+        };
+        let (action, channel, since) = (anchor.action, anchor.channel, anchor.since);
+        // A picture the viewer has stepped away from, or a strip that is down,
+        // is not a ring to keep: the first has another row under it and the
+        // second has no row at all.
+        if self.scheduler.zoom() != Some(channel) || !self.tile_bar.is_open() {
+            self.ring_anchor = None;
+            return;
+        }
+        // An anchor with no question behind it is not one to keep either: the
+        // press that asked for a recording the box never answered leaves a row
+        // that will never carry the control the anchor names, and an anchor
+        // that outlived its question would put the ring on a control the
+        // viewer was never shown.
+        if since.elapsed() > ANCHOR_WAIT {
+            self.ring_anchor = None;
+            return;
+        }
+        // A ring that is on something else is the viewer's own: the timeline
+        // under the strip, a panel, the picture. The anchor is the strip's
+        // business, and a ring that has left the strip is not the one it was
+        // holding. A ring that is on nothing at all is a ring egui dropped with
+        // the widget it named, and that one is put back.
+        let focused = ctx.memory(|memory| memory.focused());
+        if focused.is_some_and(|id| !tilebar::owns(id)) {
+            self.ring_anchor = None;
+            return;
+        }
+        // The row that has not been drawn yet does not carry the anchor: the
+        // recording's row only appears when the box answers, and until then
+        // the live row has no way back in it.
+        let Some(id) = self.the_control_for(action) else {
+            return;
+        };
+        if ctx.memory(|memory| memory.focused()) != Some(id) {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+    }
+
+    /// Where a control that answers `action` stands in the row as it is drawn
+    /// now.
+    ///
+    /// Asked by what the control does rather than by its place in the old row:
+    /// the rows are not the same length either, and a control that arrives or
+    /// leaves - a sound switch, a microphone - moves every place after it.
+    pub(super) fn the_control_for(&self, action: TileBarAction) -> Option<egui::Id> {
+        self.tile_bar_entries()
+            .0
+            .iter()
+            .position(|(_, entry)| *entry == action)
+            .map(tilebar::control)
     }
 }
 
@@ -2138,9 +2378,15 @@ mod tests {
         assert_eq!(actions[date + 1], TileBarAction::Download, "the save follows the day picker");
         assert_eq!(actions[date + 2], TileBarAction::Fit);
         assert_eq!(actions.last(), Some(&TileBarAction::Live));
-        // A camera without audio loses one control, not its order.
-        let (without, _) = controls(false, false);
-        assert_eq!(without.len(), 12);
+        // A camera without audio keeps the place: the row does not shift, so
+        // the control after it stays where it was.
+        let (without, breaks) = controls(false, false);
+        assert_eq!(without.len(), 13, "the row keeps its length");
+        assert!(breaks.is_empty(), "one line on a wide or turned picture");
+        assert!(
+            without.contains(&TileBarAction::NoSound),
+            "the sound's place is kept, and it says there is no sound"
+        );
         let date = without.iter().position(|a| *a == TileBarAction::Date).expect("a day picker");
         assert_eq!(without[date + 1], TileBarAction::Download);
         assert_eq!(without.last(), Some(&TileBarAction::Live));
@@ -2196,10 +2442,55 @@ mod tests {
                 TileBarAction::ZoomOut,
             ]
         );
-        // The break before the timeline keys follows the missing sound switch.
+        // The break before the timeline keys is where it is with sound as well: the
+        // sound's place is kept, so the row does not shift.
         let (without, breaks) = controls(false, true);
-        assert_eq!(breaks, vec![1, 6]);
-        assert_eq!(without[5], TileBarAction::Download);
+        assert_eq!(breaks, vec![1, 7]);
+        assert_eq!(without[6], TileBarAction::Download);
+        assert!(without.contains(&TileBarAction::NoSound), "the sound's place is kept");
+    }
+
+    /// The sound switch keeps its place, and the place says what is missing.
+    ///
+    /// The switch is the one control that comes and goes with the picture: a
+    /// stream that has not said whether it carries an audio track yet, and one
+    /// that has said it does not, are both rows without it. A control that
+    /// comes and goes takes every control after it with it, and the row is
+    /// drawn again for every picture - so the place is kept, drawn as a grey
+    /// speaker rather than left empty, and the row does not shift under the
+    /// remote's ring.
+    #[test]
+    fn the_sound_switch_keeps_its_place() {
+        let wall = include_str!("wall.rs");
+        // Both rows keep the place: the live one and the recording's.
+        assert!(
+            wall.matches("(tilebar::Control::Silent, TileBarAction::NoSound)").count() >= 3,
+            "the live row and both of the recording's rows keep the place"
+        );
+        // The place answers nothing and takes no press: it is a place kept,
+        // not a control, and the ring may not land on it.
+        let at = wall.find("fn tile_bar_available(").unwrap();
+        let body = &wall[at..(at + 700).min(wall.len())];
+        assert!(
+            body.contains("if matches!(action, TileBarAction::NoSound)"),
+            "a grey speaker is not a control"
+        );
+        // It is drawn rather than left as a hole, but the drawing is inert:
+        // a dim muted speaker, with no press and no stop on the walk. The
+        // greyness is the place's own, not a `muted` flag a caller could get
+        // wrong - the branch passes `true` to `button_in` and skips `nav`.
+        let tilebar = include_str!("../tilebar.rs");
+        let at = tilebar.find("Control::Silent =>").unwrap();
+        let body = &tilebar[at..(at + 700).min(tilebar.len())];
+        assert!(body.contains("icons::button_in("), "a button is drawn");
+        assert!(body.contains("Icon::Mute"), "the speaker is the muted one");
+        assert!(body.contains("true,"), "and it is drawn grey");
+        assert!(body.contains("continue;"), "and it takes no press or focus");
+        // A viewer who hovers it is told why it cannot be pressed.
+        assert!(
+            wall.contains("TileBarAction::NoSound => tr(\"tilebar-no-sound-tip\")"),
+            "the grey speaker says why it is grey"
+        );
     }
 
     /// The ring moves on from the control that went grey, in the row's order,
