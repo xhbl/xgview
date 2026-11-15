@@ -353,14 +353,14 @@ pub fn run(options: RunOptions) -> anyhow::Result<()> {
         }
     });
 
-    // The window is gone, so the sound goes with it - and it has to be let go of
-    // here, on this thread, while the process is still healthy: left to the
-    // thread-local destructor the output stream panics on its way out and takes
-    // the exit code with it. See `audio::shutdown`.
+    // Backstop for the paths that do return (a failure to start, and
+    // `run_and_return` builds). The ordinary desktop close does *not* get here:
+    // with the default `run_and_return = false`, eframe calls
+    // `std::process::exit(0)` from its event loop. That is why the close path
+    // lets the devices go from `XgViewApp::pump_background`, and why the parked
+    // streams carry a `QuietDrop` guard. See `audio::shutdown`.
     #[cfg(not(target_os = "android"))]
     audio::shutdown();
-    // The microphone is the same shape of problem, and is let go here for the
-    // same reason: see `mic::shutdown`.
     #[cfg(not(target_os = "android"))]
     mic::shutdown();
 

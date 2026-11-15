@@ -15,10 +15,13 @@
 //! speech and needs no state beyond a running sum.
 //!
 //! The stream is `!Send`, like the output one, so it is parked on the thread
-//! that opened it and only stopped by [`shutdown`] on the way out of the window.
+//! that opened it and stopped by [`shutdown`] on the way out of the window.
 //! Leaving it to the thread-local destructor has the same price it does there:
 //! a join of an audio thread that is already gone, inside a destructor that
-//! cannot unwind, which aborts the process instead of exiting it.
+//! cannot unwind, which aborts the process instead of exiting it. The stream
+//! therefore sits in a [`crate::audio::QuietDrop`] guard too, because the
+//! desktop's `std::process::exit(0)` reaches that destructor without ever
+//! calling [`shutdown`].
 
 #[cfg(not(target_os = "android"))]
 use std::cell::RefCell;
@@ -34,8 +37,12 @@ use monitor_core::talk::TalkHub;
 #[cfg(not(target_os = "android"))]
 thread_local! {
     /// The live input stream, parked on the thread that opened the device, for
-    /// the reason [`crate::audio`] parks the output one.
-    static INPUT_STREAM: RefCell<Option<cpal::Stream>> = const { RefCell::new(None) };
+    /// the reason [`crate::audio`] parks the output one. The same
+    /// [`crate::audio::QuietDrop`] guard wraps it: exiting by
+    /// `std::process::exit` destroys this thread local without ever calling
+    /// [`shutdown`], and an unguarded cpal join panic there aborts the process.
+    static INPUT_STREAM: RefCell<Option<crate::audio::QuietDrop<cpal::Stream>>> =
+        const { RefCell::new(None) };
 }
 
 /// The Android capture's sink: the hub the activity's thread pushes into, and the
@@ -199,6 +206,10 @@ impl Mic {
                 }
             }
             .ok_or(MicError::NoDevice)?;
+            // Guard it before the first possible drop - the failed `play` below,
+            // replacing an older stream, or the thread-local destructor at exit.
+            // See `crate::audio::drop_quietly`.
+            let stream = crate::audio::QuietDrop::new(stream, "the microphone");
             if let Err(err) = stream.play() {
                 tracing::warn!(target: "xgview::mic", error = %err, "could not start the microphone");
                 return Err(MicError::NoDevice);
@@ -228,8 +239,8 @@ impl Mic {
 }
 
 /// Stops the microphone and lets the input device go, on the way out of the
-/// window - see [`crate::audio::shutdown`] for why leaving it to the thread
-/// local is not enough.
+/// window - see [`crate::audio::shutdown`] for why this is a backstop rather
+/// than a guarantee, and why the parked stream carries its own guard.
 pub fn shutdown() {
     #[cfg(target_os = "android")]
     {
@@ -240,16 +251,10 @@ pub fn shutdown() {
     }
     #[cfg(not(target_os = "android"))]
     INPUT_STREAM.with(|slot| {
-        let stream = match slot.borrow_mut().take() {
-            Some(stream) => stream,
-            None => return,
-        };
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(stream))).is_err() {
-            tracing::debug!(
-                target: "xgview::mic",
-                "the microphone did not stop cleanly; ignoring it on the way out"
-            );
-        }
+        // The `RefMut` has to be gone before the stream is dropped. See
+        // `crate::audio::shutdown`.
+        let stream = slot.borrow_mut().take();
+        drop(stream);
     });
 }
 

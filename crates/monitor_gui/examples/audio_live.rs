@@ -11,8 +11,10 @@
 //! and read the exit code; `0` is the whole point.
 //!
 //! The sink is opened and shut down on the main thread, like the real viewer
-//! (`audio::shutdown` after `run_native`), because the cpal stream lives in a
-//! thread-local and only that thread's destructor is the dangerous one.
+//! (whose close path calls `audio::shutdown` before `run_native` can exit),
+//! because the cpal stream lives in a thread-local and only that thread's
+//! destructor is the dangerous one. Unlike the viewer this example does return
+//! from its own loop, so the explicit call below is the real cleanup.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

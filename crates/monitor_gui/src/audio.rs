@@ -159,6 +159,53 @@ const CALLBACK_GRACE: Duration = Duration::from_millis(500);
 /// How long the stream is left alone to prime itself before the counting starts.
 const CALLBACK_SETTLE: Duration = Duration::from_millis(100);
 
+/// Drops a value without letting a panic out of the drop.
+///
+/// cpal joins its audio thread when a `Stream` is dropped; if that thread has
+/// already been terminated by the platform the join panics with "threads should
+/// not terminate unexpectedly". A panic in a thread-local destructor cannot
+/// unwind - `std` calls `abort_on_dtor_unwind`, which on Windows is
+/// `__fastfail(7)` / `0xC0000409` - so the panic has to be contained *inside*
+/// the destructor, not by whoever happens to drop the value.
+pub(crate) fn drop_quietly<T>(value: T, what: &str) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(value))).is_err() {
+        tracing::debug!("{what} did not stop cleanly; ignoring it on the way out");
+    }
+}
+
+/// A value parked in a thread local whose `Drop` must never panic.
+///
+/// The `Option` is what lets a type with a `Drop` of its own give the value up:
+/// taking it out leaves nothing for Rust to drop a second time. `Deref` keeps a
+/// parked stream usable - `StreamTrait::play` is called before it is parked.
+pub(crate) struct QuietDrop<T> {
+    value: Option<T>,
+    what: &'static str,
+}
+
+impl<T> QuietDrop<T> {
+    pub(crate) fn new(value: T, what: &'static str) -> Self {
+        Self { value: Some(value), what }
+    }
+}
+
+impl<T> std::ops::Deref for QuietDrop<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // `None` exists only for the instant inside `Drop`, after `take()`.
+        self.value.as_ref().expect("a parked value is only emptied by its Drop")
+    }
+}
+
+impl<T> Drop for QuietDrop<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            drop_quietly(value, self.what);
+        }
+    }
+}
+
 thread_local! {
     /// A live cpal stream is `!Send` - the crate marks it so on purpose - and so
     /// cannot sit in [`CpalOutput`], which is shared with the channel workers.
@@ -166,39 +213,39 @@ thread_local! {
     /// opens the sink on its own thread and keeps it for the life of the window,
     /// which is exactly how long the stream has to run. Dropping it would stop
     /// the sound, so it is only taken back out by [`shutdown`], on the way out.
-    static OUTPUT_STREAM: RefCell<Option<Stream>> = const { RefCell::new(None) };
+    ///
+    /// The wrapper is the important part: [`QuietDrop`] contains the cpal join
+    /// panic even when the thread local is destroyed by `ExitProcess` rather
+    /// than by [`shutdown`]. See [`drop_quietly`].
+    static OUTPUT_STREAM: RefCell<Option<QuietDrop<Stream>>> = const { RefCell::new(None) };
 }
 
 /// Stops the sound and lets the output device go, on the way out of the window.
 ///
-/// This exists because of what happens when it is *not* called. The stream is
-/// `!Send` and lives in a thread local, so leaving it there hands it to the
-/// thread-local destructor at thread exit - and dropping a cpal stream joins its
-/// audio thread. By then that thread can already be gone, so the join fails with
-/// "threads should not terminate unexpectedly". A panic inside a thread-local
-/// destructor cannot unwind - `std` calls `abort_on_dtor_unwind` - so the process
-/// dies with `0xC0000409` (`STATUS_STACK_BUFFER_OVERRUN`, `__fastfail` code 7,
-/// `FAST_FAIL_FATAL_APP_EXIT`) instead of exiting cleanly. Nothing in the log
-/// points at the real culprit: the abort is the *last* thing that happens, and it
-/// replaces whatever exit code the viewer meant to return.
+/// This used to be the *only* thing standing between the viewer and a hard
+/// abort. The stream is `!Send` and lives in a thread local, so leaving it there
+/// hands it to the thread-local destructor at thread exit - and dropping a cpal
+/// stream joins its audio thread. By then that thread can already be gone, so
+/// the join fails with "threads should not terminate unexpectedly". A panic
+/// inside a thread-local destructor cannot unwind: `std` calls
+/// `abort_on_dtor_unwind`, and the process dies with `0xC0000409`
+/// (`STATUS_STACK_BUFFER_OVERRUN`, `__fastfail` code 7,
+/// `FAST_FAIL_FATAL_APP_EXIT`) instead of exiting cleanly.
 ///
-/// Dropping it here, while the process is still healthy, keeps that panic on an
-/// ordinary stack - where it is caught and logged instead of aborting the process.
+/// The fatal flaw was that `eframe::run_native` does not return on the desktop:
+/// with `run_and_return` at its default of `false`, eframe calls
+/// `std::process::exit(0)`, which runs the loader's TLS callbacks and skips the
+/// shutdown calls made after it. This function is therefore a *backstop*, not a
+/// guarantee - [`QuietDrop`] on the parked stream is what makes every exit path
+/// safe. The early call from the close path matters all the same: it lets the
+/// device go while the process is still healthy, rather than during teardown.
 pub fn shutdown() {
     OUTPUT_STREAM.with(|slot| {
-        let stream = match slot.borrow_mut().take() {
-            Some(stream) => stream,
-            None => return,
-        };
-        // The join inside this drop is what panics when the audio thread has
-        // already terminated. Catching it keeps the exit quiet; the stream is
-        // consumed either way and the process is on its way out.
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(stream))).is_err() {
-            tracing::debug!(
-                target: "xgview::audio",
-                "the output stream did not stop cleanly; ignoring it on the way out"
-            );
-        }
+        // Take it out before dropping it: the `RefMut` is gone by then, so a
+        // backend that touches this thread local from its own drop cannot
+        // collide with a borrow that is still alive.
+        let stream = slot.borrow_mut().take();
+        drop(stream);
     });
 }
 
@@ -479,6 +526,11 @@ impl CpalOutput {
                 None
             }
         }?;
+        // Park the stream in its guard *before* anything can drop it: the two
+        // early returns below, replacing an older stream, and the thread-local
+        // destructor at exit are all drop sites, and every one of them has to
+        // contain the cpal join panic. See `drop_quietly`.
+        let stream = QuietDrop::new(stream, "the output stream");
         if let Err(err) = stream.play() {
             tracing::warn!(target: "xgview::audio", error = %err, "could not start the audio stream");
             return None;
@@ -670,6 +722,75 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in for a cpal stream whose join fails: the whole point of
+    /// `QuietDrop` is that this panic never reaches a thread-local destructor.
+    struct BadJoin;
+    impl Drop for BadJoin {
+        fn drop(&mut self) {
+            panic!("threads should not terminate unexpectedly");
+        }
+    }
+
+    thread_local! {
+        static PARKED_BOMB: RefCell<Option<QuietDrop<BadJoin>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// The shape of the real crash: a value left in a thread local when the
+    /// thread goes away. A panic there cannot unwind and `std` aborts the whole
+    /// process, so this test can only pass if the guard is on the parked value.
+    #[test]
+    fn a_thread_local_destructor_that_would_panic_exits_cleanly() {
+        let exited = std::thread::spawn(|| {
+            PARKED_BOMB.with(|slot| {
+                *slot.borrow_mut() = Some(QuietDrop::new(BadJoin, "the test stream"));
+            });
+            // The thread ends here; the TLS destructor drops the guarded value.
+        })
+        .join();
+        assert!(exited.is_ok(), "the guarded drop must not unwind out of the destructor");
+    }
+
+    #[test]
+    fn a_panicking_drop_is_contained() {
+        assert!(std::panic::catch_unwind(|| drop_quietly(BadJoin, "the test stream")).is_ok());
+        assert!(std::panic::catch_unwind(|| drop(QuietDrop::new(BadJoin, "the test stream"))).is_ok());
+    }
+
+    #[test]
+    fn a_quiet_value_still_drops_and_still_derefs() {
+        let parked = QuietDrop::new(7_i32, "a number");
+        assert_eq!(*parked, 7);
+        drop(parked);
+    }
+
+    /// The guard has to be on the value in the thread local, not on the caller
+    /// that takes it out: `std::process::exit` destroys the thread local without
+    /// asking `shutdown` first. Reads the source because a type change here
+    /// compiles cleanly and only shows up as a `0xC0000409` at exit.
+    #[test]
+    fn both_parked_streams_carry_the_drop_guard() {
+        let output = include_str!("audio.rs");
+        assert!(
+            output.contains("static OUTPUT_STREAM: RefCell<Option<QuietDrop<Stream>>>"),
+            "the output stream must not be parked bare"
+        );
+        let wrap = output.find("let stream = QuietDrop::new(stream").unwrap();
+        let play = wrap + output[wrap..].find("stream.play()").unwrap();
+        let park = wrap + output[wrap..].find("OUTPUT_STREAM.with").unwrap();
+        assert!(wrap < play && play < park, "wrap the stream before its first possible drop");
+
+        let input = include_str!("mic.rs");
+        assert!(
+            input.contains("static INPUT_STREAM: RefCell<Option<crate::audio::QuietDrop<cpal::Stream>>>"),
+            "the microphone must carry the same guard"
+        );
+        let wrap = input.find("let stream = crate::audio::QuietDrop::new(stream").unwrap();
+        let play = wrap + input[wrap..].find("stream.play()").unwrap();
+        let park = wrap + input[wrap..].find("INPUT_STREAM.with").unwrap();
+        assert!(wrap < play && play < park, "wrap the microphone before its first possible drop");
+    }
 
     #[test]
     fn resampling_widens_a_mono_block_to_the_device() {

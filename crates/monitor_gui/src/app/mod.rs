@@ -3085,6 +3085,21 @@ impl XgViewApp {
         if ctx.input(|input| input.viewport().close_requested()) {
             self.save_now();
             self.manager.shutdown();
+            // The audio devices go here, on the thread that opened them and
+            // while the channel workers above have just been stopped. eframe
+            // does not return from `run_native` on the desktop - it calls
+            // `std::process::exit(0)` - so the shutdowns after it in
+            // `lib.rs::run` are dead code on this path, and the cpal streams
+            // would otherwise be dropped by the loader's TLS callbacks during
+            // teardown. Their `QuietDrop` guard makes that safe, but letting
+            // them go here keeps the join on a healthy stack. See `audio::shutdown`.
+            // Android has no cpal stream parked in a thread local, so this is
+            // the desktop's close path only.
+            #[cfg(not(target_os = "android"))]
+            {
+                crate::audio::shutdown();
+                crate::mic::shutdown();
+            }
             // The request outlives the viewport otherwise: on the desktop this
             // is the last moment anything of ours runs.
             if let Err(err) = power::release() {
@@ -4665,6 +4680,23 @@ mod tests {
             rest[index..].contains("self.tile_bar_activate(action, ctx)"),
             "the control the ring is on is the one that gets pressed"
         );
+    }
+
+    /// eframe does not return from `run_native` on the desktop, so the only
+    /// chance to let the audio devices go on a healthy stack is the frame that
+    /// sees the close request. Reads the source because removing these two
+    /// lines still leaves a process that exits - it just exits through the
+    /// loader's TLS callbacks, where a cpal join panic aborts it.
+    #[test]
+    fn the_close_frame_lets_the_audio_devices_go() {
+        let source = include_str!("mod.rs");
+        let pump = source.find("fn pump_background(").unwrap();
+        let close = pump + source[pump..]
+            .find("if ctx.input(|input| input.viewport().close_requested())")
+            .unwrap();
+        let tail = &source[close..close + 1400];
+        assert!(tail.contains("crate::audio::shutdown();"), "the output device is let go on close");
+        assert!(tail.contains("crate::mic::shutdown();"), "the microphone is let go on close");
     }
 
     /// A bar that goes down on its idle clock does so after the frame's focus
