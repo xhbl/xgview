@@ -1221,10 +1221,13 @@ impl XgViewApp {
 
         if self.tile_bar.is_open() {
             // The controls are egui's own buttons, placed in the picture's own
-            // frame: a press lights the one it went down on, the ring is the
-            // focus the navigation layer puts there, and the confirm key reaches
-            // it as a click on that focus. What is left here is the guard - the
-            // gesture that opened the bar must not also press it - and the act.
+            // frame: a press lights the one it went down on, and the ring is the
+            // focus the navigation layer puts there. The confirm key is answered
+            // by `handle_keys` before this frame is drawn and is taken out of
+            // the queue there, so it cannot arrive a second time as egui's fake
+            // click on the focused widget. What is left here is the pointer
+            // press, the guard - the gesture that opened the bar must not also
+            // press it - and the act.
             let controls: Vec<tilebar::Control> =
                 entries.iter().map(|(control, _)| *control).collect();
             // A control with nothing beyond it in the direction it points - a step
@@ -1242,7 +1245,10 @@ impl XgViewApp {
             if let Some(index) =
                 tilebar::draw(ui, &mut self.nav, &layout, rotated, &controls, &muted, &tips)
             {
-                if !self.tile_bar.ignoring(now) {
+                // A window of the viewer's own owns the screen while it is up;
+                // the bar stays drawn behind it. This guard is the counterpart
+                // of the one on the manual confirm-key branch in `handle_keys`.
+                if !self.modal_is_up() && !self.tile_bar.ignoring(now) {
                     // Was the ring on a control, or still on the seat? The
                     // difference is whether the remote is driving the bar.
                     let driven = ui
@@ -1334,6 +1340,38 @@ impl XgViewApp {
         }
     }
 
+    /// Where the ring goes when the control under it has gone grey.
+    ///
+    /// `focused` is the focus egui still holds at the end of the frame, and
+    /// `focus_before` is where the ring stood when the frame began. egui gives
+    /// the focus up *as it draws* a control that has gone grey - a muted button
+    /// is a `Sense::hover()` widget, which is not focusable, so `create_widget`
+    /// calls `surrender_focus` on it. A press answered before the bar is drawn
+    /// (the confirm key in `handle_keys`) therefore greys its own control in the
+    /// same frame it is drawn: by the end of that frame there is no focus left
+    /// to read, even though the ring was plainly on a control a moment ago.
+    /// The place it started from is the one the next live control takes.
+    ///
+    /// A focus that moved somewhere else on purpose is not ours to override:
+    /// only a frame that ended with no focus at all looks back at the start.
+    pub(super) fn grey_handoff(
+        focused: Option<Id>,
+        focus_before: Option<Id>,
+        live: &[bool],
+    ) -> Option<Id> {
+        let index = match focused {
+            Some(id) => tilebar::index_of(id),
+            None => focus_before.and_then(tilebar::index_of),
+        }?;
+        let Some(&is_live) = live.get(index) else {
+            return None;
+        };
+        if is_live {
+            return None;
+        }
+        Some(tilebar::next_live(live, index).map_or_else(tilebar::seat, tilebar::control))
+    }
+
     /// Hands the focus on from a control that has just gone grey.
     ///
     /// A greyed control takes no press and is not in the walk, so a focus left on
@@ -1341,24 +1379,33 @@ impl XgViewApp {
     /// what a viewer pressing "more detail" at the end of the ladder saw - the
     /// ring went, and the row could not be walked past it. The focus goes to the
     /// next live control instead, wrapping round the row, and to the seat when the
-    /// whole row is grey.
-    pub(super) fn step_off_a_greyed_control(&mut self, ctx: &egui::Context) {
-        let Some(index) = ctx.memory(|memory| memory.focused()).and_then(tilebar::index_of) else {
-            return;
+    /// whole row is grey. See [`grey_handoff`] for why the frame's starting focus
+    /// has to be part of the answer.
+    pub(super) fn step_off_a_greyed_control(
+        &mut self,
+        ctx: &egui::Context,
+        focus_before: Option<Id>,
+    ) {
+        let focused = ctx.memory(|memory| memory.focused());
+        // Only the wall can be given a bar control back. A window over it owns
+        // whatever focus is left, and a frame that ends with none while a window
+        // is up belongs to that window's hand-off, not to this one.
+        let before = if focused.is_none()
+            && !self.modal_is_up()
+            && self.panel_anchor().is_none()
+        {
+            focus_before
+        } else {
+            None
         };
         let entries = self.tile_bar_entries().0;
-        let Some((_, action)) = entries.get(index) else {
-            return;
-        };
-        if self.tile_bar_available(*action) {
-            return;
-        }
         let live: Vec<bool> = entries
             .iter()
             .map(|(_, action)| self.tile_bar_available(*action))
             .collect();
-        let target = tilebar::next_live(&live, index).map_or_else(tilebar::seat, tilebar::control);
-        ctx.memory_mut(|memory| memory.request_focus(target));
+        if let Some(target) = Self::grey_handoff(focused, before, &live) {
+            ctx.memory_mut(|memory| memory.request_focus(target));
+        }
     }
 
     pub(super) fn tile_bar_entries(&self) -> (Vec<(tilebar::Control, TileBarAction)>, Vec<usize>) {
@@ -1800,5 +1847,62 @@ mod tests {
         let (without, breaks) = controls(false, true);
         assert_eq!(breaks, vec![1, 6]);
         assert_eq!(without[5], TileBarAction::Download);
+    }
+
+    /// The ring moves on from the control that went grey, in the row's order,
+    /// skipping a run of grey and wrapping round the end.
+    #[test]
+    fn a_greyed_control_hands_the_ring_to_the_next_live_one() {
+        let live = [true, true, false, false, true];
+        assert_eq!(
+            XgViewApp::grey_handoff(Some(tilebar::control(2)), None, &live),
+            Some(tilebar::control(4)),
+            "a focus that survived the draw goes to the next live control"
+        );
+        assert_eq!(
+            XgViewApp::grey_handoff(None, Some(tilebar::control(2)), &live),
+            Some(tilebar::control(4)),
+            "and so does one egui has already given up"
+        );
+        assert_eq!(
+            XgViewApp::grey_handoff(None, Some(tilebar::control(2)), &[true, false, false]),
+            Some(tilebar::control(0)),
+            "the last grey control wraps round the end"
+        );
+    }
+
+    /// Nothing is handed on when the ring was on a live control, when it moved
+    /// somewhere that is not the bar, or when it simply was not on the bar.
+    #[test]
+    fn the_handoff_leaves_every_other_focus_alone() {
+        assert_eq!(
+            XgViewApp::grey_handoff(None, Some(tilebar::control(1)), &[true, true, false]),
+            None,
+            "a live control keeps its ring"
+        );
+        assert_eq!(
+            XgViewApp::grey_handoff(
+                Some(Id::new("a-window's-field")),
+                Some(tilebar::control(1)),
+                &[false, false]
+            ),
+            None,
+            "a focus that moved on purpose is not overridden"
+        );
+        assert_eq!(
+            XgViewApp::grey_handoff(None, None, &[false, false]),
+            None,
+            "no ring at the start of the frame means nothing to hand on"
+        );
+        assert_eq!(
+            XgViewApp::grey_handoff(None, Some(tilebar::control(9)), &[false, false]),
+            None,
+            "a place the row no longer has is not a control"
+        );
+        assert_eq!(
+            XgViewApp::grey_handoff(None, Some(tilebar::control(1)), &[false, false]),
+            Some(tilebar::seat()),
+            "a row with nothing live in it goes to the seat"
+        );
     }
 }

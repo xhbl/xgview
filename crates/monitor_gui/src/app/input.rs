@@ -3,6 +3,36 @@
 
 use super::*;
 
+/// The two keys that mean "confirm".
+///
+/// egui 0.32 turns *either* of them into a click on a focused widget whose
+/// `Sense` includes click (`Ui::interact` sets `FAKE_PRIMARY_CLICKED`). Where
+/// this application answers the confirm key itself, it therefore has to take
+/// both out of the queue - `key_pressed` and `consume_key` read the same
+/// `InputState.events`, so consuming before the widget is drawn is what stops
+/// the same press arriving twice.
+pub(super) const CONFIRM_KEYS: [Key; 2] = [Key::Enter, Key::Space];
+
+/// Back as a window reads it, before a field's caret is considered.
+pub(super) const BACK_KEYS: [Key; 2] = [Key::Escape, Key::BrowserBack];
+
+/// Back with the keyboard's Backspace, where no field is being typed into.
+pub(super) const BACK_WITH_BACKSPACE: [Key; 3] =
+    [Key::Escape, Key::BrowserBack, Key::Backspace];
+
+/// Takes *every* synonym out of the queue and says whether any was pressed.
+///
+/// `|=` rather than `||`: a frame that happens to carry two of them must not
+/// short-circuit and leave the second one in flight for the next layer to
+/// answer. `consume_key` removes all matching events, repeats included.
+pub(super) fn consume_any(input: &mut egui::InputState, keys: &[Key]) -> bool {
+    let mut pressed = false;
+    for &key in keys {
+        pressed |= input.consume_key(Modifiers::NONE, key);
+    }
+    pressed
+}
+
 impl XgViewApp {
     /// Remembers where a press went down, so the release can be read as a tap.
     ///
@@ -592,18 +622,6 @@ impl XgViewApp {
         ((ui.available_width() - total) * 0.5).max(0.0)
     }
 
-    /// Takes Back out of the queue, if it was pressed.
-    ///
-    /// Escape on a keyboard, `BrowserBack` from an Android remote. Backspace is
-    /// left alone: it belongs to a field's caret, and the alternative owner of
-    /// Back only claims it when no field is being typed into.
-    pub(super) fn back_pressed(ctx: &egui::Context) -> bool {
-        ctx.input_mut(|input| {
-            let none = Modifiers::NONE;
-            input.consume_key(none, Key::Escape) || input.consume_key(none, Key::BrowserBack)
-        })
-    }
-
     /// Whether a Back key was pressed, taking it out of the queue so the
     /// window behind it cannot answer the same press as well. `true` means
     /// the picker is to close - on every platform, and whichever of the three
@@ -625,7 +643,13 @@ impl XgViewApp {
     fn picker_back(ctx: &egui::Context, typing: bool) -> bool {
         ctx.input_mut(|input| {
             let none = Modifiers::NONE;
-            if input.consume_key(none, Key::Escape) || input.consume_key(none, Key::BrowserBack) {
+            if consume_any(input, &BACK_KEYS) {
+                // A Backspace in the same frame is the same Back: take it too,
+                // so a press cannot close a second window behind this one. It
+                // stays with the field's caret while one is being typed into.
+                if !typing {
+                    input.consume_key(none, Key::Backspace);
+                }
                 return true;
             }
             // The remote's Back is BrowserBack; a keyboard's Backspace is only
@@ -642,12 +666,19 @@ impl XgViewApp {
     /// way it leaves the panel - otherwise the press falls through to the panel
     /// behind and closes that instead. A field with the focus keeps Backspace
     /// for its own text.
+    ///
+    /// All three leave the queue in the same frame. Answering on the first hit
+    /// and returning used to leave a Backspace from that frame behind, and the
+    /// wall then closed a second layer with the same press.
     pub(super) fn dialog_back_pressed(&self, ctx: &egui::Context) -> bool {
-        if Self::back_pressed(ctx) {
-            return true;
-        }
-        !self.typing(ctx)
-            && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Backspace))
+        let typing = self.typing(ctx);
+        ctx.input_mut(|input| {
+            let mut back = consume_any(input, &BACK_KEYS);
+            if !typing {
+                back |= input.consume_key(Modifiers::NONE, Key::Backspace);
+            }
+            back
+        })
     }
 
     /// Whether this frame carries input that is not a Back press.
@@ -687,11 +718,7 @@ impl XgViewApp {
     /// wall can act on them.
     pub(super) fn handle_combined_info_keys(&mut self, ctx: &egui::Context) {
         let none = Modifiers::NONE;
-        let back = ctx.input_mut(|input| {
-            input.consume_key(none, Key::Escape)
-                || input.consume_key(none, Key::BrowserBack)
-                || input.consume_key(none, Key::Backspace)
-        });
+        let back = ctx.input_mut(|input| consume_any(input, &BACK_WITH_BACKSPACE));
         if back {
             self.restore_focus = self.combined_info_picker.close_restoring();
             return;
@@ -727,7 +754,7 @@ impl XgViewApp {
             i.consume_key(none, Key::ArrowDown),
             i.consume_key(none, Key::ArrowLeft),
             i.consume_key(none, Key::ArrowRight),
-            i.consume_key(none, Key::Enter) || i.consume_key(none, Key::Space),
+            consume_any(i, &CONFIRM_KEYS),
         ));
 
         let mut changed = false;
@@ -833,10 +860,7 @@ impl XgViewApp {
             let focused = ctx.memory(|memory| memory.focused());
             let none = Modifiers::NONE;
             if self.editing == focused {
-                if ctx.input_mut(|input| {
-                    input.consume_key(none, Key::Escape)
-                        || input.consume_key(none, Key::BrowserBack)
-                }) {
+                if ctx.input_mut(|input| consume_any(input, &BACK_KEYS)) {
                     self.editing = None;
                     return true;
                 }
@@ -853,8 +877,7 @@ impl XgViewApp {
         // navigation layer they are left for the layer to move the focus.
         let leave = ctx.input_mut(|input| {
             let none = Modifiers::NONE;
-            let leave = input.consume_key(none, Key::Escape)
-                || input.consume_key(none, Key::BrowserBack);
+            let leave = consume_any(input, &BACK_KEYS);
             if !nav_owns {
                 for key in [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown] {
                     input.consume_key(none, key);
@@ -910,10 +933,8 @@ impl XgViewApp {
                 keys.right = input.consume_key(none, Key::ArrowRight);
                 keys.up = input.consume_key(none, Key::ArrowUp);
                 keys.down = input.consume_key(none, Key::ArrowDown);
-                keys.enter = input.consume_key(none, Key::Enter) || input.consume_key(none, Key::Space);
-                keys.back = input.consume_key(none, Key::Escape)
-                    || input.consume_key(none, Key::Backspace)
-                    || input.consume_key(none, Key::BrowserBack);
+                keys.enter = consume_any(input, &CONFIRM_KEYS);
+                keys.back = consume_any(input, &BACK_WITH_BACKSPACE);
             } else {
                 // A control of the navigation layer has its arrows taken out of
                 // the queue here: the layer decides where they go, and the
@@ -1338,10 +1359,21 @@ impl XgViewApp {
         }
         if keys.enter {
             let focused = ctx.memory(|memory| memory.focused());
-            if focused == Some(Id::new("portrait-prev-page")) {
-                self.advance(false, true);
+            let forward = if focused == Some(Id::new("portrait-prev-page")) {
+                Some(false)
             } else if focused == Some(Id::new("portrait-next-page")) {
-                self.advance(true, true);
+                Some(true)
+            } else {
+                None
+            };
+            if let Some(forward) = forward {
+                // The two portrait arrows are `ui.interact(.., Sense::click())`
+                // widgets, so egui turns a confirm key left in the queue into a
+                // fake click on the focused one and `portrait_page_buttons`
+                // turns the page a *second* time. This branch owns the press:
+                // take both synonyms before anything is drawn.
+                ctx.input_mut(|input| consume_any(input, &CONFIRM_KEYS));
+                self.advance(forward, true);
             }
         }
     }
@@ -1628,30 +1660,36 @@ impl XgViewApp {
             self.tile_bar.touch(Instant::now());
         }
 
-        // The confirm key is a press on the control the ring is on. The bar's
-        // controls are drawn by hand rather than built from `egui::Button`, and
-        // egui only turns Enter into a click for the widgets it implements
-        // itself - so without this the remote could walk the bar and then had
-        // no way to *do* anything with it, which reads as the bar being dead.
-        // A fresh press only: a held key would fire the control again every
-        // frame, and the one that starts a download would start it once and
-        // then refuse the rest, one at a time.
+        // The confirm key is a press on the control the ring is on, answered
+        // here before the bar is drawn. The bar's controls are `ui.interact`
+        // widgets with `Sense::click()`, so egui *also* turns a focused one's
+        // Enter or Space into a fake click as it is drawn - see
+        // `tilebar::draw`. One press therefore has to leave the queue here, in
+        // both spellings, or the control fires twice: a toggle returns to where
+        // it started, a speed walks two steps, a stepper jumps two marks. Only
+        // Enter used to be taken, which is exactly why Space looked broken.
+        //
+        // Taken on a held frame too, so repeats cannot reach the widget as fake
+        // clicks; only a fresh press does the activating. `enter_fresh` on its
+        // own was not enough: it guarded this branch, not the widget's.
         //
         // Not while a window of this program is up: the bar stays on screen
         // behind one - a recording's bar behind the save panel it opened - and
         // a focus left on it would re-run the control that opened the window on
         // every press, closing and reopening it and throwing away the anchor the
         // focus was about to land on.
-        if self.tile_bar.is_open() && keys.enter && keys.enter_fresh && !self.modal_is_up() {
+        if self.tile_bar.is_open() && keys.enter && !self.modal_is_up() {
             let focused = ctx.memory(|memory| memory.focused());
             if let Some(index) = focused.and_then(tilebar::index_of) {
                 if let Some((_, action)) = self.tile_bar_entries().0.get(index).copied() {
                     // A greyed control is not a control: it takes no focus, so
                     // this is only ever reached for one that can act.
                     if self.tile_bar_available(action) {
-                        ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
-                        self.tile_bar_activate(action, ctx);
-                        return;
+                        ctx.input_mut(|input| consume_any(input, &CONFIRM_KEYS));
+                        if keys.enter_fresh {
+                            self.tile_bar_activate(action, ctx);
+                            return;
+                        }
                     }
                 }
             }

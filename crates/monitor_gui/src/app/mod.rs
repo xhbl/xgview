@@ -1291,13 +1291,14 @@ pub struct XgViewApp {
     /// be scrolled into view on this one: it had already been drawn when the
     /// focus reached it. See [`Nav::next_in_scope`].
     reveal_next: Option<Id>,
-    /// Frames left in which an Enter is discarded.
+    /// Frames left in which a confirm key is discarded.
     ///
-    /// The Enter that opened a window is still in flight for a frame or two -
-    /// the soft keyboard the window raises may carry one of its own - and it
-    /// would confirm or activate the control the window has just put under the
-    /// focus, before the viewer has read the form.
-    swallow_enter: u8,
+    /// The Enter or Space that opened a window is still in flight for a frame
+    /// or two - the soft keyboard the window raises may carry one of its own -
+    /// and it would confirm or activate the control the window has just put
+    /// under the focus, before the viewer has read the form. Both keys have to
+    /// be taken: egui turns either into a click on a focused widget.
+    swallow_confirm: u8,
     /// A control to hand the focus back to as the next frame begins.
     ///
     /// A window gives the focus back to the button it was opened from, and
@@ -1760,7 +1761,7 @@ impl XgViewApp {
             // for the next one in the pass to consume.
             nav: Nav::new(&scopes),
             reveal_next: None,
-            swallow_enter: 0,
+            swallow_confirm: 0,
             restore_focus: None,
             import_cameras_only: true,
             encrypt_export: true,
@@ -2566,12 +2567,13 @@ impl XgViewApp {
         if let Some(id) = self.restore_focus.take() {
             ctx.memory_mut(|memory| memory.request_focus(id));
         }
-        // The Enter that opened a window is still in flight for a frame or two:
-        // taken out before any control is drawn, so it cannot land on the one
-        // the window has just put under the focus.
-        if self.swallow_enter > 0 {
-            self.swallow_enter -= 1;
-            ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
+        // The confirm key that opened a window is still in flight for a frame
+        // or two: taken out before any control is drawn, so it cannot land on
+        // the one the window has just put under the focus. Both spellings -
+        // egui turns either into a click on a focused widget.
+        if self.swallow_confirm > 0 {
+            self.swallow_confirm -= 1;
+            ctx.input_mut(|i| input::consume_any(i, &input::CONFIRM_KEYS));
         }
         // While the wall is blank the keys belong to it: `update_blackout` has
         // already emptied the queue, and skipping this stops a held modifier
@@ -2701,9 +2703,9 @@ impl XgViewApp {
         self.combined_info_picker.hand_off(ctx, false);
         self.dialog_handoff
             .takes_focus(ctx, self.discovery.open, self.discovery.focus_anchor, false);
-        // The four a press on a control opens. The Enter that opened one is still
-        // in flight for a frame or two, and would confirm the control the window
-        // has just been given. See `swallow_enter`.
+        // The four a press on a control opens. The confirm key that opened one
+        // is still in flight for a frame or two, and would confirm the control
+        // the window has just been given. See `swallow_confirm`.
         let mut opened = false;
         opened |= self.camera_edit.hand_off(ctx, true);
         opened |= self.remove_confirm.hand_off(ctx, false);
@@ -2724,7 +2726,7 @@ impl XgViewApp {
         let picker_ready = self.file_picker.is_open() && self.file_picker.anchor.is_some();
         opened |= self.file_picker.hand_off_when(ctx, picker_ready, false);
         if opened {
-            self.swallow_enter = 10;
+            self.swallow_confirm = 10;
         }
         // The reorder mode is opened by a press on one frame, and its list is
         // drawn on the next; the first move button is only known once it has
@@ -2824,8 +2826,14 @@ impl XgViewApp {
             // A control that has just gone grey is handed on first: it takes no
             // press and it is no longer in the walk, so a focus left on it is a
             // focus with nowhere to go. See `step_off_a_greyed_control`.
+            //
+            // The frame's *starting* focus goes with it. egui gives the focus up
+            // as soon as it draws a control grey, and a confirm key answered
+            // before the bar is drawn greys its own control that same frame, so
+            // the end of the frame would otherwise have nothing to hand on and
+            // the ring would simply disappear.
             if self.tile_bar.is_open() {
-                self.step_off_a_greyed_control(ctx);
+                self.step_off_a_greyed_control(ctx, focus_before);
             }
             if let Some(focused) = ctx.memory(|memory| memory.focused()) {
                 // The strip under the magnified bar and the seat the bar opens
@@ -4656,12 +4664,12 @@ mod tests {
         );
     }
 
-    /// The bar's controls are drawn by hand, and egui only turns Enter into a
-    /// click for the widgets it implements itself - so the confirm key has to
-    /// be answered here or the remote could walk the bar and do nothing with
-    /// it. Reads the source rather than driving a frame because the rule is
-    /// about which branch owns the press, which is what would go wrong if it
-    /// were put back behind one of the early returns.
+    /// The bar answers the confirm key by hand, and egui *also* turns both
+    /// Enter and Space into a fake click on the focused control as it is drawn.
+    /// One press therefore has to leave the queue here in both spellings, or a
+    /// toggle fires twice. Reads the source rather than driving a frame because
+    /// the rule is about which branch owns the press and when the keys are
+    /// taken out of the queue.
     #[test]
     fn the_confirm_key_presses_the_bar_control_the_ring_is_on() {
         let source = include_str!("input.rs");
@@ -4669,16 +4677,122 @@ mod tests {
         let rest = &source[handle..];
         let index = rest.find("focused.and_then(tilebar::index_of)").unwrap();
         assert!(
-            rest[..index].contains("keys.enter && keys.enter_fresh"),
-            "a held confirm key must not fire the control every frame"
-        );
-        assert!(
             rest[..index].contains("self.tile_bar.is_open()"),
             "the press belongs to the bar only while the bar is up"
         );
         assert!(
-            rest[index..].contains("self.tile_bar_activate(action, ctx)"),
-            "the control the ring is on is the one that gets pressed"
+            rest[..index].contains("keys.enter && !self.modal_is_up()"),
+            "the press belongs to the bar only while no window is over it"
+        );
+        let tail = &rest[index..index + 900];
+        assert!(
+            tail.contains("consume_any(input, &CONFIRM_KEYS)"),
+            "both Enter and Space must leave the queue before the widget is drawn"
+        );
+        let fresh = tail.find("keys.enter_fresh").unwrap();
+        let activate = tail.find("self.tile_bar_activate(action, ctx)").unwrap();
+        assert!(fresh < activate, "a held confirm key must not fire the control every frame");
+        assert!(
+            source.contains("pub(super) const CONFIRM_KEYS: [Key; 2] = [Key::Enter, Key::Space]"),
+            "Space is a confirm key too"
+        );
+        assert!(
+            include_str!("wall.rs").contains("if !self.modal_is_up() && !self.tile_bar.ignoring(now)"),
+            "the drawn bar's press path needs the same modal guard"
+        );
+    }
+
+    /// egui 0.32: a focused widget with `Sense::click()` is clicked by either
+    /// Enter or Space. This is the second activation the manual bar branch has
+    /// to prevent - and the reason consuming only Enter left Space looking
+    /// broken. The test drives a real frame both ways.
+    fn confirm_key_clicks_the_focus(key: Key, consume: bool) -> bool {
+        let ctx = egui::Context::default();
+        let id = Id::new("confirm-probe");
+        let mut clicked = false;
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 100.0))),
+            events: vec![press(key)],
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+            if consume {
+                ctx.input_mut(|input| input::consume_any(input, &input::CONFIRM_KEYS));
+            }
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let response = ui.interact(
+                    Rect::from_min_size(pos2(0.0, 0.0), vec2(40.0, 40.0)),
+                    id,
+                    Sense::click(),
+                );
+                clicked = response.clicked();
+            });
+        });
+        clicked
+    }
+
+    #[test]
+    fn only_a_confirm_key_left_in_flight_fake_clicks_a_widget() {
+        for key in input::CONFIRM_KEYS {
+            assert!(confirm_key_clicks_the_focus(key, false), "{key:?} is a fake click");
+            assert!(
+                !confirm_key_clicks_the_focus(key, true),
+                "{key:?} must be taken out before the widget is drawn"
+            );
+        }
+    }
+
+    /// `||` short-circuits; `consume_any` must not. A frame carrying two
+    /// synonyms has to lose both, or the leftover reaches the next layer.
+    #[test]
+    fn consume_any_takes_every_synonym_out_of_one_frame() {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 100.0))),
+            events: vec![
+                press(Key::Enter),
+                press(Key::Space),
+                press(Key::Escape),
+                press(Key::BrowserBack),
+            ],
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| {
+            ctx.input_mut(|input| {
+                assert!(input::consume_any(input, &input::CONFIRM_KEYS));
+                assert!(input::consume_any(input, &input::BACK_KEYS));
+                for key in [Key::Enter, Key::Space, Key::Escape, Key::BrowserBack] {
+                    assert!(!input.key_pressed(key), "{key:?} was left in the queue");
+                }
+                assert!(!input::consume_any(input, &input::CONFIRM_KEYS), "nothing left to take");
+            });
+        });
+    }
+
+    /// The upright page arrows are hand-drawn `Sense::click()` widgets and the
+    /// application turns the page for them too. Without taking the confirm key
+    /// here, egui's fake click on the focused arrow turns a second page.
+    #[test]
+    fn the_upright_page_arrows_own_their_confirm_key() {
+        let source = include_str!("input.rs");
+        let branch = source.find("if let Some(forward) = forward").unwrap();
+        let tail = &source[branch..branch + 600];
+        assert!(tail.contains("consume_any(input, &CONFIRM_KEYS)"));
+        assert!(tail.contains("self.advance(forward, true)"));
+    }
+
+    /// A window opened by a confirm key swallows the key for a few frames, so
+    /// it cannot activate the control the window has just focused. That has to
+    /// cover Space as well as Enter.
+    #[test]
+    fn an_opening_window_swallows_both_confirm_keys() {
+        let source = include_str!("mod.rs");
+        let swallow = source.find("if self.swallow_confirm > 0").unwrap();
+        assert!(
+            source[swallow..swallow + 400]
+                .contains("input::consume_any(i, &input::CONFIRM_KEYS)"),
+            "the opening press must be taken in both spellings"
         );
     }
 
@@ -4925,5 +5039,123 @@ mod tests {
             };
             assert_eq!(seen[2], expected, "{key:?} goes where the recording says");
         }
+    }
+
+    /// What egui does on the frame a control is drawn grey: the ring the frame
+    /// began with is gone by the time it ends, so the hand-off cannot read the
+    /// focus that is left.
+    #[test]
+    fn a_control_drawn_grey_has_no_focus_left_at_the_end_of_the_frame() {
+        let ctx = egui::Context::default();
+        let id = tilebar::control(2);
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(200.0, 100.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+                assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let _ = icons::button_in(
+                        ui,
+                        Rect::from_min_size(pos2(0.0, 0.0), vec2(40.0, 40.0)),
+                        id,
+                        Icon::TimelineZoomIn,
+                        false,
+                        true,
+                        "",
+                        false,
+                    );
+                });
+                assert!(
+                    ctx.memory(|memory| memory.focused()).is_none(),
+                    "egui surrenders the focus when it draws a control as grey"
+                );
+            },
+        );
+    }
+
+    /// The frame a confirm key greys the very control the ring is on. The key is
+    /// answered at the start of the frame, so the control is drawn grey and
+    /// egui has given the focus up before the frame ends - but the ring was on a
+    /// control when the frame began, and it has to be handed to the next live
+    /// one rather than disappear onto the seat.
+    #[test]
+    fn a_confirm_key_that_greys_its_control_still_passes_the_ring_on() {
+        let ctx = egui::Context::default();
+        let from = tilebar::control(2);
+        let live = [true, true, false, true, true];
+        let mut seen = Vec::new();
+        for frame in 0..2 {
+            let pressed = frame == 0;
+            let events: Vec<egui::Event> = pressed.then(|| press(Key::Enter)).into_iter().collect();
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(600.0, 200.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    if frame == 0 {
+                        ctx.memory_mut(|memory| memory.request_focus(from));
+                    }
+                    let focus_before = ctx.memory(|memory| memory.focused());
+                    if pressed {
+                        // `handle_keys` answers the confirm key before the bar
+                        // is drawn, and takes both spellings out of the queue.
+                        // The press takes the last step of the zoom ladder.
+                        ctx.input_mut(|i| assert!(input::consume_any(i, &input::CONFIRM_KEYS)));
+                    }
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        for (index, _) in live.iter().enumerate() {
+                            let rect = Rect::from_min_size(
+                                pos2(20.0 + index as f32 * 45.0, 20.0),
+                                vec2(40.0, 40.0),
+                            );
+                            let sense = if index == 2 { Sense::hover() } else { Sense::click() };
+                            let _ = ui.interact(rect, tilebar::control(index), sense);
+                        }
+                    });
+                    // `end_frame`: hand off from a greyed control, then put a
+                    // stray focus back on the bar's seat.
+                    let focused = ctx.memory(|memory| memory.focused());
+                    if frame == 0 {
+                        assert!(focused.is_none(), "the grey draw gave egui's focus up");
+                        assert_eq!(
+                            XgViewApp::grey_handoff(focused, None, &live),
+                            None,
+                            "the old rule, which read only the focus left, handed on nothing"
+                        );
+                    }
+                    if let Some(target) = XgViewApp::grey_handoff(focused, focus_before, &live) {
+                        ctx.memory_mut(|memory| memory.request_focus(target));
+                    }
+                    let focused = ctx.memory(|memory| memory.focused());
+                    if !focused.is_some_and(tilebar::owns) {
+                        ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
+                    }
+                    seen.push(ctx.memory(|memory| memory.focused()));
+                },
+            );
+        }
+        assert_eq!(seen[0], Some(tilebar::control(3)), "the ring went to the next live control");
+        assert_eq!(seen[1], Some(tilebar::control(3)), "and stayed there on the next frame");
+    }
+
+    /// The hand-off cannot read only the focus that is left: a window over the
+    /// wall owns that, and the frame a control greys has none at all.
+    #[test]
+    fn the_grey_handoff_knows_where_the_frame_began() {
+        assert!(
+            include_str!("mod.rs").contains("self.step_off_a_greyed_control(ctx, focus_before)"),
+            "the frame's starting focus has to reach the hand-off"
+        );
+        let wall = include_str!("wall.rs");
+        let guard = wall.find("fn step_off_a_greyed_control(").unwrap();
+        let tail = &wall[guard..guard + 900];
+        assert!(tail.contains("focus_before"), "the fallback must be there");
+        assert!(tail.contains("!self.modal_is_up()"), "a window owns its own focus");
+        assert!(tail.contains("self.panel_anchor().is_none()"), "and so does a panel");
     }
 }
