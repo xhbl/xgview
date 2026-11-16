@@ -1457,9 +1457,8 @@ public class MainActivity extends NativeActivity {
     private static int talkSavedMode = -1;
     private static boolean talkSavedSpeaker;
 
-    /** The playback a call's sound leaves through, and the volume the call found. */
+    /** The playback a call's sound leaves through. */
     private static AudioTrack talkOutput;
-    private static int talkSavedVoiceVolume = -1;
 
     /**
      * The makeup gain applied to the call's playback, in linear terms.
@@ -1481,8 +1480,11 @@ public class MainActivity extends NativeActivity {
      * therefore set again when the playback is opened, not only when the capture
      * is: the mode can be dropped between the two, and the routing with it.
      *
-     * <p>The call volume is remembered on the first call and put back on the
-     * last, like the mode.
+     * <p>The system's call volume is left alone. It is the viewer's own setting
+     * and the ceiling the playback can reach: the app's volume slider scales
+     * below it, and `setVolume(1.0)` reaches it, but nothing here overwrites it
+     * with the maximum. Raising it used to make the slider's effect disappear
+     * into a system volume that had been pinned to the top.
      */
     private static void enterTalkAudio(final AudioManager audio) {
         if (audio == null) {
@@ -1491,31 +1493,19 @@ public class MainActivity extends NativeActivity {
         if (talkSavedMode < 0) {
             talkSavedMode = audio.getMode();
         }
-        if (talkSavedVoiceVolume < 0) {
-            talkSavedVoiceVolume = audio.getStreamVolume(AudioManager.STREAM_VOICE_CALL);
-            audio.setStreamVolume(
-                    AudioManager.STREAM_VOICE_CALL,
-                    audio.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
-                    0);
-        }
         audio.setMode(AudioManager.MODE_IN_COMMUNICATION);
         audio.setSpeakerphoneOn(true);
     }
 
-    /** Puts the audio mode, the speakerphone and the call volume back. */
+    /** Puts the audio mode and the speakerphone back. The call volume is untouched. */
     private static void leaveTalkAudio(final AudioManager audio) {
         if (audio != null) {
             audio.setSpeakerphoneOn(talkSavedSpeaker);
             if (talkSavedMode >= 0) {
                 audio.setMode(talkSavedMode);
             }
-            if (talkSavedVoiceVolume >= 0) {
-                audio.setStreamVolume(
-                        AudioManager.STREAM_VOICE_CALL, talkSavedVoiceVolume, 0);
-            }
         }
         talkSavedMode = -1;
-        talkSavedVoiceVolume = -1;
     }
 
     /**
