@@ -77,17 +77,10 @@ impl XgViewApp {
         let layout = self.scheduler.layout();
         let page = self.scheduler.page();
         let focus = self.scheduler.focus();
-        let portrait = self.orientation.is_portrait();
-        let view = self.config.group_mut();
-        // The grid is remembered per orientation; page and focus are shared and
-        // clamped to the current grid.
-        if portrait {
-            view.portrait_layout = layout;
-        } else {
-            view.layout = layout;
-        }
-        view.page = page;
-        view.focus = focus;
+        // The grid, the page and the cursor all belong to the orientation
+        // being drawn. Turning the wall parks this side before the other side
+        // is loaded, so neither can overwrite the other's place.
+        self.config.group_mut().set_view(self.orientation.is_portrait(), layout, page, focus);
     }
 
     pub(super) fn save_now(&mut self) {
@@ -640,15 +633,7 @@ impl XgViewApp {
             // those cameras and clamps the page - after the planner had run,
             // that would leave the two disagreeing about which channels live.
             self.config.normalize();
-            let (layout, page, focus) = {
-                let view = self.config.group();
-                let layout = if self.orientation.is_portrait() {
-                    view.portrait_layout
-                } else {
-                    view.layout
-                };
-                (layout, view.page, view.focus)
-            };
+            let (layout, page, focus) = self.config.group().view(self.orientation.is_portrait());
             self.scheduler = Scheduler::new(layout, page, focus, self.config.enabled_count());
             // Cameras no longer on the wall's plan. A scheduler built from
             // scratch remembers no plan, so the first `refresh` can only say

@@ -59,11 +59,13 @@ impl XgViewApp {
 
     /// Switches the wall between landscape and portrait.
     ///
-    /// The grid of the orientation being left is parked first - through
-    /// [`Self::sync`], which writes the scheduler's layout back to the field of
-    /// the current orientation - so the other side's grid is not overwritten.
-    /// The grid of the orientation being entered is loaded next. Page and focus
-    /// are shared and are clamped to the new grid.
+    /// The view of the orientation being left is parked first - through
+    /// [`Self::sync`], which writes the scheduler's grid, page and cursor back
+    /// to the side being drawn - so the other side's view is not overwritten.
+    /// The grid of the orientation being entered is loaded next, then its page
+    /// and cursor: each side has its own, and the order matters because
+    /// changing the grid clamps the page, and changing the page clamps the
+    /// cursor into it.
     pub(super) fn set_orientation(&mut self, portrait: bool) {
         let wanted = if portrait && self.supports_portrait {
             Orientation::Portrait
@@ -77,11 +79,15 @@ impl XgViewApp {
         self.sync();
         self.orientation = wanted;
         self.tile_bar.hide();
-        let view = self.config.group().clone();
-        let layout = if wanted.is_portrait() { view.portrait_layout } else { view.layout };
+        let (layout, page, focus) = self.config.group().view(wanted.is_portrait());
         self.leave_playback();
         self.scheduler.zoom_out();
+        // The page is clamped by the grid, and the cursor by the page, so the
+        // three have to be loaded in that order - the other way round loses a
+        // cursor that sat on a page the new grid no longer has.
         self.scheduler.set_layout(layout);
+        self.scheduler.set_page(page);
+        self.scheduler.set_focus(focus);
         self.slide = Slide::default();
         // The settings panel and the layout picker are built for landscape.
         self.show_settings = false;
@@ -474,5 +480,57 @@ mod tests {
         let asked = body.find("if !self.scheduler.zoom_step(forward)").unwrap();
         let hide = body.find("self.tile_bar.hide();").expect("a step still leaves the old bar");
         assert!(asked < hide, "only a step that is taken may put the bar away");
+    }
+
+    /// Turning the wall parks the side being left before loading the side being
+    /// entered, and loads that side's grid before its page and its cursor.
+    /// `sync` reads the old orientation because it runs before the switch;
+    /// loading in any other order lets the new grid clamp a page that was
+    /// valid on the old one, and lets the page pull the cursor off its channel.
+    #[test]
+    fn turning_the_wall_parks_one_view_before_loading_the_other() {
+        let source = include_str!("paging.rs");
+        let at = source.find("pub(super) fn set_orientation(").unwrap();
+        let body = &source[at..(at + 2600).min(source.len())];
+        let sync = body.find("self.sync();").expect("the old side is parked first");
+        let switched = body.find("self.orientation = wanted;").expect("then the side changes");
+        let (layout, page, focus) = (
+            body.find("self.scheduler.set_layout(layout);").unwrap(),
+            body.find("self.scheduler.set_page(page);").unwrap(),
+            body.find("self.scheduler.set_focus(focus);").unwrap(),
+        );
+        assert!(sync < switched, "sync must see the orientation being left");
+        assert!(switched < layout, "the new view is read after the switch");
+        assert!(layout < page && page < focus, "grid, then page, then cursor");
+        assert!(
+            body.contains("self.config.group().view(wanted.is_portrait())"),
+            "the new side's own page and cursor are loaded"
+        );
+    }
+
+    /// Every place that parks a view writes it to the side it belongs to. A
+    /// direct write to `page` or `focus` here would let a rotation or a group
+    /// switch save a portrait page into the landscape field.
+    #[test]
+    fn a_parked_view_is_written_to_the_side_being_drawn() {
+        let persist = include_str!("persist.rs");
+        let at = persist.find("pub(super) fn sync(").unwrap();
+        let body = &persist[at..(at + 3200).min(persist.len())];
+        let parked = body.find("set_view(self.orientation.is_portrait()").unwrap();
+        assert!(
+            !body[..parked].contains("view.page =")
+                && !body[..parked].contains("view.portrait_page ="),
+            "no direct page write beside the orientation-aware one"
+        );
+        let cameras = include_str!("cameras.rs");
+        assert_eq!(
+            cameras.matches("set_view(self.orientation.is_portrait()").count(),
+            1,
+            "the group park goes through the same view"
+        );
+        assert!(
+            cameras.contains("self.config.group().view(self.orientation.is_portrait())"),
+            "and so does the group load"
+        );
     }
 }

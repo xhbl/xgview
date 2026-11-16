@@ -1698,10 +1698,9 @@ impl XgViewApp {
         } else {
             Orientation::Landscape
         };
-        let view = config.group();
-        let start_layout =
-            if orientation.is_portrait() { view.portrait_layout } else { view.layout };
-        let scheduler = Scheduler::new(start_layout, view.page, view.focus, config.enabled_count());
+        let (start_layout, start_page, start_focus) = config.group().view(orientation.is_portrait());
+        let scheduler =
+            Scheduler::new(start_layout, start_page, start_focus, config.enabled_count());
         let manager = ChannelManager::spawn(
             &handle,
             config.reconnect.clone(),

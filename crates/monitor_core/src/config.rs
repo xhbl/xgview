@@ -551,8 +551,45 @@ pub struct Group {
     /// apart from `layout` so turning the device does not overwrite the grid
     /// chosen for the other orientation. One column, one to four rows.
     pub portrait_layout: GridLayout,
+    /// The page the wall stands on in landscape. `portrait_page` is its
+    /// upright counterpart: the two grids rarely hold the same number of
+    /// channels, so a page the viewer reached in one orientation has no
+    /// meaning in the other. Keeping one per side means turning the device
+    /// cannot clamp away the place it was left, and turning it back finds it.
     pub page: usize,
     pub focus: Option<usize>,
+    /// The page and focus the wall stands on in portrait. See [`Self::page`]
+    /// and [`Self::focus`]. A group written before these existed inherits the
+    /// landscape pair, which was the only view there was then; see
+    /// [`AppConfig::adopt_portrait_view`].
+    pub portrait_page: usize,
+    pub portrait_focus: Option<usize>,
+}
+
+impl Group {
+    /// The grid, page and cursor of one orientation. Every place that parks or
+    /// loads a group's view goes through here, so a new direction can never
+    /// read the other one's page by accident.
+    pub fn view(&self, portrait: bool) -> (GridLayout, usize, Option<usize>) {
+        if portrait {
+            (self.portrait_layout, self.portrait_page, self.portrait_focus)
+        } else {
+            (self.layout, self.page, self.focus)
+        }
+    }
+
+    /// Parks a grid, page and cursor into one orientation of the group.
+    pub fn set_view(&mut self, portrait: bool, layout: GridLayout, page: usize, focus: Option<usize>) {
+        if portrait {
+            self.portrait_layout = layout;
+            self.portrait_page = page;
+            self.portrait_focus = focus;
+        } else {
+            self.layout = layout;
+            self.page = page;
+            self.focus = focus;
+        }
+    }
 }
 
 impl Default for Group {
@@ -563,6 +600,8 @@ impl Default for Group {
             portrait_layout: GridLayout::P3,
             page: 0,
             focus: None,
+            portrait_page: 0,
+            portrait_focus: None,
         }
     }
 }
@@ -778,8 +817,43 @@ impl AppConfig {
         }
         let mut config: AppConfig = serde_json::from_value(value.clone())?;
         config.adopt_flat_view(&value);
+        config.adopt_portrait_view(&value);
         config.normalize();
         Ok(config)
+    }
+
+    /// Gives a configuration written before the portrait view had its own page
+    /// and focus the one view it had then: the landscape pair.
+    ///
+    /// Read from the raw JSON, not from a field default. A zero in the parsed
+    /// struct cannot say whether the file put it there or whether the key was
+    /// simply missing, and a viewer who really stopped on the first page would
+    /// be indistinguishable from one whose file predates the key. The raw key
+    /// is the only honest answer, and it also has to be checked after
+    /// [`Self::adopt_flat_view`], which folds the old top-level `page` and
+    /// `focus` into the first group before this runs.
+    fn adopt_portrait_view(&mut self, value: &serde_json::Value) {
+        let Some(object) = value.as_object() else { return };
+        if let Some(groups) = object.get("groups").and_then(|v| v.as_array()) {
+            for (index, group) in self.groups.iter_mut().enumerate() {
+                let raw = groups.get(index).and_then(|v| v.as_object());
+                if !raw.is_some_and(|r| r.contains_key("portrait_page")) {
+                    group.portrait_page = group.page;
+                }
+                if !raw.is_some_and(|r| r.contains_key("portrait_focus")) {
+                    group.portrait_focus = group.focus;
+                }
+            }
+        } else if let Some(group) = self.groups.first_mut() {
+            // No groups key: `adopt_flat_view` has just folded the top-level
+            // view into the first one, so that is the pair to inherit.
+            if !object.contains_key("portrait_page") {
+                group.portrait_page = group.page;
+            }
+            if !object.contains_key("portrait_focus") {
+                group.portrait_focus = group.focus;
+            }
+        }
     }
 
     /// Folds the `layout` / `page` / `focus` keys a configuration written before
@@ -1266,17 +1340,40 @@ impl AppConfig {
                 .iter()
                 .filter(|camera| usize::from(camera.group) == index && camera.enabled)
                 .count();
-            let group = &mut self.groups[index];
-            let capacity = group.layout.capacity();
-            let pages = crate::layout::page_count(count, capacity).max(1);
-            if group.page >= pages {
-                group.page = pages - 1;
+            let Group {
+                layout,
+                portrait_layout,
+                page,
+                focus,
+                portrait_page,
+                portrait_focus,
+                ..
+            } = &mut self.groups[index];
+            // Each orientation gets its own pages and its own cursor: ten
+            // cameras fill one landscape 4x4 and three portrait columns of
+            // four, so the page the wall was left on in one says nothing about
+            // the other. Each pair is clamped only by the grid drawn on that
+            // side. The scheduler clamps once more against the grid it is
+            // actually drawing; this pass is about not losing a value the
+            // other orientation cannot interpret.
+            Self::clamp_view(page, focus, layout.capacity(), count);
+            Self::clamp_view(portrait_page, portrait_focus, portrait_layout.capacity(), count);
+        }
+    }
+
+    /// Brings one orientation's page and focus back inside the grid it draws.
+    /// A focus with no page yet starts on the first cell of the page it is on.
+    fn clamp_view(page: &mut usize, focus: &mut Option<usize>, capacity: usize, count: usize) {
+        let pages = crate::layout::page_count(count, capacity).max(1);
+        if *page >= pages {
+            *page = pages - 1;
+        }
+        match *focus {
+            Some(at) if at >= count => {
+                *focus = if count == 0 { None } else { Some(count - 1) }
             }
-            match group.focus {
-                Some(focus) if focus >= count => group.focus = if count == 0 { None } else { Some(count - 1) },
-                None if count > 0 => group.focus = Some(group.page * capacity),
-                _ => {}
-            }
+            None if count > 0 => *focus = Some(*page * capacity),
+            _ => {}
         }
     }
 }
@@ -1510,6 +1607,113 @@ mod tests {
         let config = AppConfig::load("does-not-exist/config.json").unwrap();
         assert_eq!(config.version, CONFIG_VERSION);
         assert!(config.cameras.is_empty());
+    }
+
+    /// Ten enabled cameras on one landscape grid and a portrait column of four.
+    /// The two views are deliberately different, so a mix-up cannot hide.
+    fn ten_cameras_on_both_walls(landscape: GridLayout) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.cameras = (0..10)
+            .map(|index| {
+                CameraSource::new(
+                    format!("camera {index}"),
+                    format!("rtsp://10.0.0.{index}/live"),
+                )
+            })
+            .collect();
+        let group = &mut config.groups[0];
+        group.layout = landscape;
+        group.portrait_layout = GridLayout::P4;
+        group.page = 0;
+        group.focus = Some(2);
+        group.portrait_page = 2;
+        group.portrait_focus = Some(8);
+        config
+    }
+
+    /// Turning the wall keeps each orientation's own page and cursor.
+    ///
+    /// Ten cameras fill one landscape 4x4, two 3x3 pages, and three portrait
+    /// columns of four. A page and a focus remembered on the third portrait
+    /// page used to be clamped by the landscape count when the file was read,
+    /// so the wall came back on the first page (or the second on a narrower
+    /// grid). Now the two views are separate, and one cannot cut the other
+    /// short - including when the two grids disagree about how many pages the
+    /// same channels make.
+    #[test]
+    fn each_orientation_keeps_its_own_page_and_cursor() {
+        for landscape in [GridLayout::G4x4, GridLayout::G3x3] {
+            let config = ten_cameras_on_both_walls(landscape);
+            let written = config.to_json().unwrap();
+            let read = AppConfig::from_json(&written).unwrap();
+            assert_eq!(read.group().page, 0, "{landscape:?} landscape page");
+            assert_eq!(read.group().focus, Some(2), "{landscape:?} landscape cursor");
+            assert_eq!(read.group().portrait_page, 2, "{landscape:?} portrait page");
+            assert_eq!(read.group().portrait_focus, Some(8), "{landscape:?} portrait cursor");
+        }
+    }
+
+    /// A page past even the finer grid is still put back on the last page, on
+    /// both sides, and the cursor follows that side's own grid.
+    #[test]
+    fn a_page_past_both_grids_is_still_clamped() {
+        let mut config = ten_cameras_on_both_walls(GridLayout::G4x4);
+        config.groups[0].page = 99;
+        config.groups[0].portrait_page = 99;
+        let read = AppConfig::from_json(&config.to_json().unwrap()).unwrap();
+        assert_eq!(read.group().page, 0, "one landscape 4x4 page");
+        assert_eq!(read.group().portrait_page, 2, "three portrait pages, so the last is two");
+        assert_eq!(read.group().portrait_focus, Some(8));
+    }
+
+    /// A file written before the portrait view existed has only one page and
+    /// one cursor: both sides inherit them, which was the view the viewer
+    /// actually left. The raw keys decide, because a zero in the parsed struct
+    /// could just be the field's default.
+    #[test]
+    fn an_old_configuration_inherits_its_only_view() {
+        let config = ten_cameras_on_both_walls(GridLayout::G3x3);
+        let mut raw: serde_json::Value = serde_json::from_str(&config.to_json().unwrap()).unwrap();
+        let group = &mut raw["groups"][0];
+        let object = group.as_object_mut().unwrap();
+        object.insert("page".into(), serde_json::json!(1));
+        object.insert("focus".into(), serde_json::json!(5));
+        object.remove("portrait_page");
+        object.remove("portrait_focus");
+        let read = AppConfig::from_json(&raw.to_string()).unwrap();
+        assert_eq!(read.group().page, 1, "landscape page is read as written");
+        assert_eq!(read.group().focus, Some(5));
+        assert_eq!(read.group().portrait_page, 1, "and the old view is inherited");
+        assert_eq!(read.group().portrait_focus, Some(5));
+    }
+
+    /// A file that does name the portrait keys keeps them even when both are
+    /// zero - a first page is a real page, not a missing field.
+    #[test]
+    fn an_explicit_first_page_is_not_overwritten_by_migration() {
+        let mut config = ten_cameras_on_both_walls(GridLayout::G4x4);
+        config.groups[0].page = 0;
+        config.groups[0].portrait_page = 0;
+        let read = AppConfig::from_json(&config.to_json().unwrap()).unwrap();
+        assert_eq!(read.group().portrait_page, 0);
+    }
+
+    /// The oldest shape had no groups at all: its top-level page and focus are
+    /// folded into the first group before the portrait view inherits them.
+    #[test]
+    fn a_flat_configuration_inherits_the_folded_view() {
+        let config = ten_cameras_on_both_walls(GridLayout::G3x3);
+        let mut raw: serde_json::Value = serde_json::from_str(&config.to_json().unwrap()).unwrap();
+        let view = raw["groups"][0].clone();
+        let object = raw.as_object_mut().unwrap();
+        object.remove("groups");
+        object.insert("layout".into(), view["layout"].clone());
+        object.insert("page".into(), serde_json::json!(1));
+        object.insert("focus".into(), serde_json::json!(5));
+        let read = AppConfig::from_json(&raw.to_string()).unwrap();
+        assert_eq!(read.group().page, 1);
+        assert_eq!(read.group().portrait_page, 1, "the folded view is inherited");
+        assert_eq!(read.group().portrait_focus, Some(5));
     }
 
     /// The first run of a fresh install starts on the defaults and leaves them

@@ -57,15 +57,9 @@ impl XgViewApp {
     pub(super) fn park_group_view(&mut self) {
         let (layout, page, focus) =
             (self.scheduler.layout(), self.scheduler.page(), self.scheduler.focus());
-        let portrait = self.orientation.is_portrait();
-        let group = self.config.group_mut();
-        if portrait {
-            group.portrait_layout = layout;
-        } else {
-            group.layout = layout;
-        }
-        group.page = page;
-        group.focus = focus;
+        self.config
+            .group_mut()
+            .set_view(self.orientation.is_portrait(), layout, page, focus);
     }
 
     /// Loads the active group's view into the scheduler. The cameras follow on
@@ -81,17 +75,15 @@ impl XgViewApp {
         // arriving has its own, and nothing of the old one is drawn here.
         self.leave_playback();
         self.scheduler.zoom_out();
-        let group = self.config.group().clone();
-        let layout =
-            if self.orientation.is_portrait() { group.portrait_layout } else { group.layout };
+        let (layout, page, focus) = self.config.group().view(self.orientation.is_portrait());
         // The length of the group first: `set_page` and `set_focus` keep to the
         // grid that is there, and a group that arrived with more cameras than
         // the one being left would otherwise have its page and its focus cut
         // down to the old size - and `sync` would write the loss back.
         self.scheduler.set_channel_count(self.config.enabled_count());
         self.scheduler.set_layout(layout);
-        self.scheduler.set_page(group.page);
-        self.scheduler.set_focus(group.focus);
+        self.scheduler.set_page(page);
+        self.scheduler.set_focus(focus);
         self.needs_sync = true;
         self.apply_audio();
     }
