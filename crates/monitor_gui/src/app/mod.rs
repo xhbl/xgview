@@ -517,6 +517,10 @@ enum TileBarAction {
     /// what is missing. It answers nothing and takes no press. See
     /// `tilebar::Control::Silent`.
     NoSound,
+    /// The mark a strip carries while the box answers a question about a
+    /// recording. It is a place in the row, not a control: nothing presses it,
+    /// nothing focuses it, and nothing on the strip can be pressed beside it.
+    Waiting,
 }
 
 /// The control the ring is anchored to, the picture it belongs to, and when the
@@ -1381,6 +1385,18 @@ pub struct XgViewApp {
     /// [`XgViewApp::ring_follows_the_switch`] and
     /// [`XgViewApp::place_the_anchored_ring`].
     ring_anchor: Option<RingAnchor>,
+    /// The channel whose recording the box has been asked for, and when.
+    ///
+    /// The answer is a request away, and the wait is a state of the picture:
+    /// until it lands the strip carries nothing but a waiting mark, because a
+    /// live row would still offer the microphone, a second way into the
+    /// recording and a turn of a picture that is about to be replaced. It is
+    /// also the record that decides which answers are still about what is on
+    /// the screen - a second press, a viewer who has left, and a box that took
+    /// too long all leave answers that name a question no longer asked. The
+    /// wait has an end, so a box that never answers does not hold the strip
+    /// for good. See [`XgViewApp::playback_is_asking`].
+    playback_asking: Option<(usize, Instant)>,
     /// Whether a direction press asked for the ring on the pinned strip, to be
     /// put there as the next frame begins.
     ///
@@ -1857,6 +1873,7 @@ impl XgViewApp {
             swallow_confirm: 0,
             restore_focus: None,
             ring_anchor: None,
+            playback_asking: None,
             strip_claim: false,
             import_cameras_only: true,
             encrypt_export: true,
@@ -2228,36 +2245,66 @@ impl XgViewApp {
                     ));
                 }
                 BackgroundEvent::PlaybackReady { channel, camera_id, origin, credentials, window, begin, playlist, segments, read } => {
-                    match window {
-                        Some(window) => self.start_playback(
-                            *channel,
-                            Source {
-                                camera: camera_id.clone(),
-                                origin: origin.clone(),
-                                credentials: credentials.clone(),
-                            },
-                            *window,
-                            *begin,
-                            playlist.clone(),
-                            segments.clone(),
-                            *read,
-                        ),
-                        // The camera is there and its server answered; there is
-                        // simply nothing recorded to play. Said once, and the
-                        // viewport stays where it was. The bar's clock is in
-                        // charge again - the question has been answered, and the
-                        // answer was that there is nothing to see. The anchor
-                        // goes with it: the row it named is the row that is
-                        // being drawn, and it carries no way back into a
-                        // recording that is not there.
-                        None => {
-                            self.tile_bar.release(Instant::now());
-                            self.ring_anchor = None;
-                            self.flash(
-                                monitor_i18n::tr("toast-no-recording"),
-                                ToastKind::Error,
-                            )
+                    // Only the answer to the question this picture is still
+                    // waiting for belongs to it. A second press, an answer that
+                    // arrived after the viewer left the picture, and one that
+                    // came after the wait was given up are answers to a
+                    // question that is no longer on the screen; the strip has
+                    // gone back to its controls and an answer landing now would
+                    // take the picture away from whoever is watching it.
+                    // `playback_is_asking` owns the wait's clock and the
+                    // picture it belongs to; the channel is the last half of
+                    // "this answer is for that question".
+                    let waiting = self.playback_is_asking()
+                        && self.playback_asking.is_some_and(|(asked, _)| asked == *channel);
+                    if waiting {
+                        self.playback_asking = None;
+                        match window {
+                            Some(window) => self.start_playback(
+                                *channel,
+                                Source {
+                                    camera: camera_id.clone(),
+                                    origin: origin.clone(),
+                                    credentials: credentials.clone(),
+                                },
+                                *window,
+                                *begin,
+                                playlist.clone(),
+                                segments.clone(),
+                                *read,
+                            ),
+                            // The camera is there and its server answered; there is
+                            // simply nothing recorded to play. Said once, and the
+                            // viewport stays where it was. The bar's clock is in
+                            // charge again - the question has been answered, and the
+                            // answer was that there is nothing to see. The anchor
+                            // goes with it: the row it named is the row that is
+                            // being drawn, and it carries no way back into a
+                            // recording that is not there.
+                            None => {
+                                self.tile_bar.release(Instant::now());
+                                self.ring_anchor = None;
+                                self.flash(
+                                    monitor_i18n::tr("toast-no-recording"),
+                                    ToastKind::Error,
+                                )
+                            }
                         }
+                    } else {
+                        // The answer came, so that question is over even when
+                        // the viewer has left the picture it was asked of:
+                        // otherwise stepping back to the same channel would
+                        // find a strip still waiting for an answer it has
+                        // already had. An answer for another channel is not
+                        // this question's, and leaves the newer one alone.
+                        if self.playback_asking.is_some_and(|(asked, _)| asked == *channel) {
+                            self.playback_asking = None;
+                        }
+                        tracing::debug!(
+                            target: "xgview::app",
+                            channel,
+                            "a recording answered a question no longer asked"
+                        );
                     }
                 }
                 BackgroundEvent::PlaylistReady { index, camera_id, window, at, playlist, gen } => {
@@ -5161,9 +5208,9 @@ mod tests {
         // there is none to play - lets it go.
         let playback = include_str!("playback.rs");
         let at = playback.find("fn enter_playback(").unwrap();
-        let tail = &playback[at..(at + 2500).min(playback.len())];
+        let tail = &playback[at..(at + 3500).min(playback.len())];
         assert!(
-            tail.contains("self.tile_bar.hold(Instant::now())"),
+            tail.contains("self.tile_bar.hold(now)"),
             "the question holds the bar up"
         );
         let at = playback.find("fn start_playback(").unwrap();
@@ -5173,7 +5220,7 @@ mod tests {
             "the answer lets it go"
         );
         let at = app.find("BackgroundEvent::PlaybackReady").unwrap();
-        let tail = &app[at..(at + 2500).min(app.len())];
+        let tail = &app[at..(at + 3500).min(app.len())];
         assert!(
             tail.contains("self.tile_bar.release(Instant::now())"),
             "and so does the box saying there is nothing to play"
@@ -5186,6 +5233,106 @@ mod tests {
         assert!(
             tail.contains("self.ring_follows_the_switch(ui.ctx(), *action)"),
             "a finger on the strip keeps the ring too"
+        );
+    }
+
+    /// The strip is one waiting mark while the box answers, and nothing on it
+    /// can be pressed twice.
+    ///
+    /// A press that asked for a recording used to leave a live row on the
+    /// screen until the box answered, and that row still offered a microphone,
+    /// another way into the recording, a turn of the picture and a whole walk
+    /// of controls - all of them about a picture that was about to be replaced.
+    /// A call opened in that wait took the whole strip for its handset and was
+    /// still there when the recording came up.
+    #[test]
+    fn the_strip_waits_for_the_recording_with_nothing_to_press() {
+        let wall = include_str!("wall.rs");
+        let at = wall.find("fn tile_bar_entries(").unwrap();
+        let body = &wall[at..(at + 1200).min(wall.len())];
+        assert!(
+            body.contains("if self.playback_is_asking()")
+                && body.contains("tilebar::Control::Waiting"),
+            "the waiting strip carries one mark and no controls"
+        );
+        let at = wall.find("fn tile_bar_available(").unwrap();
+        let body = &wall[at..(at + 500).min(wall.len())];
+        assert!(
+            body.contains("TileBarAction::NoSound | TileBarAction::Waiting"),
+            "the mark is not a control"
+        );
+        // One question, and only the answer to that question is about what is
+        // on the screen.
+        let playback = include_str!("playback.rs");
+        let at = playback.find("fn enter_playback(").unwrap();
+        let body = &playback[at..(at + 3000).min(playback.len())];
+        assert!(
+            body.contains("if self.playback_is_asking()") && body.contains("return;"),
+            "a second press is not another question"
+        );
+        assert!(
+            body.contains("self.playback_asking = Some((channel, now))"),
+            "the question is recorded with the picture it belongs to"
+        );
+        let app = include_str!("mod.rs");
+        let at = app.find("BackgroundEvent::PlaybackReady").unwrap();
+        let body = &app[at..(at + 2000).min(app.len())];
+        assert!(
+            body.contains("self.playback_is_asking()") && body.contains("asked == *channel"),
+            "only a question still on the screen has an answer"
+        );
+        // The keys cannot fall through to the picture while the strip waits.
+        let input = include_str!("input.rs");
+        let at = input.find("if self.playback_is_asking()").unwrap();
+        let body = &input[at..(at + 900).min(input.len())];
+        assert!(
+            body.contains("if self.playback_is_asking()")
+                && body.contains("consume_any(input, &CONFIRM_KEYS)")
+                && body.contains("memory.request_focus(tilebar::seat())"),
+            "the arrows and the confirm key are taken, and the seat keeps the focus"
+        );
+        // The mark turns, and it is drawn outside the walk.
+        let tilebar = include_str!("../tilebar.rs");
+        let at = tilebar.find("Control::Waiting =>").unwrap();
+        let body = &tilebar[at..(at + 400).min(tilebar.len())];
+        assert!(
+            body.contains("icons::waiting_in") && body.contains("continue;"),
+            "the mark takes no press and no stop on the walk"
+        );
+        let icons = include_str!("../icons.rs");
+        assert!(
+            icons.contains("input.time") && icons.contains("circle_arc"),
+            "and it turns with the clock"
+        );
+        // The wait is about the picture on the screen, not only a clock: the
+        // paths that change the magnification do not all settle the bar, so a
+        // question left behind must not put a recording on another picture.
+        let at = playback.find("fn playback_is_asking(").unwrap();
+        let body = &playback[at..(at + 900).min(playback.len())];
+        assert!(
+            body.contains("self.scheduler.zoom() == Some(channel)"),
+            "a viewer who left the picture is not waiting for it"
+        );
+        assert_eq!(
+            ANCHOR_WAIT,
+            crate::tilebar::HOLD,
+            "the strip and the question are held for the same wait"
+        );
+        // And an answer ends the question it was asked about, even when the
+        // viewer has left: stepping back must not find a strip still waiting.
+        let at = app.find("a recording answered a question no longer asked").unwrap();
+        let head = &app[at.saturating_sub(1000)..at];
+        assert!(
+            head.contains("asked == *channel") && head.contains("self.playback_asking = None"),
+            "an answer ends the question it was asked about"
+        );
+        // A call that outlived the wait is ended when the recording opens, but
+        // only one that is actually up: letting go clears the ring's anchor.
+        let at = playback.find("fn start_playback(").unwrap();
+        let body = &playback[at..(at + 2000).min(playback.len())];
+        assert!(
+            body.contains("if self.talking {") && body.contains("self.set_talking(false)"),
+            "the recording cannot inherit a call"
         );
     }
 

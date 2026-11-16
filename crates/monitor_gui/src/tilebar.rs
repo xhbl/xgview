@@ -278,6 +278,14 @@ pub enum Control {
     /// a button belongs reads as something missing, while a grey speaker says
     /// what is missing. See `XgViewApp::tile_bar_tips`.
     Silent,
+    /// The one mark a strip carries while the box answers a question about a
+    /// recording. Every control is away for that wait: a live row would still
+    /// offer a microphone, another way into the recording and a picture to
+    /// turn, all of which are about to be replaced. The mark turns with the
+    /// clock so the press is known to have been heard, and it is not a control
+    /// - nothing presses it, nothing focuses it, and the walk has no stop on
+    /// it. See `XgViewApp::playback_is_asking`.
+    Waiting,
 }
 
 /// How much room an icon control asks for: square, the strip's depth.
@@ -868,6 +876,13 @@ pub fn draw(
                     tip,
                     rotated,
                 );
+                continue;
+            }
+            // The strip is waiting for the box. The turning mark is the answer
+            // to "was my press heard?", and the seat keeps the keys: no press,
+            // no stop on the walk, nothing to activate beside it.
+            Control::Waiting => {
+                let _ = icons::waiting_in(ui, *rect, self::control(index), tip);
                 continue;
             }
         };

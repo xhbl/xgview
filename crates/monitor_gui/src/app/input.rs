@@ -1731,6 +1731,27 @@ impl XgViewApp {
         // The magnified bar's own controls, and the strip under them: the two
         // answers the arrow keys are read against.
         let bar_owns = ctx.memory(|memory| memory.focused()).is_some_and(tilebar::owns);
+        // While the box answers, the strip is one waiting mark and the seat is
+        // the only place on it that can hold the focus. Take the arrows and the
+        // confirm key away before they are read: there is no control to walk
+        // onto, a second press is not another question, Left and Right step the
+        // picture's channel only when the strip is not waiting, and the anchor
+        // the switch is keeping is not the viewer's to give up. Back is left
+        // alone - leaving the picture is still theirs to do.
+        // A call that is up is the one exception: the strip is still showing
+        // its handset, and a viewer must be able to hang up even in the wait.
+        // See `tile_bar_entries`.
+        if self.playback_is_asking() && !self.talking {
+            ctx.input_mut(|input| {
+                for key in [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown] {
+                    input.consume_key(Modifiers::NONE, key);
+                }
+                consume_any(input, &CONFIRM_KEYS);
+            });
+            if ctx.memory(|memory| memory.focused()) != Some(tilebar::seat()) {
+                ctx.memory_mut(|memory| memory.request_focus(tilebar::seat()));
+            }
+        }
         let keys = Self::parse_keys(ctx, grid_owns, nav_owns, nav_kind, typing, bar_owns);
         // The remote is walking the strip itself: the ring is the viewer's own
         // cursor again, and the anchor that was holding it on one control lets

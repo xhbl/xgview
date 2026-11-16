@@ -487,7 +487,33 @@ impl XgViewApp {
     /// only playable where a segment covers it, and where it begins is what the
     /// moment each picture is of is counted from. So this is a request, and what
     /// it answers arrives as an event.
+    /// Whether the box still owes the picture on the screen an answer about
+    /// its recording.
+    ///
+    /// The question belongs to the channel that asked it. A viewer who stepped
+    /// away - a channel step, a new layout, the grid again - is not waiting for
+    /// it, and paths that change the magnification do not all pass through
+    /// `settle_tile_bar`, so the picture is asked here rather than remembered.
+    ///
+    /// The wait is a question with an end as well: a box that never answers
+    /// must not hold the strip in its waiting shape for ever. [`ANCHOR_WAIT`]
+    /// is the same wait the ring's anchor keeps - both are the time a question
+    /// about a recording is allowed to be outstanding.
+    pub(super) fn playback_is_asking(&self) -> bool {
+        self.playback_asking.is_some_and(|(channel, at)| {
+            at.elapsed() <= ANCHOR_WAIT && self.scheduler.zoom() == Some(channel)
+        })
+    }
+
     pub(super) fn enter_playback(&mut self) {
+        // One question at a time. The strip is a waiting mark until the box
+        // answers, and a second press during that wait is not another
+        // question - two answers would open the same recording twice, and the
+        // second would take the picture from under the first.
+        if self.playback_is_asking() {
+            tracing::debug!(target: "xgview::app", "enter playback: the box is still answering");
+            return;
+        }
         let Some(channel) = self.scheduler.zoom() else {
             tracing::debug!(target: "xgview::app", "enter playback: nothing magnified");
             return;
@@ -514,9 +540,23 @@ impl XgViewApp {
         // floating bar has a clock of its own and would go down in the middle
         // of it, taking the ring with it - so it is held up until the answer
         // lands, or until the box says there is nothing to play.
-        if self.tile_bar.is_open() {
-            self.tile_bar.hold(Instant::now());
+        // A call is placed to the camera, and the picture is on its way to
+        // being a recording: there is nothing behind one to talk to. Ended
+        // only here, once the question is really going out - a camera that
+        // names no server, or a viewport nobody magnified, is not a reason to
+        // hang up on the viewer.
+        if self.talking {
+            self.set_talking(false);
         }
+        let now = Instant::now();
+        if self.tile_bar.is_open() {
+            self.tile_bar.hold(now);
+        }
+        // From here the picture is waiting: the strip changes on the next
+        // frame, and this is the record the answer is checked against. One
+        // instant for the hold and the question, so the two waits are the
+        // same wait.
+        self.playback_asking = Some((channel, now));
         start_window(
             &self.handle,
             &self.events_tx,
@@ -549,6 +589,16 @@ impl XgViewApp {
         // The answer has landed, so the bar's own clock is in charge again: it
         // goes down when the viewer stops using it, and not before.
         self.tile_bar.release(Instant::now());
+        self.playback_asking = None;
+        // A call that outlived the wait would take the whole strip for its
+        // handset, and the recording's row - including the way back to the
+        // picture - would never be drawn. Only a call that is actually up is
+        // ended: letting one go clears the ring's anchor, and the ring the
+        // switch asked for is on its way to the control that undoes it.
+        if self.talking {
+            tracing::debug!(target: "xgview::app", "the recording ended a call opened during the wait");
+            self.set_talking(false);
+        }
         // The camera's own session under this slot is a decoder drawing nothing
         // from here on: the recording is what the viewport shows. Let go of it
         // before the recording's first fragment is asked for, so that the two

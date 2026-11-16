@@ -213,6 +213,45 @@ pub fn button_in(
     hover_text(response, tooltip)
 }
 
+/// The mark a strip carries while the box answers a question about a
+/// recording: an arc that turns with the clock, on a button's frame.
+///
+/// Nothing can press it. The frame keeps the strip's shape while every control
+/// is away, and the turning is the one thing on the screen that says the press
+/// was heard and an answer is still on its way. The repaint is asked for here
+/// because the mark is the only reason to draw again while the picture itself
+/// has nothing new to say.
+pub fn waiting_in(ui: &mut Ui, rect: Rect, id: Id, tooltip: &str) -> Response {
+    let response = ui.interact(rect, id, Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact_selectable(&response, false);
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(theme::radius::M),
+            visuals.weak_bg_fill,
+        );
+        // One turn in a little over a second: slow enough to read as waiting,
+        // quick enough that a still frame is not mistaken for a frozen one.
+        let from = (ui.ctx().input(|input| input.time) * 300.0) as f32 % 360.0;
+        let color = ui
+            .visuals()
+            .override_text_color
+            .unwrap_or_else(|| visuals.text_color());
+        let side = rect.width() * GLYPH;
+        ui.painter().add(circle_arc(
+            rect,
+            false,
+            (0.5, 0.5),
+            0.30,
+            from,
+            from + 270.0,
+            Stroke::new(stroke_width(side), color),
+        ));
+        ui.ctx().request_repaint();
+    }
+    hover_text(response, tooltip)
+}
+
 /// The red control a call ends with: [`button_in`] painted in the colour the
 /// bars use for danger.
 ///

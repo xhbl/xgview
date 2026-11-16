@@ -97,7 +97,12 @@ impl XgViewApp {
     /// the strip away is not overruled by the next frame.
     pub(super) fn settle_tile_bar(&mut self) {
         // The picture has changed under the question: whatever a tap was asking
-        // for, it was asking of the picture that has just gone.
+        // for, it was asking of the picture that has just gone. Only a change
+        // of channel or of magnification does that - a quarter turn or a change
+        // of orientation leaves the same picture, and its question, in place.
+        if self.playback_asking.is_some_and(|(channel, _)| self.scheduler.zoom() != Some(channel)) {
+            self.playback_asking = None;
+        }
         self.tap_open_at = None;
         if self.tile_bar_pinned() {
             self.tile_bar.show(tilebar::Dock::Bottom, Instant::now());
@@ -1538,10 +1543,11 @@ impl XgViewApp {
     /// be a claim this side cannot make. **A control that is right most of the
     /// time is worse than one that never claims to know.**
     pub(super) fn tile_bar_available(&self, action: TileBarAction) -> bool {
-        // A grey speaker is not a control: it is a place kept, and nothing can
-        // land on it or walk onto it. `tilebar` draws it inert on its own as
-        // well, so the two answers cannot disagree about it.
-        if matches!(action, TileBarAction::NoSound) {
+        // A grey speaker and a waiting mark are places in the row, not
+        // controls: nothing can land on either or walk onto either. `tilebar`
+        // draws them inert on its own as well, so the two answers cannot
+        // disagree about them.
+        if matches!(action, TileBarAction::NoSound | TileBarAction::Waiting) {
             return false;
         }
         // One download at a time. The mute is what stops a second press, and
@@ -1637,6 +1643,15 @@ impl XgViewApp {
     pub(super) fn tile_bar_entries(&self) -> (Vec<(tilebar::Control, TileBarAction)>, Vec<usize>) {
         if self.talking {
             return (vec![(tilebar::Control::Hangup, TileBarAction::Hangup)], Vec::new());
+        }
+        // The box owes this picture an answer. Until it lands the strip is one
+        // waiting mark and nothing else: a live row would still offer the
+        // microphone, a second way into the recording, a turn of the picture
+        // and a walk of controls that are all about to be replaced. A press
+        // answered by any of them is a press answered by a picture that is no
+        // longer there. See [`Self::playback_is_asking`].
+        if self.playback_is_asking() {
+            return (vec![(tilebar::Control::Waiting, TileBarAction::Waiting)], Vec::new());
         }
         let mut entries = Vec::new();
         let playing = self.scheduler.zoom().is_some_and(|channel| self.is_playing_back(channel));
@@ -1841,8 +1856,9 @@ impl XgViewApp {
     }
 
     /// The indices at which a recording's controls start a new line. Empty on
-    /// a wide picture, `[1, 7]` on a phone held upright (or `[1, 6]` when the
-    /// camera has no audio): live alone, then the transport and the save, then
+    /// a wide picture, `[1, 7]` on a phone held upright, whichever the
+    /// stream's audio turns out to be: live alone, then the transport and the
+    /// save, then
     /// the timeline's own keys.
     pub(super) fn tile_bar_break(&self) -> Vec<usize> {
         self.tile_bar_entries().1
@@ -1896,8 +1912,10 @@ impl XgViewApp {
                 tr(if days { "tilebar-date-back-tip" } else { "tilebar-date-tip" })
             }
             TileBarAction::Live => tr("tilebar-live-tip"),
-            // The grey speaker says why it cannot be pressed.
+            // The grey speaker says why it cannot be pressed, and the waiting
+            // mark says what the strip is waiting for.
             TileBarAction::NoSound => tr("tilebar-no-sound-tip"),
+            TileBarAction::Waiting => tr("tilebar-waiting-tip"),
             TileBarAction::Download => {
                 if self.download.is_active() {
                     monitor_i18n::tr_args(
@@ -1972,9 +1990,9 @@ impl XgViewApp {
                 }
             }
             TileBarAction::Live => self.leave_playback(),
-            // The grey speaker answers nothing, and there is nothing to press:
-            // it is a place kept, not a control.
-            TileBarAction::NoSound => {}
+            // A grey speaker and a waiting mark answer nothing, and there is
+            // nothing to press: they are places kept, not controls.
+            TileBarAction::NoSound | TileBarAction::Waiting => {}
             TileBarAction::Fit => {
                 // The fit this writes is the magnified viewport's own: it is kept
                 // per camera, and the wall's landscape and portrait fits - the
@@ -2472,8 +2490,8 @@ mod tests {
         let at = wall.find("fn tile_bar_available(").unwrap();
         let body = &wall[at..(at + 700).min(wall.len())];
         assert!(
-            body.contains("if matches!(action, TileBarAction::NoSound)"),
-            "a grey speaker is not a control"
+            body.contains("TileBarAction::NoSound | TileBarAction::Waiting"),
+            "a grey speaker and a waiting mark are not controls"
         );
         // It is drawn rather than left as a hole, but the drawing is inert:
         // a dim muted speaker, with no press and no stop on the walk. The
