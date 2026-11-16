@@ -3,6 +3,46 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 2.2.98
+
+Changes since 2.2.84.
+
+- **Recordings can be saved as clips.** Playback gained a download action that
+  asks the box to export the current recording and saves the result to the
+  device; the save window reads the same in portrait and landscape, an
+  interrupted save leaves no half-written file behind, and the viewer no longer
+  aborts on its way out.
+- **A magnified portrait picture has its control strip beside it**, no longer
+  floating over the picture: the strip keeps a band of its own for as long as
+  the picture is magnified, so it no longer covers the image or intercepts a
+  pinch or a tap.
+- **The focus ring is consistent across the strip and both orientations.** The
+  confirm key and Down light the ring, Up and Back hand the keys back to the
+  picture, and a turned strip is walked with Left and Right. A ring follows a
+  switch between live and recording, between the microphone and the handset,
+  and across a row whose controls come and go. Leaving a picture with no ring
+  now takes one Back.
+- **Waiting for a recording no longer shows the live controls.** While the box
+  answers, the strip shows one turning mark and the arrow and confirm keys are
+  held, so a stray press cannot start a call or ask a second question against a
+  picture that is about to change.
+- **A portrait wall keeps its own page and cursor**, independently of the
+  landscape side and across a restart; older configurations keep the page they
+  had, and a turn of the device no longer clamps a third page away.
+- **An empty wall cell now says so** instead of looking like a camera that
+  failed to load.
+- **Android leaves the system's call volume alone.** Playback volume is now a
+  ceiling the viewer sets rather than the app pushing the call stream to its
+  maximum, so the on-screen slider makes a difference; the microphone and
+  playback waveform gains are unchanged.
+- **The Settings shortcut names are localized**, and now list the keys the
+  viewer actually has - Space as a confirm key, Backspace and the remote's Back
+  as Back, and the number keys 0 through 9.
+- **Fixed:** a Chinese language line whose value had swallowed a second copy of
+  itself drew a key name on screen; the i18n check now catches that shape of
+  paste error. Also fixed a grey speaker for streams that carry no audio track,
+  and assorted wording and documentation corrections.
+
 ## 2.2.84
 
 Changes since 2.2.69.
