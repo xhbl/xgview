@@ -3860,7 +3860,15 @@ mod tests {
             Key::PageUp,
             Key::PageDown,
             Key::Num1,
+            Key::Num2,
+            Key::Num3,
             Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
+            Key::Num0,
         ] {
             assert!(XgViewApp::wall_key(key), "{key:?} acts on the wall");
             assert!(!XgViewApp::wall_event(bars(), true, true, &press(key)), "{key:?} acts on the wall");

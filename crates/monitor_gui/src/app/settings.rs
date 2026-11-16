@@ -646,17 +646,17 @@ impl XgViewApp {
             .num_columns(2)
             .spacing([theme::space::L, theme::space::XS])
             .show(ui, |ui| {
-                for (keys, action) in [
-                    ("DPAD / arrows", "key-move-focus"),
-                    ("Enter", "key-enter"),
-                    ("Esc / Back", "key-back"),
-                    ("Num (1-4)", "key-grid"),
-                    ("PgUp / PgDn", "key-page"),
-                    ("F1", "key-settings"),
-                    ("F2", "key-add-devices"),
-                    ("F11", "key-fullscreen"),
+                for (keyname, action) in [
+                    ("keyname-dpad", "key-move-focus"),
+                    ("keyname-enter", "key-enter"),
+                    ("keyname-back", "key-back"),
+                    ("keyname-num", "key-grid"),
+                    ("keyname-page", "key-page"),
+                    ("keyname-f1", "key-settings"),
+                    ("keyname-f2", "key-add-devices"),
+                    ("keyname-f11", "key-fullscreen"),
                 ] {
-                    ui.label(RichText::new(keys).monospace().strong());
+                    ui.label(RichText::new(monitor_i18n::tr(keyname)).monospace().strong());
                     ui.label(RichText::new(monitor_i18n::tr(action)).small().color(theme::TEXT_DIM));
                     ui.end_row();
                 }

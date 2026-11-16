@@ -8,11 +8,16 @@
 # another pack is drawn in English inside that language - both look like bugs to
 # whoever sees them, and neither fails a build.
 #
-# Three things are checked:
+# Four things are checked:
 #
 #   1. every key the code asks for is defined in English;
 #   2. every English key is defined in each pack beside it;
-#   3. no pack defines the same key twice.
+#   3. no pack defines the same key twice;
+#   4. no value has swallowed another `name =` definition - a paste accident
+#      once doubled a whole line inside its own value, which Fluent takes as
+#      text and draws as the key name in the UI. The key still appears once,
+#      so checks 1-3 cannot see it. An identifier starting with a digit is
+#      deliberately not matched, so `attempts (0 = forever)` stays legal.
 #
 # Usage: scripts/check-i18n.sh   (exits non-zero when something is missing)
 set -u
@@ -58,6 +63,18 @@ done
 for PACK in "$EN" langs/*.ftl; do
     DUPLICATES=$(keys_of "$PACK" | uniq -d)
     [ -n "$DUPLICATES" ] && report "defined twice in $PACK:" <(echo "$DUPLICATES")
+done
+
+# 4. A value that has swallowed another `name =` definition. Fluent reads
+#    everything after the first `=` as the value, so a line pasted twice -
+#    key and all - leaves the second key name visible to the viewer. The key
+#    itself is still defined once, so none of the checks above fires. It matches
+#    a letter-led identifier followed by `=` inside a value; an identifier
+#    starting with a digit is deliberately left alone, which is what keeps the
+#    legitimate `attempts (0 = forever)` out of the report.
+for PACK in "$EN" langs/*.ftl; do
+    SWALLOWED=$(grep -nE '^[a-z0-9-]+ *=.*[A-Za-z][A-Za-z0-9-]* *=' "$PACK" || true)
+    [ -n "$SWALLOWED" ] && report "value swallows a key definition in $PACK:" <(echo "$SWALLOWED")
 done
 
 [ "$STATUS" -eq 0 ] && echo "i18n: ok"

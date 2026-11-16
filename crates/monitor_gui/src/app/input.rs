@@ -152,7 +152,7 @@ impl XgViewApp {
             // is why the grid digits are read as keys above: a character typed
             // at the wall does nothing at all - there is no field on the wall to
             // type into - and counting it would put the bars back every time the
-            // viewer picked a grid with `1`, `2`, `3` or `4`.
+            // viewer picked a grid with `0` through `9`.
             egui::Event::Text(_) => false,
             egui::Event::PointerMoved(_)
             | egui::Event::MouseMoved(_)
@@ -302,6 +302,12 @@ impl XgViewApp {
                 | Key::Num2
                 | Key::Num3
                 | Key::Num4
+                | Key::Num5
+                | Key::Num6
+                | Key::Num7
+                | Key::Num8
+                | Key::Num9
+                | Key::Num0
         )
     }
 

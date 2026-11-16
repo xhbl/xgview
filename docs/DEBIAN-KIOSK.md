@@ -30,7 +30,7 @@ everything at once (upload it to the target machine first, and run it as
 the target machine needs Debian installed, a network, and SSH enabled)
 
 ```powershell
-scp scripts/debian-kiosk.sh xgview-1.4.70-linux-x86_64.tar.gz admin@machine-ip:/home/admin/
+scp scripts/debian-kiosk.sh xgview-VERSION-linux-x86_64.tar.gz admin@machine-ip:/home/admin/
 ```
 
 (Use the version of the package you actually downloaded.)
@@ -255,7 +255,7 @@ apt install --no-install-recommends \
 | `fonts-dejavu-core` | Interface and monospace fonts (DejaVu Sans / Sans Mono), read by XGView at runtime |
 | `fonts-noto-cjk` | Chinese font (Noto Sans CJK); without it Chinese renders as boxes |
 | `x11-xserver-utils` | Provides `xset`, used to disable blanking and power saving (a monitor wall must stay lit) |
-| `libasound2` | ALSA runtime, which the audio sink (cpal, 1.5) links; without it the sound switch has nothing to drive |
+| `libasound2` | ALSA runtime, which the audio sink (cpal, 0.15) links; without it the sound switch has nothing to drive |
 | `open-vm-tools` | VMware guest tools (**virtual machines only**; skip on real hardware) |
 
 Do not install `open-vm-tools-desktop`: it pulls in graphical dependencies.
@@ -277,7 +277,7 @@ Do not install `open-vm-tools-desktop`: it pulls in graphical dependencies.
 ## 5. Getting and installing the program (release package)
 
 XGView ships as a Linux package named like
-`xgview-1.4.70-linux-x86_64.tar.gz` (the version changes). Inside is a directory
+`xgview-VERSION-linux-x86_64.tar.gz`. Inside is a directory
 of the same name holding:
 
 | Content | Purpose |
@@ -294,7 +294,7 @@ The package needs glibc 2.28 or newer; Debian 13 is far above that.
 From PowerShell on Windows (no need to enter the VM):
 
 ```powershell
-scp xgview-1.4.70-linux-x86_64.tar.gz admin@machine-ip:/home/admin/
+scp xgview-VERSION-linux-x86_64.tar.gz admin@machine-ip:/home/admin/
 ```
 
 WinSCP or MobaXterm's file panel works too.
@@ -382,7 +382,7 @@ sudo systemctl start monitor
   OpenGL/Vulkan libraries and the graphics driver still come from the system, so
   the packages in section 4 cannot be skipped.
 - **Hardware decoding**: the bundled `libva` is only the interface; the actual
-  VA-API driver (on the N100, `intel-media-va-driver`) comes from the system.
+  VA-API driver (on the N100, `intel-media-va-driver-non-free`) comes from the system.
   Check with `vainfo` first, then see whether the program's **About** page
   reports hardware decoding. If the system driver is fine but the program says
   otherwise, the bundled `libva` may not find the driver directory; try adding

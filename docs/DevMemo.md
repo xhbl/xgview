@@ -608,8 +608,8 @@ before blaming the converter for anything.
 **`copy_back` is the only step that costs**, and it scales with the picture:
 0.6 ms at 640x480, 4.8 ms at 2560x1920. At 20 fps that is about 1.2% of a core
 per 640x480 channel, and about 10% per 2560x1920 one. `pack` is 0.05 ms at
-640x480 and 1.4 ms only at 2560x1920, where the same row walk crosses six and a
-half times as many bytes. The upload's CPU side is a quarter of a millisecond
+640x480 and 1.4 ms only at 2560x1920, where the same walk covers sixteen times
+as many bytes. The upload's CPU side is a quarter of a millisecond
 either way.
 
 **The measurement is what rules the two copy-removing designs out**, rather than
@@ -765,7 +765,7 @@ can only be settled by upgrading and measuring again. Making this box work
 would mean a second renderer (`egui_glow` plus a GL path for the video
 textures), which is the thing the device is not worth, so the floor was set at
 28 rather than letting a device install an app that aborts on its first frame
-(see section 18 for why it later moved to 27).
+(see §18 for why it later moved to 27).
 
 **The panic hook earned its place here.** Without it the only trace was
 `SIGABRT` with a backtrace ending inside our own `.so`: a Rust panic cannot
@@ -4176,8 +4176,8 @@ and that was the whole vocabulary.
 
 The plan's row is five controls - back ten seconds, play, forward ten, the speed
 and the way out - and it has never been built. What it did not have room for is
-what this adds: **the two event jumps and the timeline's width**, which are eight
-controls in all.
+what this adds: **the two event jumps and the timeline's width**, alongside the
+quarter turn and the sound switch that are already there.
 
 | live | a recording |
 | --- | --- |
@@ -4859,7 +4859,7 @@ overlay and the band test go through it. `a_band_from_another_screen_is_not_a_ba
 pins it: the bands of a 720-tall window asked about a 1080-tall screen are at the
 top and bottom of *that* screen, and a press in the middle is the wall's.
 
-**How it got here.** Two pieces, five days apart in October, and neither is wrong
+**How it got here.** Two pieces, three days apart in October, and neither is wrong
 on its own. `v1.1.60` (2026-10-05, *adjust full screen navigation*) gave the band
 an overlay that claims a press in it for the pointer, and a test that reads the
 stored rectangles' absolute y. `v1.2.101` (2026-10-08, *Start the viewer full
@@ -5388,7 +5388,7 @@ moved the cursor. Both halves are read now.
 *And a seek into a hole stayed held.* The empty answer has its own path - "the box
 was asked about this range and there is nothing in it" - and it cleared the wait
 without letting go of the hold a press had taken, so the picture stayed stopped for
-ever. It is the fifth of these (§ above): every way out of a seek has to release the
+ever. It is the fifth of these: every way out of a seek has to release the
 hold, including the ways that end in nothing. Gated on a seek having been the one
 waiting, because a read of the strip's own comes back empty while a finger is still
 on the timeline, and letting go there would start the picture under the hand.
@@ -5743,8 +5743,8 @@ step landed before the list's first file, the seek asked about that moment, the 
 answered nothing, and the cursor went back to the picture it had started from, so the same
 press did the same thing again. The far left of the band was unreachable.
 
-A step back is now held to `segments.first().start`, and a landing that is already where
-the picture is is no step at all (`step_landing` answers `None`): a held key would
+A step back is now held to `segments.first().start`, and a landing already at
+the picture is no step at all (`step_landing` answers `None`): a held key would
 otherwise seek the same fragment ten times a second. A step *forward* is not held this way
 - past the last file is a recording the box has not listed yet, and the read is the right
 answer.

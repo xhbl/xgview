@@ -939,7 +939,7 @@ XGView.app/Contents/MacOS/xgview --print-schedule
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE). All code in this repository are free to use, modify, and distribute under the terms of this license.
+This project is licensed under the [MIT License](LICENSE). All code in this repository is free to use, modify, and distribute under the terms of this license.
 
 ***
 
