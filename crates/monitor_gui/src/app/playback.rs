@@ -505,6 +505,24 @@ impl XgViewApp {
         })
     }
 
+    /// Hands the picture back the keys the wait held on the strip's seat.
+    ///
+    /// While the box answers, the strip is one turning mark and the seat is
+    /// the only thing on it that can hold the focus - see
+    /// [`XgViewApp::handle_keys`]. An answer ends the wait, and a seat left
+    /// focused is a cursor that draws nothing but still owns the arrows: the
+    /// first Back would be spent letting it go, and Left and Right would walk
+    /// a strip the viewer never asked to walk. Only the bar's own focus is
+    /// given up; a window over the wall keeps whatever it was given.
+    pub(super) fn release_the_waiting_seat(&self, ctx: &egui::Context) {
+        if let Some(id) = ctx
+            .memory(|memory| memory.focused())
+            .filter(|id| tilebar::owns(*id))
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+    }
+
     pub(super) fn enter_playback(&mut self) {
         // One question at a time. The strip is a waiting mark until the box
         // answers, and a second press during that wait is not another
@@ -575,6 +593,7 @@ impl XgViewApp {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn start_playback(
         &mut self,
+        ctx: &egui::Context,
         channel: usize,
         source: Source,
         window: (i64, i64),
@@ -586,6 +605,10 @@ impl XgViewApp {
         let index = self.playback_index();
         let from = window.0;
         let begin = begin.map(|at| begin_in(window, at));
+        // Read before anything here can let the anchor go: ending a call is
+        // one such thing, and the answer is about the ring the press had, not
+        // about the state the cleanup leaves behind.
+        let keep_ring = self.ring_anchor.is_some();
         // The answer has landed, so the bar's own clock is in charge again: it
         // goes down when the viewer stops using it, and not before.
         self.tile_bar.release(Instant::now());
@@ -682,17 +705,26 @@ impl XgViewApp {
         });
         // The bar's row has changed under the focus: the camera's controls are
         // gone and the recording's are here, and the place the focus was on
-        // means something else in this row. It goes to the seat, which draws
-        // nothing until an arrow picks a control - unless the press that asked
-        // for this recording was made with a ring on the strip: that ring is
-        // the viewer's cursor, and it goes on the control that leaves the
-        // recording, the way it came from the one that entered it. The anchor
-        // is what carries it there, and it is put on the control every frame
-        // while the row is drawn - a row that is a frame shorter puts the
-        // anchor somewhere else, and a ring that was put there once names a
-        // control that is not there. See [`Self::ring_follows_the_switch`] and
+        // means something else in this row. A ring the switch is keeping -
+        // the anchor - is put on its control every frame, so it needs only a
+        // seat to stand on until that frame is drawn. A switch made with no
+        // ring, a finger on the button, needs no seat at all: the seat draws
+        // nothing but still owns the keyboard, and a first Back would then be
+        // spent letting go of a cursor nobody can see. See
+        // [`Self::ring_follows_the_switch`] and
         // [`Self::place_the_anchored_ring`].
-        self.restore_focus = Some(tilebar::seat());
+        self.restore_focus = keep_ring.then(tilebar::seat);
+        // The wait held the keyboard on that same seat while the strip was one
+        // turning mark. A box that answers within the frame never put it
+        // there; a box that took a frame longer leaves it behind in the
+        // recording that opens. With no ring to keep, the keys go back to the
+        // picture now - not only so Back is one press, but so the arrows step
+        // the picture instead of walking a strip nobody asked to walk. Only
+        // the bar's own focus is given up: a window over the wall still owns
+        // whatever it was given. See [`Self::playback_is_asking`].
+        if !keep_ring {
+            self.release_the_waiting_seat(ctx);
+        }
         // A new recording starts at normal speed whatever the last one was
         // played at, and says so: the channel's control outlives the request
         // that is open - see `Supervisor::play` - so the speed it is holding is
@@ -1671,6 +1703,20 @@ impl XgViewApp {
         // set by the press that asked for this - the way in. See
         // [`Self::ring_follows_the_switch`].
         self.ring_anchor = None;
+        // Read before the row is put away: a ring drawn on one of the strip's
+        // controls at the end of the last frame is the one a switch keeps, and
+        // only that ring needs a seat to stand on until the new row is drawn
+        // and the anchor is placed again. The seat itself is not a ring - it
+        // draws nothing but still owns the arrows - and leaving a recording is
+        // not only the Live button: stepping to another camera, leaving the
+        // viewport, a change of layout all pass through here. A finger on the
+        // way into a recording left no ring behind, and a Left that then steps
+        // the picture must not put one on the next camera: the first Right
+        // would be spent lighting the strip instead of stepping back. See
+        // [`Self::step_zoom`] and [`Self::focus_at_end`].
+        let keep_ring = self
+            .focus_at_end
+            .is_some_and(|id| tilebar::index_of(id).is_some());
         let Some(playback) = self.playback.take() else {
             return;
         };
@@ -1679,14 +1725,11 @@ impl XgViewApp {
         // and keeps arriving on its own task.
         self.download_panel.close();
         // The bar's row is not the row it was: the recording's controls are gone
-        // and the camera's are back. The focus was on a place in the old row, and
-        // the place means something else now - so it goes to the seat, where the
-        // first arrow picks a control by name rather than by number.
-        //
-        // A ring that was on the strip does not go there: it goes on the way
-        // into the recording, which is where `ring_follows_the_switch` sends it
-        // once this has put the new row back.
-        self.restore_focus = Some(tilebar::seat());
+        // and the camera's are back. A ring the switch is keeping is put on the
+        // control that undoes it every frame, so it needs only a seat to stand
+        // on until that frame is drawn. No ring was drawn: put no seat down,
+        // for the reason above.
+        self.restore_focus = keep_ring.then(tilebar::seat);
         self.manager.stop_clip(playback.index);
         self.channels.remove(&playback.index);
         self.textures.remove(&playback.index);

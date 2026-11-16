@@ -1494,6 +1494,15 @@ impl XgViewApp {
             });
             if on_bar {
                 self.leave_controls(ui.ctx());
+                // A switch made with a finger puts a seat on the next frame.
+                // That is the very focus this press has just let go of:
+                // leaving it queued would hand the keyboard back to an
+                // invisible cursor the moment the box answers. Only the seat
+                // is dropped - a window's own focus to restore is not this
+                // press's to spend.
+                if self.restore_focus == Some(tilebar::seat()) {
+                    self.restore_focus = None;
+                }
             }
         }
 

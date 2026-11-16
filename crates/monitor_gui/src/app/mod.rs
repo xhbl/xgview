@@ -1339,6 +1339,17 @@ pub struct XgViewApp {
     audio: Option<Arc<crate::audio::Sink>>,
     /// Who answered the last frame's direction presses.
     owner: Owner,
+    /// The focus the viewer was looking at as the last frame ended.
+    ///
+    /// `owner` is read from this same focus, and both belong to the frame that
+    /// has just been drawn: egui gives a Back/Escape press its own answer at the
+    /// start of the *next* frame and drops the focus before the application sees
+    /// the key. Asking the focus on the press's own frame therefore says "none"
+    /// even when a ring was on the strip, and a rule that used it let the first
+    /// Back out of a magnified picture that still had a ring. What the press has
+    /// to answer is the state it was aimed at - the one this field kept. See
+    /// [`XgViewApp::keys_off_the_grid`].
+    focus_at_end: Option<Id>,
     /// Whether the recording's strip was drawn this frame.
     ///
     /// It is the one focus that the navigation layer does not own: the strip is a
@@ -1896,6 +1907,7 @@ impl XgViewApp {
             reorder_trigger_anchor: None,
             reorder_focus: false,
             owner: Owner::Grid,
+            focus_at_end: None,
             timeline_shown: false,
             focus_names: HashMap::new(),
             focused_name: None,
@@ -2140,7 +2152,7 @@ impl XgViewApp {
         }
     }
 
-    fn poll_events(&mut self) {
+    fn poll_events(&mut self, ctx: &egui::Context) {
         for event in self.manager.poll() {
             // A camera's answer, not a channel's: it is kept by address so that
             // a camera shown in two slots, or magnified twice, is asked once.
@@ -2261,6 +2273,7 @@ impl XgViewApp {
                         self.playback_asking = None;
                         match window {
                             Some(window) => self.start_playback(
+                                ctx,
                                 *channel,
                                 Source {
                                     camera: camera_id.clone(),
@@ -2284,6 +2297,11 @@ impl XgViewApp {
                             None => {
                                 self.tile_bar.release(Instant::now());
                                 self.ring_anchor = None;
+                                // No recording to open, so no ring to carry
+                                // into one: the seat the wait held is the
+                                // picture's to have back, the same as when an
+                                // answer opens a recording without a ring.
+                                self.release_the_waiting_seat(ctx);
                                 self.flash(
                                     monitor_i18n::tr("toast-no-recording"),
                                     ToastKind::Error,
@@ -2943,6 +2961,10 @@ impl XgViewApp {
         let focused = ctx.memory(|memory| memory.focused());
         self.owner = if focused.is_some() { Owner::Controls } else { Owner::Grid };
         self.focused_name = focused.and_then(|focused| self.focus_names.get(&focused).copied());
+        // Kept with `owner`, and from the same read: the next frame's Back has
+        // to be answered against the ring the viewer was looking at, not the
+        // focus egui may already have dropped before its key was handed out.
+        self.focus_at_end = focused;
 
         // A focused text field keeps the arrow keys for its caret and tells
         // `Memory` so, which is what stops the focus walk from taking them. On a
@@ -3323,7 +3345,7 @@ impl XgViewApp {
             }
         }
 
-        self.poll_events();
+        self.poll_events(ctx);
         self.poll_sealing();
         self.poll_talk_test();
         // An answer comes back with the wall drawn a frame or two after it was
@@ -5333,6 +5355,119 @@ mod tests {
         assert!(
             body.contains("if self.talking {") && body.contains("self.set_talking(false)"),
             "the recording cannot inherit a call"
+        );
+    }
+
+    /// A Back with no ring on the strip is the way out, not a press spent on
+    /// a focus nothing drew.
+    ///
+    /// A finger on the switch between a picture and its recording used to
+    /// leave the strip's seat focused on the next frame. The seat owns the
+    /// keyboard without drawing a ring, so `end_frame` called the controls the
+    /// owner and the first Back was spent surrendering a cursor the viewer
+    /// could not see; only the second left the magnified picture.
+    ///
+    /// The wait for the box's answer puts the keyboard on that same seat for
+    /// as long as the strip is one turning mark. A box that answers within the
+    /// frame leaves none behind, and a box that takes a frame longer leaves
+    /// the seat focused in the recording that opens - so a fix that only stops
+    /// the seat being queued for the next frame works on the fast box and not
+    /// on the slow one. Both are answered by the state the press was aimed at:
+    /// the focus the last frame ended on.
+    #[test]
+    fn a_back_with_no_visible_ring_leaves_the_picture_at_once() {
+        // A ring that is drawn is still let go by the first Back: the rule is
+        // owned by `owner`, read at the end of the last frame, and not by a
+        // focus egui may already have dropped on this one.
+        let input = include_str!("input.rs");
+        let at = input.find("fn keys_off_the_grid(").unwrap();
+        let body = &input[at..(at + 9000).min(input.len())];
+        let back = body.find("if keys.back {").unwrap();
+        let branch = &body[back..(back + 6000).min(body.len())];
+        assert!(
+            branch.contains("self.leave_controls(ctx);")
+                && !branch.contains("focused.is_some_and(|id| id != tilebar::seat())"),
+            "a visible ring is still the first Back's business"
+        );
+        assert!(
+            branch.contains("self.focus_at_end == Some(tilebar::seat())")
+                && branch.contains("self.back(ctx);"),
+            "a seat with no ring is the way out in one press"
+        );
+        assert!(
+            input.contains("if keys.back {") && input.contains("self.back(ctx);"),
+            "with no focus at all the press goes straight to back"
+        );
+        // The two are read together, from the frame the viewer was looking at,
+        // and not from the press's own frame - egui has dropped its focus by
+        // then and a ring that was on the strip would read as none.
+        let app = include_str!("mod.rs");
+        let at = app.find("self.owner = if focused.is_some()").unwrap();
+        let tail = &app[at..(at + 800).min(app.len())];
+        assert!(
+            tail.contains("self.focus_at_end = focused;"),
+            "the rule reads the focus the last frame ended on"
+        );
+        assert!(
+            app.contains("focus_at_end: None,"),
+            "the remembered focus starts with the app"
+        );
+        let playback = include_str!("playback.rs");
+        assert!(
+            playback.contains("let keep_ring = self.ring_anchor.is_some();")
+                && playback.contains("self.restore_focus = keep_ring.then(tilebar::seat)"),
+            "a switch without a ring does not put the keyboard on the seat"
+        );
+        assert!(
+            playback.contains("if !keep_ring {")
+                && playback.contains("self.release_the_waiting_seat(ctx);")
+                && playback.contains("memory.surrender_focus(id)"),
+            "the seat the wait left behind is given up when the answer lands"
+        );
+        let at = app.find("toast-no-recording").unwrap();
+        assert!(
+            app[at.saturating_sub(600)..at].contains("self.release_the_waiting_seat(ctx)"),
+            "an answer with no recording gives the keys back too"
+        );
+        let wall = include_str!("wall.rs");
+        assert!(
+            wall.contains("if self.restore_focus == Some(tilebar::seat()) {")
+                && wall.contains("self.restore_focus = None"),
+            "a finger's press does not leave a seat queued for the next frame"
+        );
+    }
+
+    /// Stepping off a recording with the arrows leaves the arrows with the
+    /// picture.
+    ///
+    /// A finger on the way into a recording draws no ring. Left then steps to
+    /// the camera before it, and the recording goes with the picture - but
+    /// `leave_playback` used to put the strip's seat on the next frame however
+    /// the recording was left. The seat draws nothing, yet the first Right on
+    /// the new camera was its first arrow: it lit the first control of the bar
+    /// instead of stepping the picture back. A live picture stepped the same
+    /// way was never affected, because there was no recording to put away.
+    #[test]
+    fn stepping_past_a_recording_leaves_the_arrows_with_the_picture() {
+        let playback = include_str!("playback.rs");
+        let at = playback.find("fn leave_playback(").unwrap();
+        let body = &playback[at..(at + 2200).min(playback.len())];
+        assert!(
+            body.contains("let keep_ring = self")
+                && body.contains("focus_at_end")
+                && body.contains("tilebar::index_of(id).is_some()"),
+            "only a ring drawn on a control is worth a seat"
+        );
+        assert!(
+            body.contains("self.restore_focus = keep_ring.then(tilebar::seat);")
+                && !body.contains("self.restore_focus = Some(tilebar::seat());"),
+            "leaving a recording with no ring queues no seat"
+        );
+        let paging = include_str!("paging.rs");
+        let at = paging.find("fn step_zoom(").unwrap();
+        assert!(
+            paging[at..(at + 1800).min(paging.len())].contains("self.leave_playback();"),
+            "a step to another camera puts its recording away"
         );
     }
 

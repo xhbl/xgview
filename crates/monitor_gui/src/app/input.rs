@@ -1450,7 +1450,26 @@ impl XgViewApp {
                 // in before a ring was asked for. A second Back finds nothing
                 // focused and is `back`'s own answer, the way out. See
                 // [`Self::tile_bar_pinned`].
-                self.leave_controls(ctx);
+                //
+                // Unless the last frame ended on the seat. The seat draws no
+                // ring and still owns the keyboard: a finger on the switch
+                // between a picture and its recording leaves it behind, and so
+                // does the wait for the box's answer on the way in, which holds
+                // the keys on the seat for as long as the strip is one waiting
+                // mark. A fast answer lands before any frame has done that, a
+                // slow one leaves the seat focused in the recording that opens
+                // - the same invisible cursor either way. There is no ring for
+                // this press to put away, so it goes straight to `back`: one
+                // press, the way out. Read from `focus_at_end`, the focus the
+                // last frame ended on, and not from this one's: egui drops the
+                // focus on a Back/Escape press before the key is handed out,
+                // and a ring that was there a frame ago would read as none.
+                // See [`Self::start_playback`] and `tile_bar_overlay`.
+                if self.tile_bar_pinned() && self.focus_at_end == Some(tilebar::seat()) {
+                    self.back(ctx);
+                } else {
+                    self.leave_controls(ctx);
+                }
             }
         } else if keys.down && !self.show_settings && self.toolbar_has_focus(ctx) {
             // Below the bar there is only the wall, so the arrow that walks
