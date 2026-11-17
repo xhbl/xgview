@@ -66,12 +66,12 @@ use crate::{
 /// own speed, are further apart than this gap and hand over every picture they
 /// have. Only a read that is faster than the screen is thinned.
 ///
-/// The gap is kept narrow on purpose: pictures that arrive in a burst - decoded
-/// and read back within a few milliseconds of one another - would otherwise be
-/// thinned down to the first of each batch. Ten milliseconds keeps pictures ten
-/// milliseconds apart while still capping a replay faster than the screen. The
-/// proper fix paces the feed itself; until then this is the stopgap.
-const HANDOVER_GAP: Duration = Duration::from_millis(10);
+/// A live stream reaches the decoder a picture at a time whatever the wire did,
+/// because the session places each picture on the clock its timestamp names
+/// first; see `pipeline::rtsp_session::LivePacer`. A gap narrowed so a burst
+/// could pass was a stopgap that made the picture worse, and is no longer what
+/// this is for.
+const HANDOVER_GAP: Duration = Duration::from_millis(25);
 
 /// Decoder backed by FFmpeg's `libavcodec`.
 pub struct FfmpegDecoder {

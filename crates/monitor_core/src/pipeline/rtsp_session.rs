@@ -3,6 +3,8 @@
 
 use super::*;
 
+use std::collections::VecDeque;
+
 use super::shared::{
     BaselineFix, Sinks, StatsWindow, announce_streaming, emit, publish_frames, uses_hardware,
     video_decoder,
@@ -699,6 +701,190 @@ pub(super) async fn run_session(
         .await
 }
 
+/// How far ahead of the clock the first live picture is placed.
+///
+/// A live main stream does not arrive one picture per frame interval. Measured
+/// on the wall with a client that does not decode at all, three or four
+/// pictures arrive within a millisecond of each other and then the wire is
+/// quiet for a hundred and fifty: the forwarder sends a batch. A player that
+/// decodes each picture as it lands gets a batch of four pictures into one
+/// refresh of the display, which shows the last of them, and then a hundred
+/// and fifty milliseconds of a still picture. That is eight updates a second
+/// out of twenty-six pictures, which is exactly what a magnified live view
+/// looked like next to a replay of the same camera.
+///
+/// So pictures are placed on a clock taken from their own timestamps and
+/// handed to the decoder when their moment comes, the way the replay path
+/// already did it. This is the distance between the first picture's moment and
+/// the moment it arrived: enough for a batch's first picture not to be shown
+/// before its own time, and small enough that a monitor does not feel lagged.
+const LIVE_LEAD: Duration = Duration::from_millis(60);
+
+/// The most pictures the clock may hold while the decoder catches up.
+///
+/// A batch of four arrives while the three pictures before it are still waiting
+/// for their moments - the queue sits at five or six through a healthy stream,
+/// and a batch lands on top of that - so the ceiling has to clear a whole batch
+/// before it means anything. Twelve pictures are half a second, and past that
+/// what is given up is the picture rather than the delay: a viewer watching a
+/// door wants the present.
+const LIVE_MAX_HELD: usize = 12;
+
+/// How far behind its own clock a picture may be before the clock is moved to
+/// it instead of the picture being shown late.
+const LIVE_LATE_LIMIT: Duration = Duration::from_millis(500);
+
+/// The `H.264` RTP clock, in ticks a second.
+const LIVE_CLOCK: i64 = 90_000;
+
+/// One picture waiting for its moment, with the timestamp that placed it.
+struct HeldPicture {
+    /// Ticks on the stream's 90 kHz clock, counted from the session's first
+    /// picture rather than from the camera's power-on: RTP timestamps wrap
+    /// every thirteen hours and a session outlives the wrap.
+    at: i64,
+    unit: AccessUnit,
+}
+
+/// Places live pictures on the clock their timestamps describe.
+///
+/// The clock is an anchor and not an accumulator: every moment is the anchor
+/// plus the picture's own distance from the anchor's timestamp. An anchor that
+/// moved with each handover would drift - a batch handed over late would move
+/// every picture after it, and one that arrived early would pull them all
+/// forward - which is the failure the first attempt at this had.
+struct LivePacer {
+    /// Whether a first picture has placed the anchor.
+    started: bool,
+    /// The wall clock the anchor's timestamp was placed at.
+    anchor_wall: Instant,
+    /// The stream timestamp the anchor was taken from, in unwrapped ticks.
+    anchor_at: i64,
+    /// The last raw timestamp seen, and where it sat once unwrapped.
+    last_raw: u32,
+    held: i64,
+    queue: VecDeque<HeldPicture>,
+    /// What the session did with the clock since it opened, for the window's
+    /// line: handed pictures, pictures the clock could not hold, and the moments
+    /// the clock had to be moved to a picture rather than the other way round.
+    handed: u64,
+    dropped: u64,
+    moved: u64,
+    /// The deepest the queue has been, which is the delay the clock added.
+    deepest: usize,
+}
+
+impl Default for LivePacer {
+    fn default() -> Self {
+        Self {
+            started: false,
+            anchor_wall: Instant::now(),
+            anchor_at: 0,
+            last_raw: 0,
+            held: 0,
+            queue: VecDeque::new(),
+            handed: 0,
+            dropped: 0,
+            moved: 0,
+            deepest: 0,
+        }
+    }
+}
+
+impl LivePacer {
+    /// Puts a picture on the clock, dropping the oldest when the clock holds
+    /// more than the decoder can be expected to get through.
+    fn push(&mut self, unit: AccessUnit, now: Instant) {
+        let step = unit.timestamp.wrapping_sub(self.last_raw) as i32;
+        // A timestamp that jumped is not a frame interval: the camera restarted
+        // its counter, or the session outlived a wrap this arithmetic could not
+        // follow. The pictures held are for a clock that no longer applies.
+        let jumped = step > (LIVE_CLOCK * 2) as i32 || step < -(LIVE_CLOCK as i32);
+        if !self.started || jumped {
+            self.clear();
+            self.started = true;
+            self.last_raw = unit.timestamp;
+            self.held = 0;
+            self.anchor_wall = now + LIVE_LEAD;
+            self.anchor_at = 0;
+            self.queue.push_back(HeldPicture { at: 0, unit });
+            return;
+        }
+        // Two pictures that claim the same moment are two pictures of the same
+        // moment as far as this is concerned: the second waits with the first
+        // rather than being placed before it.
+        self.held += i64::from(step.max(0));
+        self.last_raw = unit.timestamp;
+        let at = self.held;
+        self.queue.push_back(HeldPicture { at, unit });
+        while self.queue.len() > LIVE_MAX_HELD {
+            // The oldest picture is given up, not the delay - but never a key
+            // frame while a picture after it is still queued: the pictures that
+            // follow are predicted from it, and losing it costs every one of
+            // them until the camera sends another.
+            let victim = self
+                .queue
+                .iter()
+                .position(|held| !held.unit.keyframe)
+                .unwrap_or(0);
+            if self.queue.remove(victim).is_some() {
+                self.dropped += 1;
+                // The clock moves to the picture that is now first, so what is
+                // given up is the past and not the delay.
+                if let Some(front) = self.queue.front() {
+                    self.anchor_wall = now;
+                    self.anchor_at = front.at;
+                }
+            }
+        }
+        self.deepest = self.deepest.max(self.queue.len());
+    }
+
+    /// The wall clock a moment on the stream's clock falls at.
+    fn moment(&self, at: i64) -> Instant {
+        let ahead = (at - self.anchor_at).max(0) as u64;
+        self.anchor_wall + Duration::from_micros(ahead.saturating_mul(100) / 9)
+    }
+
+    /// The next picture whose moment has come, if there is one.
+    ///
+    /// A picture whose moment passed long ago is not shown late: that is a
+    /// decoder that fell behind, and catching up by holding the clock back
+    /// would turn a stall into a growing delay.
+    fn due(&mut self, now: Instant) -> Option<AccessUnit> {
+        let front = self.queue.front()?;
+        let moment = self.moment(front.at);
+        if moment > now {
+            return None;
+        }
+        if now.duration_since(moment) > LIVE_LATE_LIMIT {
+            self.anchor_wall = now;
+            self.anchor_at = front.at;
+            self.moved += 1;
+        }
+        let held = self.queue.pop_front();
+        if held.is_some() {
+            self.handed += 1;
+        }
+        held.map(|held| held.unit)
+    }
+
+    /// When the picture in front is due, if any is waiting.
+    fn next_due(&self) -> Option<Instant> {
+        self.queue.front().map(|held| self.moment(held.at))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.queue.clear();
+        self.started = false;
+        self.held = 0;
+    }
+}
+
 /// The state one RTSP session carries between packets.
 ///
 /// Everything the loop carried from one iteration to the next is a field,
@@ -730,6 +916,8 @@ struct RtspSession<'a> {
     /// The picture's path, from the packet to the frame store.
     decoder: Option<Box<dyn VideoDecoder>>,
     depacketizer: Depacketizer,
+    /// Where each picture waits for the moment its timestamp names.
+    pacer: LivePacer,
     baseline_fix: BaselineFix,
     sequence: u64,
     decode_errors: u64,
@@ -965,6 +1153,7 @@ impl<'a> RtspSession<'a> {
             talk_sender,
             decoder,
             depacketizer,
+            pacer: LivePacer::default(),
             baseline_fix,
             sequence,
             decode_errors,
@@ -995,6 +1184,9 @@ impl<'a> RtspSession<'a> {
             // Talk-back, before waiting on the picture: the session's clock is the
             // RTP clock, and it must not be tied to how often a camera sends video.
             self.pump_talk();
+            // Before anything that can wait: a picture whose moment has come is
+            // owed to the viewer now, and the wait below is measured from here.
+            self.hand_over_due();
             let late = self.stall.lateness();
             self.check_stall(late)?;
             self.keep_alive().await?;
@@ -1013,6 +1205,12 @@ impl<'a> RtspSession<'a> {
                     if self.talk_sender.is_some()
                         && self.last_talk.elapsed() >= talk_gap(self.talk.talking_on(self.index))
                     {
+                        continue;
+                    }
+                    // A wait the picture's own clock cut short is neither silence
+                    // on the wire nor a stall: the next picture is simply not due
+                    // yet, and the loop has nothing to read until it is.
+                    if !self.pacer.is_empty() {
                         continue;
                     }
                     // A wait that the picture deadline cut short is not silence on
@@ -1196,10 +1394,24 @@ impl<'a> RtspSession<'a> {
         let talk_wait = self.talk_sender.as_ref().map(|_| {
             talk_gap(self.talk.talking_on(self.index)).saturating_sub(self.last_talk.elapsed())
         });
-        match talk_wait {
+        let wait = match talk_wait {
             Some(talk_wait) => wait.min(talk_wait),
             None => wait,
-        }
+        };
+        // The picture in front is owed no earlier than its own moment, and
+        // waking for it rather than for the next packet is what keeps a batch
+        // from waiting out the whole gap between batches: the wire is quiet for
+        // a hundred and fifty milliseconds after a batch, and three of the
+        // pictures in it are due inside that silence.
+        let paced = self
+            .pacer
+            .next_due()
+            .map(|due| due.saturating_duration_since(Instant::now()))
+            .unwrap_or(wait);
+        // Never zero: a loop that is told not to wait would poll the transport
+        // and the clock without ever parking, and could starve the runtime it
+        // shares with the other channels.
+        wait.min(paced).max(Duration::from_millis(1))
     }
 
     /// Decodes one audio packet and hands it to the sink, while this channel is
@@ -1297,15 +1509,15 @@ impl<'a> RtspSession<'a> {
     /// Hands the access units a packet completed to the decoder, and the pictures
     /// that come out of it to the frame store.
     fn on_video(&mut self, header: &RtpHeader, payload: &[u8]) {
-        let Some(decoder) = self.decoder.as_mut() else {
+        if self.decoder.is_none() {
             return;
-        };
+        }
         let payload = &payload[header.header_len..];
         // A packet completes at most two pictures: the one the RTP
         // timestamp change released, and the one its marker closed.
         let units = self.depacketizer.push(header, payload);
         let completed_none = units.is_empty();
-        for mut unit in units {
+        for unit in units {
             self.window.counters.units += 1;
             self.window.counters.unit_bytes += unit.data.len() as u64;
             // Once per session, from the first access unit that
@@ -1338,147 +1550,171 @@ impl<'a> RtspSession<'a> {
                     }
                 }
             }
-            self.baseline_fix.observe(self.index, self.kind, &mut unit.data);
-            self.stall.observe(unit.keyframe, Instant::now());
-            // Offered back to the platform decoder on a key frame, and only
-            // there: a decoder cannot be resumed past a picture it never saw,
-            // so a return to hardware that started mid-group would leave the
-            // tile dark until the next one. A channel that fell back to the CPU
-            // because the device was out of hardware sessions is the case this
-            // is for - one of them frees up when a channel closes or the grid
-            // is made smaller, and nothing else ever asks again.
-            if unit.keyframe {
-                decoder.try_upgrade();
-            }
-            let started = Instant::now();
-            // Counted before and after, because a decoder given a surface keeps
-            // its pictures: `decode` comes back empty on a stream that is
-            // arriving perfectly well, and a session that read that as "no
-            // picture" declared the channel stalled - an orange dot over a
-            // moving picture, and a reconnect after the hard timeout.
-            let pictures_before = decoder.pictures();
-            let decoded = decoder.decode(&unit.data, unit.pts_us(), unit.keyframe);
-            self.window.counters.decode_took(started.elapsed());
-            match decoded {
-                Ok(decoded) => {
-                    // A picture came out, whatever the renderer can
-                    // do with it: on the platform whose frames stay
-                    // in a GPU buffer there are no planes to publish,
-                    // and the stream is no less alive for it.
-                    if !decoded.is_empty() || decoder.pictures() != pictures_before {
-                        let was_stalled = self.stall.stalled_since.is_some();
-                        // The first picture of a session, which is a recovery
-                        // too: a channel that was cut and has opened again is
-                        // "reconnecting" as far as the wall knows, and a tile in
-                        // that state is painted over with the pending canvas -
-                        // the picture is there and nobody can see it. A session
-                        // that never says it is streaming leaves that canvas up
-                        // for as long as it lasts.
-                        let first_picture = !self.stall.running;
-                        self.stall.picture(Instant::now());
-                        if was_stalled || first_picture {
-                            emit(
-                                self.sinks.events,
-                                StreamEvent::State {
-                                    index: self.index,
-                                    camera_id: self.camera_id.clone(),
-                                    state: ConnectionState::Streaming,
-                                    detail: format!(
-                                        "receiving {} stream",
-                                        self.stream.label()
-                                    ),
-                                },
-                            );
-                        }
-                    }
-                    self.window.counters.decoded += decoded.len() as u64;
-                    let published = publish_frames(
-                        self.sinks.frames,
-                        self.index,
-                        &mut self.sequence,
-                        decoded,
-                        None,
-                    );
-                    if let Some((picture_width, picture_height)) = published {
-                        self.width = Some(picture_width);
-                        self.height = Some(picture_height);
-                    }
-                    // A picture that went to the surface has no frame to
-                    // publish, and it is on screen all the same: counted here,
-                    // or a session that works looks to the channel like one
-                    // that never came up - the mse address is tried, the backoff
-                    // is not reset, and the health line says `pictures=0` about
-                    // a picture the viewer is watching.
-                    if published.is_none() && decoder.pictures() != pictures_before {
-                        self.sinks.frames.note_picture(self.index, None);
-                    }
-                }
-                // One damaged picture is not worth a new session:
-                // the encoder recovers at its next IDR.
-                Err(err) => {
-                    // Pictures refused before the session has shown
-                    // one are its opening rather than damage. A
-                    // camera that sends a run of pictures before its
-                    // first IDR leaves the decoder nothing to
-                    // reference - one here spends its first thirty
-                    // five that way and then runs clean - so
-                    // counting them as errors would report a
-                    // working channel as a broken one at every
-                    // connect. They are counted apart, and the
-                    // warning is kept for a session that had a
-                    // picture and then lost it.
-                    if !self.stall.running {
-                        self.window.counters.opening += 1;
-                        if self.window.counters.opening == 1 {
-                            tracing::debug!(
-                                target: "xgview::pipeline",
-                                index = self.index,
-                                %err,
-                                "no picture yet, waiting for the first key frame"
-                            );
-                        }
-                    } else {
-                        self.decode_errors += 1;
-                        self.window.counters.errors += 1;
-                        // The first rejections carry the payload
-                        // that caused them, which names the NAL
-                        // units the decoder was given.
-                        if self.decode_errors <= 3 {
-                            tracing::debug!(
-                                target: "xgview::pipeline",
-                                index = self.index,
-                                len = unit.data.len(),
-                                types = ?nal_types(&unit.data, self.kind),
-                                keyframe = unit.keyframe,
-                                au = %hex(&unit.data, 24),
-                                cached = ?self.depacketizer.parameter_sets(),
-                                "access unit rejected by the decoder"
-                            );
-                        }
-                        if self.decode_errors == 1 {
-                            tracing::warn!(
-                                target: "xgview::pipeline",
-                                index = self.index,
-                                %err,
-                                "decoding failed, waiting for the next key frame"
-                            );
-                        } else {
-                            tracing::debug!(
-                                target: "xgview::pipeline",
-                                index = self.index,
-                                errors = self.decode_errors,
-                                %err,
-                                "decoding failed"
-                            );
-                        }
-                    }
-                }
-            }
+            self.pacer.push(unit, Instant::now());
         }
         if completed_none && header.marker {
             // The marker closed a picture but nothing came out of
             // it: the unit held no slice, or its head was lost.
             self.window.counters.dropped += 1;
+        }
+    }
+
+    /// Hands the decoder every picture whose moment has come.
+    ///
+    /// One per call would be enough for a stream that keeps up, but not for one
+    /// that arrived while the loop was busy: a batch of four is due within a
+    /// hundred and twenty milliseconds, and a decoder that fell behind would be
+    /// handed them a loop iteration apart instead of at once.
+    fn hand_over_due(&mut self) {
+        while let Some(unit) = self.pacer.due(Instant::now()) {
+            self.decode_unit(unit);
+        }
+    }
+
+    /// Decodes one picture, and hands what comes out of it to the frame store.
+    ///
+    /// Called once the picture's own timestamp says its moment has come, so
+    /// the pictures reach the decoder at the pace the stream describes rather
+    /// than at the pace the wire delivered them. See [`LivePacer`].
+    fn decode_unit(&mut self, mut unit: AccessUnit) {
+        let Some(decoder) = self.decoder.as_mut() else {
+            return;
+        };
+        self.baseline_fix.observe(self.index, self.kind, &mut unit.data);
+        self.stall.observe(unit.keyframe, Instant::now());
+        // Offered back to the platform decoder on a key frame, and only
+        // there: a decoder cannot be resumed past a picture it never saw,
+        // so a return to hardware that started mid-group would leave the
+        // tile dark until the next one. A channel that fell back to the CPU
+        // because the device was out of hardware sessions is the case this
+        // is for - one of them frees up when a channel closes or the grid
+        // is made smaller, and nothing else ever asks again.
+        if unit.keyframe {
+            decoder.try_upgrade();
+        }
+        let started = Instant::now();
+        // Counted before and after, because a decoder given a surface keeps
+        // its pictures: `decode` comes back empty on a stream that is
+        // arriving perfectly well, and a session that read that as "no
+        // picture" declared the channel stalled - an orange dot over a
+        // moving picture, and a reconnect after the hard timeout.
+        let pictures_before = decoder.pictures();
+        let decoded = decoder.decode(&unit.data, unit.pts_us(), unit.keyframe);
+        self.window.counters.decode_took(started.elapsed());
+        match decoded {
+            Ok(decoded) => {
+                // A picture came out, whatever the renderer can
+                // do with it: on the platform whose frames stay
+                // in a GPU buffer there are no planes to publish,
+                // and the stream is no less alive for it.
+                if !decoded.is_empty() || decoder.pictures() != pictures_before {
+                    let was_stalled = self.stall.stalled_since.is_some();
+                    // The first picture of a session, which is a recovery
+                    // too: a channel that was cut and has opened again is
+                    // "reconnecting" as far as the wall knows, and a tile in
+                    // that state is painted over with the pending canvas -
+                    // the picture is there and nobody can see it. A session
+                    // that never says it is streaming leaves that canvas up
+                    // for as long as it lasts.
+                    let first_picture = !self.stall.running;
+                    self.stall.picture(Instant::now());
+                    if was_stalled || first_picture {
+                        emit(
+                            self.sinks.events,
+                            StreamEvent::State {
+                                index: self.index,
+                                camera_id: self.camera_id.clone(),
+                                state: ConnectionState::Streaming,
+                                detail: format!(
+                                    "receiving {} stream",
+                                    self.stream.label()
+                                ),
+                            },
+                        );
+                    }
+                }
+                self.window.counters.decoded += decoded.len() as u64;
+                let published = publish_frames(
+                    self.sinks.frames,
+                    self.index,
+                    &mut self.sequence,
+                    decoded,
+                    None,
+                );
+                if let Some((picture_width, picture_height)) = published {
+                    self.width = Some(picture_width);
+                    self.height = Some(picture_height);
+                }
+                // A picture that went to the surface has no frame to
+                // publish, and it is on screen all the same: counted here,
+                // or a session that works looks to the channel like one
+                // that never came up - the mse address is tried, the backoff
+                // is not reset, and the health line says `pictures=0` about
+                // a picture the viewer is watching.
+                if published.is_none() && decoder.pictures() != pictures_before {
+                    self.sinks.frames.note_picture(self.index, None);
+                }
+            }
+            // One damaged picture is not worth a new session:
+            // the encoder recovers at its next IDR.
+            Err(err) => {
+                // Pictures refused before the session has shown
+                // one are its opening rather than damage. A
+                // camera that sends a run of pictures before its
+                // first IDR leaves the decoder nothing to
+                // reference - one here spends its first thirty
+                // five that way and then runs clean - so
+                // counting them as errors would report a
+                // working channel as a broken one at every
+                // connect. They are counted apart, and the
+                // warning is kept for a session that had a
+                // picture and then lost it.
+                if !self.stall.running {
+                    self.window.counters.opening += 1;
+                    if self.window.counters.opening == 1 {
+                        tracing::debug!(
+                            target: "xgview::pipeline",
+                            index = self.index,
+                            %err,
+                            "no picture yet, waiting for the first key frame"
+                        );
+                    }
+                } else {
+                    self.decode_errors += 1;
+                    self.window.counters.errors += 1;
+                    // The first rejections carry the payload
+                    // that caused them, which names the NAL
+                    // units the decoder was given.
+                    if self.decode_errors <= 3 {
+                        tracing::debug!(
+                            target: "xgview::pipeline",
+                            index = self.index,
+                            len = unit.data.len(),
+                            types = ?nal_types(&unit.data, self.kind),
+                            keyframe = unit.keyframe,
+                            au = %hex(&unit.data, 24),
+                            cached = ?self.depacketizer.parameter_sets(),
+                            "access unit rejected by the decoder"
+                        );
+                    }
+                    if self.decode_errors == 1 {
+                        tracing::warn!(
+                            target: "xgview::pipeline",
+                            index = self.index,
+                            %err,
+                            "decoding failed, waiting for the next key frame"
+                        );
+                    } else {
+                        tracing::debug!(
+                            target: "xgview::pipeline",
+                            index = self.index,
+                            errors = self.decode_errors,
+                            %err,
+                            "decoding failed"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1528,9 +1764,147 @@ impl<'a> RtspSession<'a> {
             reordered = counted.reordered,
             lost = counted.lost,
             slowest_decode_ms = counted.slowest.as_millis() as u64,
+            // What the picture clock did with them. `handed` is the rate the
+            // viewer sees the stream at, `held` the delay it added, and `moved`
+            // the times the decoder had fallen far enough behind for the clock
+            // to be moved to a picture instead of the picture shown late.
+            handed = self.pacer.handed,
+            held = self.pacer.queue.len(),
+            deepest = self.pacer.deepest,
+            gave_up = self.pacer.dropped,
+            moved_clock = self.pacer.moved,
             fps,
             kbps,
             "stream window"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn picture(timestamp: u32, keyframe: bool) -> AccessUnit {
+        AccessUnit {
+            data: vec![0; 8],
+            timestamp,
+            keyframe,
+        }
+    }
+
+    /// One picture of a 25 frame a second stream, in 90 kHz ticks.
+    const FRAME: u32 = 3600;
+
+    /// A batch that arrives together is not shown together: each picture waits
+    /// for the moment its own timestamp names.
+    #[test]
+    fn a_batch_is_spread_over_the_clock_its_timestamps_describe() {
+        let mut pacer = LivePacer::default();
+        let arrival = Instant::now();
+        for i in 0..4u32 {
+            pacer.push(picture(FRAME * i, i == 0), arrival);
+        }
+        let due: Vec<Duration> = pacer
+            .queue
+            .iter()
+            .map(|held| pacer.moment(held.at).duration_since(arrival))
+            .collect();
+        assert_eq!(
+            due,
+            vec![
+                Duration::from_millis(60),
+                Duration::from_millis(100),
+                Duration::from_millis(140),
+                Duration::from_millis(180),
+            ]
+        );
+    }
+
+    /// The clock is an anchor and not an accumulator: a hundred batches of four
+    /// pictures still place the last picture exactly where its timestamp says,
+    /// which is what the first attempt at this could not do.
+    #[test]
+    fn the_clock_does_not_drift_across_a_hundred_batches() {
+        let mut pacer = LivePacer::default();
+        let start = Instant::now();
+        let mut now;
+        let mut sent = 0u32;
+        for batch in 0..100u32 {
+            now = start + Duration::from_millis(160 * u64::from(batch));
+            for i in 0..4u32 {
+                let keyframe = batch == 0 && i == 0;
+                pacer.push(picture(FRAME * (batch * 4 + i), keyframe), now);
+                sent += 1;
+            }
+            // The decoder hands over what has come due before the next batch.
+            while pacer.due(now).is_some() {}
+        }
+        assert_eq!(sent, 400);
+        assert_eq!(pacer.anchor_at, 0, "the anchor moved and the clock drifted");
+        let last = pacer.queue.back().expect("the last batch is still held");
+        assert_eq!(
+            pacer.moment(last.at).duration_since(start),
+            Duration::from_micros(u64::from(sent - 1) * 40_000) + LIVE_LEAD
+        );
+    }
+
+    /// A queue that overflows gives up the oldest picture that nothing after it
+    /// is predicted from - never the key frame the others are predicted from.
+    #[test]
+    fn a_full_queue_gives_up_a_predicted_picture_before_a_key_one() {
+        let mut pacer = LivePacer::default();
+        let now = Instant::now();
+        pacer.push(picture(0, true), now);
+        for i in 1..=LIVE_MAX_HELD as u32 {
+            pacer.push(picture(FRAME * i, false), now);
+        }
+        assert_eq!(pacer.queue.len(), LIVE_MAX_HELD);
+        assert!(
+            pacer.queue.iter().any(|held| held.unit.keyframe),
+            "the key frame was given up while pictures after it were still held"
+        );
+        assert_eq!(pacer.queue.front().expect("not empty").at, 0);
+    }
+
+    /// A picture that is due and long past is not shown late: the clock moves to
+    /// it, so a decoder that fell behind does not turn into a growing delay.
+    #[test]
+    fn a_clock_far_behind_the_wire_is_moved_to_the_picture() {
+        let mut pacer = LivePacer::default();
+        let arrival = Instant::now();
+        pacer.push(picture(0, true), arrival);
+        let late = arrival + Duration::from_secs(2);
+        assert!(pacer.due(late).is_some());
+        assert_eq!(pacer.anchor_wall, late);
+    }
+
+    /// Two seconds of timestamps in one step is the camera starting its counter
+    /// over, not a frame interval.
+    #[test]
+    fn a_timestamp_that_jumps_starts_the_clock_over() {
+        let mut pacer = LivePacer::default();
+        let start = Instant::now();
+        pacer.push(picture(0, true), start);
+        pacer.push(picture(FRAME, false), start);
+        pacer.push(picture(90_000 * 30, false), start + Duration::from_millis(80));
+        assert_eq!(pacer.queue.len(), 1, "the old clock's pictures are gone");
+        assert_eq!(pacer.anchor_at, 0);
+        assert_eq!(pacer.held, 0);
+    }
+
+    /// Two pictures that claim the same moment wait together rather than the
+    /// second being placed before the first.
+    #[test]
+    fn a_repeated_timestamp_does_not_move_the_clock_back() {
+        let mut pacer = LivePacer::default();
+        let start = Instant::now();
+        pacer.push(picture(0, true), start);
+        pacer.push(picture(0, false), start);
+        assert_eq!(pacer.queue.len(), 2);
+        assert_eq!(pacer.held, 0);
+        assert_eq!(
+            pacer.moment(pacer.queue.back().expect("held").at),
+            pacer.moment(pacer.queue.front().expect("held").at)
         );
     }
 }
