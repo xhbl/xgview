@@ -3,6 +3,36 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 2.2.106
+
+Changes since 2.2.98.
+
+- **Live pictures keep the rhythm of the wire.** A low-frame-rate camera that
+  sent its pictures in bursts - a twelve-frame doorbell delivering eight at
+  once - no longer holds one frame and then jumps. Each live picture is placed
+  on the clock its timestamp names, and that clock learns the stream's frame
+  interval so a wandering timestamp or a bursty wire cannot make it run at a
+  speed of its own. A lead that widens while frames arrive late and narrows
+  only after a calm absorbs the jitter.
+- **Android hands frames over by feed rate, not by the gap between pictures.**
+  A batch leaving a slow decoder no longer loses all but its first frame.
+  The doorbell's decoder is asked for low latency, with a fallback for decoders
+  that refuse the request and a reorder check for streams carrying B frames; a
+  failed start is no longer mistaken for a refusal that disables the option
+  for the whole process.
+- **A crowded picture queue is now cut at a key frame.** Dropping its oldest
+  non-key frame orphaned everything predicted from it; what remains keeps a
+  whole reference chain. Switching channels also clears the sound waiting in
+  the audio queue.
+- **Sound is back to the lowest delay the device allows.** A shorter playback
+  track was measured and then removed, as were four other attempts to move the
+  picture's delay into the audio path. Decoded sound is written as it arrives
+  again with a half-second device buffer. The remaining picture-to-sound gap
+  was measured on three devices and in Frigate's own player and comes from the
+  recording and the Android audio chain, not from this viewer.
+- **Fixed:** the low-latency refusal check now looks only at configure time,
+  and a no-op in the reorder test was removed.
+
 ## 2.2.98
 
 Changes since 2.2.84.
