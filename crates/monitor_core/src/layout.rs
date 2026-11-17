@@ -153,6 +153,25 @@ const CELLS_P4: &[Cell] = &[
     c(0, 3, 1, 1),
 ];
 
+/// Custom grids use the same maximum number of tiles as the 4x4 preset.
+pub const MAX_GRID_DIMENSION: u8 = 4;
+
+const fn uniform_cells() -> [[Cell; 16]; 4] {
+    let mut grids = [[c(0, 0, 1, 1); 16]; 4];
+    let mut columns = 1;
+    while columns <= 4 {
+        let mut index = 0;
+        while index < 16 {
+            grids[columns - 1][index] = c((index % columns) as u8, (index / columns) as u8, 1, 1);
+            index += 1;
+        }
+        columns += 1;
+    }
+    grids
+}
+
+static UNIFORM_CELLS: [[Cell; 16]; 4] = uniform_cells();
+
 /// Supported wall layouts.
 ///
 /// Four are the square, uniform grids the wall has always had - `1x1`, `2x2`,
@@ -161,6 +180,8 @@ const CELLS_P4: &[Cell] = &[
 /// through the layout picker. See [`GridLayout::ALL`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GridLayout {
+    #[serde(rename = "custom")]
+    Custom { columns: u8, rows: u8 },
     #[serde(rename = "1x1")]
     G1x1,
     #[serde(rename = "2x2")]
@@ -252,6 +273,10 @@ impl GridLayout {
     /// The viewports of this layout, in the order channels fill them.
     pub fn cells(self) -> &'static [Cell] {
         match self {
+            GridLayout::Custom { .. } => {
+                let columns = self.grid_cols();
+                &UNIFORM_CELLS[columns - 1][..columns * self.grid_rows()]
+            }
             GridLayout::G1x1 => CELLS_1X1,
             GridLayout::G2x2 => CELLS_2X2,
             GridLayout::G3x3 => CELLS_3X3,
@@ -275,6 +300,7 @@ impl GridLayout {
     /// The number of grid columns the cells are laid out against.
     pub fn grid_cols(self) -> usize {
         match self {
+            GridLayout::Custom { columns, .. } => columns.clamp(1, MAX_GRID_DIMENSION) as usize,
             GridLayout::G1x1 => 1,
             GridLayout::G2x2 => 2,
             GridLayout::G3x3 => 3,
@@ -295,6 +321,7 @@ impl GridLayout {
     /// The number of grid rows the cells are laid out against.
     pub fn grid_rows(self) -> usize {
         match self {
+            GridLayout::Custom { rows, .. } => rows.clamp(1, MAX_GRID_DIMENSION) as usize,
             GridLayout::G1x1 => 1,
             GridLayout::G2x2 => 2,
             GridLayout::G3x3 => 3,
@@ -330,6 +357,15 @@ impl GridLayout {
 
     pub fn label(self) -> &'static str {
         match self {
+            GridLayout::Custom { .. } => {
+                const LABELS: [[&str; 4]; 4] = [
+                    ["1x1", "1x2", "1x3", "1x4"],
+                    ["2x1", "2x2", "2x3", "2x4"],
+                    ["3x1", "3x2", "3x3", "3x4"],
+                    ["4x1", "4x2", "4x3", "4x4"],
+                ];
+                LABELS[self.grid_cols() - 1][self.grid_rows() - 1]
+            }
             GridLayout::G1x1 => "1x1",
             GridLayout::G2x2 => "2x2",
             GridLayout::G3x3 => "3x3",
@@ -383,6 +419,9 @@ impl GridLayout {
 
     /// Next denser layout, wrapping around at the last one.
     pub fn next(self) -> Self {
+        if matches!(self, Self::Custom { .. }) {
+            return Self::ALL[0];
+        }
         let index = self.index();
         Self::ALL[(index + 1) % Self::ALL.len()]
     }

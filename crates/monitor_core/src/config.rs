@@ -2043,6 +2043,28 @@ mod tests {
         assert_eq!(config.groups[0].layout, GridLayout::G3x3);
     }
 
+    #[test]
+    fn custom_layout_round_trips_per_group() {
+        let mut config = AppConfig::default();
+        let group = config.add_group(String::from("Office"));
+        let custom = GridLayout::Custom { columns: 3, rows: 2 };
+        config.groups[group].layout = custom;
+
+        let restored = AppConfig::from_json(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.groups[0].layout, GridLayout::default());
+        assert_eq!(restored.groups[group].layout, custom);
+        assert_eq!(custom.capacity(), 6);
+        use crate::layout::{navigate, Direction, NavigateOutcome};
+        assert_eq!(
+            navigate(custom, 0, Some(1), Direction::Down, 6),
+            NavigateOutcome::Moved { focus: 4 },
+        );
+        assert_eq!(
+            custom.cells().iter().map(|cell| (cell.col, cell.row)).collect::<Vec<_>>(),
+            vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)],
+        );
+    }
+
     /// A group's order is its own: reordering one leaves the other groups' work
     /// where it was.
     #[test]

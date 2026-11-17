@@ -4,6 +4,41 @@
 use super::*;
 
 impl XgViewApp {
+    pub(super) fn custom_grid_controls(&mut self, ui: &mut egui::Ui) {
+        let current = self.scheduler.layout();
+        let custom = matches!(current, GridLayout::Custom { .. });
+        let response = self.nav.tracked(ui.selectable_label(custom, monitor_i18n::tr("settings-grid-custom")));
+        self.name(&response, "settings-grid-custom");
+        if response.clicked() && !custom {
+            self.set_layout(GridLayout::Custom { columns: 3, rows: 2 });
+        }
+        if custom {
+            use monitor_core::layout::MAX_GRID_DIMENSION;
+
+            let mut columns = current.grid_cols() as u8;
+            let mut rows = current.grid_rows() as u8;
+            let mut changed = false;
+            for (key, value) in [
+                ("settings-grid-columns", &mut columns),
+                ("settings-grid-rows", &mut rows),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.label(monitor_i18n::tr(key));
+                    for dimension in 1..=MAX_GRID_DIMENSION {
+                        let response = self.nav.tracked(ui.selectable_label(*value == dimension, dimension.to_string()));
+                        if response.clicked() && *value != dimension {
+                            *value = dimension;
+                            changed = true;
+                        }
+                    }
+                });
+            }
+            if changed {
+                self.set_layout(GridLayout::Custom { columns, rows });
+            }
+        }
+    }
+
     /// Opens a link the way the desktop does.
     ///
     /// egui would hand the URL to eframe, which opens it through the
@@ -203,6 +238,8 @@ impl XgViewApp {
                 .then_some(more.id);
             }
         });
+        ui.add_space(theme::space::S);
+        self.custom_grid_controls(ui);
         ui.add_space(theme::space::S);
         ui.label(RichText::new(monitor_i18n::tr("settings-osd")).strong());
         ui.label(

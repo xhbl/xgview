@@ -369,6 +369,7 @@ impl XgViewApp {
         // next one - and the tile carries the same mode in its corner.
         ui.horizontal(|ui| {
             ui.add_space(theme::space::S);
+            ui.label(monitor_i18n::tr("cameras-aspect-name"));
             let aspect = camera.aspect;
             let aspect_button = ui
                 .small_button(RichText::new(monitor_i18n::tr(aspect.label())).small().color(theme::ACCENT))

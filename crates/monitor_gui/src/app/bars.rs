@@ -284,7 +284,11 @@ impl XgViewApp {
             // button: it shows the number of the one in use, and an ellipsis
             // while the wall is on a layout that has a button of its own.
             let active = !current.is_standard() && !self.scheduler.is_zoomed();
-            let more = ui.selectable_label(active || self.layout_picker.is_open(), current.numeric_label().unwrap_or("…"));
+            let more_label = match current {
+                GridLayout::Custom { .. } => current.label(),
+                _ => current.numeric_label().unwrap_or("…"),
+            };
+            let more = ui.selectable_label(active || self.layout_picker.is_open(), more_label);
             items.push((more.id, more.rect));
             self.name(&more, "toolbar-layout-more");
             if more.clicked() {

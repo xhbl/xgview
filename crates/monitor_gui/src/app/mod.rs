@@ -948,6 +948,7 @@ fn layout_hint(layout: GridLayout) -> &'static str {
         GridLayout::N10 => "toolbar-layout-10",
         GridLayout::N12 => "toolbar-layout-12",
         GridLayout::N13 => "toolbar-layout-13",
+        GridLayout::Custom { .. } => "settings-grid-custom",
         GridLayout::P1 => "toolbar-layout-p1",
         GridLayout::P2 => "toolbar-layout-p2",
         GridLayout::P3 => "toolbar-layout-p3",
@@ -1751,7 +1752,8 @@ impl XgViewApp {
             // end is spent rather than wrapping.
             ("layout-picker-row-0", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-1"))),
             ("layout-picker-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-0")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-2"))),
-            ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1"))),
+            ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1")).exit(Dir::Down, Exit::Scope("layout-picker-custom"))),
+            ("layout-picker-custom", ScopeDef::new(Axis::Column).exit(Dir::Up, Exit::Scope("layout-picker-row-2"))),
             ("status", ScopeDef::new(Axis::Row)),
             ("edit-body", ScopeDef::new(Axis::Column)),
             ("confirm-body", ScopeDef::new(Axis::Column)),

@@ -101,6 +101,11 @@ impl XgViewApp {
                     });
                 }
 
+                ui.separator();
+                app.nav.open("layout-picker-custom");
+                app.custom_grid_controls(ui);
+                app.nav.close();
+
                 if let Some(layout) = chosen {
                     // The wall behind has already changed by the time this
                     // returns; what is left is to close the window and give the
