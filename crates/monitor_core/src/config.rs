@@ -748,6 +748,10 @@ pub struct AppConfig {
     /// the last input while full screen, in seconds.  Zero means it never hides.
     #[serde(default = "default_chrome_idle_secs")]
     pub chrome_idle_secs: f32,
+    /// Hide the wall's controls and routine live OSD after five idle seconds,
+    /// in both windowed and fullscreen modes. Transient visibility is UI state.
+    #[serde(default)]
+    pub clean_view: bool,
     pub cameras: Vec<CameraSource>,
 }
 
@@ -784,6 +788,7 @@ impl Default for AppConfig {
             osd: Osd::default(),
             combined_info: default_combined_info(),
             chrome_idle_secs: default_chrome_idle_secs(),
+            clean_view: false,
             cameras: Vec::new(),
         }
     }
@@ -1570,6 +1575,26 @@ fn keep_previous(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_view_defaults_off_and_survives_save_and_reload() {
+        assert!(!AppConfig::default().clean_view);
+        let legacy = AppConfig::from_json(r#"{"version":1,"groups":[{}]}"#).unwrap();
+        assert!(!legacy.clean_view);
+        let path = std::env::temp_dir().join(format!("xgview-clean-view-{}.json", crate::model::new_id()));
+        let mut config = AppConfig::default();
+        config.clean_view = true;
+        config.group_mut().layout = GridLayout::G3x3;
+        config.save(&path).unwrap();
+        let mut restored = AppConfig::load(&path).unwrap();
+        assert!(restored.clean_view);
+        assert_eq!(restored.group().layout, config.group().layout);
+        restored.clean_view = false;
+        restored.save(&path).unwrap();
+        assert!(!AppConfig::load(&path).unwrap().clean_view);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(previous_path(&path));
+    }
 
     /// A camera carries the address its recordings answer on, and a client for
     /// it is built from that alone - the import's configuration may have been

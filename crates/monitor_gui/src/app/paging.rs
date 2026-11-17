@@ -347,7 +347,7 @@ impl XgViewApp {
         // opposite request - the picture and nothing else - so they go at once
         // rather than after the idle delay. A configured idle of zero means the
         // bars never hide, so entering full screen leaves them up as well.
-        let hide = enabled && self.config.chrome_idle_secs > 0.0;
+        let hide = enabled && !self.config.clean_view && self.config.chrome_idle_secs > 0.0;
         self.chrome.visible = !hide;
         self.chrome.hide_now = hide;
         self.chrome.last_input = Instant::now();

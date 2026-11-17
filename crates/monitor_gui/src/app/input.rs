@@ -1563,6 +1563,11 @@ impl XgViewApp {
     }
 
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
+        if self.chrome.reveal_back {
+            ctx.input_mut(|input| consume_any(input, &BACK_WITH_BACKSPACE));
+            self.exit_armed = None;
+            return;
+        }
         // The ring a direction press asked for, put down before anything of this
         // frame can be read against it - and before the early ways out below, so
         // that a request made on the frame a window opened is not left lying

@@ -735,9 +735,16 @@ impl XgViewApp {
             // own idle and the bars'. Which bars are up does not come into
             // it. See `ring_shown`.
             focused: interactive && index == self.scheduler.focus() && ring,
-            interactive,
+            interactive: interactive && !self.chrome.consume_primary,
             dim: !interactive,
-            osd: self.config.osd,
+            // Preserve every configured corner on a fault/reconnect and on
+            // recordings. Camera-burned labels are part of the video itself.
+            osd: grid::clean_view_osd(
+                self.config.osd,
+                self.clean_view_hidden(),
+                index.and_then(|index| self.view_channel(index)).map(|channel| channel.state),
+                index.and_then(|index| self.recording_mark(index)).is_some(),
+            ),
             combined: [
                 &self.config.combined_info[0],
                 &self.config.combined_info[1],
@@ -822,7 +829,9 @@ impl XgViewApp {
                     actions.focus = *index;
                     actions.click_pos = response.interact_pointer_pos();
                 }
-                if response.double_clicked() {
+                if response.double_clicked()
+                    && ui.input(|input| input.time >= self.chrome.reveal_double_click_until)
+                {
                     actions.zoom = *index;
                     actions.double_click_pos = response.interact_pointer_pos();
                 }
@@ -1221,6 +1230,9 @@ impl XgViewApp {
         dx: f32,
         actions: &TileActions,
     ) -> bool {
+        if self.chrome.consume_primary {
+            return true;
+        }
         if !self.scheduler.is_zoomed() {
             return false;
         }

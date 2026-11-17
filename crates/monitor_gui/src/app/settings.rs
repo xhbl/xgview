@@ -303,24 +303,44 @@ impl XgViewApp {
         }
 
         ui.add_space(theme::space::S);
-        let idle = controls::slider(
-            &mut self.nav,
-            ui,
-            &mut self.config.chrome_idle_secs,
-            0.0..=10.0,
-            0.5,
-            "s",
-            &monitor_i18n::tr("settings-chrome-idle"),
-            3.5,
-        );
-        if idle.changed() {
+        let clean = self.nav.tracked(ui.checkbox(
+            &mut self.config.clean_view,
+            monitor_i18n::tr("settings-clean-view"),
+        ));
+        self.name(&clean, "settings-clean-view");
+        if clean.changed() {
+            self.chrome.visible = true;
+            self.chrome.hide_now = false;
+            self.chrome.last_input = Instant::now();
             dirty = true;
         }
         ui.label(
-            RichText::new(monitor_i18n::tr("settings-chrome-idle-hint"))
+            RichText::new(monitor_i18n::tr("settings-clean-view-hint"))
                 .small()
                 .color(theme::TEXT_DIM),
         );
+
+        ui.add_space(theme::space::S);
+        ui.add_enabled_ui(!self.config.clean_view, |ui| {
+            let idle = controls::slider(
+                &mut self.nav,
+                ui,
+                &mut self.config.chrome_idle_secs,
+                0.0..=10.0,
+                0.5,
+                "s",
+                &monitor_i18n::tr("settings-chrome-idle"),
+                3.5,
+            );
+            if idle.changed() {
+                dirty = true;
+            }
+            ui.label(
+                RichText::new(monitor_i18n::tr("settings-chrome-idle-hint"))
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+        });
 
         ui.add_space(theme::space::S);
         if self.settings_language(ui) {

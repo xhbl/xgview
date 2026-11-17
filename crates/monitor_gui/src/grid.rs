@@ -30,6 +30,16 @@ use crate::video::VideoSurface;
 /// half as wide as the crosses.
 pub const LINE: f32 = 1.0;
 
+/// Suppress routine live information, retaining all configured fault/reconnect
+/// and recording information. This never changes the saved OSD or video pixels.
+pub(crate) fn clean_view_osd(osd: Osd, hidden: bool, state: Option<ConnectionState>, recording: bool) -> Osd {
+    if hidden && !recording && state == Some(ConnectionState::Streaming) {
+        Osd::default()
+    } else {
+        osd
+    }
+}
+
 /// How much of a tile's furniture fits.
 ///
 /// A 4x4 grid on a television leaves each tile a couple of hundred points; the
@@ -1500,6 +1510,43 @@ pub fn empty_state(ui: &mut Ui, area: Rect, message: &str, hint: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_view_preserves_fault_and_recording_overlays() {
+        let osd = Osd { top_left: OsdItem::Name, top_right: OsdItem::Stream, ..Osd::default() };
+        assert_eq!(clean_view_osd(osd, true, Some(ConnectionState::Streaming), false), Osd::default());
+        for state in [None, Some(ConnectionState::Failed), Some(ConnectionState::Reconnecting),
+            Some(ConnectionState::Connecting), Some(ConnectionState::Stalled)] {
+            assert_eq!(clean_view_osd(osd, true, state, false), osd);
+        }
+        assert_eq!(clean_view_osd(osd, true, Some(ConnectionState::Streaming), true), osd);
+        assert_eq!(clean_view_osd(osd, false, Some(ConnectionState::Streaming), false), osd);
+    }
+
+    #[test]
+    fn clean_view_grid_expands_and_preserves_each_aspect() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1280.0, 720.0));
+        let with_bars = Rect::from_min_max(egui::pos2(0.0, 36.0), egui::pos2(1280.0, 690.0));
+        let layout = GridLayout::G3x3;
+        for cell in 0..9 {
+            let before = tile_rect(with_bars, layout, cell, LINE);
+            let after = tile_rect(screen, layout, cell, LINE);
+            assert!(after.height() > before.height());
+            assert_eq!(after.width(), before.width());
+            for aspect in TileAspect::ALL {
+                for tile in [before, after] {
+                    let picture = fitted(vec2(1920.0, 1080.0), tile, aspect);
+                    assert!(tile.expand(0.01).contains_rect(picture));
+                    if aspect == TileAspect::Stretch {
+                        assert_eq!(picture, tile);
+                    } else {
+                        let ratio = aspect.ratio().unwrap_or(16.0 / 9.0);
+                        assert!((picture.width() / picture.height() - ratio).abs() < 0.001);
+                    }
+                }
+            }
+        }
+    }
 
     /// The number keeps counting across pages: the second page of a 3x3 wall
     /// starts at 10, and a list past 99 keeps every digit.

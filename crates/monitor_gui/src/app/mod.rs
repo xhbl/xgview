@@ -180,6 +180,15 @@ struct Chrome {
     /// rectangle they were drawn in is the only description of where it is.
     /// `None` until they have been drawn once.
     bars: Option<(Rect, Rect)>,
+    /// Swallow the primary gesture that revealed Clean View's controls,
+    /// including its release on a later frame.
+    consume_primary: bool,
+    /// Back reveals controls before it can unwind the wall this frame.
+    reveal_back: bool,
+    /// An interaction ending starts a fresh countdown even without intervening frames.
+    clean_held: bool,
+    /// The reveal click must not count as the first half of a tile double-click.
+    reveal_double_click_until: f64,
 }
 
 /// The bar an arrow walked off the wall for.
@@ -1843,6 +1852,10 @@ impl XgViewApp {
                 hide_now: false,
                 input_seen: false,
                 bars: None,
+                consume_primary: false,
+                reveal_back: false,
+                clean_held: false,
+                reveal_double_click_until: f64::NEG_INFINITY,
             },
             toolbar_items: Vec::new(),
             page_prev_id: None,
@@ -3320,6 +3333,7 @@ impl XgViewApp {
     /// `poll_events` is the manager's queue; this is everything that has to be
     /// in hand before a widget is drawn, which includes it.
     pub(super) fn collect_events(&mut self, ctx: &egui::Context) {
+        self.collect_clean_view_input(ctx);
         // Read before the keys are handed out: `handle_keys` takes the ones the
         // application acts on out of the queue, and the bars still have to know
         // a viewer was there. What counts as asking for them is the whole of
@@ -3327,7 +3341,9 @@ impl XgViewApp {
         self.chrome.input_seen = self.viewer_active(ctx);
         // And the press in flight is tracked before anything is drawn: the
         // release that closes the magnified viewport's bar is read against it.
-        self.track_tap(ctx);
+        if !self.chrome.consume_primary {
+            self.track_tap(ctx);
+        }
         // A tap asks for the strip, but only once egui's double-click window has
         // passed: the second tap of a double press is the way back to the grid,
         // and the first must not put the strip on screen on its way there. See
@@ -3419,10 +3435,17 @@ impl XgViewApp {
         // *before* the bars are asked for, because the frame a press in a band
         // brings them back in is one of the frames that has to claim it.
         let bands_hidden = !self.chrome.visible;
-        let bars = self.chrome_visible();
+        let bars = self.chrome_visible(ctx);
         if bars {
-            let toolbar = egui::TopBottomPanel::top("xgview-toolbar").show(ctx, |ui| self.toolbar(ui));
-            let status = egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| self.status_bar(ui));
+            let enabled = !self.chrome.consume_primary;
+            let toolbar = egui::TopBottomPanel::top("xgview-toolbar").show(ctx, |ui| {
+                if !enabled { ui.disable(); }
+                self.toolbar(ui);
+            });
+            let status = egui::TopBottomPanel::bottom("xgview-status").show(ctx, |ui| {
+                if !enabled { ui.disable(); }
+                self.status_bar(ui);
+            });
             // Kept past this frame, when the bars are gone: the band a bar
             // occupies is the pointer's way of asking for it back. See
             // `Chrome::bars`.
@@ -3456,7 +3479,7 @@ impl XgViewApp {
         // under it is what has to see the press: these overlays are exactly
         // where that bar is drawn, so one of them would eat the press before the
         // tile could open it. See `crate::tilebar` and `wall_event`.
-        if bands_hidden && !self.scheduler.is_zoomed() {
+        if bands_hidden && !self.config.clean_view && !self.scheduler.is_zoomed() {
             // Held to this frame's screen: the rectangles are from the frame the
             // bars were last drawn in, and a window made full screen since has
             // bands at the top and bottom of a taller screen than those - an
@@ -3530,6 +3553,7 @@ impl XgViewApp {
                 theme::BACKGROUND
             }))
             .show(ctx, |ui| {
+                if self.chrome.consume_primary { ui.disable(); }
                 let area = ui.available_rect_before_wrap();
                 self.draw_grid(ui);
                 // The floating page arrows sit at the very edges the magnified

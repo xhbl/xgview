@@ -364,6 +364,16 @@ without one. A page turn - or a layout that moves the cursor under you - never
 brings it back and takes one that is showing down, so a wall nobody is aiming at
 shows the picture alone.
 
+Enable **Settings → Display → Clean View** to hide both bars and routine live
+tile overlays after five seconds of inactivity, in a window or full screen.
+The grid expands into the freed space using each camera's existing aspect
+setting. A click on the hidden wall reveals the controls without selecting or
+magnifying a tile; **Esc / Back** also reveals them. Controls stay visible while
+a bar is hovered or focused, or a menu, settings panel or dialog is open.
+Connection errors and reconnect indicators remain visible, as do names and
+timestamps embedded in the video by the cameras. Clean View is off by default,
+and its setting is saved across launches.
+
 ### Grid layouts and paging
 
 Pick a layout with the digit keys or the toolbar. The four square grids -

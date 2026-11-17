@@ -103,6 +103,14 @@ if (-not $NoBuild) {
     try {
         cargo build --release
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+        Write-Step 'Running core and GUI regression tests'
+        $testPath = $env:PATH
+        try {
+            if ($env:FFMPEG_DIR) { $env:PATH = (Join-Path $env:FFMPEG_DIR 'bin') + ";$testPath" }
+            cargo test --release -p monitor_core -p monitor_gui
+            if ($LASTEXITCODE -ne 0) { throw "cargo test failed with exit code $LASTEXITCODE" }
+        }
+        finally { $env:PATH = $testPath }
     }
     finally {
         Pop-Location
