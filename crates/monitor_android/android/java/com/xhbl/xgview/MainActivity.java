@@ -1685,14 +1685,13 @@ public class MainActivity extends NativeActivity {
         if (min <= 0) {
             return false;
         }
-        // Three quarters of a second, at sixteen-bit samples: rate * 3 / 2
-        // frames. An eight-kilohertz AAC packet is a hundred and twenty-eight
-        // milliseconds, so this holds several whole packets - enough for a
-        // non-blocking write to land, but short enough that a burst on open
-        // cannot bury seconds of old sound under the picture. A two-second
-        // track was measured holding 2.1 seconds of sound behind a 0.5-second
-        // picture; no waterline on the Rust side can see what is already in
-        // here, so the buffer itself is the bound on the worst-case lag.
+        // Half a second, at sixteen-bit samples: rate frames. An eight-kilohertz
+        // AAC packet is a hundred and twenty-eight milliseconds, so this holds
+        // several whole packets - enough for a non-blocking write to land. This
+        // is the size the player used before the audio waterline was added, and
+        // viewers heard that version as closer to the picture. A larger track
+        // only adds delay nothing on this side can take back: no waterline can
+        // see the sound already in here.
         final AudioTrack track = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
@@ -1703,7 +1702,7 @@ public class MainActivity extends NativeActivity {
                         .setSampleRate(rate)
                         .setChannelMask(channelMask)
                         .build())
-                .setBufferSizeInBytes(Math.max(min, rate * 3 * channels / 2))
+                .setBufferSizeInBytes(Math.max(min, rate * channels))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build();
         if (track.getState() != AudioTrack.STATE_INITIALIZED) {

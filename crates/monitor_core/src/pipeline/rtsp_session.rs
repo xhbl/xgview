@@ -23,27 +23,6 @@ struct AudioTrack {
     opened: u32,
 }
 
-/// How far behind the picture the sound is placed, on top of the lead.
-///
-/// The picture is held on its own clock so that a batch can spread out; the
-/// sound is not, and played the moment it was decoded it would run ahead of the
-/// lips. What the picture is held by is the lead plus the pictures the clock is
-/// holding, and the latter settles at two or three of them - a hundred
-/// milliseconds is that, and following the lead means the two stay together even
-/// when the lead retunes. Ten milliseconds of a retune is a step the ear never
-/// hears as a shift.
-const AUDIO_SETTLE: Duration = Duration::from_millis(100);
-
-/// How many interleaved samples make up `lag` of this track's sound.
-///
-/// Samples rather than milliseconds, because the queue it measures is what the
-/// sink is given and that is interleaved: a stereo track at forty-eight
-/// kilohertz holds ninety-six thousand of them a second.
-fn audio_lag_samples(info: &AudioStreamInfo, lag: Duration) -> usize {
-    let channels = u64::from(info.channels.max(1));
-    (u64::from(info.sample_rate) * channels * lag.as_millis() as u64 / 1000) as usize
-}
-
 /// Opens an audio decoder for the camera's audio track, or `None` when there is
 /// no track the client receives or the codec has no backend in this build.
 fn audio_track_decoder(tracks: &[SdpTrack]) -> Option<AudioTrack> {
@@ -1882,9 +1861,6 @@ impl<'a> RtspSession<'a> {
     /// from all playing their microphones.
     fn on_audio(&mut self, payload: &[u8]) {
         if self.audio.wants(self.index) {
-            // Read before the track is borrowed: the sound's own lag is measured
-            // against what the picture's clock is holding right now.
-            let lead = self.pacer.lead;
             // Nothing is playing, so nothing is being held for it: the sound at
             // the moment the sink is opened is the present, not a backlog from
             // before it was muted.
@@ -1923,45 +1899,15 @@ impl<'a> RtspSession<'a> {
                                 track.waiting.clear();
                                 track.opened = track.info.sample_rate;
                             }
-                            // The sound is held the same distance behind the
-                            // picture, so the picture's own clock does not leave
-                            // it running ahead. The mark moves with the lead, so
-                            // the two stay together when it retunes; what is
-                            // pushed is only the sound past that mark, which
-                            // keeps the lag without a clock of its own.
-                            let lag = audio_lag_samples(&track.info, lead + AUDIO_SETTLE);
-                            // What one packet decodes to is the yardstick for
-                            // everything below: an AAC packet is a thousand and
-                            // twenty-four samples - a hundred and twenty-eight
-                            // milliseconds at eight kilohertz - and a G.711 one is
-                            // twenty. Metring the sound out smaller than a packet
-                            // cannot keep up with the packets arriving, and what
-                            // does not keep up is thrown away from the front, in
-                            // the middle of a word.
-                            let packet = pcm.len();
-                            track.waiting.extend(pcm.iter().copied());
-                            // Sound the picture has already passed is not played:
-                            // at most the watermark and the packet that just
-                            // arrived is held, and what is over that is skipped in
-                            // one move. Writing it instead would hand the sink a
-                            // block it has no room for, and a track that cuts a
-                            // block leaves a hole exactly where it cut it.
-                            if track.waiting.len() > lag + packet {
-                                let excess = track.waiting.len() - lag;
-                                track.waiting.drain(..excess);
-                            }
-                            if track.waiting.len() > lag {
-                                // A packet's worth at most: in steady state that
-                                // is exactly what overflowed, and a retune that
-                                // widened the lag has only to swallow the eighty
-                                // samples the step added. The sink is written
-                                // without blocking, so a block bigger than its
-                                // buffer is cut where it does not fit - a hole in
-                                // the sound the ear hears as a click.
-                                let take = (track.waiting.len() - lag).min(packet);
-                                let ready: Vec<i16> = track.waiting.drain(..take).collect();
-                                output.push(&ready);
-                            }
+                            // Play the sound as it is decoded. A waterline
+                            // here holds the sound back to match the picture's
+                            // clock, but the picture's own delay is the
+                            // forwarder's, which the sink cannot share: the
+                            // result was a voice about half a second further
+                            // behind than the version without a waterline.
+                            // The sink's own buffer is delay enough. Keep
+                            // `waiting` only as the thing a sink reopen drops.
+                            output.push(&pcm);
                         }
                     }
                 }
@@ -2747,17 +2693,5 @@ mod tests {
             pacer.moment(pacer.queue.back().expect("held").at),
             pacer.moment(pacer.queue.front().expect("held").at)
         );
-    }
-
-    /// The sound's mark is counted in the samples the sink is given, which are
-    /// interleaved: a stereo track needs twice as many as a mono one.
-    #[test]
-    fn the_audio_lag_is_counted_in_interleaved_samples() {
-        let mono = AudioStreamInfo::new(AudioCodec::Pcmu, 8000, 1);
-        let stereo = AudioStreamInfo::new(AudioCodec::Aac, 48_000, 2);
-        let lag = Duration::from_millis(120);
-        assert_eq!(audio_lag_samples(&mono, lag), 960);
-        assert_eq!(audio_lag_samples(&stereo, lag), 11_520);
-        assert_eq!(audio_lag_samples(&stereo, Duration::from_secs(1)), 96_000);
     }
 }

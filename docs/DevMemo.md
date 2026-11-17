@@ -6517,3 +6517,78 @@ The onn box went offline while they were being checked and came back; its
 thirty-two bit package was installed and opened without complaint.
 
 Version to 2.3.4. No changelog, tag or push yet.
+
+## 73. Two attempts at the sound's delay, and why neither is here
+
+The sound still sits two to four seconds behind the picture on the onn box,
+and two fixes were tried and taken back out. Both are recorded so neither is
+attempted a third time without the measurements in front of it.
+
+**Reading the playback head.** Teach `AudioOutput` to report what the device
+has queued and stop writing when it exceeds the watermark. It cannot work: an
+`AudioTrack` in `MODE_STREAM` underruns when its writer stops, the head freezes,
+and the feedback reads a permanently full track and stops for good. A probe
+found the track playing with its queue counter pinned while the queue on this
+side grew; the head advanced normally once writing resumed. The policy, not the
+device, was wrong. A shorter buffer of three quarters of a second did help - it
+cut the measured device backlog from two seconds to four hundred and nine
+hundred milliseconds - and that change stands.
+
+**Putting sound on its own clock.** Decode each AAC access unit separately,
+stamp it with its RTP timestamp, hold it until that moment, and hand it over
+from the packet loop. Three measurements say this is not the fix:
+units were placed only three hundred to six hundred milliseconds into the
+future, they were handed over within ten milliseconds of their moment, and the
+device's own backlog did not shrink. Worse, the access units do not decode to a
+fixed length - measured sizes ran from six hundred and forty to fourteen hundred
+and fifty-nine samples - so the fixed one-thousand-and-twenty-four-tick spacing
+assumed for them was wrong, and the queue grew to eight or twelve units. The
+viewer heard a *longer* delay than before. The change was reverted.
+
+**What the measurements do say.** The delay is not in the queue on this side,
+nor in when the loop hands sound to the sink: both were measured and small. It
+lives below the JNI bridge - in `AudioTrack`'s own buffer and the Amlogic HAL,
+whose reported `getTimestamp().framePosition` appears not to be the speaker's
+real position, so the depth read here understates what the ear hears. There is
+no RTCP sender report from the forwarder either (probed: not one packet on
+either track), so there is no NTP-to-RTP mapping to align the two streams by.
+A real fix has to measure the speaker's actual position, or give the audio a
+clock the sink can follow, neither of which this forwarder offers today.
+
+The forwarder's opening burst remains the source of the first couple of
+seconds: video folds it, audio does not. That is still worth doing, but it is a
+smaller change than either of the above and should be measured against the
+ear, not against `AudioTrack`'s counters.
+
+## 74. Sound without a waterline
+
+Three attempts to make the sound sit closer to the picture were made and
+removed (§73). The viewer then supplied the measurement that was missing all
+along: the picture itself is about a second behind real life because the
+forwarder buffers it, and the sound is only about a second behind the picture -
+and the 2.2.98 build, which sounded closer, had no audio waterline at all.
+
+A diff against that build found the difference. Before the live clock work a
+decoded audio packet went straight to the sink:
+
+    decode -> output.push(&pcm)
+
+with a half-second AudioTrack buffer. The live clock added a waterline of
+`lead + AUDIO_SETTLE` - a hundred and sixty plus a hundred milliseconds - held
+the decoded samples until they were past it, and wrote only what was over. The
+sink buffer grew from half a second to three quarters. Those two changes are
+about half a second of extra delay, on a stream where the picture's own second
+comes from the forwarder and cannot be removed here: the sound was being made
+to wait for a picture that was already late.
+
+Both are now back to their earlier values: decoded sound is written as it is
+decoded, and the track is half a second. The queue and rate fields stay: they
+are what a sink reopen drops, so switching channels cannot put the previous
+channel's sound in front of the new one. The playback-head log stays too - it
+is the only window into the sink's own backlog.
+
+What remains is the forwarder's second, common to both streams, and whatever
+the Amlogic HAL adds below the head reading. An RTCP sender report would tie
+the two streams to one clock, but the forwarder sends no RTCP at all (§73).
+The viewer is the judge of whether this is closer; the counters here cannot
+see the speaker.
