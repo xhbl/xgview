@@ -35,8 +35,11 @@
 
 #![allow(non_camel_case_types)]
 
+use crate::handover::Handover;
+use crate::reorder::Order;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::audio::{AudioCodec, AudioDecoder, AudioStreamInfo};
@@ -63,35 +66,21 @@ const INFO_OUTPUT_FORMAT_CHANGED: isize = -2;
 /// `INFO_TRY_AGAIN_LATER`
 const INFO_TRY_AGAIN_LATER: isize = -1;
 
-/// The shortest gap between two pictures handed to the surface's compositor.
-///
-/// A surface shows one picture per refresh, and holds the codec's output buffers
-/// until it has shown them. A session that renders every picture it decodes is
-/// therefore paced by the display rather than by what it is reading: a live
-/// channel at 25 frames a second never notices, and a recording played at eight
-/// times its speed is pinned to sixty pictures a second - the codec waits for an
-/// output buffer it has already handed over, the session sees every sample
-/// arrive late, and the rate the viewer asked for is never reached.
-///
-/// Skipping a handover costs nothing visible: the compositor can only show the
-/// newest picture it was given, so the ones in between were never going to be
-/// seen. The gap is a little wider than a frame at 30Hz, which leaves the live
-/// channel - and a recording at its own speed - handing over every picture they
-/// have.
-///
-/// A live stream now reaches the decoder a picture at a time whatever the wire
-/// did, because the session places each picture on the clock its timestamp
-/// names first; see `pipeline::rtsp_session::LivePacer`. Narrowing this gap so a
-/// burst could pass was a stopgap that made the picture worse, and is no longer
-/// what this is for.
-const RENDER_GAP: Duration = Duration::from_millis(25);
-
 /// `COLOR_FormatYUV420Flexible`: the format a decoder offers when it is given no
 /// surface to render into. What it hands over is NV12 in practice, with the row
 /// pitch and plane height it reports as `stride` and `slice-height`.
 const COLOR_FORMAT_FLEXIBLE: i32 = 0x7F42_0888;
 /// `COLOR_FormatYUV420SemiPlanar`: the same layout under its older name.
 const COLOR_FORMAT_SEMI_PLANAR: i32 = 0x15;
+
+/// Whether a decoder on this device has refused `low-latency` already.
+///
+/// The refusal costs a whole configuration, not the option: `ACodec` reports it
+/// as a failure to configure, so a session that asks blindly pays one failed
+/// configure every time it opens. HiSilicon's decoder answers
+/// `OMX_ErrorUndefined` and is common enough to be worth remembering for the
+/// process - see `docs/DevMemo.md` §9 for the framework log that named it.
+static LOW_LATENCY_REFUSED: AtomicBool = AtomicBool::new(false);
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -320,12 +309,9 @@ pub struct AMediaCodecDecoder {
     /// on the strength of a window existing shows that instead - which is a
     /// frame of the previous camera, on a channel step.
     presenting: bool,
-    /// When the last picture was handed to the surface's compositor.
-    ///
-    /// `None` before the first one, so that a session always renders the picture
-    /// it opened on however soon after it opened. See [`RENDER_GAP`] for why the
-    /// handovers are spaced at all.
-    rendered_at: Option<Instant>,
+    /// What the surface can take, and what it is given: the feed rate that
+    /// tells a live channel from a replay, and the gap between handovers.
+    handover: Handover,
     /// Set once an output format this cannot read as NV12 has been reported.
     ///
     /// Byte-buffer mode only: with a surface the codec reports
@@ -385,6 +371,27 @@ pub struct AMediaCodecDecoder {
     stat_total: Duration,
     stat_frames: u32,
     stat_packed: u32,
+    /// Pictures decoded this window that were not handed to the compositor
+    /// because the previous handover was too recent.
+    stat_skipped: u32,
+    /// What the order of this session's pictures says about the stream: whether
+    /// it is shown in the order it is decoded in, or needs the decoder's own
+    /// reordering back.
+    order: Order,
+    /// Set once this stream has been seen to need its pictures reordered.
+    ///
+    /// A decoder asked for low latency hands its pictures over in the order it
+    /// decoded them, which is the order a stream with B-frames is *not* shown
+    /// in: the tile would show an older picture after a newer one on every GOP,
+    /// a regular shudder (`docs/DevMemo.md` §17). Asking for the reordering back
+    /// costs its depth in delay and gives correct order, so a stream that needs
+    /// it is reopened without low latency and never asks again.
+    reorder_seen: bool,
+    /// Whether the session the handle points at was opened asking for low
+    /// latency. The ask can be refused afterwards, see [`LOW_LATENCY_REFUSED`],
+    /// so this records what was asked rather than what was granted, which is
+    /// all the reopen below needs.
+    opened_low_latency: bool,
 }
 
 // Safety: the codec is owned outright by the channel worker that opened it and
@@ -417,6 +424,9 @@ impl AMediaCodecDecoder {
             return Ok(());
         }
         self.suspended = surface_suspended();
+        // What this session is being asked for, kept so a stream that turns out
+        // to reorder can tell whether taking the ask back is worth a reopen.
+        self.opened_low_latency = !self.reorder_seen;
         let config = self.config.clone();
         let mime = CString::new(config.codec.mime())
             .map_err(|err| CodecError::Configure(err.to_string()))?;
@@ -474,6 +484,7 @@ impl AMediaCodecDecoder {
                     size,
                     COLOR_FORMAT_SEMI_PLANAR,
                     Some(window),
+                    !self.reorder_seen,
                 ) {
                     Ok(codec) => Ok(codec),
                     Err(err) => {
@@ -482,7 +493,14 @@ impl AMediaCodecDecoder {
                             %err,
                             "the codec would not take a named layout, asking for a flexible one"
                         );
-                        Self::open_session(&mime, &csd, size, COLOR_FORMAT_FLEXIBLE, Some(window))
+                        Self::open_session(
+                            &mime,
+                            &csd,
+                            size,
+                            COLOR_FORMAT_FLEXIBLE,
+                            Some(window),
+                            !self.reorder_seen,
+                        )
                     }
                 };
                 match opened {
@@ -537,7 +555,14 @@ impl AMediaCodecDecoder {
         // lock aborts inside the platform's own gralloc mapper. Reading a picture
         // back costs the same either way; the reader only ever made it possible
         // to *not* read it back, which is what the activity's surface does.
-        let codec = match Self::open_session(&mime, &csd, size, COLOR_FORMAT_SEMI_PLANAR, None) {
+        let codec = match Self::open_session(
+            &mime,
+            &csd,
+            size,
+            COLOR_FORMAT_SEMI_PLANAR,
+            None,
+            !self.reorder_seen,
+        ) {
             Ok(codec) => codec,
             Err(err) => {
                 tracing::debug!(
@@ -545,7 +570,14 @@ impl AMediaCodecDecoder {
                     %err,
                     "the codec would not take a named layout, asking for a flexible one"
                 );
-                Self::open_session(&mime, &csd, size, COLOR_FORMAT_FLEXIBLE, None)?
+                Self::open_session(
+                    &mime,
+                    &csd,
+                    size,
+                    COLOR_FORMAT_FLEXIBLE,
+                    None,
+                    !self.reorder_seen,
+                )?
             }
         };
         self.handle = Some(codec);
@@ -564,6 +596,37 @@ impl AMediaCodecDecoder {
         Ok(())
     }
 
+    /// Opens a session at the lowest latency this device will give, asking for
+    /// low latency first and giving it up if the decoder refuses the ask.
+    ///
+    /// A decoder that will not take `low-latency` does not ignore the option, it
+    /// fails the whole configuration (`docs/DevMemo.md` §9), so the ask is made
+    /// once per process and the refusal remembered: without that, every channel
+    /// on such a device would pay a failed configure each time it opens, and the
+    /// stream would then have nowhere to go but the software decoder.
+    fn open_session(
+        mime: &CString,
+        csd: &[Vec<u8>],
+        size: Option<(u32, u32)>,
+        colour_format: i32,
+        window: Option<*mut ANativeWindow>,
+        want_low_latency: bool,
+    ) -> Result<*mut AMediaCodec> {
+        let asked = want_low_latency && !LOW_LATENCY_REFUSED.load(Ordering::Relaxed);
+        match Self::configure(mime, csd, size, colour_format, window, asked) {
+            Err(CodecError::Configure(_)) if asked => {
+                LOW_LATENCY_REFUSED.store(true, Ordering::Relaxed);
+                tracing::info!(
+                    target: "xgview::codec",
+                    mime = mime.to_string_lossy().as_ref(),
+                    "the decoder refused low latency; opening without it"
+                );
+                Self::configure(mime, csd, size, colour_format, window, false)
+            }
+            other => other,
+        }
+    }
+
     /// Creates, configures and starts one codec session, handing back the codec.
     ///
     /// `csd` is the parameter sets in the order the codec wants them, one per
@@ -572,13 +635,15 @@ impl AMediaCodecDecoder {
     /// `window` is the `ANativeWindow` to render into, or `None` for byte-buffer
     /// mode. A codec that failed to configure is released before the error comes
     /// back, so a caller that wants to try again with a different format has
-    /// nothing to clean up.
-    fn open_session(
+    /// nothing to clean up - which is what the retry without low latency relies
+    /// on.
+    fn configure(
         mime: &CString,
         csd: &[Vec<u8>],
         size: Option<(u32, u32)>,
         colour_format: i32,
         window: Option<*mut ANativeWindow>,
+        low_latency: bool,
     ) -> Result<*mut AMediaCodec> {
         let codec = unsafe { AMediaCodec_createDecoderByType(mime.as_ptr()) };
         if codec.is_null() {
@@ -601,19 +666,42 @@ impl AMediaCodecDecoder {
                 let key = CString::new(format!("csd-{slot}")).expect("csd-N has no nul byte");
                 AMediaFormat_setBuffer(format, key.as_ptr(), set.as_ptr().cast(), set.len());
             }
-            // Deliberately no `low-latency`. A decoder told to run at low
-            // latency hands its pictures over in the order it decoded them,
-            // which for a stream with B-frames is not the order they are shown
-            // in - the picture then jumps backwards, regularly, on every GOP.
-            // Left alone, the codec reorders by the presentation times it was
-            // given and hands them over to be shown, and a stream with no
-            // B-frames still comes out one after another as it always did.
-            //
             // `color-format` is a byte-buffer question only: it names the
             // layout of the memory the codec writes into. A codec given a
             // surface writes through gralloc and the reader decides the layout
             // (`YUV_420_888`), so naming one here would be a request about
             // memory that never exists.
+            //
+            // `low-latency` asks the decoder to hand each picture over as it
+            // finishes it, rather than holding it until the order the bitstream
+            // describes is resolved. That wait is what made a twelve frame a
+            // second doorbell stutter: an access unit arrived every eighty-three
+            // milliseconds and came back eight at a time, once a second - the
+            // screen froze for three quarters of a second and then jumped -
+            // while every twenty frame camera on the same box came back one for
+            // one. Asked for low latency, the same decoder hands each picture
+            // over as it finishes it, and the rhythm became the feed's again.
+            //
+            // What it gives up is the decoder's own reordering, which makes it
+            // wrong for a stream with B-frames: the pictures then come over in
+            // the order they were decoded, and the tile shows an older picture
+            // after a newer one on every GOP - a regular shudder, measured in
+            // `docs/DevMemo.md` §17 and the reason both low latency flags were
+            // once taken out of this tree. Every camera the boxes here run is
+            // H.264 with no B-frames, so it is asked for again; a session on a
+            // stream that does reorder would need it taken back, and nothing
+            // here can tell that from the outside - the NDK exposes neither a
+            // way to ask a codec whether it takes the option nor a stream
+            // whether it needs reordering.
+            //
+            // Nor does every decoder take it: HiSilicon's answers
+            // `OMX_ErrorUndefined`, and `ACodec` treats the option as part of
+            // the configuration rather than as a hint it may drop, so the ask
+            // costs the whole session (§9). `open_session` asks and, when the
+            // ask is refused, opens again without it.
+            if low_latency {
+                AMediaFormat_setInt32(format, c"low-latency".as_ptr(), 1);
+            }
             if window.is_none() {
                 AMediaFormat_setInt32(format, c"color-format".as_ptr(), colour_format);
             }
@@ -643,6 +731,16 @@ impl AMediaCodecDecoder {
             unsafe { AMediaCodec_delete(codec) };
             return Err(CodecError::Configure("AMediaCodec_start failed".to_string()));
         }
+        // What this session was opened asking for: a decoder that honours the
+        // option and one that quietly ignores it configure alike, so whether the
+        // ask was granted has to be read from what the pictures do - a stream
+        // that comes back one for one was honoured, one that comes back in
+        // batches was not.
+        tracing::debug!(
+            target: "xgview::codec",
+            asked = low_latency,
+            "the decoder is running"
+        );
         Ok(codec)
     }
 
@@ -742,33 +840,32 @@ impl AMediaCodecDecoder {
 
     /// Whether this picture is one to hand to the surface's compositor.
     ///
-    /// Answered with the clock rather than with a count of pictures, because
-    /// what the surface can take is a rate and not a share of the stream: the
-    /// same codec serves a live camera at 25 frames a second and a recording at
-    /// eight times that, and only the second one has pictures to spare.
-    ///
-    /// The first picture after a session opens is always handed over - the
-    /// surface is showing the previous session's, or nothing at all.
+    /// The decision is [`Handover`]'s: a live feed is handed over whole, and
+    /// only a session reading faster than the display is thinned. A counter is
+    /// kept here so the window's line can say how many pictures a thinning cost.
     fn take_handover(&mut self) -> bool {
         let now = Instant::now();
-        if self
-            .rendered_at
-            .is_some_and(|last| now.duration_since(last) < RENDER_GAP)
-        {
-            return false;
+        let take = self.handover.take(now);
+        if !take {
+            self.stat_skipped += 1;
         }
-        self.rendered_at = Some(now);
-        true
+        take
     }
 
     fn drain_inner(&mut self, codec: *mut AMediaCodec, frames: &mut Vec<DecodedFrame>) {
         let Some(_) = self.handle else {
             return;
         };
+        // The first ask is given a few milliseconds: a codec asked with no
+        // patience can answer that it has nothing while it is still closing the
+        // picture it was given, and the answer would be a picture left in the
+        // codec until the next access unit came, one frame interval later.
+        let mut patience = 5_000i64;
         loop {
             let mut info = AMediaCodecBufferInfo::default();
             let waiting = Instant::now();
-            let index = unsafe { AMediaCodec_dequeueOutputBuffer(codec, &mut info, 0) };
+            let index = unsafe { AMediaCodec_dequeueOutputBuffer(codec, &mut info, patience) };
+            patience = 0;
             self.stat_output += waiting.elapsed();
             match index {
                 INFO_TRY_AGAIN_LATER => break,
@@ -777,6 +874,15 @@ impl AMediaCodecDecoder {
                     continue;
                 }
                 index if index >= 0 => {
+                    // What the order of the output says about the stream. A
+                    // decoder asked for low latency hands pictures over in the
+                    // order it decoded them, so a stream with B-frames shows it
+                    // here and nowhere else: each GOP puts a picture out before
+                    // one it follows. Counted in the drain, acted on in
+                    // `decode`, where no codec call is in flight.
+                    if info.flags & BUFFER_FLAG_END_OF_STREAM == 0 {
+                        self.order.saw(info.presentation_time_us);
+                    }
                     if self.on_surface {
                         // A codec rendering into a surface hands its picture
                         // over by rendering it - there is nothing to read back
@@ -1044,7 +1150,12 @@ impl VideoDecoder for AMediaCodecDecoder {
         // Whatever the next session opens on is not this one's picture, and the
         // gap between two handovers is a gap within a session: a session opened
         // straight after another must not be held back by the last one's clock.
-        self.rendered_at = None;
+        self.handover.reset();
+        // The order of the pictures is the next session's to report, and so is
+        // what it asks for. What the stream was seen to do is not forgotten: it
+        // is why this one is opening without the ask.
+        self.order.reset();
+        self.opened_low_latency = false;
         // A new session starts its own count: the one that came before it was
         // judged on a codec that no longer exists.
         self.starved = 0;
@@ -1079,6 +1190,11 @@ impl VideoDecoder for AMediaCodecDecoder {
         // Remembered, not acted on: the codec session is opened on the first
         // access unit, which is the first thing that can describe the stream.
         self.config = config.clone();
+        // A new stream is its own order and its own latency: what the last one
+        // asked for, and how its pictures came out, says nothing about this one.
+        self.order.clear();
+        self.reorder_seen = false;
+        self.opened_low_latency = false;
         // A new session knows nothing about the pace of this codec yet, so it
         // starts at the floor and finds out. Waiting longer than the codec needs
         // is not free: the wait blocks the thread the session runs on, and a
@@ -1098,6 +1214,28 @@ impl VideoDecoder for AMediaCodecDecoder {
         keyframe: bool,
     ) -> Result<Vec<DecodedFrame>> {
         let whole = Instant::now();
+        // How fast the session feeds the codec, which is what tells a live
+        // channel from a replay when a picture is handed to the surface.
+        self.handover.fed(whole);
+        // A stream that hands its pictures over before the ones they follow
+        // needs the decoder's own reordering, which is exactly what low latency
+        // gives up: with B-frames the tile shows an older picture after a newer
+        // one on every GOP, a regular shudder (`docs/DevMemo.md` §17). The drain
+        // counted what it saw; the session is closed here, where no codec call
+        // is in flight, and the next access unit opens one without the ask. The
+        // reorder depth then costs its few frames of delay, which is the price
+        // of showing the stream in the order it is meant to be seen in.
+        if self.order.needs_reordering() && self.opened_low_latency && self.handle.is_some() {
+            self.reorder_seen = true;
+            tracing::info!(
+                target: "xgview::codec",
+                reordered = self.order.reordered(),
+                "the stream hands its pictures over out of order; reopening the decoder without low latency"
+            );
+            self.close();
+            self.on_surface = false;
+            self.generation = 0;
+        }
         // A codec renders into the window it was opened on, and cannot be
         // pointed at another. The activity's picture surface is destroyed when
         // the window goes away - leaving the app, or anything else that stops
@@ -1292,6 +1430,7 @@ impl VideoDecoder for AMediaCodecDecoder {
                 drain_ms = self.stat_drain.as_millis() as u64,
                 release_ms = self.stat_release.as_millis() as u64,
                 pictures = self.pictures,
+                skipped = self.stat_skipped,
                 total_ms = self.stat_total.as_millis() as u64,
                 "the decoder's pace"
             );
@@ -1305,6 +1444,7 @@ impl VideoDecoder for AMediaCodecDecoder {
             self.stat_total = Duration::ZERO;
             self.stat_frames = 0;
             self.stat_packed = 0;
+            self.stat_skipped = 0;
         }
         Ok(frames)
     }

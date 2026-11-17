@@ -1683,7 +1683,7 @@ public class MainActivity extends NativeActivity {
                         .setSampleRate(rate)
                         .setChannelMask(channelMask)
                         .build())
-                .setBufferSizeInBytes(Math.max(min, rate / 2 * 2 * channels))
+                .setBufferSizeInBytes(Math.max(min, rate * 4 * channels))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build();
         if (track.getState() != AudioTrack.STATE_INITIALIZED) {
@@ -1698,7 +1698,10 @@ public class MainActivity extends NativeActivity {
             audio.setMode(AudioManager.MODE_IN_COMMUNICATION);
             audio.setSpeakerphoneOn(true);
         }
-        android.util.Log.i("xgview", "talk playback opened rate=" + rate + " channels=" + channels);
+        android.util.Log.i(
+                "xgview",
+                "talk playback opened rate=" + rate + " channels=" + channels
+                        + " buffer=" + track.getBufferSizeInFrames() + " frames");
         return true;
     }
 
@@ -1707,25 +1710,33 @@ public class MainActivity extends NativeActivity {
      *
      * <p>The voice path's gain staging is a call's, which leaves speech a little
      * quieter than the media path at the same volume; {@link #TALK_GAIN} is what
-     * buys that back. Non-blocking: a full track drops the block rather than
-     * stalling the native worker that pushed it, and that worker is also pumping
-     * the picture.
+     * buys that back, and it is applied to a camera's sound as well - that is the
+     * level the viewer settled on, and taking it away would drop every channel
+     * six decibels the moment a call ends.
+     *
+     * <p>Non-blocking, and a full track cuts the block rather than stalling the
+     * native worker that pushed it - that worker is also pumping the picture. What
+     * the track would not take is said out loud: it is a hole in the sound, and
+     * the only way to tell it from a camera's own noise.
      */
     public static void pushTalkPlayback(final short[] samples, final int count) {
         final AudioTrack track = talkOutput;
         if (track == null) {
             return;
         }
-        // The voice path runs quieter than the media path, so the samples are
-        // lifted by {@link #TALK_GAIN} before they leave. In place: each block is
-        // its own array, and what the caller handed over is not read again. A soft
-        // clip keeps a frame the gain pushes past full scale from ringing.
+        // In place: each block is its own array, and what the caller handed over
+        // is not read again. A soft clip keeps a frame the gain pushes past full
+        // scale from ringing.
         for (int i = 0; i < count; i++) {
             final double normalised = samples[i] / 32768.0 * TALK_GAIN;
             final int lifted = (int) (32767.0 * Math.tanh(normalised));
             samples[i] = (short) lifted;
         }
-        track.write(samples, 0, count, AudioTrack.WRITE_NON_BLOCKING);
+        final int written = track.write(samples, 0, count, AudioTrack.WRITE_NON_BLOCKING);
+        if (written < count) {
+            android.util.Log.w(
+                    "xgview", "playback took " + written + " of " + count + " samples");
+        }
     }
 
     /** The playback's volume, {@code 0.0..=1.0}. */

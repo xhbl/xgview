@@ -576,6 +576,32 @@ extra failed configure per session on the devices that will not take it, logged 
 "the decoder refused low latency; opening without it". The SHIELD, whose decoder
 accepts it, keeps it: nine sessions opened with `low_latency=true` and no fallback.
 
+**The option came back, and the fallback above is why it could.** §17 lost the
+flag to an H.265 stream with B-frames - a decoder told to be fast hands pictures
+over in the order it decoded them, and a tile showing an older picture after a
+newer one reads as a shutter. What brought it back is a twelve frame a second
+doorbell: left to reorder, its decoder returned eight pictures once every seven
+hundred milliseconds, so the tile froze for three quarters of a second and then
+jumped - `shown=695, 80, 86, 75, 7, 7, 7, 7, 7, 7, 7, 7` - and came back `82, 84,
+82, 83` once the option was asked for. Asking is only safe with two things in
+place: the fallback above, and a memory of the refusal. Without the memory, every
+channel on a device that will not take the ask pays a failed configure and then
+reads the failure as *the stream* being refused, which is what drops it to
+OpenH264 - measured on the GRL-AL10 as four channels at `SW 19.96fps` before, and
+`HW` after `LOW_LATENCY_REFUSED` remembered the answer for the process.
+
+The B-frame cost is taken back by measurement rather than by a setting. The NDK
+cannot be asked whether a codec takes the option, nor whether a stream reorders,
+and the SDP says neither, so `monitor_codec::reorder` counts what the output
+does: a picture handed over before the one it follows, twice, and the stream is
+taken to need the decoder's reordering - the session is closed and reopened
+without the ask, and the depth then costs its few frames of delay, which is the
+price of showing the stream in the order it is meant to be seen in. A jump back
+by seconds is a replay seeking rather than a picture out of order, and is not
+counted - which is what keeps low latency on a recording that is skipped
+through. The disorder it watches for is §17's `2, 7, 5, 4, 6, 11, 9, 8, 10`, and
+the tests in that module are written against it.
+
 *Note for the next time a codec configure fails:* the verbose framework tags flood
 the logcat ring buffer within seconds, and the ordinary `tracing` lines that carry
 each channel's state are rolled out first. Set the tags back to `INFO` when done.

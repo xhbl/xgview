@@ -38,6 +38,12 @@ pub mod null;
 /// settles can be tested where the NDK decoder cannot be built.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub mod surface;
+/// What a surface can take, and what it is given. Compiled everywhere so the
+/// policy can be tested where the NDK decoder cannot be built.
+pub mod handover;
+/// Whether a codec hands its pictures over in the order they are shown in.
+/// Compiled everywhere for the same reason.
+pub mod reorder;
 pub mod sps;
 pub mod wait;
 
