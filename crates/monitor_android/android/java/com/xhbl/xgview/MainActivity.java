@@ -1461,6 +1461,18 @@ public class MainActivity extends NativeActivity {
     private static AudioTrack talkOutput;
 
     /**
+     * Frames handed to the track, and how often the depth has been reported.
+     *
+     * <p>The waterline in the session counts the sound waiting on our side of
+     * the JNI bridge; it cannot see what has already been written into the
+     * track and is still waiting there. The playback head is the only answer to
+     * how far behind the speaker really is, so it is read here, away from the
+     * picture loop, and reported once in a while rather than per packet.
+     */
+    private static long playbackWrittenFrames = 0;
+    private static int playbackTick = 0;
+
+    /**
      * The makeup gain applied to the call's playback, in linear terms.
      *
      * <p>The voice path's gain staging is a call's, which leaves speech quieter
@@ -1673,6 +1685,14 @@ public class MainActivity extends NativeActivity {
         if (min <= 0) {
             return false;
         }
+        // Three quarters of a second, at sixteen-bit samples: rate * 3 / 2
+        // frames. An eight-kilohertz AAC packet is a hundred and twenty-eight
+        // milliseconds, so this holds several whole packets - enough for a
+        // non-blocking write to land, but short enough that a burst on open
+        // cannot bury seconds of old sound under the picture. A two-second
+        // track was measured holding 2.1 seconds of sound behind a 0.5-second
+        // picture; no waterline on the Rust side can see what is already in
+        // here, so the buffer itself is the bound on the worst-case lag.
         final AudioTrack track = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
@@ -1683,7 +1703,7 @@ public class MainActivity extends NativeActivity {
                         .setSampleRate(rate)
                         .setChannelMask(channelMask)
                         .build())
-                .setBufferSizeInBytes(Math.max(min, rate * 4 * channels))
+                .setBufferSizeInBytes(Math.max(min, rate * 3 * channels / 2))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build();
         if (track.getState() != AudioTrack.STATE_INITIALIZED) {
@@ -1692,6 +1712,8 @@ public class MainActivity extends NativeActivity {
         }
         track.play();
         talkOutput = track;
+        playbackWrittenFrames = 0;
+        playbackTick = 0;
         // Again, after the track exists: the routing follows the mode, and the
         // mode is the thing that drifts.
         if (audio != null) {
@@ -1703,6 +1725,30 @@ public class MainActivity extends NativeActivity {
                 "talk playback opened rate=" + rate + " channels=" + channels
                         + " buffer=" + track.getBufferSizeInFrames() + " frames");
         return true;
+    }
+
+    /**
+     * Frames accepted by the track but not yet played, or zero if there is no
+     * track. Read for the periodic depth log: the session's own waterline
+     * cannot see what has already been written into the device, and this is the
+     * only place that can say how much sound is really waiting on the speaker.
+     * The timestamp is the precise form; the head position is the older
+     * fallback.
+     */
+    public static int playbackQueuedFrames() {
+        final AudioTrack track = talkOutput;
+        if (track == null) {
+            return 0;
+        }
+        final android.media.AudioTimestamp stamp = new android.media.AudioTimestamp();
+        final long head = track.getTimestamp(stamp)
+                ? stamp.framePosition
+                : (long) track.getPlaybackHeadPosition();
+        final long behind = playbackWrittenFrames - head;
+        if (behind <= 0) {
+            return 0;
+        }
+        return (int) Math.min(behind, Integer.MAX_VALUE);
     }
 
     /**
@@ -1733,9 +1779,22 @@ public class MainActivity extends NativeActivity {
             samples[i] = (short) lifted;
         }
         final int written = track.write(samples, 0, count, AudioTrack.WRITE_NON_BLOCKING);
+        if (written > 0) {
+            playbackWrittenFrames += written / Math.max(1, track.getFormat().getChannelCount());
+        }
         if (written < count) {
             android.util.Log.w(
                     "xgview", "playback took " + written + " of " + count + " samples");
+        }
+        if (++playbackTick % 60 == 0) {
+            final int rate = track.getFormat().getSampleRate();
+            final long behind = playbackQueuedFrames();
+            android.util.Log.i(
+                    "xgview",
+                    "playback depth rate=" + rate
+                            + " buffer=" + track.getBufferSizeInFrames()
+                            + " written=" + playbackWrittenFrames
+                            + " behind_ms=" + (behind * 1000L / Math.max(rate, 1)));
         }
     }
 
