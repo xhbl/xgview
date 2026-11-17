@@ -139,7 +139,7 @@ mod tests {
         order.saw(120 * FRAME_US);
         order.saw(121 * FRAME_US);
         order.reset();
-        assert!(!order.saw(1 * FRAME_US), "a session change read as a reorder");
+        assert!(!order.saw(FRAME_US), "a session change read as a reorder");
         assert_eq!(order.reordered(), 0);
     }
 

@@ -6437,3 +6437,83 @@ aspect switch move the picture's own view. A hardware keyboard types into fields
 and keeps F1/F2/F11, and the loop waits for egui's next repaint instead of
 compositing an idle wall sixty times a second. See
 `priv/docs/android-surface-plan.md` §25.
+
+## 72. A second look at the clock, the codec and the sound
+
+Three passes over the whole of 2.3.x - one over the picture's clock, one over
+the decoder and what reaches the surface, one over the audio - each read
+against the diff and against the device logs it was meant to explain. Seven
+things were found. Five are fixed here; the other two are written down below
+because writing them down is what stops them being lost.
+
+**A refused option was remembered on the strength of the wrong failure.** The
+fallback restored in §9 remembered `low-latency` as refused on any
+`CodecError::Configure`, which also covers `AMediaCodec_start`. A start that
+fails for an unrelated reason - this file already records a tenth channel on an
+Amlogic box doing exactly that - would take the option away from every channel
+opened after it, for the life of the process, and put the doorbell back to
+arriving eight pictures at a time. The two steps are apart now: `configure`
+leaves a codec unstarted, and `open_session` starts it after the retry decision
+is made, so a refusal is only remembered when a session that did *not* ask has
+configured successfully. Measured again: the GRL-AL10 logs one ask, one refusal
+and then only `asked=false`; the Shield logs nine asks and no refusal.
+
+**Giving up a picture broke the ones behind it.** The queue's ceiling gave up
+the oldest picture that was not a key frame, on the reasoning that the key frame
+would carry the ones after it. In a P stream every picture but the newest is
+predicted from the one before it, so what was actually left was a key frame,
+a run of orphans, and a decoder waiting for the next IDR to show any of them.
+The cut is now at a key frame: the run before the first key frame with another
+one after it goes, and what remains starts on a key frame and carries its own
+chain. When only the first picture is a key frame, nothing here can be given up
+without orphaning the rest, so the newest goes instead and the crowd rule deals
+with a queue that stays deep. A test with two key frames and fourteen pictures
+checks that the cut leaves a decodable run, not just a non-empty queue.
+
+**Thirty frames a second sat three milliseconds from the replay threshold.**
+`LIVE_FEED` was thirty milliseconds, and a thirty frame stream is thirty-three
+and a third: a smoothed estimate that dipped could read a live camera as a
+replay, which for a decoder that returns pictures in batches throws away all
+but one of each. The threshold is twenty - still far above the fifty a second
+an eight times replay feeds, and now far enough from any live camera that a
+dip does not cross it.
+
+**A channel that was not being listened to kept its sound.** `on_audio`
+cleared the waiting samples only while the sink was active; a channel switched
+away kept a quarter of a second of sound, and switching back put that old
+quarter-second in front of the new one. The other branch clears it too.
+
+**Opening does not fold a whole crowd.** This one is recorded rather than
+fixed. The fold ends at the first picture the loop hands over, which at a
+hundred and sixty milliseconds of lead is two pictures of a twenty-five frame
+stream. A forwarder that flushes more than that leaves the rest spread over the
+wire's own timestamps, half a second behind, until the queue stays deep for a
+second and `deep_since` folds it back - one visible jump instead of a long lag.
+No box here flushes that way: the deepest queue measured was two. The
+limitation is written on the `opening` field so the next reader does not take
+the name for a promise.
+
+**The sound's delay can still grow.** The waterline is measured against the
+queue in this process, not against the samples already inside `AudioTrack`;
+nothing reads `getPlaybackHeadPosition`. A camera clock a few parts per million
+fast, or a batch of audio after a network repair, can fill the device's buffer
+without the waterline ever seeing it, until short writes become holes and the
+picture and the sound are no longer together. Fixing it means teaching
+`AudioOutput` to report what the device still has queued and skipping a whole
+packet when it is over the mark - three implementations and the JNI bridge,
+left here as the next piece of work. Related, and also left: the two second
+buffer was chosen because a 128 millisecond packet would not fit in six
+hundred samples, which was never true - the old expression already asked for
+half a second. The real fault was metering sound out twenty milliseconds at a
+time, which is fixed. The two seconds can stay as room for a burst, but it is
+not the fix it was said to be. And `tanh` at a gain of two is a limiter over
+the whole range: a half-scale sample comes out two and a half decibels below
+where a plain multiply would put it, while full scale is slightly attenuated.
+It prevents wrap-round, which was the point, but it is not "gain plus soft
+clipping" and should not be described as such.
+
+The workspace ran 795 tests green, and two builds were put on all four boxes.
+The onn box went offline while they were being checked and came back; its
+thirty-two bit package was installed and opened without complaint.
+
+Version to 2.3.4. No changelog, tag or push yet.

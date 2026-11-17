@@ -602,8 +602,17 @@ impl AMediaCodecDecoder {
     /// A decoder that will not take `low-latency` does not ignore the option, it
     /// fails the whole configuration (`docs/DevMemo.md` §9), so the ask is made
     /// once per process and the refusal remembered: without that, every channel
-    /// on such a device would pay a failed configure each time it opens, and the
-    /// stream would then have nowhere to go but the software decoder.
+    /// on such a device would pay a failed configure each time it opens.
+    ///
+    /// What counts as a refusal is narrow on purpose. Only a session that
+    /// configures *without* the ask is evidence that the ask was what failed:
+    /// anything else that goes wrong on a device - a tenth channel finding no
+    /// hardware slot, a start that lost a race - must not be remembered as "this
+    /// decoder will not take low latency", because the memory outlives the
+    /// channel that hit it and would take the option away from the doorbell for
+    /// the rest of the process. Starting is kept out of the retry for the same
+    /// reason: a decoder that accepted the option and then would not start has
+    /// said nothing about it.
     fn open_session(
         mime: &CString,
         csd: &[Vec<u8>],
@@ -613,21 +622,44 @@ impl AMediaCodecDecoder {
         want_low_latency: bool,
     ) -> Result<*mut AMediaCodec> {
         let asked = want_low_latency && !LOW_LATENCY_REFUSED.load(Ordering::Relaxed);
-        match Self::configure(mime, csd, size, colour_format, window, asked) {
-            Err(CodecError::Configure(_)) if asked => {
-                LOW_LATENCY_REFUSED.store(true, Ordering::Relaxed);
+        let codec = match Self::configure(mime, csd, size, colour_format, window, asked) {
+            Err(CodecError::Configure(reason)) if asked => {
                 tracing::info!(
                     target: "xgview::codec",
                     mime = mime.to_string_lossy().as_ref(),
+                    %reason,
                     "the decoder refused low latency; opening without it"
                 );
-                Self::configure(mime, csd, size, colour_format, window, false)
+                let codec = Self::configure(mime, csd, size, colour_format, window, false)?;
+                // Remembered only now: the session that opened without the ask
+                // is what turned a suspicion into an answer.
+                LOW_LATENCY_REFUSED.store(true, Ordering::Relaxed);
+                codec
             }
-            other => other,
+            other => other?,
+        };
+        if unsafe { AMediaCodec_start(codec) } != AMEDIA_OK {
+            unsafe { AMediaCodec_delete(codec) };
+            return Err(CodecError::Configure("AMediaCodec_start failed".to_string()));
         }
+        // What this session was opened asking for: a decoder that honours the
+        // option and one that quietly ignores it configure alike, so whether the
+        // ask was granted has to be read from what the pictures do - a stream
+        // that comes back one for one was honoured, one that comes back in
+        // batches was not.
+        tracing::debug!(
+            target: "xgview::codec",
+            asked,
+            "the decoder is running"
+        );
+        Ok(codec)
     }
 
-    /// Creates, configures and starts one codec session, handing back the codec.
+    /// Creates and configures one codec session, handing back the codec.
+    ///
+    /// Started by [`Self::open_session`], which is where a refusal is read: the
+    /// two are apart so that a codec that will not start cannot be mistaken for
+    /// one that will not take an option.
     ///
     /// `csd` is the parameter sets in the order the codec wants them, one per
     /// `csd-N` slot: H.264's SPS then PPS, or H.265's VPS, SPS and PPS.
@@ -727,20 +759,6 @@ impl AMediaCodecDecoder {
                 "AMediaCodec_configure failed with status {configured}"
             )));
         }
-        if unsafe { AMediaCodec_start(codec) } != AMEDIA_OK {
-            unsafe { AMediaCodec_delete(codec) };
-            return Err(CodecError::Configure("AMediaCodec_start failed".to_string()));
-        }
-        // What this session was opened asking for: a decoder that honours the
-        // option and one that quietly ignores it configure alike, so whether the
-        // ask was granted has to be read from what the pictures do - a stream
-        // that comes back one for one was honoured, one that comes back in
-        // batches was not.
-        tracing::debug!(
-            target: "xgview::codec",
-            asked = low_latency,
-            "the decoder is running"
-        );
         Ok(codec)
     }
 

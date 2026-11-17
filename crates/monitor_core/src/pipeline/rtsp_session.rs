@@ -944,9 +944,21 @@ struct LivePacer {
     handed: u64,
     dropped: u64,
     moved: u64,
-    /// Whether the clock is still opening: the pictures of a stream that was
-    /// already sending when the session joined, and how many were folded into
-    /// the one moment it settled on.
+    /// Whether the clock is still opening, and how many pictures were folded
+    /// into the one moment they are all shown at.
+    ///
+    /// A stream that was already sending when the session joined arrives as a
+    /// crowd - the forwarder flushing what it buffered - and anchoring on the
+    /// first of those pictures would keep the viewer that far behind the wire
+    /// for as long as the session lasts.
+    ///
+    /// The fold ends at the first picture the loop actually hands over, which
+    /// covers a crowd that arrives before the first moment comes: with the lead
+    /// at a hundred and sixty milliseconds, two pictures of a twenty-five frame
+    /// stream. A forwarder that flushes more than that is not lost, only caught
+    /// late: the queue stays deeper than a batch, and `deep_since` folds it back
+    /// to the present a second later, which the viewer sees as one jump rather
+    /// than as half a second of lag.
     opening: bool,
     folded: u64,
     /// When the queue first went deeper than a batch, if it still is.
@@ -1064,23 +1076,45 @@ impl LivePacer {
             self.folded += 1;
         }
         while self.queue.len() > LIVE_MAX_HELD {
-            // The oldest picture is given up, not the delay - but never a key
-            // frame while a picture after it is still queued: the pictures that
-            // follow are predicted from it, and losing it costs every one of
-            // them until the camera sends another.
-            let victim = self
+            // Give up a run rather than a picture. Every picture but the newest
+            // is predicted from the one before it, so dropping the oldest
+            // non-key frame leaves everything behind it without its reference:
+            // the decoder refuses those pictures or paints garbage until the
+            // next key frame, and the ones that were "kept" were never
+            // showable. What goes is the run before the oldest key frame that
+            // has another key frame after it, so what stays starts on a key
+            // frame and carries its own chain.
+            let cut = self
                 .queue
                 .iter()
-                .position(|held| !held.unit.keyframe)
-                .unwrap_or(0);
-            if self.queue.remove(victim).is_some() {
-                self.dropped += 1;
-                // The clock moves to the picture that is now first, so what is
-                // given up is the past and not the delay.
-                if let Some(front) = self.queue.front() {
-                    let (at, raw) = (front.at, front.unit.timestamp);
-                    self.reanchor(at, raw, now);
+                .enumerate()
+                .skip(1)
+                .find(|(_, held)| held.unit.keyframe)
+                .map(|(index, _)| index);
+            match cut {
+                Some(index) => {
+                    for _ in 0..index {
+                        if self.queue.pop_front().is_some() {
+                            self.dropped += 1;
+                        }
+                    }
                 }
+                // One key frame, and it is the first: nothing in this queue can
+                // be given up without orphaning what follows. The newest goes
+                // instead - a picture the viewer has not seen yet - and the
+                // chain stays whole. A queue that stays this deep is the crowd
+                // rule's business, not this one's.
+                None => {
+                    if self.queue.pop_back().is_some() {
+                        self.dropped += 1;
+                    }
+                }
+            }
+            // The clock moves to the picture that is now first, so what is
+            // given up is the past and not the delay.
+            if let Some(front) = self.queue.front() {
+                let (at, raw) = (front.at, front.unit.timestamp);
+                self.reanchor(at, raw, now);
             }
         }
         // A picture that arrived after its own moment is one the clock was
@@ -1932,6 +1966,13 @@ impl<'a> RtspSession<'a> {
                     }
                 }
             }
+        } else if let Some(track) = self.audio_decoder.as_mut() {
+            // Not the channel being listened to. What it holds was held for the
+            // moment it was decoded at, and by the time the viewer switches back
+            // that moment is a quarter of a second gone: pushing it then puts the
+            // past in front of the present, which the ear hears as a stutter
+            // repeating itself.
+            track.waiting.clear();
         }
     }
 
@@ -2635,6 +2676,35 @@ mod tests {
             "the key frame was given up while pictures after it were still held"
         );
         assert_eq!(pacer.queue.front().expect("not empty").at, 0);
+        // One key frame and nothing but predictions behind it: the newest went,
+        // because nothing here could be given up without orphaning the rest.
+        assert_eq!(pacer.dropped, 1);
+    }
+
+    /// A queue that must give something up is cut at a key frame. What is kept
+    /// has to be decodable on its own: dropping a picture in the middle of a
+    /// chain leaves everything behind it without its reference, and the decoder
+    /// paints garbage until the camera sends the next key frame - while the
+    /// pictures that were "kept" are ones nobody can see.
+    #[test]
+    fn a_full_queue_is_cut_at_a_key_frame() {
+        let mut pacer = LivePacer::default();
+        let now = Instant::now();
+        // A key frame with eight pictures predicted from it, then a second key
+        // frame with four more: fourteen pictures, two over the ceiling.
+        pacer.push(picture(0, true), now);
+        for i in 1..=8u32 {
+            pacer.push(picture(FRAME * i, false), now);
+        }
+        pacer.push(picture(FRAME * 9, true), now);
+        for i in 10..=13u32 {
+            pacer.push(picture(FRAME * i, false), now);
+        }
+        assert!(pacer.queue.len() <= LIVE_MAX_HELD);
+        let front = pacer.queue.front().expect("not empty");
+        assert!(front.unit.keyframe, "the queue was cut in the middle of a chain");
+        assert_eq!(front.at, i64::from(FRAME) * 9, "the second key frame was not kept");
+        assert_eq!(pacer.dropped, 9, "the run before the key frame was not given up");
     }
 
     /// A picture that is due and long past is not shown late: the clock moves to

@@ -40,7 +40,15 @@ pub const RENDER_GAP: Duration = Duration::from_millis(25);
 /// that moves four times a second, while the same stream in VLC moves at twelve.
 /// The feed, by contrast, is one picture per frame interval whatever the codec
 /// does with it.
-pub const LIVE_FEED: Duration = Duration::from_millis(30);
+///
+/// Twenty, and not the thirty this was: thirty sits four milliseconds from the
+/// frame interval of a thirty frame camera, and a smoothed feed that dips is
+/// then enough to read a live stream as a replay - which for a decoder that
+/// hands its pictures back in bursts means throwing away all but one of each.
+/// Thirty frames a second is a stream the display can show, so it is handed over
+/// whole. Eight times a recording is fifty a second, a fifth of this, and no
+/// live stream is near it.
+pub const LIVE_FEED: Duration = Duration::from_millis(20);
 
 /// The feed rate a session is taken at before it has one.
 ///
@@ -141,10 +149,10 @@ mod tests {
     fn a_feed_faster_than_the_display_is_thinned() {
         let mut handover = Handover::default();
         let start = Instant::now();
-        // Fifty access units a second, which is a replay at eight times a
+        // Two hundred access units a second, which is a replay at eight times a
         // twenty-five frame stream.
         for frame in 0..20u64 {
-            handover.fed(start + Duration::from_millis(frame * 20));
+            handover.fed(start + Duration::from_millis(frame * 5));
         }
         assert!(handover.thinned(), "a fast feed was read as live");
         let now = start + Duration::from_secs(1);
@@ -171,7 +179,7 @@ mod tests {
         let mut handover = Handover::default();
         let start = Instant::now();
         for frame in 0..20u64 {
-            handover.fed(start + Duration::from_millis(frame * 20));
+            handover.fed(start + Duration::from_millis(frame * 5));
         }
         assert!(handover.thinned());
         handover.reset();
