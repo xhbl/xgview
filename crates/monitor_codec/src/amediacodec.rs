@@ -75,10 +75,13 @@ const INFO_TRY_AGAIN_LATER: isize = -1;
 ///
 /// Skipping a handover costs nothing visible: the compositor can only show the
 /// newest picture it was given, so the ones in between were never going to be
-/// seen. The gap is a little wider than a frame at 30Hz, which leaves the live
-/// channel - and a recording at its own speed - handing over every picture they
-/// have.
-const RENDER_GAP: Duration = Duration::from_millis(25);
+/// seen. The gap is kept narrow on purpose: a live channel whose pictures
+/// arrive in a burst - a batch dequeued within a few milliseconds - would
+/// otherwise hand over only the first of each batch and show a fraction of its
+/// frames. A narrow gap lets pictures ten milliseconds apart through while
+/// still capping a recording played at eight times its speed. The proper fix
+/// paces the feed itself; until then this is the stopgap.
+const RENDER_GAP: Duration = Duration::from_millis(10);
 
 /// `COLOR_FormatYUV420Flexible`: the format a decoder offers when it is given no
 /// surface to render into. What it hands over is NV12 in practice, with the row

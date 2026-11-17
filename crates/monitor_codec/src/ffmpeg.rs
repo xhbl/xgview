@@ -65,7 +65,13 @@ use crate::{
 /// A live channel at twenty-five frames a second, and a recording played at its
 /// own speed, are further apart than this gap and hand over every picture they
 /// have. Only a read that is faster than the screen is thinned.
-const HANDOVER_GAP: Duration = Duration::from_millis(25);
+///
+/// The gap is kept narrow on purpose: pictures that arrive in a burst - decoded
+/// and read back within a few milliseconds of one another - would otherwise be
+/// thinned down to the first of each batch. Ten milliseconds keeps pictures ten
+/// milliseconds apart while still capping a replay faster than the screen. The
+/// proper fix paces the feed itself; until then this is the stopgap.
+const HANDOVER_GAP: Duration = Duration::from_millis(10);
 
 /// Decoder backed by FFmpeg's `libavcodec`.
 pub struct FfmpegDecoder {
