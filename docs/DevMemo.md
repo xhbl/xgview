@@ -6440,8 +6440,8 @@ compositing an idle wall sixty times a second. See
 
 ## 72. A second look at the clock, the codec and the sound
 
-Three passes over the whole of 2.3.x - one over the picture's clock, one over
-the decoder and what reaches the surface, one over the audio - each read
+Three passes over the whole of the live-view work - one over the picture's
+clock, one over the decoder and what reaches the surface, one over the audio - each read
 against the diff and against the device logs it was meant to explain. Seven
 things were found. Five are fixed here; the other two are written down below
 because writing them down is what stops them being lost.
@@ -6516,7 +6516,7 @@ The workspace ran 795 tests green, and two builds were put on all four boxes.
 The onn box went offline while they were being checked and came back; its
 thirty-two bit package was installed and opened without complaint.
 
-Version to 2.3.4. No changelog, tag or push yet.
+Version to 2.2.102. No changelog, tag or push yet.
 
 ## 73. Two attempts at the sound's delay, and why neither is here
 
@@ -6592,3 +6592,26 @@ the Amlogic HAL adds below the head reading. An RTCP sender report would tie
 the two streams to one clock, but the forwarder sends no RTCP at all (§73).
 The viewer is the judge of whether this is closer; the counters here cannot
 see the speaker.
+
+## 75. The delay is in the recordings and the devices, not the player
+
+The viewer compared the same recording across three Android devices and a
+browser, all on the current build:
+
+- onn (Amlogic), SHIELD (NVIDIA) and the Huawei GRL-AL10 (Kirin) each show the
+  sound about a second behind the picture.
+- Frigate's own WebUI, which is a browser's plain video element and shares no
+  code with this player, shows the same thing, a little shorter.
+
+Three different SoCs and an independent player all land in the same place. The
+one second is therefore not the player's waterline, its clock, or its handover:
+none of those are shared with a browser, and four earlier attempts to fix the
+delay here were measured and removed (§73, §74). It is what the recording
+carries and what an Android device takes to get sound out of an AudioTrack and
+through its HAL - on onn the track is four thousand frames at eight kilohertz
+(half a second) and the HAL reports another hundred and fifty milliseconds.
+
+Section 74 is the right state to leave the player in: sound is written as it is
+decoded, and the device buffer is half a second, the smallest of the settings
+tried. Any further alignment has to come from the forwarder or the recording,
+not from here.
