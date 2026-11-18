@@ -201,6 +201,15 @@ pub enum BackgroundEvent {
     /// progress event may already be in the queue; the id says it is not the
     /// current one's.
     DownloadProgress { id: u64, progress: Progress },
+    /// Whether a Frigate camera is recording, from the periodic segment read.
+    ///
+    /// `active` is `None` when the box could not be asked: the receiver keeps
+    /// its last answer then, rather than showing a camera that is recording as
+    /// one that stopped because the network blinked.
+    RecordingStatus {
+        camera_id: String,
+        active: Option<bool>,
+    },
     /// A clip arrived whole and has its final name on disk.
     DownloadDone { id: u64, path: String },
     /// A clip could not be saved. The reason is shown once, as a toast.
@@ -515,6 +524,8 @@ impl DiscoveryUi {
             BackgroundEvent::SegmentsReady { .. } => {}
             BackgroundEvent::DaysReady { .. } => {}
             BackgroundEvent::EventsReady { .. } => {}
+            // A camera's recording state belongs on its tile, not in a panel.
+            BackgroundEvent::RecordingStatus { .. } => {}
             // A saved clip is answered by the wall's download state, not by a
             // device panel.
             BackgroundEvent::DownloadProgress { .. } => {}

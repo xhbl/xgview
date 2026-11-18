@@ -669,6 +669,17 @@ enum OsdMark {
     Dot(Color32),
     Play(Color32),
     Pause(Color32),
+    /// A live dot followed by a recording square: the state of the stream and
+    /// whether the camera is being recorded, in one leading mark.
+    ///
+    /// `record` is `None` for a camera with no Frigate origin, which draws only
+    /// the dot. Some red means recording; some grey means no segment was found
+    /// or the box could not be asked. Keeping them in one mark means the two
+    /// glyphs share the leading space that `dot_lead` reserves.
+    LiveRecord {
+        live: Color32,
+        record: Option<Color32>,
+    },
 }
 
 /// What one corner of a tile shows, in the order its lines are drawn.
@@ -838,16 +849,30 @@ fn stream_line(recording: Option<&Recording<'_>>, channel: Option<&ChannelUi>) -
         };
         return OsdLine { mark: Some(mark), text };
     }
+    let Some(channel) = channel else {
+        return OsdLine {
+            mark: Some(OsdMark::Dot(theme::TEXT_DIM)),
+            text: "—".to_string(),
+        };
+    };
+    let live = match channel.state {
+        ConnectionState::Streaming => theme::LIVE,
+        ConnectionState::Stalled => theme::WARN,
+        _ => theme::TEXT_DIM,
+    };
+    let text = channel
+        .stream
+        .map(|stream| monitor_i18n::tr(stream.tag()).to_string())
+        .unwrap_or_else(|| "—".to_string());
+    // A camera from Frigate carries a recording answer: red while it is being
+    // recorded, grey when nothing was found or the box could not be asked.
+    // One with no Frigate origin carries none and draws no square at all.
+    let record = channel
+        .recording
+        .map(|active| if active { theme::ERROR } else { theme::TEXT_DIM });
     OsdLine {
-        mark: Some(match channel.map(|channel| channel.state) {
-            Some(ConnectionState::Streaming) => OsdMark::Dot(theme::LIVE),
-            Some(ConnectionState::Stalled) => OsdMark::Dot(theme::WARN),
-            _ => OsdMark::Dot(theme::TEXT_DIM),
-        }),
-        text: channel
-            .and_then(|channel| channel.stream)
-            .map(|stream| monitor_i18n::tr(stream.tag()).to_string())
-            .unwrap_or_else(|| "—".to_string()),
+        mark: Some(OsdMark::LiveRecord { live, record }),
+        text,
     }
 }
 
@@ -883,7 +908,7 @@ fn strip_scheme(url: &str) -> &str {
 /// weight when a recording is paused. What differs is how much of that box they
 /// fill, which is the nature of the shapes - a circle fills all of it, a triangle
 /// and two bars rather less.
-fn draw_mark(painter: &egui::Painter, at: egui::Pos2, radius: f32, mark: OsdMark, angle: f32) {
+fn draw_mark(painter: &egui::Painter, at: egui::Pos2, radius: f32, mark: OsdMark, angle: f32, toward_text: f32) {
     let (sin, cos) = angle.sin_cos();
     let turn = |offset: Vec2| vec2(offset.x * cos - offset.y * sin, offset.x * sin + offset.y * cos);
     match mark {
@@ -910,7 +935,47 @@ fn draw_mark(painter: &egui::Painter, at: egui::Pos2, radius: f32, mark: OsdMark
                 painter.rect_filled(rect, CornerRadius::same((bar * 0.25) as u8), colour);
             }
         }
+        OsdMark::LiveRecord { live, record } => {
+            let r = radius;
+            painter.circle_filled(at, r, live);
+            if let Some(colour) = record {
+                // A rounded square the same height as the dot, set just past
+                // it on the way to the text. `toward_text` is +1 for a left or
+                // top corner and -1 for a right or bottom one, so the square
+                // always sits between the dot and the words - mirroring the
+                // corner instead of hanging off its outer edge. `turn` carries
+                // the whole pair through a rotated corner.
+                let centre = at + turn(vec2(r * 2.4 * toward_text, 0.0));
+                let side = r * 1.8;
+                let rect = Rect::from_center_size(centre, vec2(side, side));
+                painter.rect_filled(rect, CornerRadius::same((r * 0.4) as u8), colour);
+            }
+        }
     }
+}
+
+/// The room a corner's leading marks need, in points.
+///
+/// The dot sits at a fixed spot near the corner; `dot_lead` only moves the
+/// text. One dot needs `size * 1.15`, which leaves a gap of `0.39size` between
+/// its edge and the words. A second glyph (the recording square) occupies
+/// `2.4r` from the dot's centre plus its own half width, so the text needs
+/// `size * 1.84` to keep that very same `0.39size` gap - no more. Making this
+/// wider pushed the dot away from the corner and left an uneven gap.
+fn mark_lead(lines: &[OsdLine], size: f32) -> f32 {
+    let wide = lines.iter().any(|line| matches!(line.mark, Some(OsdMark::LiveRecord { record: Some(_), .. })));
+    let any = lines.iter().any(|line| line.mark.is_some());
+    if wide { size * 1.84 } else if any { size * 1.15 } else { 0.0 }
+}
+
+/// Where the leading dot is anchored, measured from its corner.
+///
+/// Fixed, unlike [`mark_lead`]: adding the recording square must not shove the
+/// dot away from the edge. A turned corner anchors half a `1.15` lead in, a
+/// straight one two fifths of it - the same spots the plain dot has always
+/// used, so a single dot looks exactly as it did before.
+const fn dot_anchor(size: f32, turned: bool) -> f32 {
+    if turned { size * 1.15 * 0.5 } else { size * 1.15 * 0.4 }
 }
 
 /// Where the ink of a line sits, measured from the top of its galley.
@@ -962,7 +1027,7 @@ fn osd_corner(painter: &egui::Painter, body: Rect, align: Align2, dim: bool, lin
     // and the room a leading dot takes is added to whichever corner has one.
     // The same layout says where the ink of the line sits, which is where the
     // mark goes - see [`ink_centre`].
-    let dot_lead = if lines.iter().any(|line| line.mark.is_some()) { size * 1.15 } else { 0.0 };
+    let dot_lead = mark_lead(lines, size);
     let galleys: Vec<_> = lines
         .iter()
         .map(|line| painter.layout_no_wrap(line.text.clone(), font.clone(), color))
@@ -990,8 +1055,9 @@ fn osd_corner(painter: &egui::Painter, body: Rect, align: Align2, dim: bool, lin
         if let Some(mark) = entry.mark {
             let lead = if left { dot_lead } else { -dot_lead };
             let centre = ink_centre(&galleys[row]).unwrap_or(line * 0.5);
-            let at = egui::pos2(x + lead * 0.4, y + centre);
-            draw_mark(painter, at, (size * 0.3).max(2.0), mark, 0.0);
+            let anchor = dot_anchor(size, false);
+            let at = egui::pos2(x + if left { anchor } else { -anchor }, y + centre);
+            draw_mark(painter, at, (size * 0.3).max(2.0), mark, 0.0, if left { 1.0 } else { -1.0 });
             x += lead;
         }
         outlined_text(painter, egui::pos2(x, y), anchor, &entry.text, font.clone(), color);
@@ -1060,7 +1126,7 @@ fn osd_corner_rotated(
         if top { body.top() + m.inset } else { body.bottom() - m.inset },
     );
 
-    let dot_lead = if lines.iter().any(|line| line.mark.is_some()) { size * 1.15 } else { 0.0 };
+    let dot_lead = mark_lead(lines, size);
     let galleys: Vec<_> = lines
         .iter()
         .map(|entry| painter.layout_no_wrap(entry.text.clone(), font.clone(), color))
@@ -1106,9 +1172,10 @@ fn osd_corner_rotated(
             // turned frame, and the ink sits that far left of it.
             let centre = ink_centre(&galleys[row]).unwrap_or(text_h * 0.5);
             let dot_x = pos.x - centre;
-            let dot_y = if top { corner.y + dot_lead * 0.5 } else { corner.y - dot_lead * 0.5 };
+            let anchor = dot_anchor(size, true);
+            let dot_y = if top { corner.y + anchor } else { corner.y - anchor };
             let at = egui::pos2(dot_x, dot_y);
-            draw_mark(painter, at, (size * 0.3).max(2.0), mark, std::f32::consts::FRAC_PI_2);
+            draw_mark(painter, at, (size * 0.3).max(2.0), mark, std::f32::consts::FRAC_PI_2, if top { 1.0 } else { -1.0 });
         }
 
         outlined_rotated_text(painter, pos, angle, &entry.text, font.clone(), color);
@@ -1501,6 +1568,32 @@ pub fn empty_state(ui: &mut Ui, area: Rect, message: &str, hint: &str) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_recording_square_keeps_the_same_gap_to_the_text_as_a_lone_dot() {
+        let size = 10.0;
+        let one = [OsdLine { mark: Some(OsdMark::Dot(theme::LIVE)), text: String::new() }];
+        let two = [OsdLine {
+            mark: Some(OsdMark::LiveRecord { live: theme::LIVE, record: Some(theme::ERROR) }),
+            text: String::new(),
+        }];
+        let dot_r = size * 0.3;
+        let square_half = dot_r * 1.8 * 0.5;
+        // Text begins at the lead; the last glyph ends at the fixed dot anchor
+        // plus, for the square, its offset and half width.
+        let gap_one = mark_lead(&one, size) - (dot_anchor(size, false) + dot_r);
+        let gap_two = mark_lead(&two, size)
+            - (dot_anchor(size, false) + dot_r * 2.4 + square_half);
+        assert!((gap_one - gap_two).abs() < 0.01, "both gaps must match: {gap_one} vs {gap_two}");
+    }
+
+    #[test]
+    fn a_lone_dot_sits_at_the_same_anchor_with_or_without_a_square() {
+        let size = 10.0;
+        // The dot's anchor never moves when a square joins it, straight or turned.
+        assert_eq!(dot_anchor(size, false), size * 1.15 * 0.4);
+        assert_eq!(dot_anchor(size, true), size * 1.15 * 0.5);
+    }
+
     /// The number keeps counting across pages: the second page of a 3x3 wall
     /// starts at 10, and a list past 99 keeps every digit.
     #[test]
@@ -1753,13 +1846,23 @@ mod tests {
         assert_eq!(fast.text, "Playback 8×");
         assert!(matches!(fast.mark, Some(OsdMark::Play(_))), "still playing");
 
-        // A live channel keeps its dot, and its colour is its state.
+        // A live channel keeps its dot, and its colour is its state. With no
+        // Frigate origin there is no recording square beside it.
         let mut channel = ChannelUi::default();
         channel.state = ConnectionState::Streaming;
         channel.stream = Some(StreamKind::Sub);
         let live = stream_line(None, Some(&channel));
-        assert!(matches!(live.mark, Some(OsdMark::Dot(colour)) if colour == theme::LIVE));
+        assert!(matches!(live.mark, Some(OsdMark::LiveRecord { live: c, record: None }) if c == theme::LIVE));
         assert_eq!(live.text, monitor_i18n::tr("stream-tag-sub"));
+
+        // A Frigate camera being recorded adds a red square; one that is not,
+        // or that could not be asked, adds a grey one.
+        channel.recording = Some(true);
+        let recording = stream_line(None, Some(&channel));
+        assert!(matches!(recording.mark, Some(OsdMark::LiveRecord { record: Some(c), .. }) if c == theme::ERROR));
+        channel.recording = Some(false);
+        let not_recording = stream_line(None, Some(&channel));
+        assert!(matches!(not_recording.mark, Some(OsdMark::LiveRecord { record: Some(c), .. }) if c == theme::TEXT_DIM));
 
         // A channel with nothing to say is a grey dot and a dash, as before.
         let idle = stream_line(None, None);

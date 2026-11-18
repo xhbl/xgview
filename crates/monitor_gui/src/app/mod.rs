@@ -4,7 +4,7 @@
 //! event queues (oneshot per frame), recomputes the decoding schedule and paints
 //! the grid. Everything else happens on the tokio runtime.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::path::Path;
@@ -56,6 +56,14 @@ const LINK_TAKEOVER: Duration = Duration::from_secs(5);
 /// `priv/docs/grid-cpu-cost.md` counts - a sixth of the whole frame's
 /// tessellation and composition, for a number.
 const LIVE_REPAINT: Duration = Duration::from_millis(40);
+
+/// How often the wall asks Frigate whether each camera is recording.
+///
+/// A recording segment is written about every ten seconds and is only visible
+/// once written, so the square beside the live dot is a short-lag answer.
+/// Thirty seconds keeps a dozen cameras at well under one request a second
+/// between them and buys an answer that is never more than a segment old.
+const RECORDING_POLL: Duration = Duration::from_secs(30);
 
 /// The most pictures a view may show and still be painted on the stream's
 /// clock rather than on [`LIVE_REPAINT`].
@@ -248,6 +256,13 @@ pub struct ChannelUi {
     pub fps: f32,
     pub bitrate_kbps: f32,
     pub total_frames: u64,
+    /// Whether this camera is being recorded, from the periodic Frigate read.
+    ///
+    /// `None` means the camera has no Frigate origin and no square is drawn;
+    /// `Some(true)` is a red square, `Some(false)` a grey one. Carried on the
+    /// channel so the OSD, which is drawn from `ChannelUi`, needs no separate
+    /// map lookup in the grid.
+    pub recording: Option<bool>,
     /// Stream decoded before the current switch. While it is set the viewport
     /// keeps the last frame of that stream instead of showing a black frame.
     pub switching_from: Option<StreamKind>,
@@ -273,6 +288,7 @@ impl Default for ChannelUi {
             fps: 0.0,
             bitrate_kbps: 0.0,
             total_frames: 0,
+            recording: None,
             switching_from: None,
             stats_sequence: 0,
         }
@@ -1013,6 +1029,14 @@ pub struct XgViewApp {
     manager: ChannelManager,
     handle: Handle,
     channels: HashMap<usize, ChannelUi>,
+    /// Whether each Frigate camera is recording, keyed by camera id, from the
+    /// periodic segment read. Only cameras with a Frigate origin get an entry;
+    /// a missing key means no answer yet, which the tile draws as a grey square.
+    recording: HashMap<String, bool>,
+    /// When the next recording-state read is due. Answers are a few seconds
+    /// stale by nature, so a half-minute tick costs nothing and keeps the
+    /// red square honest without a poll per frame.
+    recording_poll_at: Instant,
     /// The audio devices this machine offered when the viewer started.
     ///
     /// Read once, before the sink opens, and never again: opening a device makes
@@ -1557,6 +1581,7 @@ pub use persist::public_download_dir;
 pub use persist::EXPORT_SUBFOLDER;
 mod playback;
 use playback::Source;
+mod recording;
 use download::{DownloadChoice, DownloadState};
 mod pickers;
 mod settings;
@@ -1798,6 +1823,8 @@ impl XgViewApp {
             manager,
             handle,
             channels: HashMap::new(),
+            recording: HashMap::new(),
+            recording_poll_at: Instant::now(),
             audio_outputs,
             audio_inputs,
             talk_route: HashMap::new(),
@@ -2368,6 +2395,13 @@ impl XgViewApp {
                         *to,
                         segments.clone(),
                     );
+                }
+                BackgroundEvent::RecordingStatus { camera_id, active } => {
+                    // A failed read says nothing new: keep the last answer so a
+                    // network blink does not turn a recording camera grey.
+                    if let Some(active) = active {
+                        self.recording.insert(camera_id.clone(), *active);
+                    }
                 }
                 BackgroundEvent::Go2rtcFailed(error) => {
                     toast = Some((
@@ -3390,6 +3424,67 @@ impl XgViewApp {
         }
     }
 
+    /// Copy the recording answer onto every channel showing that camera.
+    ///
+    /// Run each frame: a camera change, a group change or a late answer all
+    /// settle here without each having to remember to update the OSD. A camera
+    /// with no Frigate origin gets `None`, which draws no square at all.
+    fn apply_recording(&mut self) {
+        let slots = self.config.active_slots();
+        for (index, channel) in self.channels.iter_mut() {
+            let camera = slots.get(*index).and_then(|slot| self.config.cameras.get(*slot));
+            channel.recording = camera.and_then(|camera| {
+                camera.frigate.as_ref()?;
+                Some(self.recording.get(&camera.id).copied().unwrap_or(false))
+            });
+        }
+    }
+
+    /// Ask each Frigate camera whether it is recording, one task per camera.
+    ///
+    /// The answers come back through [`BackgroundEvent::RecordingStatus`] and
+    /// land in `self.recording` on a later frame. One read per tick, never one
+    /// per frame: the recorder itself only decides every ten seconds. A camera
+    /// that is not from Frigate is never asked and draws no square at all.
+    fn poll_recording_status(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        if now < self.recording_poll_at {
+            return;
+        }
+        self.recording_poll_at = now + RECORDING_POLL;
+
+        let epoch = recording::epoch_now();
+        // Ask by origin, not by slot: a camera shown twice is the same camera
+        // and its answer is keyed by id, so one task is enough for both slots.
+        let mut asked: HashSet<String> = HashSet::new();
+        for camera in &self.config.cameras {
+            if !camera.enabled {
+                continue;
+            }
+            let Some(origin) = camera.frigate.clone() else {
+                continue;
+            };
+            if !asked.insert(camera.id.clone()) {
+                continue;
+            }
+            let credentials = camera
+                .mse_username
+                .clone()
+                .map(|user| (user, camera.mse_password.clone().unwrap_or_default()));
+            recording::poll_one(
+                &self.handle,
+                &self.events_tx,
+                camera.id.clone(),
+                origin,
+                credentials,
+                epoch,
+            );
+        }
+        // The next tick needs a frame to run in even on a still wall: a paused
+        // recording or a frozen camera asks for no repaints of its own.
+        ctx.request_repaint_after(RECORDING_POLL);
+    }
+
     /// What the background jobs answered since the last frame, and the press in
     /// flight - both read before anything is drawn.
     ///
@@ -3420,7 +3515,9 @@ impl XgViewApp {
             }
         }
 
+        self.poll_recording_status(ctx);
         self.poll_events(ctx);
+        self.apply_recording();
         self.poll_sealing();
         self.poll_talk_test();
         // An answer comes back with the wall drawn a frame or two after it was
