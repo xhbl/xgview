@@ -465,6 +465,11 @@ power-mechanism-unsupported = Не поддерживается
 
 ## Состояние ячеек
 grid-stream-failed = Ошибка видеопотока
+grid-detail-receiving = получаем поток { $stream }
+grid-detail-stalled = нет новых кадров { $seconds } с
+grid-detail-gave-up = прекращено после { $attempts } попыток
+grid-detail-retry = повтор через { $ms } мс
+grid-detail-rtsp-fallback = RTSP недоступен, пробуем MSE
 
 grid-suspended = Приостановлено
 grid-switching-to = Переключение на { $stream }…
@@ -597,3 +602,6 @@ cameras-cancel-order = Отмена
 portrait-aspect-entry = Соотношение сторон
 combined-info-button = Составная информация
 settings-talk-mute = Отключать звук при включённом микрофоне
+grid-detail-connection-attempt = попытка подключения
+grid-detail-network-error = Ошибка сети
+grid-detail-connect-timeout = Ошибка сети: время ожидания подключения к { $address } истекло

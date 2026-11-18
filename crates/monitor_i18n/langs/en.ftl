@@ -494,6 +494,11 @@ power-mechanism-unsupported = unsupported
 
 ## Grid tile states
 grid-stream-failed = Stream failed
+grid-detail-receiving = receiving { $stream } stream
+grid-detail-stalled = stalled for { $seconds } s
+grid-detail-gave-up = gave up after { $attempts } attempts
+grid-detail-retry = retry in { $ms } ms
+grid-detail-rtsp-fallback = RTSP unreachable, trying MSE
 
 grid-suspended = suspended
 grid-switching-to = Switching to { $stream }...
@@ -652,3 +657,6 @@ cameras-cancel-order = Cancel
 portrait-aspect-entry = Picture fit
 combined-info-button = Combined info
 settings-talk-mute = Mute the sound while the microphone is open
+grid-detail-connection-attempt = connection attempt
+grid-detail-network-error = network error
+grid-detail-connect-timeout = network error: connect to { $address } timed out

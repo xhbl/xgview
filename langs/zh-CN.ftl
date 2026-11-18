@@ -465,6 +465,11 @@ power-mechanism-unsupported = 不支持
 
 ## 宫格格子状态
 grid-stream-failed = 码流失败
+grid-detail-receiving = 正在接收 { $stream } 码流
+grid-detail-stalled = 已有 { $seconds } 秒未收到新画面
+grid-detail-gave-up = 尝试 { $attempts } 次后停止重连
+grid-detail-retry = { $ms } 毫秒后重试
+grid-detail-rtsp-fallback = RTSP 无法连接，正在尝试 MSE
 
 grid-suspended = 已挂起
 grid-switching-to = 切换到 { $stream }…
@@ -597,3 +602,6 @@ cameras-cancel-order = 取消
 portrait-aspect-entry = 画面比例
 combined-info-button = 组合信息
 settings-talk-mute = 麦克风打开时播放静音
+grid-detail-connection-attempt = 正在尝试连接
+grid-detail-network-error = 网络错误
+grid-detail-connect-timeout = 网络错误：连接 { $address } 超时

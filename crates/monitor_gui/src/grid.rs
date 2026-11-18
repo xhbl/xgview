@@ -399,6 +399,88 @@ impl<'a> Panel<'a> {
 /// that is seen. Two copies of the wording would drift, so there is one.
 ///
 /// Over a turned picture the panel is laid out and drawn turned; see [`Panel`].
+fn localized_detail(detail: &str) -> String {
+    fn translate_part(part: &str) -> String {
+        let part = part.trim();
+
+        if let Some(ms) = part.strip_prefix("retry in ").and_then(|s| s.strip_suffix(" ms")) {
+            if let Ok(ms) = ms.parse::<i64>() {
+                return monitor_i18n::tr_args("grid-detail-retry", &[("ms", ms.into())]);
+            }
+        }
+
+        if let Some(attempts) = part.strip_prefix("(gave up after ").and_then(|s| s.strip_suffix(" attempts)")) {
+            if let Ok(attempts) = attempts.parse::<i64>() {
+                return format!("({})", monitor_i18n::tr_args(
+                    "grid-detail-gave-up", &[("attempts", attempts.into())]
+                ));
+            }
+        }
+
+        if let Some(seconds) = part.strip_prefix("stalled for ").and_then(|s| s.strip_suffix(" s")) {
+            if let Ok(seconds) = seconds.parse::<i64>() {
+                return monitor_i18n::tr_args("grid-detail-stalled", &[("seconds", seconds.into())]);
+            }
+        }
+
+        if part == "rtsp unreachable, trying mse" {
+            return monitor_i18n::tr("grid-detail-rtsp-fallback");
+        }
+
+        if let Some(stream) = part.strip_prefix("receiving ").and_then(|s| s.strip_suffix(" stream")) {
+            return monitor_i18n::tr_args("grid-detail-receiving", &[("stream", stream.into())]);
+        }
+
+        if part == "connection attempt" {
+            return monitor_i18n::tr("grid-detail-connection-attempt");
+        }
+
+        if let Some(error) = part.strip_prefix("network error: ") {
+            if let Some(address) = error
+                .strip_prefix("connect to ")
+                .and_then(|s| s.strip_suffix(" timed out"))
+            {
+                return monitor_i18n::tr_args(
+                    "grid-detail-connect-timeout",
+                    &[("address", address.into())],
+                );
+            }
+
+            return format!(
+                "{}: {}",
+                monitor_i18n::tr("grid-detail-network-error"),
+                error
+            );
+        }
+        part.to_string()
+    }
+
+    let (prefix, body) = if detail.starts_with('#') {
+        match detail.split_once(' ') {
+            Some((number, rest)) if number[1..].chars().all(|c| c.is_ascii_digit()) => {
+                (format!("{number} "), rest)
+            }
+            _ => (String::new(), detail),
+        }
+    } else {
+        (String::new(), detail)
+    };
+
+    let (body, suffix) = if let Some((before, after)) = body.rsplit_once(" (gave up after ") {
+        (before, Some(format!("(gave up after {after}")))
+    } else {
+        (body, None)
+    };
+
+    let mut result = body.split(" | ").map(translate_part).collect::<Vec<_>>().join(" | ");
+
+    if let Some(suffix) = suffix {
+        result.push(' ');
+        result.push_str(&translate_part(&suffix));
+    }
+
+    format!("{prefix}{result}")
+}
 pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: ConnectionState) {
     let panel = Panel::new(painter, body, tile.rotated);
     let tier = Tier::of(body.size());
@@ -423,7 +505,7 @@ pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: 
                 panel.text(
                     centre + vec2(0.0, 32.0),
                     Align2::CENTER_CENTER,
-                    theme::truncate(detail, 46),
+                    theme::truncate(&localized_detail(detail), 46),
                     FontId::proportional(11.0),
                     theme::TEXT_DIM,
                 );
@@ -442,7 +524,7 @@ pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: 
                     panel.text(
                         centre + vec2(0.0, 34.0),
                         Align2::CENTER_CENTER,
-                        theme::truncate(detail, 52),
+                        theme::truncate(&localized_detail(detail), 52),
                         FontId::proportional(11.0),
                         theme::TEXT_DIM,
                     );
@@ -1499,6 +1581,108 @@ pub fn empty_state(ui: &mut Ui, area: Rect, message: &str, hint: &str) {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn localized_detail_uses_active_language() {
+        let langs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../langs");
+        monitor_i18n::init("ru-RU", &[langs]);
+
+        assert_eq!(
+            super::localized_detail("#2 rtsp unreachable, trying mse"),
+            "#2 RTSP недоступен, пробуем MSE"
+        );
+        assert_eq!(
+            super::localized_detail("connection refused | retry in 1000 ms"),
+            "connection refused | повтор через 1000 мс"
+        );
+        assert_eq!(
+            super::localized_detail("connection refused (gave up after 5 attempts)"),
+            "connection refused (прекращено после 5 попыток)"
+        );
+
+        assert!(monitor_i18n::set_language("zh-CN"));
+        assert_eq!(
+            super::localized_detail("#2 rtsp unreachable, trying mse"),
+            "#2 RTSP 无法连接，正在尝试 MSE"
+        );
+        assert_eq!(
+            super::localized_detail("connection refused | retry in 1000 ms"),
+            "connection refused | 1000 毫秒后重试"
+        );
+
+        assert!(monitor_i18n::set_language("en"));
+        assert_eq!(
+            super::localized_detail("#2 rtsp unreachable, trying mse"),
+            "#2 RTSP unreachable, trying MSE"
+        );
+    }
+
+    #[test]
+    fn localized_detail_translates_connection_errors() {
+        let langs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../langs");
+        monitor_i18n::init("ru-RU", &[langs]);
+
+        assert_eq!(
+            super::localized_detail("#1 connection attempt"),
+            "#1 попытка подключения"
+        );
+        assert_eq!(
+            super::localized_detail(
+                "#2 network error: connect to 192.168.1.7:554 timed out"
+            ),
+            "#2 Ошибка сети: время ожидания подключения к 192.168.1.7:554 истекло"
+        );
+
+        assert!(monitor_i18n::set_language("zh-CN"));
+        assert_eq!(
+            super::localized_detail("#1 connection attempt"),
+            "#1 正在尝试连接"
+        );
+        assert_eq!(
+            super::localized_detail(
+                "network error: connect to 192.168.1.7:554 timed out"
+            ),
+            "网络错误：连接 192.168.1.7:554 超时"
+        );
+
+        assert!(monitor_i18n::set_language("en"));
+        assert_eq!(
+            super::localized_detail("#1 connection attempt"),
+            "#1 connection attempt"
+        );
+    }
+    #[test]
+    fn localized_detail_preserves_unknown_errors() {
+        monitor_i18n::init("en", &[]);
+        let detail = "SETUP failed: 401 Unauthorized (digest authentication)";
+        assert_eq!(super::localized_detail(detail), detail);
+    }
+
+    #[test]
+    fn localized_detail_preserves_unknown_error_before_retry() {
+        monitor_i18n::init("en", &[]);
+        let detail = "connection refused | retry in 1000 ms";
+        let result = super::localized_detail(detail);
+        assert!(result.starts_with("connection refused | "));
+        assert!(result.contains("1000"), "actual: {result:?}");
+    }
+
+    #[test]
+    fn localized_detail_keeps_attempt_number() {
+        monitor_i18n::init("en", &[]);
+        let result = super::localized_detail("#2 rtsp unreachable, trying mse");
+        assert!(result.starts_with("#2 "));
+    }
+
+    #[test]
+    fn localized_detail_keeps_failure_before_attempt_limit() {
+        monitor_i18n::init("en", &[]);
+        let result = super::localized_detail("connection refused (gave up after 5 attempts)");
+        assert!(result.starts_with("connection refused ("));
+        assert!(result.contains('5'), "actual: {result:?}");
+    }
+
     use super::*;
 
     /// The number keeps counting across pages: the second page of a 3x3 wall
