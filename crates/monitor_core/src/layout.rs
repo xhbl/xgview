@@ -6,12 +6,242 @@ use serde::{Deserialize, Serialize};
 /// a cell covers `col_span x row_span` of them, starting at `(col, row)`. The
 /// square layouts have only 1x1 cells; the mixed ones merge a few units into
 /// their large viewports. See [`GridLayout::cells`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Cell {
     pub col: u8,
     pub row: u8,
     pub col_span: u8,
     pub row_span: u8,
+}
+
+/// A layout the viewer draws: a `cols x rows` unit grid tiled exactly once by
+/// `count` rectangles, each covering whole units. Stored inline in
+/// [`GridLayout::Custom`] as a fixed array so the enum stays `Copy` - every
+/// layout is passed by value throughout the scheduler and the GUI, and losing
+/// that would ripple through well over a hundred call sites. The array holds at
+/// most 6x6 = 36 cells; only the first `count` are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CustomGrid {
+    pub cols: u8,
+    pub rows: u8,
+    pub count: u8,
+    cells: [Cell; 36],
+}
+
+/// serde only implements arrays up to 32 elements, and a custom grid holds 36.
+/// Only the first `count` cells are meaningful, so the wire form carries just
+/// that slice in a helper struct and the array is padded back out on load.
+#[derive(Serialize, Deserialize)]
+struct CustomGridWire {
+    cols: u8,
+    rows: u8,
+    count: u8,
+    cells: Vec<Cell>,
+}
+
+impl Serialize for CustomGrid {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        CustomGridWire {
+            cols: self.cols,
+            rows: self.rows,
+            count: self.count,
+            cells: self.cells[..usize::from(self.count)].to_vec(),
+        }
+        .serialize(ser)
+    }
+}
+
+impl<'de> Deserialize<'de> for CustomGrid {
+    fn deserialize<D: serde::Deserializer<'de>>(deser: D) -> Result<Self, D::Error> {
+        let wire = CustomGridWire::deserialize(deser)?;
+        let mut cells = [c(0, 0, 1, 1); 36];
+        let used = wire.cells.len().min(36);
+        cells[..used].copy_from_slice(&wire.cells[..used]);
+        Ok(CustomGrid { cols: wire.cols, rows: wire.rows, count: wire.count, cells })
+    }
+}
+
+/// The largest grid a custom layout may use. Also the size of the fixed cell
+/// array, so a layout at the limit still fits.
+pub const MAX_CUSTOM_DIMENSION: u8 = 6;
+
+impl CustomGrid {
+    /// A grid of nothing but 1x1 cells, which is where editing starts: every
+    /// later shape is made by merging whole, equal-sized neighbours.
+    pub fn uniform(cols: u8, rows: u8) -> Self {
+        assert!(cols >= 1 && cols <= MAX_CUSTOM_DIMENSION, "columns out of range");
+        assert!(rows >= 1 && rows <= MAX_CUSTOM_DIMENSION, "rows out of range");
+        let mut cells = [c(0, 0, 1, 1); 36];
+        let mut index = 0;
+        for row in 0..rows {
+            for col in 0..cols {
+                cells[index] = c(col, row, 1, 1);
+                index += 1;
+            }
+        }
+        CustomGrid { cols, rows, count: cols * rows, cells }
+    }
+
+    /// The cells in fill order: top to bottom, then left to right. Keeping this
+    /// order stable is what makes a saved page and focus still point at the
+    /// same viewport after an edit.
+    pub fn cells(&self) -> &[Cell] {
+        &self.cells[..usize::from(self.count)]
+    }
+
+    /// Whether the stored rectangles really tile the grid: dimensions in
+    /// range, count in range, every cell inside the grid, and every unit
+    /// covered exactly once. Run on load and after each edit so a hand-edited
+    /// configuration or a bad merge cannot leave a hole in the wall.
+    pub fn is_valid(&self) -> bool {
+        if self.cols < 1 || self.cols > MAX_CUSTOM_DIMENSION
+            || self.rows < 1 || self.rows > MAX_CUSTOM_DIMENSION
+            || self.count < 1 || usize::from(self.count) > usize::from(self.cols) * usize::from(self.rows)
+        {
+            return false;
+        }
+        let width = usize::from(self.cols);
+        let mut covered = vec![0u8; width * usize::from(self.rows)];
+        for cell in self.cells() {
+            if cell.col_span == 0 || cell.row_span == 0
+                || u16::from(cell.col) + u16::from(cell.col_span) > u16::from(self.cols)
+                || u16::from(cell.row) + u16::from(cell.row_span) > u16::from(self.rows)
+            {
+                return false;
+            }
+            for row in cell.row..cell.row + cell.row_span {
+                for col in cell.col..cell.col + cell.col_span {
+                    let slot = usize::from(row) * width + usize::from(col);
+                    covered[slot] += 1;
+                    if covered[slot] != 1 {
+                        return false;
+                    }
+                }
+            }
+        }
+        covered.iter().all(|&n| n == 1)
+    }
+
+    /// Two cells may merge when they are the same size and share one whole
+    /// edge. A partial overlap would produce an L shape and leave the grid
+    /// untileable, so it is refused.
+    pub fn can_merge(&self, a: usize, b: usize) -> bool {
+        let (Some(a), Some(b)) = (self.cells().get(a), self.cells().get(b)) else {
+            return false;
+        };
+        if a == b || a.col_span != b.col_span || a.row_span != b.row_span {
+            return false;
+        }
+        let beside = a.row == b.row
+            && (a.col + a.col_span == b.col || b.col + b.col_span == a.col);
+        let below = a.col == b.col
+            && (a.row + a.row_span == b.row || b.row + b.row_span == a.row);
+        beside || below
+    }
+
+    /// Merge two neighbours into one rectangle. The survivor takes their
+    /// common corner; cells are re-sorted into fill order. `None` when the
+    /// pair cannot merge.
+    pub fn merge(&self, a: usize, b: usize) -> Option<Self> {
+        if !self.can_merge(a, b) {
+            return None;
+        }
+        let first = self.cells()[a];
+        let second = self.cells()[b];
+        // Only the axis they share an edge across grows. Adding both spans
+        // would make a 2x1 pair into a 2x2 block that overlaps its neighbours.
+        let beside = first.row == second.row && first.col_span == second.col_span
+            && (first.col + first.col_span == second.col || second.col + second.col_span == first.col);
+        let merged = if beside {
+            c(first.col.min(second.col), first.row, first.col_span + second.col_span, first.row_span)
+        } else {
+            c(first.col, first.row.min(second.row), first.col_span, first.row_span + second.row_span)
+        };
+        let mut next = *self;
+        let mut out = [c(0, 0, 1, 1); 36];
+        let mut index = 0;
+        for (position, cell) in self.cells().iter().enumerate() {
+            if position != a && position != b {
+                out[index] = *cell;
+                index += 1;
+            }
+        }
+        out[index] = merged;
+        index += 1;
+        next.count = index as u8;
+        next.cells = out;
+        next.sort();
+        next.is_valid().then_some(next)
+    }
+
+    /// A cell can be split back when one of its spans is more than one unit.
+    pub fn can_split(&self, index: usize) -> bool {
+        self.cells().get(index).is_some_and(|cell| cell.col_span > 1 || cell.row_span > 1)
+    }
+
+    /// Halve one cell along an axis. Only even spans can be split evenly, so
+    /// a cell made by merging equal neighbours can always be undone.
+    pub fn split(&self, index: usize, horizontal: bool) -> Option<Self> {
+        let cell = *self.cells().get(index)?;
+        let (first, second) = if horizontal {
+            if cell.col_span % 2 != 0 {
+                return None;
+            }
+            let half = cell.col_span / 2;
+            (c(cell.col, cell.row, half, cell.row_span),
+             c(cell.col + half, cell.row, half, cell.row_span))
+        } else {
+            if cell.row_span % 2 != 0 {
+                return None;
+            }
+            let half = cell.row_span / 2;
+            (c(cell.col, cell.row, cell.col_span, half),
+             c(cell.col, cell.row + half, cell.col_span, half))
+        };
+        let mut next = *self;
+        let mut out = [c(0, 0, 1, 1); 36];
+        let mut at = 0;
+        for (position, existing) in self.cells().iter().enumerate() {
+            if position != index {
+                out[at] = *existing;
+                at += 1;
+            }
+        }
+        out[at] = first;
+        out[at + 1] = second;
+        at += 2;
+        next.count = at as u8;
+        next.cells = out;
+        next.sort();
+        next.is_valid().then_some(next)
+    }
+
+    /// Keep the fill order after an edit: top to bottom, then left to right.
+    /// Insertion sort over at most 36 cells is ample.
+    fn sort(&mut self) {
+        for i in 1..usize::from(self.count) {
+            let mut j = i;
+            while j > 0 {
+                let (a, b) = (self.cells[j - 1], self.cells[j]);
+                if (a.row, a.col) <= (b.row, b.col) {
+                    break;
+                }
+                self.cells.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+    }
+
+    /// The short label for the toolbar and status line: columns x rows when
+    /// the grid is still uniform, otherwise the number of viewports. Digits
+    /// and `x` need no translation, matching the preset labels exactly.
+    pub fn display_label(&self) -> String {
+        if usize::from(self.count) == usize::from(self.cols) * usize::from(self.rows) {
+            format!("{}x{}", self.cols, self.rows)
+        } else {
+            self.count.to_string()
+        }
+    }
 }
 
 /// Shorthand for building the tables below.
@@ -199,6 +429,10 @@ pub enum GridLayout {
     /// Portrait: one column, four rows.
     #[serde(rename = "p4")]
     P4,
+    /// A viewer-drawn layout. The grid is stored inline so the enum stays
+    /// `Copy`; every method below reads its dimensions and cells directly.
+    #[serde(rename = "custom")]
+    Custom(CustomGrid),
 }
 
 impl Default for GridLayout {
@@ -250,8 +484,10 @@ impl GridLayout {
         [GridLayout::P1, GridLayout::P2, GridLayout::P3, GridLayout::P4];
 
     /// The viewports of this layout, in the order channels fill them.
-    pub fn cells(self) -> &'static [Cell] {
+    /// Borrowed from `self` because a custom grid's cells live in the value.
+    pub fn cells(&self) -> &[Cell] {
         match self {
+            GridLayout::Custom(grid) => grid.cells(),
             GridLayout::G1x1 => CELLS_1X1,
             GridLayout::G2x2 => CELLS_2X2,
             GridLayout::G3x3 => CELLS_3X3,
@@ -275,6 +511,7 @@ impl GridLayout {
     /// The number of grid columns the cells are laid out against.
     pub fn grid_cols(self) -> usize {
         match self {
+            GridLayout::Custom(grid) => usize::from(grid.cols),
             GridLayout::G1x1 => 1,
             GridLayout::G2x2 => 2,
             GridLayout::G3x3 => 3,
@@ -295,6 +532,7 @@ impl GridLayout {
     /// The number of grid rows the cells are laid out against.
     pub fn grid_rows(self) -> usize {
         match self {
+            GridLayout::Custom(grid) => usize::from(grid.rows),
             GridLayout::G1x1 => 1,
             GridLayout::G2x2 => 2,
             GridLayout::G3x3 => 3,
@@ -330,6 +568,10 @@ impl GridLayout {
 
     pub fn label(self) -> &'static str {
         match self {
+            // A custom layout's real label is built at runtime by
+            // `display_label`; this static form is only a fallback for the
+            // picker's name lookup, which never lists custom layouts.
+            GridLayout::Custom(_) => "custom",
             GridLayout::G1x1 => "1x1",
             GridLayout::G2x2 => "2x2",
             GridLayout::G3x3 => "3x3",
@@ -363,6 +605,31 @@ impl GridLayout {
         (!self.is_standard()).then(|| self.label())
     }
 
+    /// The label shown on the toolbar's "more layouts" button and in the
+    /// status line. Presets use their static label; a custom layout spells out
+    /// `columns x rows` while it is uniform, or its viewport count once cells
+    /// have been merged. All digits, so it needs no translation.
+    pub fn display_label(&self) -> String {
+        match self {
+            GridLayout::Custom(grid) => grid.display_label(),
+            _ => self.label().to_string(),
+        }
+    }
+
+    /// Whether this is a viewer-drawn layout, as opposed to a built-in preset.
+    pub fn is_custom(self) -> bool {
+        matches!(self, GridLayout::Custom(_))
+    }
+
+    /// The custom grid, when this is one. Used by the editor to load a saved
+    /// layout's current shape into its preview.
+    pub fn custom(&self) -> Option<&CustomGrid> {
+        match self {
+            GridLayout::Custom(grid) => Some(grid),
+            _ => None,
+        }
+    }
+
     /// The layout a digit key selects: the digit is the viewport count, and
     /// `0` stands for the 10-cell layout. 12, 13 and 16 have no digit.
     pub fn for_digit(digit: u8) -> Option<GridLayout> {
@@ -383,12 +650,20 @@ impl GridLayout {
 
     /// Next denser layout, wrapping around at the last one.
     pub fn next(self) -> Self {
+        // A custom layout is not in the preset cycle: density toggles have no
+        // meaning for it, so they leave it alone.
+        if self.is_custom() {
+            return self;
+        }
         let index = self.index();
         Self::ALL[(index + 1) % Self::ALL.len()]
     }
 
     /// Previous layout, wrapping around at the first one.
     pub fn prev(self) -> Self {
+        if self.is_custom() {
+            return self;
+        }
         let index = self.index();
         Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
     }
@@ -659,6 +934,68 @@ pub fn navigate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_custom_grid_is_copy_and_round_trips_through_json() {
+        let grid = CustomGrid::uniform(6, 6);
+        assert!(grid.is_valid());
+        assert_eq!(grid.cells().len(), 36);
+        let layout = GridLayout::Custom(grid);
+        // The enum is still Copy - that is the whole reason for the fixed
+        // array. This assignment would not compile if it were not.
+        let copied = layout;
+        assert_eq!(copied, layout);
+
+        let json = serde_json::to_string(&layout).unwrap();
+        // Only the 36 live cells travel, padded back on load.
+        let restored: GridLayout = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, layout);
+        assert_eq!(restored.cells().len(), 36);
+        assert_eq!(restored.display_label(), "6x6");
+    }
+
+    #[test]
+    fn merging_and_splitting_keep_the_grid_tiled() {
+        let grid = CustomGrid::uniform(2, 2);
+        assert!(grid.can_merge(0, 1)); // top two side by side
+        assert!(!grid.can_merge(0, 3)); // diagonal, not an edge
+
+        let merged = grid.merge(0, 1).unwrap();
+        assert!(merged.is_valid());
+        assert_eq!(merged.count, 3);
+        assert!(merged.cells().iter().any(|cell| cell.col_span == 2 && cell.row_span == 1));
+        assert_eq!(GridLayout::Custom(merged).display_label(), "3");
+
+        // The merged cell is first in fill order, and can be split back to the
+        // exact grid we started from.
+        let restored = merged.split(0, true).unwrap();
+        assert!(restored.is_valid());
+        assert_eq!(restored, grid);
+    }
+
+    #[test]
+    fn a_merged_grid_is_not_labelled_by_its_dimensions() {
+        // A 3x3 grid with the top pair merged still spans 3x3 units, but it
+        // now shows eight viewports - the label must say "8", not "3x3".
+        let grid = CustomGrid::uniform(3, 3);
+        let merged = grid.merge(0, 1).unwrap();
+        assert_eq!(merged.count, 8);
+        assert_eq!(merged.display_label(), "8");
+        assert_eq!(grid.display_label(), "3x3");
+    }
+
+    #[test]
+    fn a_custom_layout_stays_out_of_the_preset_cycle() {
+        let layout = GridLayout::Custom(CustomGrid::uniform(3, 4));
+        assert!(layout.is_custom());
+        assert!(!layout.is_standard());
+        assert_eq!(layout.next(), layout);
+        assert_eq!(layout.prev(), layout);
+        assert_eq!(layout.capacity(), 12);
+        assert_eq!(layout.grid_cols(), 3);
+        assert_eq!(layout.grid_rows(), 4);
+        assert_eq!(layout.display_label(), "3x4");
+    }
 
     #[test]
     fn capacities_match_layouts() {

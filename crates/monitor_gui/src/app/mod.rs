@@ -984,6 +984,7 @@ fn layout_hint(layout: GridLayout) -> &'static str {
         GridLayout::P2 => "toolbar-layout-p2",
         GridLayout::P3 => "toolbar-layout-p3",
         GridLayout::P4 => "toolbar-layout-p4",
+        GridLayout::Custom(_) => "toolbar-layout-custom",
     }
 }
 

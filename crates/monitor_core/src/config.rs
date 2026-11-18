@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
-use crate::layout::GridLayout;
+use crate::layout::{CustomGrid, GridLayout};
 use crate::model::{new_id, CameraSource, ConnectionMode, CombinedInfo, Osd, OsdItem};
 use crate::{APP_NAME, CONFIG_FILE_NAME};
 
@@ -564,6 +564,11 @@ pub struct Group {
     /// [`AppConfig::adopt_portrait_view`].
     pub portrait_page: usize,
     pub portrait_focus: Option<usize>,
+    /// The viewer's four custom grids, in the order the picker shows them.
+    /// `None` is an empty slot, drawn as "+" and ready to be edited. Kept per
+    /// group so two groups can keep different walls without colliding.
+    #[serde(default)]
+    pub custom_layouts: [Option<CustomGrid>; 4],
 }
 
 impl Group {
@@ -602,6 +607,7 @@ impl Default for Group {
             focus: None,
             portrait_page: 0,
             portrait_focus: None,
+            custom_layouts: [None, None, None, None],
         }
     }
 }
@@ -1361,6 +1367,23 @@ impl AppConfig {
                 .iter()
                 .filter(|camera| usize::from(camera.group) == index && camera.enabled)
                 .count();
+            // A custom grid can arrive from a hand-edited file with bad
+            // dimensions or a hole in it. Drop any such slot, and if the wall
+            // is currently showing one, send it back to the default grid
+            // before its capacity is used to clamp the page below. The
+            // portrait grid is never custom, so only the landscape side needs
+            // this.
+            let group = &mut self.groups[index];
+            for slot in &mut group.custom_layouts {
+                if slot.as_ref().is_some_and(|grid| !grid.is_valid()) {
+                    *slot = None;
+                }
+            }
+            if let GridLayout::Custom(grid) = group.layout {
+                if !grid.is_valid() {
+                    group.layout = GridLayout::default();
+                }
+            }
             let Group {
                 layout,
                 portrait_layout,
@@ -1591,6 +1614,44 @@ fn keep_previous(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A configuration written before custom grids existed has no slots; it
+    /// must come back with four empty ones and keep the preset it had.
+    #[test]
+    fn custom_layout_slots_default_empty_for_old_configurations() {
+        let legacy = AppConfig::from_json(r#"{"version":1,"groups":[{"layout":"3x3"}],"cameras":[]}"#).unwrap();
+        assert_eq!(legacy.groups[0].custom_layouts, [None, None, None, None]);
+        assert_eq!(legacy.groups[0].layout, GridLayout::G3x3);
+    }
+
+    #[test]
+    fn custom_layout_slots_survive_a_save_and_load() {
+        let grid = CustomGrid::uniform(3, 2);
+        let mut config = AppConfig::default();
+        config.group_mut().custom_layouts[1] = Some(grid);
+        let path = std::env::temp_dir().join(format!("xgview-custom-layouts-{}.json", crate::model::new_id()));
+        config.save(&path).unwrap();
+        let restored = AppConfig::load(&path).unwrap();
+        assert_eq!(restored.groups[0].custom_layouts[1], Some(grid));
+        assert!(restored.groups[0].custom_layouts[0].is_none());
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(previous_path(&path));
+    }
+
+    #[test]
+    fn a_broken_custom_grid_is_dropped_on_load() {
+        // A count larger than the grid can hold is not a valid layout. Built
+        // in code here because a bad hand-edited file would fail to parse
+        // before normalize ever sees it.
+        let mut bad = CustomGrid::uniform(3, 2);
+        bad.count = 40;
+        let mut config = AppConfig::default();
+        config.group_mut().layout = GridLayout::Custom(bad);
+        config.group_mut().custom_layouts[0] = Some(bad);
+        config.normalize();
+        assert_eq!(config.groups[0].layout, GridLayout::G2x2);
+        assert!(config.groups[0].custom_layouts[0].is_none());
+    }
 
     /// Clean View is three switches, not the pull request's single one. A
     /// configuration written before they existed must behave exactly as it did
