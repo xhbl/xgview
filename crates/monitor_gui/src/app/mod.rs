@@ -988,6 +988,63 @@ struct Keys {
 }
 
 /// The viewer application.
+/// Incoming video traffic sampled for the About page.
+#[derive(Debug, Default)]
+struct NetworkTraffic {
+    current_mbps: f32,
+    samples: std::collections::VecDeque<(Instant, f32)>,
+    last_sample: Option<Instant>,
+}
+impl NetworkTraffic {
+    const WINDOW: Duration = Duration::from_secs(60);
+    const INTERVAL: Duration = Duration::from_secs(1);
+    const MAX_GAP: Duration = Duration::from_secs(5);
+
+    fn sample(&mut self, now: Instant, mbps: f32) {
+        if let Some(previous) = self.last_sample {
+            let elapsed = now.saturating_duration_since(previous);
+            if elapsed < Self::INTERVAL {
+                return;
+            }
+            if elapsed > Self::MAX_GAP {
+                self.samples.clear();
+            }
+        }
+
+        self.current_mbps = if mbps.is_finite() { mbps.max(0.0) } else { 0.0 };
+        self.last_sample = Some(now);
+        self.samples.push_back((now, self.current_mbps));
+
+        let cutoff = now - Self::WINDOW;
+        while self.samples.len() > 1 && self.samples[1].0 <= cutoff {
+            self.samples.pop_front();
+        }
+    }
+
+    fn average_mbps(&self) -> f32 {
+        let Some(now) = self.last_sample else {
+            return 0.0;
+        };
+        let cutoff = now - Self::WINDOW;
+        let mut weighted = 0.0;
+        let mut seconds = 0.0;
+
+        for index in 1..self.samples.len() {
+            let (at, value) = self.samples[index];
+            let previous = self.samples[index - 1].0;
+            let start = previous.max(cutoff);
+            let duration = at.saturating_duration_since(start).as_secs_f32();
+            weighted += value * duration;
+            seconds += duration;
+        }
+
+        if seconds > 0.0 {
+            weighted / seconds
+        } else {
+            self.current_mbps
+        }
+    }
+}
 pub struct XgViewApp {
     config: AppConfig,
     /// Last configuration written to disk, used to avoid useless writes.
@@ -1041,6 +1098,7 @@ pub struct XgViewApp {
     /// The machine's memory, processor load and operating system, read while the
     /// About page is open; see `monitor_core::vitals`.
     vitals: monitor_core::vitals::Vitals,
+    network_traffic: NetworkTraffic,
     /// When this viewer started, for the About page's uptime.
     started: Instant,
     /// Measures the frame, when `XGVIEW_FRAME_MS` asks it to.
@@ -1792,6 +1850,7 @@ impl XgViewApp {
             picture_layer_held: false,
             video,
             vitals: monitor_core::vitals::Vitals::new(),
+            network_traffic: NetworkTraffic::default(),
             started: Instant::now(),
             frame_clock: crate::frame::FrameClock::from_env(),
             events_tx,
@@ -2151,6 +2210,19 @@ impl XgViewApp {
         }
     }
 
+    /// Aggregate the incoming bitrate reported by active video sessions.
+    fn update_network_traffic(&mut self) {
+        let now = Instant::now();
+        if self.network_traffic.last_sample.is_some_and(|at| now.duration_since(at) < NetworkTraffic::INTERVAL) {
+            return;
+        }
+        let stats = self.manager.stats();
+        let kbps: f32 = self.channels.keys()
+            .filter_map(|index| stats.latest(*index))
+            .map(|entry| entry.stats.bitrate_kbps)
+            .sum();
+        self.network_traffic.sample(now, kbps / 1000.0);
+    }
     fn poll_events(&mut self, ctx: &egui::Context) {
         for event in self.manager.poll() {
             // A camera's answer, not a channel's: it is kept by address so that
@@ -3345,6 +3417,7 @@ impl XgViewApp {
         }
 
         self.poll_events(ctx);
+        self.update_network_traffic();
         self.poll_sealing();
         self.poll_talk_test();
         // An answer comes back with the wall drawn a frame or two after it was
@@ -3637,7 +3710,7 @@ impl XgViewApp {
 /// Whether a camera's sub stream address was guessed from its main URL.
 ///
 /// The badge this feeds is about where the address came from, not about what it
-/// looks like. An ONVIF profile that produced `…/videoSub` (Foscam's `prof1`) is
+/// looks like. An ONVIF profile that produced `Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’В Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В РІР‚в„ўР вЂ™Р’В Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’В Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†Р вЂљР’В Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р РЋРІвЂћСћР В Р’В Р В Р вЂ№Р В Р вЂ Р Р†Р вЂљРЎвЂєР РЋРЎвЂєР В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р вЂ Р Р†Р вЂљРЎвЂєР РЋРЎвЂєР В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р Р†РІР‚С›РЎС›Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’В¦/videoSub` (Foscam's `prof1`) is
 /// a real address even though it reads exactly like what the `/videoMain` ->
 /// `/videoSub` rule would have derived. `sub_profile` records that a profile
 /// produced it, so a camera that has one is never shown as inferred.
@@ -3795,6 +3868,65 @@ fn bands_around(outer: Rect, inner: Rect) -> Vec<Rect> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn network_traffic_averages_samples() {
+        let start = Instant::now();
+        let mut traffic = NetworkTraffic::default();
+
+        assert_eq!(traffic.average_mbps(), 0.0);
+
+        traffic.sample(start, 10.0);
+        assert_eq!(traffic.current_mbps, 10.0);
+        assert_eq!(traffic.average_mbps(), 10.0);
+
+        traffic.sample(start + Duration::from_secs(1), 20.0);
+        traffic.sample(start + Duration::from_secs(2), 30.0);
+
+        assert!((traffic.average_mbps() - 25.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn network_traffic_keeps_sixty_second_window() {
+        let start = Instant::now();
+        let mut traffic = NetworkTraffic::default();
+
+        for second in 0..=70 {
+            traffic.sample(
+                start + Duration::from_secs(second),
+                if second < 40 { 10.0 } else { 20.0 },
+            );
+        }
+
+        assert!((traffic.average_mbps() - 15.166667).abs() < 0.001);
+    }
+
+    #[test]
+    fn network_traffic_resets_after_long_gap() {
+        let start = Instant::now();
+        let mut traffic = NetworkTraffic::default();
+
+        traffic.sample(start, 100.0);
+        traffic.sample(start + Duration::from_secs(1), 100.0);
+        traffic.sample(start + Duration::from_secs(10), 5.0);
+
+        assert_eq!(traffic.current_mbps, 5.0);
+        assert_eq!(traffic.average_mbps(), 5.0);
+        assert_eq!(traffic.samples.len(), 1);
+    }
+
+    #[test]
+    fn network_traffic_ignores_early_and_invalid_samples() {
+        let start = Instant::now();
+        let mut traffic = NetworkTraffic::default();
+
+        traffic.sample(start, 10.0);
+        traffic.sample(start + Duration::from_millis(500), 50.0);
+        assert_eq!(traffic.current_mbps, 10.0);
+
+        traffic.sample(start + Duration::from_secs(1), f32::NAN);
+        assert_eq!(traffic.current_mbps, 0.0);
+    }
+
     use super::*;
     use egui::{Pos2, pos2};
 

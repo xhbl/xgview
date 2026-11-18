@@ -187,7 +187,7 @@ impl XgViewApp {
             let active = !current.is_standard();
             let more = self
                 .nav
-                .tracked(ui.selectable_label(active || self.layout_picker.is_open(), current.numeric_label().unwrap_or("…")));
+                .tracked(ui.selectable_label(active || self.layout_picker.is_open(), current.numeric_label().unwrap_or("РІР‚В¦")));
             self.name(&more, "toolbar-layout-more");
             if more.clicked() {
                 if self.layout_picker.is_open() {
@@ -664,7 +664,7 @@ impl XgViewApp {
 
         ui.add_space(theme::space::L);
         ui.label(RichText::new(monitor_i18n::tr("settings-actions")).strong());
-        // Two actions that end the session. Exit leaves at once — a viewer that
+        // Two actions that end the session. Exit leaves at once РІР‚вЂќ a viewer that
         // pressed it has read the label. Reboot is behind a confirmation window:
         // a press beside a neighbour must not restart the machine on its own,
         // and it is drawn only where the process has the privilege to do it.
@@ -933,6 +933,14 @@ impl XgViewApp {
                 ui.label(monitor_i18n::tr("about-cpu-unknown"));
             }
         }
+        ui.label(monitor_i18n::tr_args(
+            "about-network-current",
+            &[("mbps", format!("{:.2}", self.network_traffic.current_mbps).into())],
+        ));
+        ui.label(monitor_i18n::tr_args(
+            "about-network-average",
+            &[("mbps", format!("{:.2}", self.network_traffic.average_mbps()).into())],
+        ));
         ui.label(monitor_i18n::tr_args("about-system", &[("os", self.vitals.os().into())]));
         ui.label(monitor_i18n::tr_args(
             "about-uptime",
