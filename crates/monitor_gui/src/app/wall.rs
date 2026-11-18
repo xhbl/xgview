@@ -1137,7 +1137,22 @@ impl XgViewApp {
             self.picture_zoom = PictureZoom::FULL;
         }
 
+        let dismiss_settings = self.show_settings
+            && ui.ctx().input(|input| {
+                input.pointer.button_clicked(egui::PointerButton::Primary)
+                    && input.pointer.interact_pos().is_some_and(|pos| area.contains(pos))
+            });
+
         let mut actions = self.paint_view(ui, picture_area, &cameras, &view, dx, true, 2);
+
+        if dismiss_settings {
+            self.show_settings = false;
+            actions.focus = None;
+            actions.zoom = None;
+            actions.drag_started = false;
+            actions.drag_delta = 0.0;
+            actions.drag_stopped = false;
+        }
 
         if actions.edit_camera.is_some() || actions.delete_camera.is_some() {
             let slots = self.config.active_slots();
