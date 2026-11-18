@@ -118,7 +118,43 @@ pub struct VideoRenderer {
     /// [`VideoRenderer::report_upload_cost`].
     cost: UploadCost,
     last_report: Instant,
+    /// How evenly each channel's pictures reached the screen, which is the
+    /// only measure that describes what the viewer actually saw. See
+    /// [`VideoRenderer::note_rhythm`].
+    rhythm: HashMap<usize, Rhythm>,
 }
+
+/// The gaps between the pictures one channel put on screen.
+///
+/// The pacer's own gaps say the wire was read evenly; these say the screen was
+/// painted evenly, and the two are not the same thing: a wall that looks for a
+/// new picture on a timer shows a twelve-frame stream for two waits or for
+/// three by turns even when every picture arrived on time.
+#[derive(Debug)]
+struct Rhythm {
+    last: Option<Instant>,
+    count: u32,
+    total: Duration,
+    max: Duration,
+    min: Duration,
+    report: Instant,
+}
+
+impl Default for Rhythm {
+    fn default() -> Self {
+        Self {
+            last: None,
+            count: 0,
+            total: Duration::ZERO,
+            max: Duration::ZERO,
+            min: Duration::MAX,
+            report: Instant::now(),
+        }
+    }
+}
+
+/// How often the on-screen rhythm is reported.
+const RHYTHM_REPORT: Duration = Duration::from_secs(3);
 
 /// Time spent uploading pictures, summed over the pictures of one report.
 #[derive(Debug, Default)]
@@ -220,6 +256,7 @@ impl VideoRenderer {
             layout,
             sampler,
             channels: HashMap::new(),
+            rhythm: HashMap::new(),
             encoder: None,
             cost: UploadCost::default(),
             last_report: Instant::now(),
@@ -233,6 +270,11 @@ impl VideoRenderer {
 
     /// Uploads one picture, rebuilding the textures when the size changed.
     pub fn upload(&mut self, index: usize, frame: &VideoFrame) {
+        // Counted before any of the checks below can turn the picture away: a
+        // channel whose pictures reach here at the stream's rate and leave
+        // without being drawn is a different fault from one whose pictures
+        // never reach here at all, and only this shape tells the two apart.
+        self.note_rhythm(index);
         let size = (frame.width, frame.height);
         if size.0 == 0 || size.1 == 0 {
             return;
@@ -247,6 +289,17 @@ impl VideoRenderer {
         // of U and V bytes is as long as a luma row.
         let stride = plane_stride(width);
         if frame.y.len() < stride * height || frame.uv.len() < stride * chroma_height {
+            tracing::debug!(
+                target: "xgview::video",
+                index,
+                width,
+                height,
+                luma = frame.y.len(),
+                luma_needed = stride * height,
+                chroma = frame.uv.len(),
+                chroma_needed = stride * chroma_height,
+                "a picture whose planes are too short to draw"
+            );
             return;
         }
 
@@ -284,6 +337,48 @@ impl VideoRenderer {
 
         self.convert(index);
         self.report_upload_cost();
+    }
+
+    /// Records that a picture reached this uploader, and says how evenly they
+    /// have been arriving.
+    ///
+    /// Counted here rather than at the end of `upload` on purpose: the caller
+    /// only calls this for a picture the store has not handed over before, so
+    /// these are the pictures the stream produced - and a picture that arrives
+    /// and is then turned away for having no planes is a different fault from
+    /// one that never arrived, which only this shape tells apart.
+    ///
+    /// A mean that matches the stream's frame interval with a wide spread is a
+    /// rhythm the eye reads as stutter, and it can be there while every counter
+    /// on the reading side reports perfect pacing: those measure when the wire
+    /// was read, this one measures when the screen changed.
+    fn note_rhythm(&mut self, index: usize) {
+        let now = Instant::now();
+        let rhythm = self.rhythm.entry(index).or_default();
+        if let Some(last) = rhythm.last {
+            let gap = now.saturating_duration_since(last);
+            rhythm.count += 1;
+            rhythm.total += gap;
+            rhythm.max = rhythm.max.max(gap);
+            rhythm.min = rhythm.min.min(gap);
+        }
+        rhythm.last = Some(now);
+        if rhythm.count == 0 || rhythm.report.elapsed() < RHYTHM_REPORT {
+            return;
+        }
+        tracing::debug!(
+            target: "xgview::video",
+            index,
+            pictures = rhythm.count,
+            mean_ms = (rhythm.total / rhythm.count).as_millis() as u64,
+            min_ms = rhythm.min.as_millis() as u64,
+            max_ms = rhythm.max.as_millis() as u64,
+            "picture rhythm"
+        );
+        *rhythm = Rhythm {
+            report: now,
+            ..Rhythm::default()
+        };
     }
 
     /// Reports the cost of uploading one picture, every few seconds.

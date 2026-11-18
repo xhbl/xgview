@@ -84,13 +84,20 @@ pub(super) fn publish_frames(
 ) -> Option<(u32, u32)> {
     let mut size = None;
     let mut undrawable = 0usize;
+    // What one of them looked like, so the line says which shape the renderer
+    // could not take rather than only how many there were.
+    let mut shape: Option<(u32, u32, usize)> = None;
     for frame in decoded {
+        let plane_count = frame.planes.len();
         let mut planes = frame.planes.into_iter();
         let (Some(y), Some(uv)) = (planes.next(), planes.next()) else {
             // The decoder produced a picture the renderer cannot take - a
             // backend that renders into a GPU buffer of its own has no planes.
             // Nothing is published, and the tile keeps whatever it had.
             undrawable += 1;
+            if shape.is_none() {
+                shape = Some((frame.width, frame.height, plane_count));
+            }
             continue;
         };
         *sequence += 1;
@@ -113,6 +120,7 @@ pub(super) fn publish_frames(
             target: "xgview::pipeline",
             index,
             pictures = undrawable,
+            shape = ?shape,
             "pictures that cannot be drawn"
         );
     }
@@ -233,6 +241,25 @@ pub(super) struct WindowCounters {
     /// link.
     pub(super) decoded: u64,
     pub(super) errors: u64,
+    /// Decode calls that put no pixels in the renderer's hands.
+    ///
+    /// A decoder scanning into a surface of its own is the ordinary case, and
+    /// such a call is one of these too: it hands its picture over by rendering
+    /// it. What separates the two is `undrawn_frames`, which counts the
+    /// pictures behind those calls only when there were some - so a climb in
+    /// this with that one still at zero is a surface, and a climb in both is
+    /// pictures that were decoded and then went nowhere.
+    ///
+    /// Not the complement of `drawn`, and not a count of handovers: a handover
+    /// can be both, when the decode that produced nothing is the one during
+    /// which a picture held from before went to the wall. Each counts its own
+    /// side of that.
+    pub(super) undrawn_calls: u64,
+    /// The pictures behind those calls, which tells an empty decode from a
+    /// decode whose output had no planes to draw.
+    pub(super) undrawn_frames: u64,
+    /// Calls that did put a picture in the renderer's hands.
+    pub(super) drawn: u64,
     /// Refusals before the session had shown a picture, which are its opening
     /// rather than damage - see `on_video` in `rtsp_session`.
     pub(super) opening: u64,
@@ -356,21 +383,96 @@ pub(super) fn emit(events: &Sender<StreamEvent>, event: StreamEvent) {
 pub(super) struct BaselineFix {
     decided: bool,
     apply: bool,
+    /// Whether a set may be rewritten past the baseline flag at all.
+    ///
+    /// Only where a wrong answer can be taken back. The level and the reorder
+    /// declaration both change what a decoder is configured with, and a decoder
+    /// keeps that for as long as it lives: leaving a set alone is the only way
+    /// back. A live session can reopen its decoder on the set the camera sends
+    /// (see [`Self::retract`]); a recording and the MSE path cannot, because
+    /// what they feed after the first parameter sets carries none, so a decoder
+    /// reopened there would have nothing to configure from. They get the
+    /// baseline flag and nothing else - narrow, and the direction that cannot
+    /// make a stream worse.
+    rewrite: bool,
+    /// The level this stream declares and the one its pictures need, when the
+    /// declaration is far above it. See [`sps::overstated_level`].
+    level: Option<(u8, u8)>,
+    /// Whether to declare that this stream has nothing to reorder.
+    ///
+    /// Taken for a stream that carries no VUI: a set that says nothing leaves
+    /// the decoder to its own default, and its default is to hold pictures -
+    /// four or five on the hardware in `priv/docs/foscam_probe.md` §12 - before
+    /// releasing the first. The main stream of that doorbell is the case a
+    /// level-based gate missed: 2560x1920 declared at level 5.1 is an honest
+    /// declaration, and the pictures still arrived in bursts of four.
+    ///
+    /// A set that carries a VUI is left to say what it wants, and a stream that
+    /// turns out to reorder takes the declaration back - see [`Self::retract`].
+    no_reorder: bool,
+    /// Whether a stream that reordered after the declaration was made has had it
+    /// taken back, so the log says it once.
+    retracted: bool,
 }
 
 impl BaselineFix {
-    pub(super) fn new() -> Self {
-        Self { decided: false, apply: false }
+    /// For a session whose decoder can be reopened mid-stream: a live one, which
+    /// the next access unit's own parameter sets configure.
+    pub(super) fn new_live() -> Self {
+        Self { rewrite: true, ..Self::new() }
     }
 
-    /// Rewrites `data` in place when the stream needs it, and says whether it
-    /// changed anything. Called with every access unit - and with the MSE init
-    /// segment's parameter sets - so the decision is taken from the first set
-    /// that arrives, whichever form the session is in.
-    pub(super) fn observe(&mut self, index: usize, codec: Codec, data: &mut [u8]) -> bool {
+    /// For a session whose decoder cannot: a recording and the MSE path both
+    /// feed samples without parameter sets after the first.
+    pub(super) fn new() -> Self {
+        Self {
+            decided: false,
+            apply: false,
+            rewrite: false,
+            level: None,
+            no_reorder: false,
+            retracted: false,
+        }
+    }
+
+    /// Stops declaring that this stream has nothing to reorder, and answers
+    /// whether it did - the caller uses that to reopen the decoder, which is
+    /// the only way the declaration leaves one that was configured from it.
+    ///
+    /// Called when the decoder reports that the stream hands its pictures over
+    /// out of order, which is the one thing the declaration would be wrong
+    /// about: a stream that reorders must be allowed to. The set the next
+    /// access unit carries is then left as the camera sent it, and the decoder
+    /// the session reopens for itself is configured from that one - see
+    /// `AMediaCodecDecoder::restart`.
+    pub(super) fn retract(&mut self, index: usize) -> bool {
+        if !self.no_reorder || self.retracted {
+            return false;
+        }
+        self.no_reorder = false;
+        self.retracted = true;
+        tracing::info!(
+            target: "xgview::pipeline",
+            index,
+            "the stream reorders its pictures, so the declaration that it does \
+             not is taken back"
+        );
+        true
+    }
+
+    /// Rewrites `data` when the stream needs it, and says whether it changed
+    /// anything. Called with every access unit, so the decision is taken from
+    /// the first set that arrives.
+    pub(super) fn observe(&mut self, index: usize, codec: Codec, data: &mut Vec<u8>) -> bool {
         if codec == Codec::H264 && !self.decided {
             if let Some(nal) = sps::access_unit_sps(data) {
                 self.apply = sps::needs_constrained_baseline(nal);
+                self.level = self.rewrite.then(|| sps::overstated_level(nal)).flatten();
+                // The gate is the set's own silence, not its level: a camera
+                // that declares a level its pictures fit in still says nothing
+                // about reordering, and that is the field the decoder fills in
+                // with a buffer of its own.
+                self.no_reorder = self.rewrite && sps::has_vui(nal) == Some(false);
                 self.decided = true;
                 if self.apply {
                     // Said out loud: the channel is about to be decoded from
@@ -382,8 +484,40 @@ impl BaselineFix {
                          which is what the hardware decoder asks of it"
                     );
                 }
+                if let Some((declared, needed)) = self.level {
+                    tracing::info!(
+                        target: "xgview::pipeline",
+                        index,
+                        declared,
+                        needed,
+                        "relabelling a stream that declares a level far above its \
+                         pictures, which is what makes a decoder hold them back"
+                    );
+                }
+                if self.no_reorder {
+                    tracing::info!(
+                        target: "xgview::pipeline",
+                        index,
+                        "declaring that this stream has nothing to reorder, which \
+                         its own parameter set left unsaid"
+                    );
+                }
             }
         }
-        self.apply && sps::constrain_baseline(data) > 0
+        // Both rewrites re-read the set they are given and decide again, rather
+        // than applying the answer taken above to whatever set arrives later: a
+        // session whose camera changed its pictures mid-stream would otherwise
+        // have the new set brought down to the old one's level, and a camera
+        // that started sending B-frames would have them reordered away. `level`
+        // and `no_reorder` only say whether this stream is one worth walking at
+        // all, and what to call it in the log.
+        let mut changed = self.apply && sps::constrain_baseline(data) > 0;
+        if self.level.is_some() {
+            changed |= sps::relabel_level(data) > 0;
+        }
+        if self.no_reorder {
+            changed |= sps::declare_no_reorder_in_unit(data) > 0;
+        }
+        changed
     }
 }

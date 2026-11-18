@@ -57,6 +57,22 @@ const LINK_TAKEOVER: Duration = Duration::from_secs(5);
 /// tessellation and composition, for a number.
 const LIVE_REPAINT: Duration = Duration::from_millis(40);
 
+/// The most pictures a view may show and still be painted on the stream's
+/// clock rather than on [`LIVE_REPAINT`].
+///
+/// A repaint costs the same whatever the grid holds - the work is the
+/// composition of the tiles and the present, not the pictures, which the store
+/// hands over once each however often it is asked. So past a few tiles most of
+/// the repaints a waker asks for draw exactly what the last one drew, and the
+/// timer is both cheaper and sufficient: twenty-five a second covers the fifteen
+/// to twenty-five these cameras send.
+///
+/// Measured on the N5095 box with ten cameras, four cores: 78% of the process
+/// with the waker off, 113% with it on, and the pictures arriving twenty times a
+/// second the whole time. Four is where a tile is still large enough for the
+/// twenty-five hertz timer to be the thing the eye sees missing.
+const FRAME_PACED_TILES: usize = 4;
+
 /// Width the toolbar is laid out for at its full size.
 ///
 /// A television and the desktop window are at least this wide; a phone in
@@ -2626,7 +2642,67 @@ impl XgViewApp {
     /// than the `eframe::App` one because two things drive it: eframe on the
     /// desktop, and - on Android - the loop in `crate::android_surface`, which
     /// owns a `SurfaceView`'s surface instead of an activity window.
+    ///
+    /// Teaches the frame store to wake this wall when a picture lands, on the
+    /// views where that is worth a repaint per picture. The two front ends are
+    /// woken differently: the Android loop waits on a condition variable of its
+    /// own and only a call to `wake` cuts that wait short, while an egui context
+    /// in either front end repaints when asked directly. See
+    /// [`FrameStore::set_wake`].
+    fn paint_on_the_stream(&self, ctx: &egui::Context) {
+        if !self.wants_frame_paced_repaint() {
+            // A grid keeps the timer it always had. Leaning on it again is not
+            // an optimisation to be measured later: it is the difference
+            // between 78% and 113% of a four core box on a ten camera wall,
+            // measured on this project's own N5095 (`priv/docs/grid-cpu-cost.md`
+            // §10), for a screen that can only show sixty of the two hundred
+            // pictures a second that arrive.
+            self.manager.frames().clear_wake();
+            return;
+        }
+        #[cfg(target_os = "android")]
+        let waker: Arc<dyn Fn() + Send + Sync> = {
+            // The Android loop waits on a condition variable of its own and an
+            // egui context cannot cut that wait short, so the context is not
+            // the way to reach it here.
+            let _ = ctx;
+            Arc::new(crate::android_surface::wake)
+        };
+        #[cfg(not(target_os = "android"))]
+        let waker: Arc<dyn Fn() + Send + Sync> = {
+            let ctx = ctx.clone();
+            Arc::new(move || ctx.request_repaint())
+        };
+        self.manager.frames().set_wake(waker);
+    }
+
+    /// Whether this view is one to paint on the stream's clock rather than on
+    /// the wall's timer.
+    ///
+    /// A magnified picture and a replay are one large picture each, painted for
+    /// as many cameras as there are - one. The wall shows up to
+    /// [`FRAME_PACED_TILES`] of them the same way, and past that the timer is
+    /// the cheaper answer: its twenty-five repaints a second already cover the
+    /// fifteen to twenty five a second these cameras send, and the extra ones a
+    /// waker asks for draw what the last one drew.
+    fn wants_frame_paced_repaint(&self) -> bool {
+        if self.scheduler.is_zoomed() || self.playback.is_some() {
+            return true;
+        }
+        let live = self.scheduler.current().map_or(0, |schedule| schedule.live().count());
+        live <= FRAME_PACED_TILES
+    }
+
     pub fn frame(&mut self, ctx: &egui::Context) {
+        // The wall paints when a picture lands rather than on a timer. A twelve
+        // frame stream is eighty-three milliseconds a frame, and the
+        // forty-millisecond timer the wall runs on otherwise shows each picture
+        // for two of those waits or for three by turns - a rhythm the eye reads
+        // as stutter even when the pictures themselves were placed perfectly.
+        // Reinstalled every frame because it is one lock and one clone, and
+        // because a context that was rebuilt would otherwise leave the store
+        // waking a dead one.
+        self.paint_on_the_stream(ctx);
         let start = self.begin_frame(ctx);
         // Before anything asks whether the picture is on its own layer: a step
         // to another camera has to be noticed in the same frame it happens.
