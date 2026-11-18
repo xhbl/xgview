@@ -211,8 +211,6 @@ about-memory = Оперативная память: { $used } МБ / { $total } 
 about-memory-unknown = Оперативная память: —
 about-cpu = Загрузка CPU: { $percent }%
 about-cpu-unknown = Загрузка CPU: —
-about-network-current = Входящий видеопоток: { $mbps } Мбит/с
-about-network-average = Средняя скорость за 60 секунд: { $mbps } Мбит/с
 about-system = Операционная система: { $os }
 about-uptime = Время работы: { $duration }
 about-duration-seconds = { $n } с
@@ -601,6 +599,3 @@ cameras-cancel-order = Отмена
 portrait-aspect-entry = Соотношение сторон
 combined-info-button = Составная информация
 settings-talk-mute = Отключать звук при включённом микрофоне
-
-camera-context-edit = Редактировать камеру
-camera-context-delete = Удалить камеру
