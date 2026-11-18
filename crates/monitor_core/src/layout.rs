@@ -69,8 +69,8 @@ impl CustomGrid {
     /// A grid of nothing but 1x1 cells, which is where editing starts: every
     /// later shape is made by merging whole, equal-sized neighbours.
     pub fn uniform(cols: u8, rows: u8) -> Self {
-        assert!(cols >= 1 && cols <= MAX_CUSTOM_DIMENSION, "columns out of range");
-        assert!(rows >= 1 && rows <= MAX_CUSTOM_DIMENSION, "rows out of range");
+        assert!((1..=MAX_CUSTOM_DIMENSION).contains(&cols), "columns out of range");
+        assert!((1..=MAX_CUSTOM_DIMENSION).contains(&rows), "rows out of range");
         let mut cells = [c(0, 0, 1, 1); 36];
         let mut index = 0;
         for row in 0..rows {

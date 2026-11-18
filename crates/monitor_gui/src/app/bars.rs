@@ -284,7 +284,10 @@ impl XgViewApp {
             // button: it shows the number of the one in use, and an ellipsis
             // while the wall is on a layout that has a button of its own.
             let active = !current.is_standard() && !self.scheduler.is_zoomed();
-            let more = ui.selectable_label(active || self.layout_picker.is_open(), current.numeric_label().unwrap_or("…"));
+            let more = ui.selectable_label(
+                active || self.layout_picker.is_open(),
+                current.display_label(),
+            );
             items.push((more.id, more.rect));
             self.name(&more, "toolbar-layout-more");
             if more.clicked() {
@@ -292,6 +295,7 @@ impl XgViewApp {
                     self.layout_picker.close();
                 } else {
                     self.layout_picker.open(());
+                    self.layout_picker_tab = None;
                 }
                 // Only for a press that came from the keyboard or a remote: a
                 // pointer does not move the focus anywhere else in this program,
@@ -464,7 +468,7 @@ impl XgViewApp {
                 ui.label(monitor_i18n::tr_args(
                     "status-page",
                     &[
-                        ("layout", self.scheduler.layout().label().into()),
+                        ("layout", self.scheduler.layout().display_label().into()),
                         ("page", (info.page + 1).into()),
                         ("count", info.page_count.into()),
                     ],

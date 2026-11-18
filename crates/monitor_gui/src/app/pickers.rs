@@ -21,14 +21,13 @@ impl XgViewApp {
         self.modal_frame(
             ctx,
             "xgview-layout-picker",
-            360.0,
+            380.0,
             |app| &mut app.layout_picker,
             |app, ui, ()| {
                 let mut chosen: Option<GridLayout> = None;
                 let mut close = false;
+                let mut edit_slot: Option<usize> = None;
 
-                // The way out, at the far end of the title bar: a cross rather
-                // than the word, which stays as its tooltip.
                 let bar = dialogs::title_bar(
                     ui,
                     &monitor_i18n::tr("layout-picker-title"),
@@ -41,74 +40,168 @@ impl XgViewApp {
                     }
                 }
 
-                // Three to a row, each row a scope of the navigation layer: the
-                // sideways arrows walk a row and the vertical ones cross between
-                // them at the same column, so a remote reaches all nine.
-                app.layout_picker.anchor = None;
-                for (row, chunk) in GridLayout::EXTENDED.chunks(3).enumerate() {
-                    let scope = LAYOUT_PICKER_ROWS[row];
-                    ui.horizontal(|ui| {
-                        app.nav.open(scope);
-                        for layout in chunk {
-                            let selected = app.scheduler.layout() == *layout;
-                            let (rect, response) =
-                                ui.allocate_exact_size(vec2(108.0, 84.0), Sense::click());
-                            if app.layout_picker.anchor.is_none() {
-                                app.layout_picker.anchor = Some(response.id);
-                            }
-                            if ui.is_rect_visible(rect) {
-                                let painter = ui.painter();
-                                // The two states the rest of the interface draws:
-                                // the layout in use carries the accent fill, and
-                                // the thumbnail the remote is on carries the
-                                // focus ring. Both come from the same
-                                // `WidgetVisuals` a `selectable_label` would use,
-                                // so the fill and the number match the toolbar's
-                                // own layout buttons.
-                                let visuals = ui.style().interact_selectable(&response, selected);
-                                let corner = CornerRadius::same(theme::radius::S);
-                                if selected || response.hovered() {
-                                    painter.rect_filled(rect, corner, visuals.weak_bg_fill);
-                                }
-                                if visuals.bg_stroke.width > 0.0 {
-                                    painter.rect_stroke(
-                                        rect,
-                                        corner,
-                                        visuals.bg_stroke,
-                                        StrokeKind::Inside,
-                                    );
-                                }
-                                let thumb = Rect::from_min_size(
-                                    rect.left_top() + vec2(6.0, 6.0),
-                                    vec2(rect.width() - 12.0, rect.height() - 30.0),
-                                );
-                                grid::layout_thumbnail(painter, thumb, *layout);
-                                painter.text(
-                                    egui::pos2(rect.center().x, rect.bottom() - 12.0),
-                                    Align2::CENTER_CENTER,
-                                    layout.label(),
-                                    FontId::proportional(15.0),
-                                    visuals.text_color(),
-                                );
-                            }
-                            let response = app.nav.tracked(response);
-                            app.name(&response, layout_hint(*layout));
-                            if response.clicked() {
-                                chosen = Some(*layout);
-                            }
+                // First frame of this opening: land on whichever page holds
+                // the current layout, so choosing a custom grid and coming
+                // back finds it again.
+                let tab = app.layout_picker_tab.unwrap_or_else(|| {
+                    if app.scheduler.layout().is_custom() { PickerTab::Custom } else { PickerTab::Presets }
+                });
+                app.layout_picker_tab = Some(tab);
+
+                ui.add_space(theme::space::XS);
+                app.nav.open("layout-picker-tabs");
+                ui.horizontal(|ui| {
+                    for (page, key) in [
+                        (PickerTab::Presets, "layout-picker-tab-presets"),
+                        (PickerTab::Custom, "layout-picker-tab-custom"),
+                    ] {
+                        let response = app.nav.tracked(ui.selectable_label(tab == page, monitor_i18n::tr(key)));
+                        if tab == page {
+                            app.nav.set_entry("layout-picker-tabs", response.id);
                         }
-                        app.nav.close();
-                    });
+                        if response.clicked() {
+                            app.layout_picker_tab = Some(page);
+                        }
+                    }
+                });
+                app.nav.close();
+                ui.add_space(theme::space::XS);
+
+                app.layout_picker.anchor = None;
+                match tab {
+                    PickerTab::Presets => {
+                        for (row, chunk) in GridLayout::EXTENDED.chunks(3).enumerate() {
+                            let scope = LAYOUT_PICKER_ROWS[row];
+                            ui.horizontal(|ui| {
+                                app.nav.open(scope);
+                                for layout in chunk {
+                                    let selected = app.scheduler.layout() == *layout;
+                                    let (rect, response) =
+                                        ui.allocate_exact_size(vec2(108.0, 84.0), Sense::click());
+                                    if app.layout_picker.anchor.is_none() {
+                                        app.layout_picker.anchor = Some(response.id);
+                                    }
+                                    if ui.is_rect_visible(rect) {
+                                        let painter = ui.painter();
+                                        let visuals = ui.style().interact_selectable(&response, selected);
+                                        let corner = CornerRadius::same(theme::radius::S);
+                                        if selected || response.hovered() {
+                                            painter.rect_filled(rect, corner, visuals.weak_bg_fill);
+                                        }
+                                        if visuals.bg_stroke.width > 0.0 {
+                                            painter.rect_stroke(rect, corner, visuals.bg_stroke, StrokeKind::Inside);
+                                        }
+                                        let thumb = Rect::from_min_size(
+                                            rect.left_top() + vec2(6.0, 6.0),
+                                            vec2(rect.width() - 12.0, rect.height() - 30.0),
+                                        );
+                                        grid::layout_thumbnail(painter, thumb, *layout);
+                                        painter.text(
+                                            egui::pos2(rect.center().x, rect.bottom() - 12.0),
+                                            Align2::CENTER_CENTER,
+                                            layout.label(),
+                                            FontId::proportional(15.0),
+                                            visuals.text_color(),
+                                        );
+                                    }
+                                    let response = app.nav.tracked(response);
+                                    app.name(&response, layout_hint(*layout));
+                                    if response.clicked() {
+                                        chosen = Some(*layout);
+                                    }
+                                }
+                                app.nav.close();
+                            });
+                        }
+                    }
+                    PickerTab::Custom => {
+                        let slots = app.config.group().custom_layouts;
+                        for (row, pair) in [0usize, 2].into_iter().enumerate() {
+                            let scope = LAYOUT_PICKER_ROWS[row];
+                            ui.horizontal(|ui| {
+                                app.nav.open(scope);
+                                for (slot, grid) in slots
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(index, _)| *index >= pair && *index < pair + 2)
+                                {
+                                    let grid = *grid;
+                                    let (rect, response) =
+                                        ui.allocate_exact_size(vec2(150.0, 116.0), Sense::click());
+                                    if app.layout_picker.anchor.is_none() {
+                                        app.layout_picker.anchor = Some(response.id);
+                                    }
+                                    let painter = ui.painter();
+                                    let active = match app.scheduler.layout() {
+                                        GridLayout::Custom(g) => Some(g) == grid,
+                                        _ => false,
+                                    };
+                                    let visuals = ui.style().interact_selectable(&response, active);
+                                    let corner = CornerRadius::same(theme::radius::S);
+                                    if active || response.hovered() {
+                                        painter.rect_filled(rect, corner, visuals.weak_bg_fill);
+                                    }
+                                    if visuals.bg_stroke.width > 0.0 {
+                                        painter.rect_stroke(rect, corner, visuals.bg_stroke, StrokeKind::Inside);
+                                    }
+                                    match grid {
+                                        Some(grid) => {
+                                            let thumb = Rect::from_min_size(
+                                                rect.left_top() + vec2(6.0, 6.0),
+                                                vec2(rect.width() - 12.0, rect.height() - 32.0),
+                                            );
+                                            grid::layout_thumbnail(painter, thumb, GridLayout::Custom(grid));
+                                            painter.text(
+                                                egui::pos2(rect.center().x, rect.bottom() - 12.0),
+                                                Align2::CENTER_CENTER,
+                                                grid.display_label(),
+                                                FontId::proportional(13.0),
+                                                visuals.text_color(),
+                                            );
+                                        }
+                                        None => {
+                                            painter.text(
+                                                rect.center(),
+                                                Align2::CENTER_CENTER,
+                                                "+",
+                                                FontId::proportional(28.0),
+                                                theme::TEXT_DIM,
+                                            );
+                                        }
+                                    }
+                                    let response = app.nav.tracked(response);
+                                    app.name(&response, "layout-picker-custom-slot");
+                                    if response.clicked() {
+                                        match grid {
+                                            Some(grid) => chosen = Some(GridLayout::Custom(grid)),
+                                            None => edit_slot = Some(slot),
+                                        }
+                                    }
+                                    let pencil = ui.button(monitor_i18n::tr("layout-picker-edit"));
+                                    let pencil = app.nav.tracked(pencil);
+                                    if pencil.clicked() {
+                                        edit_slot = Some(slot);
+                                    }
+                                }
+                                app.nav.close();
+                            });
+                        }
+                    }
                 }
 
+                if let Some(slot) = edit_slot {
+                    let existing = app.config.group().custom_layouts[slot];
+                    app.layout_editor.open(EditorState::open(slot, existing));
+                    app.layout_picker_tab = None;
+                    return Answer::CLOSE;
+                }
                 if let Some(layout) = chosen {
-                    // The wall behind has already changed by the time this
-                    // returns; what is left is to close the window and give the
-                    // focus back to the button it came from.
                     app.set_layout(layout);
+                    app.layout_picker_tab = None;
                     return Answer::CLOSE;
                 }
                 if close {
+                    app.layout_picker_tab = None;
                     Answer::CLOSE
                 } else {
                     Answer::STAY

@@ -439,6 +439,14 @@ struct Toast {
     center: bool,
 }
 
+/// Which page of the layout picker the viewer is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PickerTab {
+    #[default]
+    Presets,
+    Custom,
+}
+
 /// Page of the settings side panel.
 ///
 /// The panel used to be one long column. Six sections of it are read by
@@ -1165,6 +1173,13 @@ pub struct XgViewApp {
     /// Whether the layout picker is open: the panel that offers the layouts
     /// that have no button of their own.
     layout_picker: Modal<()>,
+    /// Which tab the layout picker shows. `None` until it is first drawn in
+    /// this opening; the first frame picks the tab holding the current layout
+    /// so reopening after choosing a custom grid lands on that page.
+    layout_picker_tab: Option<PickerTab>,
+    /// The editor for a viewer-drawn grid, opened from the picker's "+" and
+    /// pencil buttons. Its payload is the preview under construction.
+    layout_editor: Modal<EditorState>,
     /// Tab the settings panel is on.
     settings_tab: SettingsTab,
     /// First control of the settings panel, so the panel can be handed the
@@ -1575,6 +1590,8 @@ mod chrome;
 mod download;
 mod file_picker;
 mod input;
+mod layout_editor;
+use layout_editor::EditorState;
 mod paging;
 mod persist;
 #[cfg(target_os = "android")]
@@ -1791,9 +1808,18 @@ impl XgViewApp {
             // scope of its own, and Down / Up cross between them at the same
             // column. The sideways arrows walk a row, so a press at either
             // end is spent rather than wrapping.
-            ("layout-picker-row-0", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-1"))),
+            ("layout-picker-row-0", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope("layout-picker-tabs")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-1"))),
             ("layout-picker-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-0")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-2"))),
             ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1"))),
+            ("layout-picker-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("layout-picker-row-0"))),
+            // The custom-grid editor: two stage tabs, dimension rows, the
+            // preview grid, and the confirm row. The grid is one row scope so
+            // Left/Right walk every cell; Back leaves through the modal.
+            ("layout-editor-tabs", ScopeDef::new(Axis::Row)),
+            ("layout-editor-rows", ScopeDef::new(Axis::Row)),
+            ("layout-editor-columns", ScopeDef::new(Axis::Row)),
+            ("layout-editor-grid", ScopeDef::new(Axis::Row)),
+            ("layout-editor-actions", ScopeDef::new(Axis::Row)),
             ("status", ScopeDef::new(Axis::Row)),
             ("edit-body", ScopeDef::new(Axis::Column)),
             ("confirm-body", ScopeDef::new(Axis::Column)),
@@ -1858,6 +1884,8 @@ impl XgViewApp {
             decoder_selectable: capabilities.selectable,
             show_settings: false,
             layout_picker: Modal::default(),
+            layout_picker_tab: None,
+            layout_editor: Modal::default(),
             settings_tab: SettingsTab::default(),
             settings_anchor: None,
             settings_handoff: Handoff::default(),
@@ -3765,6 +3793,18 @@ impl XgViewApp {
         self.download_panel_window(ctx);
 
         self.draw_layout_picker(ctx);
+        // The editor sits above the picker: a confirm writes the preview into
+        // its slot and puts that grid on the wall; Back drops it entirely.
+        if self.layout_editor.is_open() {
+            let (_, finished) = self.draw_layout_editor(ctx);
+            if let Some(state) = finished {
+                let grid = state.grid;
+                let slot = state.slot.min(3);
+                self.config.group_mut().custom_layouts[slot] = Some(grid);
+                self.set_layout(GridLayout::Custom(grid));
+                self.mark_dirty();
+            }
+        }
         self.draw_portrait_aspect_picker(ctx);
         self.draw_combined_info_picker(ctx);
         self.draw_toast(ctx);

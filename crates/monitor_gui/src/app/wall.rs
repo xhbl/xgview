@@ -197,6 +197,7 @@ impl XgViewApp {
     pub fn modal_is_up(&self) -> bool {
         self.file_picker.is_open()
             || self.layout_picker.is_open()
+            || self.layout_editor.is_open()
             || self.portrait_aspect_picker.is_open()
             || self.combined_info_picker.is_open()
             || self.passphrase.is_open()

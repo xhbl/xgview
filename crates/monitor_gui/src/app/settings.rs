@@ -187,13 +187,14 @@ impl XgViewApp {
             let active = !current.is_standard();
             let more = self
                 .nav
-                .tracked(ui.selectable_label(active || self.layout_picker.is_open(), current.numeric_label().unwrap_or("…")));
+                .tracked(ui.selectable_label(active || self.layout_picker.is_open(), current.display_label()));
             self.name(&more, "toolbar-layout-more");
             if more.clicked() {
                 if self.layout_picker.is_open() {
                     self.layout_picker.close();
                 } else {
                     self.layout_picker.open(());
+                    self.layout_picker_tab = None;
                 }
                 // Only for a press that came from the keyboard or a remote: a
                 // pointer does not move the focus anywhere else in this program,
