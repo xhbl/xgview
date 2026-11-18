@@ -445,7 +445,6 @@ mod tests {
 
         for (language, expected_name, expected_hint) in [
             ("en", "Camera 01", "RTSP template"),
-            ("ru-RU", "Камера 01", "RTSP-шаблон"),
             ("zh-CN", "摄像头 01", "RTSP 模板"),
         ] {
             init(language, &dirs);

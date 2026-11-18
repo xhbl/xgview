@@ -26,7 +26,6 @@ Primary implementation:
 Related localization:
 
 - `crates/monitor_i18n/langs/en.ftl`
-- `langs/ru-RU.ftl`
 - `langs/zh-CN.ftl`
 
 ## Channel Numbering
@@ -93,7 +92,7 @@ Users should verify connectivity separately.
 
 ## Related Commits
 
-- `2ce8999` — add bulk RTSP channel import.
-- `aa7e265` — allow imports across camera groups.
-- `8b633a7` — localize the import interface.
-- `390bb19` — preserve Backspace in numeric input fields.
+- `422b267` — add bulk RTSP channel import.
+- `9a2a353` — allow imports across camera groups.
+- `5161cdd` — localize the import interface.
+- `3079950` — preserve Backspace in numeric input fields.
