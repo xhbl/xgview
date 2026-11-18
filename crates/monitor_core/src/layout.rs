@@ -749,6 +749,8 @@ mod tests {
         assert_eq!(GridLayout::G2x2.capacity(), 4);
         assert_eq!(GridLayout::G3x3.capacity(), 9);
         assert_eq!(GridLayout::G4x4.capacity(), 16);
+        assert_eq!(GridLayout::G5x5.capacity(), 25);
+        assert_eq!(GridLayout::G6x6.capacity(), 36);
         assert_eq!(GridLayout::N2.capacity(), 2);
         assert_eq!(GridLayout::N3.capacity(), 3);
         assert_eq!(GridLayout::N5.capacity(), 5);
