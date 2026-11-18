@@ -303,6 +303,50 @@ impl XgViewApp {
         }
 
         ui.add_space(theme::space::S);
+        // Clean View: which modes hide the bars, and whether the corner OSD goes
+        // with them. The delay is the old auto-hide setting, reused so an upgrade
+        // keeps its value and its meaning. A change re-arms the clock: the next
+        // frame must not take the bars away mid-adjustment.
+        ui.label(RichText::new(monitor_i18n::tr("settings-clean-view")).strong());
+        ui.label(
+            RichText::new(monitor_i18n::tr("settings-clean-view-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+        ui.horizontal_wrapped(|ui| {
+            let fullscreen = self.nav.tracked(ui.checkbox(
+                &mut self.config.clean_view_fullscreen,
+                monitor_i18n::tr("settings-clean-view-fullscreen"),
+            ));
+            self.name(&fullscreen, "settings-clean-view-fullscreen");
+            dirty |= fullscreen.changed();
+            fullscreen.on_hover_text(monitor_i18n::tr("settings-clean-view-fullscreen-tip"));
+
+            // A real window can hide on a desktop. There is no window mode on
+            // Android - `fullscreen == false` is the viewer pinning their own
+            // bars - so the switch is not drawn there at all rather than shown
+            // greyed out: a dead control still in the focus order has no visual
+            // feedback when a remote walks onto it.
+            #[cfg(not(target_os = "android"))]
+            {
+                let windowed = self.nav.tracked(ui.checkbox(
+                    &mut self.config.clean_view_windowed,
+                    monitor_i18n::tr("settings-clean-view-windowed"),
+                ));
+                self.name(&windowed, "settings-clean-view-windowed");
+                dirty |= windowed.changed();
+                windowed.on_hover_text(monitor_i18n::tr("settings-clean-view-windowed-tip"));
+            }
+
+            let osd = self.nav.tracked(ui.checkbox(
+                &mut self.config.clean_view_osd,
+                monitor_i18n::tr("settings-clean-view-osd"),
+            ));
+            self.name(&osd, "settings-clean-view-osd");
+            dirty |= osd.changed();
+            osd.on_hover_text(monitor_i18n::tr("settings-clean-view-osd-tip"));
+        });
+        ui.add_space(theme::space::XS);
         let idle = controls::slider(
             &mut self.nav,
             ui,
@@ -318,6 +362,11 @@ impl XgViewApp {
         }
         ui.label(
             RichText::new(monitor_i18n::tr("settings-chrome-idle-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+        ui.label(
+            RichText::new(monitor_i18n::tr("settings-clean-view-behaviour"))
                 .small()
                 .color(theme::TEXT_DIM),
         );

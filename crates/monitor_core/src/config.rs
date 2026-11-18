@@ -610,6 +610,12 @@ fn default_chrome_idle_secs() -> f32 {
     3.5
 }
 
+/// Full screen is the mode the old auto-hide already worked in, so it stays on
+/// when an older configuration is read.
+fn default_clean_view_fullscreen() -> bool {
+    true
+}
+
 fn default_combined_info() -> CombinedInfo {
     [
         vec![OsdItem::Codec, OsdItem::Fps, OsdItem::Format],
@@ -745,9 +751,21 @@ pub struct AppConfig {
     #[serde(default = "default_combined_info")]
     pub combined_info: CombinedInfo,
     /// How long the interface shell — toolbar, status bar — stays visible after
-    /// the last input while full screen, in seconds.  Zero means it never hides.
+    /// the last input, in seconds. Zero means it never hides. Which modes this
+    /// applies to is decided by the `clean_view_*` switches below.
     #[serde(default = "default_chrome_idle_secs")]
     pub chrome_idle_secs: f32,
+    /// Whether the idle hide above runs while full screen. On by default so an
+    /// upgrade changes nothing: this used to be the only mode that hid.
+    #[serde(default = "default_clean_view_fullscreen")]
+    pub clean_view_fullscreen: bool,
+    /// Whether the idle hide runs while windowed as well. Off by default.
+    #[serde(default)]
+    pub clean_view_windowed: bool,
+    /// Whether the idle hide also takes the four corner OSD blocks with it.
+    /// The centre status panel is feedback, not OSD, and is never hidden.
+    #[serde(default)]
+    pub clean_view_osd: bool,
     pub cameras: Vec<CameraSource>,
 }
 
@@ -784,6 +802,9 @@ impl Default for AppConfig {
             osd: Osd::default(),
             combined_info: default_combined_info(),
             chrome_idle_secs: default_chrome_idle_secs(),
+            clean_view_fullscreen: default_clean_view_fullscreen(),
+            clean_view_windowed: false,
+            clean_view_osd: false,
             cameras: Vec::new(),
         }
     }
@@ -1570,6 +1591,38 @@ fn keep_previous(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Clean View is three switches, not the pull request's single one. A
+    /// configuration written before they existed must behave exactly as it did
+    /// on the old build: only full screen hides the bars, and no corner label
+    /// is touched.
+    #[test]
+    fn clean_view_defaults_keep_the_old_fullscreen_only_behaviour() {
+        let fresh = AppConfig::default();
+        assert!(fresh.clean_view_fullscreen);
+        assert!(!fresh.clean_view_windowed);
+        assert!(!fresh.clean_view_osd);
+
+        let legacy = AppConfig::from_json(r#"{"version":1,"groups":[{}]}"#).unwrap();
+        assert!(legacy.clean_view_fullscreen);
+        assert!(!legacy.clean_view_windowed);
+        assert!(!legacy.clean_view_osd);
+
+        let path = std::env::temp_dir().join(format!("xgview-clean-view-{}.json", crate::model::new_id()));
+        let mut config = AppConfig::default();
+        config.clean_view_fullscreen = false;
+        config.clean_view_windowed = true;
+        config.clean_view_osd = true;
+        config.group_mut().layout = GridLayout::G3x3;
+        config.save(&path).unwrap();
+        let restored = AppConfig::load(&path).unwrap();
+        assert!(!restored.clean_view_fullscreen);
+        assert!(restored.clean_view_windowed);
+        assert!(restored.clean_view_osd);
+        assert_eq!(restored.group().layout, config.group().layout);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(previous_path(&path));
+    }
 
     /// A camera carries the address its recordings answer on, and a client for
     /// it is built from that alone - the import's configuration may have been

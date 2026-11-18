@@ -737,7 +737,14 @@ impl XgViewApp {
             focused: interactive && index == self.scheduler.focus() && ring,
             interactive,
             dim: !interactive,
-            osd: self.config.osd,
+            // Clean View takes every corner label with the bars when asked to;
+            // the centre status panel is feedback and stays. This never writes
+            // back to the saved OSD configuration.
+            osd: grid::clean_view_osd(
+                self.config.osd,
+                self.clean_view_hidden(),
+                self.config.clean_view_osd,
+            ),
             combined: [
                 &self.config.combined_info[0],
                 &self.config.combined_info[1],

@@ -30,6 +30,19 @@ use crate::video::VideoSurface;
 /// half as wide as the crosses.
 pub const LINE: f32 = 1.0;
 
+/// The corner OSD to draw in Clean View. When the bars are hidden and the
+/// "hide OSD" switch is on, every configured corner label is dropped - faults,
+/// reconnects and recording marks included. The centre status panel is not
+/// part of `Osd` and is drawn regardless, so a failed camera still says why.
+/// Nothing here changes the saved configuration or the video pixels.
+pub(crate) fn clean_view_osd(osd: Osd, hidden: bool, hide_osd: bool) -> Osd {
+    if hidden && hide_osd {
+        Osd::default()
+    } else {
+        osd
+    }
+}
+
 /// How much of a tile's furniture fits.
 ///
 /// A 4x4 grid on a television leaves each tile a couple of hundred points; the
@@ -1567,6 +1580,24 @@ pub fn empty_state(ui: &mut Ui, area: Rect, message: &str, hint: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_view_drops_every_corner_label_and_nothing_else() {
+        let osd = Osd {
+            top_left: OsdItem::Name,
+            top_right: OsdItem::Stream,
+            bottom_left: OsdItem::Combined1,
+            ..Osd::default()
+        };
+        // Both conditions are needed: bars hidden and the switch on.
+        assert_eq!(clean_view_osd(osd, true, true), Osd::default());
+        assert_eq!(clean_view_osd(osd, true, false), osd);
+        assert_eq!(clean_view_osd(osd, false, true), osd);
+        assert_eq!(clean_view_osd(osd, false, false), osd);
+        // The source configuration is a Copy value and is left untouched: the
+        // centre status panel is not in `Osd`, so it is unaffected by design.
+        assert_eq!(osd.top_left, OsdItem::Name);
+    }
 
     #[test]
     fn the_recording_square_keeps_the_same_gap_to_the_text_as_a_lone_dot() {

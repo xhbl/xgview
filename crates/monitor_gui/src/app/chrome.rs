@@ -334,6 +334,31 @@ impl XgViewApp {
         }
     }
 
+    /// Whether the current mode may hide the bars after the idle delay. A full
+    /// screen asks the full-screen switch; a desktop window asks the windowed
+    /// one. On Android there is no window mode - `fullscreen == false` is the
+    /// viewer pinning their own bars through `android_pin_bars` - so it never
+    /// hides there, however the windowed switch was left from a desktop config.
+    fn mode_may_hide(fullscreen: bool, clean_fullscreen: bool, clean_windowed: bool) -> bool {
+        if fullscreen {
+            clean_fullscreen
+        } else {
+            !cfg!(target_os = "android") && clean_windowed
+        }
+    }
+
+    /// Whether the wall is currently shown without its bars for Clean View.
+    /// Used to take the corner OSD with the bars; the centre status panel is
+    /// feedback and stays, so it is deliberately not part of this.
+    pub(super) fn clean_view_hidden(&self) -> bool {
+        !self.chrome.visible
+            && Self::mode_may_hide(
+                self.fullscreen,
+                self.config.clean_view_fullscreen,
+                self.config.clean_view_windowed,
+            )
+    }
+
     pub(super) fn chrome_visible(&mut self) -> bool {
         // An open panel owns the bars: taking away the bar of a panel the
         // viewer just opened would strand it. The layout picker is a modal of
@@ -345,11 +370,17 @@ impl XgViewApp {
             self.chrome.last_input = Instant::now();
             return true;
         }
-        // Not full screen: the bars are the point of the mode. On Android that
-        // is all the mode is - the window is full screen either way, and this
-        // is the viewer asking for their own toolbar and status bar to stay
-        // put; see `AppConfig::android_pin_bars`.
-        if !self.fullscreen {
+        // The bars are the point of a mode that Clean View was not asked to
+        // hide in: full screen with its switch off, a desktop window without
+        // the windowed switch, or - on Android - the viewer pinning their own
+        // toolbar and status bar through `android_pin_bars`. On that platform
+        // the window is full screen either way, so `fullscreen == false` is a
+        // request to keep the bars, and `mode_may_hide` is false for it.
+        if !Self::mode_may_hide(
+            self.fullscreen,
+            self.config.clean_view_fullscreen,
+            self.config.clean_view_windowed,
+        ) {
             self.chrome.visible = true;
             self.chrome.hide_now = false;
             return true;
@@ -547,6 +578,36 @@ fn turned_toast_box(tile: egui::Rect, size: egui::Vec2, centered: bool) -> egui:
     let to_screen =
         |pos: egui::Pos2| egui::pos2(tile.right() - pos.y, tile.top() + pos.x);
     egui::Rect::from_two_pos(to_screen(block.min), to_screen(block.max))
+}
+
+#[cfg(test)]
+mod clean_view_mode_tests {
+    use super::*;
+
+    #[test]
+    fn a_mode_without_its_switch_keeps_the_bars() {
+        // Full screen follows its own switch.
+        assert!(XgViewApp::mode_may_hide(true, true, false));
+        assert!(!XgViewApp::mode_may_hide(true, false, true));
+        // Neither mode checked: nothing can hide, even on the desktop.
+        assert!(!XgViewApp::mode_may_hide(true, false, false));
+        assert!(!XgViewApp::mode_may_hide(false, false, false));
+    }
+
+    #[test]
+    fn windowed_hiding_is_a_desktop_only_choice() {
+        // Both switches checked, but the window is not full screen. The windowed
+        // switch decides on a desktop; on Android this state is the viewer
+        // pinning their own bars, so it never hides however the switch was left.
+        let window_hides = XgViewApp::mode_may_hide(false, true, true);
+        assert_eq!(
+            window_hides,
+            !cfg!(target_os = "android"),
+            "Android pin bars must override a synced-in windowed switch"
+        );
+        // With the windowed switch off there is no hiding in a window anywhere.
+        assert!(!XgViewApp::mode_may_hide(false, true, false));
+    }
 }
 
 #[cfg(test)]
