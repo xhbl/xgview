@@ -439,6 +439,28 @@ mod tests {
     }
 
     #[test]
+    fn bulk_camera_translations_work_in_all_languages() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dirs = [root.join("langs")];
+
+        for (language, expected_name, expected_hint) in [
+            ("en", "Camera 01", "RTSP template"),
+            ("ru-RU", "Камера 01", "RTSP-шаблон"),
+            ("zh-CN", "摄像头 01", "RTSP 模板"),
+        ] {
+            init(language, &dirs);
+            assert_eq!(
+                tr_args("dialog-bulk-camera-name", &[("number", "01".into())]),
+                expected_name,
+                "language: {language}"
+            );
+            let hint = tr("dialog-bulk-hint");
+            assert!(hint.contains(expected_hint), "language: {language}, hint: {hint}");
+            assert!(hint.contains("{n}"), "language: {language}, hint: {hint}");
+            assert_ne!(tr("dialog-bulk-error-count"), "dialog-bulk-error-count");
+        }
+    }
+    #[test]
     fn zh_cn_pack_parses_and_has_keys() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let path = std::path::Path::new(manifest_dir).join("../../langs/zh-CN.ftl");

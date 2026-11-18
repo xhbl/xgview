@@ -430,33 +430,33 @@ impl Default for BulkCameraDraft {
 impl BulkCameraDraft {
     pub fn build(&self) -> Result<Vec<CameraSource>, String> {
         if self.count == 0 || self.count > 256 {
-            return Err("Количество камер должно быть от 1 до 256".into());
+            return Err(monitor_i18n::tr("dialog-bulk-error-count"));
         }
         if self.step == 0 {
-            return Err("Шаг нумерации должен быть больше нуля".into());
+            return Err(monitor_i18n::tr("dialog-bulk-error-step"));
         }
         if !self.main_template.contains("{n}") {
-            return Err("Основной RTSP-шаблон должен содержать {n}".into());
+            return Err(monitor_i18n::tr("dialog-bulk-error-main-template"));
         }
         if !self.sub_template.trim().is_empty()
             && !self.sub_template.contains("{n}")
         {
-            return Err("Дополнительный RTSP-шаблон должен содержать {n}".into());
+            return Err(monitor_i18n::tr("dialog-bulk-error-sub-template"));
         }
 
         let mut cameras = Vec::with_capacity(self.count);
 
         for index in 0..self.count {
             let offset = index.checked_mul(self.step)
-                .ok_or("Переполнение номера канала")?;
+                .ok_or_else(|| monitor_i18n::tr("dialog-bulk-error-overflow"))?;
             let number = self.first.checked_add(offset)
-                .ok_or("Переполнение номера канала")?;
+                .ok_or_else(|| monitor_i18n::tr("dialog-bulk-error-overflow"))?;
 
             let prefix = self.name_prefix.trim();
             let name = if prefix.is_empty() {
-                format!("Камера {:02}", number)
+                monitor_i18n::tr_args("dialog-bulk-camera-name", &[("number", format!("{:02}", number).into())])
             } else {
-                format!("{} — Камера {:02}", prefix, number)
+                monitor_i18n::tr_args("dialog-bulk-camera-name-prefixed", &[("prefix", prefix.into()), ("number", format!("{:02}", number).into())])
             };
 
             let draft = CameraDraft {
@@ -1398,55 +1398,55 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
 
     ui.add_space(theme::space::M);
     ui.separator();
-    ui.heading("Все камеры с регистратора");
-    ui.label("Укажите RTSP-шаблон с {n} вместо номера канала.");
+    ui.heading(monitor_i18n::tr("dialog-bulk-title"));
+    ui.label(monitor_i18n::tr("dialog-bulk-hint"));
 
-    ui.label("Название регистратора");
+    ui.label(monitor_i18n::tr("dialog-bulk-recorder-name"));
     text_field(ui, nav, &mut state.bulk.name_prefix, "bulk-camera-name", false, false, |s| {
         egui::TextEdit::singleline(s)
             .desired_width(f32::INFINITY)
-            .hint_text("Регистратор 1")
+            .hint_text(monitor_i18n::tr("dialog-bulk-recorder-placeholder"))
     });
 
-    ui.label("Основной RTSP-шаблон");
+    ui.label(monitor_i18n::tr("dialog-bulk-main-template"));
     text_field(ui, nav, &mut state.bulk.main_template, "bulk-camera-main", false, false, |s| {
         egui::TextEdit::singleline(s)
             .desired_width(f32::INFINITY)
             .hint_text("rtsp://192.168.1.100/Streaming/Channels/{n}01")
     });
 
-    ui.label("Дополнительный RTSP-шаблон (необязательно)");
+    ui.label(monitor_i18n::tr("dialog-bulk-sub-template"));
     text_field(ui, nav, &mut state.bulk.sub_template, "bulk-camera-sub", false, false, |s| {
         egui::TextEdit::singleline(s)
             .desired_width(f32::INFINITY)
             .hint_text("rtsp://192.168.1.100/Streaming/Channels/{n}02")
     });
 
-    ui.label("Учётные данные");
+    ui.label(monitor_i18n::tr("dialog-bulk-credentials"));
     credentials_row(ui, nav, &mut state.bulk.username, &mut state.bulk.password);
 
     ui.horizontal(|ui| {
-        ui.label("Первый канал");
+        ui.label(monitor_i18n::tr("dialog-bulk-first-channel"));
         nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.first).range(0..=65535)));
-        ui.label("Количество");
+        ui.label(monitor_i18n::tr("dialog-bulk-count"));
         nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.count).range(1..=256)));
-        ui.label("Шаг");
+        ui.label(monitor_i18n::tr("dialog-bulk-step"));
         nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.step).range(1..=65535)));
     });
 
     if state.bulk.sub_template.trim().is_empty() {
-        nav.tracked(ui.checkbox(&mut state.bulk.infer_sub, "Определять дополнительный поток автоматически"));
+        nav.tracked(ui.checkbox(&mut state.bulk.infer_sub, monitor_i18n::tr("dialog-bulk-infer-sub")));
     }
 
     if !state.bulk.main_template.trim().is_empty() {
         let first_url = state.bulk.main_template
             .replace("{n}", &state.bulk.first.to_string());
-        ui.label(RichText::new(format!("Пример: {}", first_url))
+        ui.label(RichText::new(monitor_i18n::tr_args("dialog-bulk-example", &[("url", first_url.into())]))
             .small()
             .color(theme::TEXT_DIM));
     }
 
-    let button_label = format!("Добавить {} камер", state.bulk.count);
+    let button_label = monitor_i18n::tr_args("dialog-bulk-add", &[("count", state.bulk.count.into())]);
     if nav.tracked(ui.button(button_label)).clicked() {
         match state.bulk.build() {
             Ok(cameras) => {
@@ -1467,7 +1467,7 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
                 state.clear_status(Tab::Manual);
                 state.note(
                     Tab::Manual,
-                    format!("Добавлено камер: {}. Пропущено дубликатов: {}.", added, skipped),
+                    monitor_i18n::tr_args("dialog-bulk-result", &[("added", added.into()), ("skipped", skipped.into())]),
                 );
                 changed |= added > 0;
             }
@@ -2197,6 +2197,7 @@ mod tests {
     }
     #[test]
     fn bulk_cameras_expand_channel_templates() {
+        monitor_i18n::init("en", &[]);
         let draft = BulkCameraDraft {
             name_prefix: "Recorder A".into(),
             main_template: "rtsp://192.168.1.100/Streaming/Channels/{n}01".into(),
@@ -2211,7 +2212,7 @@ mod tests {
 
         let cameras = draft.build().unwrap();
         assert_eq!(cameras.len(), 16);
-        assert_eq!(cameras[0].name, "Recorder A — Камера 01");
+        assert_eq!(cameras[0].name, "Recorder A — Camera 01");
         assert_eq!(cameras[0].rtsp_main, "rtsp://192.168.1.100/Streaming/Channels/101");
         assert_eq!(cameras[0].rtsp_sub.as_deref(), Some("rtsp://192.168.1.100/Streaming/Channels/102"));
         assert_eq!(cameras[15].rtsp_main, "rtsp://192.168.1.100/Streaming/Channels/1601");
@@ -2222,6 +2223,7 @@ mod tests {
 
     #[test]
     fn bulk_cameras_respect_first_channel_and_step() {
+        monitor_i18n::init("en", &[]);
         let draft = BulkCameraDraft {
             main_template: "rtsp://192.168.1.100/channel/{n}".into(),
             first: 3,
@@ -2233,7 +2235,7 @@ mod tests {
 
         let cameras = draft.build().unwrap();
         assert_eq!(cameras.len(), 3);
-        assert_eq!(cameras[0].name, "Камера 03");
+        assert_eq!(cameras[0].name, "Camera 03");
         assert_eq!(cameras[1].rtsp_main, "rtsp://192.168.1.100/channel/5");
         assert_eq!(cameras[2].rtsp_main, "rtsp://192.168.1.100/channel/7");
         assert!(cameras.iter().all(|camera| camera.rtsp_sub.is_none()));

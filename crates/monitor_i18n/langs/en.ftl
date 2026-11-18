@@ -652,3 +652,26 @@ cameras-cancel-order = Cancel
 portrait-aspect-entry = Picture fit
 combined-info-button = Combined info
 settings-talk-mute = Mute the sound while the microphone is open
+
+# Bulk RTSP camera import
+dialog-bulk-title = All cameras from a recorder
+dialog-bulk-hint = Enter an RTSP template with {"{n}"} in place of the channel number.
+dialog-bulk-recorder-name = Recorder name
+dialog-bulk-recorder-placeholder = Recorder 1
+dialog-bulk-main-template = Main RTSP template
+dialog-bulk-sub-template = Substream RTSP template (optional)
+dialog-bulk-credentials = Credentials
+dialog-bulk-first-channel = First channel
+dialog-bulk-count = Count
+dialog-bulk-step = Step
+dialog-bulk-infer-sub = Detect substream automatically
+dialog-bulk-example = Example: { $url }
+dialog-bulk-add = Add { $count } cameras
+dialog-bulk-result = Cameras added: { $added }. Duplicates skipped: { $skipped }.
+dialog-bulk-error-count = Camera count must be between 1 and 256
+dialog-bulk-error-step = Channel numbering step must be greater than zero
+dialog-bulk-error-main-template = Main RTSP template must contain {"{n}"}
+dialog-bulk-error-sub-template = Substream RTSP template must contain {"{n}"}
+dialog-bulk-error-overflow = Channel number overflow
+dialog-bulk-camera-name = Camera { $number }
+dialog-bulk-camera-name-prefixed = { $prefix } — Camera { $number }
