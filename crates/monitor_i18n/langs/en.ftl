@@ -652,3 +652,6 @@ cameras-cancel-order = Cancel
 portrait-aspect-entry = Picture fit
 combined-info-button = Combined info
 settings-talk-mute = Mute the sound while the microphone is open
+
+camera-context-edit = Edit camera
+camera-context-delete = Delete camera

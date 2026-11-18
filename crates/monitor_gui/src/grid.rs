@@ -278,6 +278,8 @@ impl PictureZoom {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TileActions {
     pub focus: Option<usize>,
+    pub edit_camera: Option<usize>,
+    pub delete_camera: Option<usize>,
     pub zoom: Option<usize>,
     pub drag_started: bool,
     pub drag_delta: f32,

@@ -818,6 +818,20 @@ impl XgViewApp {
                 );
             let response = grid::paint(ui, rect, &tile);
             if interactive {
+                if let Some(camera_index) = *index {
+                    response.context_menu(|ui| {
+                        if ui.button(monitor_i18n::tr("camera-context-edit")).clicked() {
+                            actions.edit_camera = Some(camera_index);
+                            ui.close();
+                        }
+                        if ui.button(monitor_i18n::tr("camera-context-delete")).clicked() {
+                            actions.delete_camera = Some(camera_index);
+                            ui.close();
+                        }
+                    });
+                }
+            }
+            if interactive {
                 if response.clicked() {
                     actions.focus = *index;
                     actions.click_pos = response.interact_pointer_pos();
@@ -1124,6 +1138,29 @@ impl XgViewApp {
         }
 
         let mut actions = self.paint_view(ui, picture_area, &cameras, &view, dx, true, 2);
+
+        if actions.edit_camera.is_some() || actions.delete_camera.is_some() {
+            let slots = self.config.active_slots();
+
+            if let Some(index) = actions.edit_camera {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(draft) = self.config.cameras.get(slot).map(CameraDraft::from_source) {
+                        self.camera_edit.open(CameraEdit { slot, draft });
+                        self.camera_edit.from = None;
+                    }
+                }
+            } else if let Some(index) = actions.delete_camera {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(camera) = self.config.cameras.get(slot) {
+                        self.remove_confirm.open(RemoveConfirm {
+                            slot,
+                            name: camera.name.clone(),
+                        });
+                        self.remove_confirm.from = None;
+                    }
+                }
+            }
+        }
 
         // A drag on the magnified picture is the picture moving, not the page:
         // the wall has one picture on it and nowhere to turn to, and the channel

@@ -597,3 +597,6 @@ cameras-cancel-order = 取消
 portrait-aspect-entry = 画面比例
 combined-info-button = 组合信息
 settings-talk-mute = 麦克风打开时播放静音
+
+camera-context-edit = 编辑摄像头
+camera-context-delete = 删除摄像头
