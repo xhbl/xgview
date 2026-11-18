@@ -211,8 +211,6 @@ about-memory = Оперативная память: { $used } МБ / { $total } 
 about-memory-unknown = Оперативная память: —
 about-cpu = Загрузка CPU: { $percent }%
 about-cpu-unknown = Загрузка CPU: —
-about-network-current = Входящий видеопоток: { $mbps } Мбит/с
-about-network-average = Средняя скорость за 60 секунд: { $mbps } Мбит/с
 about-system = Операционная система: { $os }
 about-uptime = Время работы: { $duration }
 about-duration-seconds = { $n } с
@@ -257,8 +255,6 @@ toolbar-layout-1x1 = Сетка 1×1
 toolbar-layout-2x2 = Сетка 2×2
 toolbar-layout-3x3 = Сетка 3×3
 toolbar-layout-4x4 = Сетка 4×4
-toolbar-layout-5x5 = Сетка 5×5
-toolbar-layout-6x6 = Сетка 6×6
 toolbar-layout-2 = Раскладка на 2 камеры
 toolbar-layout-3 = Раскладка на 3 камеры
 toolbar-layout-5 = Раскладка на 5 камер
@@ -602,8 +598,6 @@ portrait-aspect-entry = Соотношение сторон
 combined-info-button = Составная информация
 settings-talk-mute = Отключать звук при включённом микрофоне
 
-camera-context-edit = Редактировать камеру
-camera-context-delete = Удалить камеру
 # Массовое добавление RTSP-камер
 dialog-bulk-title = Все камеры с регистратора
 dialog-bulk-hint = Укажите RTSP-шаблон с {"{n}"} вместо номера канала.
