@@ -4129,7 +4129,7 @@ mod tests {
     /// draws against.
     #[test]
     fn the_layout_picker_walks_its_three_rows() {
-        let ids: Vec<Id> = (0..9).map(|slot| Id::new(("layout-picker", slot))).collect();
+        let ids: Vec<Id> = (0..12).map(|slot| Id::new(("layout-picker", slot))).collect();
         let mut nav = Nav::new(&[
             ("layout-picker-row-0", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-1"))),
             ("layout-picker-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-0")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-2"))),
@@ -4155,7 +4155,7 @@ mod tests {
         // Down and Up cross between the rows, landing on the same column.
         assert_eq!(nav.step(ids[1], Dir::Down), Some(ids[4]));
         assert_eq!(nav.step(ids[4], Dir::Down), Some(ids[7]));
-        assert_eq!(nav.step(ids[7], Dir::Down), None, "the last row");
+        assert_eq!(nav.step(ids[7], Dir::Down), Some(ids[10]));
         assert_eq!(nav.step(ids[4], Dir::Up), Some(ids[1]));
         assert_eq!(nav.step(ids[1], Dir::Up), None, "the first row has no exit");
         // The left and right columns keep their column too.
