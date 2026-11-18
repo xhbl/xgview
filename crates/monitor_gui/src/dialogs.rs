@@ -1427,11 +1427,11 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
 
     ui.horizontal(|ui| {
         ui.label("Первый канал");
-        nav.tracked(ui.add(egui::DragValue::new(&mut state.bulk.first).range(0..=65535)));
+        nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.first).range(0..=65535)));
         ui.label("Количество");
-        nav.tracked(ui.add(egui::DragValue::new(&mut state.bulk.count).range(1..=256)));
+        nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.count).range(1..=256)));
         ui.label("Шаг");
-        nav.tracked(ui.add(egui::DragValue::new(&mut state.bulk.step).range(1..=65535)));
+        nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.step).range(1..=65535)));
     });
 
     if state.bulk.sub_template.trim().is_empty() {
