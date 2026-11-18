@@ -939,6 +939,8 @@ fn layout_hint(layout: GridLayout) -> &'static str {
         GridLayout::G2x2 => "toolbar-layout-2x2",
         GridLayout::G3x3 => "toolbar-layout-3x3",
         GridLayout::G4x4 => "toolbar-layout-4x4",
+        GridLayout::G5x5 => "toolbar-layout-4x4",
+        GridLayout::G6x6 => "toolbar-layout-4x4",
         GridLayout::N2 => "toolbar-layout-2",
         GridLayout::N3 => "toolbar-layout-3",
         GridLayout::N5 => "toolbar-layout-5",
@@ -960,8 +962,8 @@ fn layout_hint(layout: GridLayout) -> &'static str {
 /// The picker lays its nine thumbnails out three to a row; each row is a scope
 /// of its own, and the vertical arrows cross between them at the same column.
 /// See the `Nav::new` call in [`XgViewApp::new`].
-const LAYOUT_PICKER_ROWS: [&str; 3] =
-    ["layout-picker-row-0", "layout-picker-row-1", "layout-picker-row-2"];
+const LAYOUT_PICKER_ROWS: [&str; 4] =
+    ["layout-picker-row-0", "layout-picker-row-1", "layout-picker-row-2", "layout-picker-row-3"];
 
 /// Keyboard / DPAD keys consumed during one frame.
 #[derive(Debug, Clone, Copy, Default)]
@@ -1751,7 +1753,8 @@ impl XgViewApp {
             // end is spent rather than wrapping.
             ("layout-picker-row-0", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-1"))),
             ("layout-picker-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-0")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-2"))),
-            ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1"))),
+            ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-3"))),
+            ("layout-picker-row-3", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-2"))),
             ("status", ScopeDef::new(Axis::Row)),
             ("edit-body", ScopeDef::new(Axis::Column)),
             ("confirm-body", ScopeDef::new(Axis::Column)),
@@ -4130,7 +4133,8 @@ mod tests {
         let mut nav = Nav::new(&[
             ("layout-picker-row-0", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-1"))),
             ("layout-picker-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-0")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-2"))),
-            ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1"))),
+            ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-3"))),
+            ("layout-picker-row-3", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-2"))),
         ]);
         let ctx = egui::Context::default();
         nav.begin();

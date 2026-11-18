@@ -52,6 +52,73 @@ const CELLS_4X4: &[Cell] = &[
     c(3, 3, 1, 1),
 ];
 
+/// 5 x 5 uniform grid.
+const CELLS_5X5: &[Cell] = &[
+    c(0, 0, 1, 1),
+    c(1, 0, 1, 1),
+    c(2, 0, 1, 1),
+    c(3, 0, 1, 1),
+    c(4, 0, 1, 1),
+    c(0, 1, 1, 1),
+    c(1, 1, 1, 1),
+    c(2, 1, 1, 1),
+    c(3, 1, 1, 1),
+    c(4, 1, 1, 1),
+    c(0, 2, 1, 1),
+    c(1, 2, 1, 1),
+    c(2, 2, 1, 1),
+    c(3, 2, 1, 1),
+    c(4, 2, 1, 1),
+    c(0, 3, 1, 1),
+    c(1, 3, 1, 1),
+    c(2, 3, 1, 1),
+    c(3, 3, 1, 1),
+    c(4, 3, 1, 1),
+    c(0, 4, 1, 1),
+    c(1, 4, 1, 1),
+    c(2, 4, 1, 1),
+    c(3, 4, 1, 1),
+    c(4, 4, 1, 1),
+];
+/// 6 x 6 uniform grid.
+const CELLS_6X6: &[Cell] = &[
+    c(0, 0, 1, 1),
+    c(1, 0, 1, 1),
+    c(2, 0, 1, 1),
+    c(3, 0, 1, 1),
+    c(4, 0, 1, 1),
+    c(5, 0, 1, 1),
+    c(0, 1, 1, 1),
+    c(1, 1, 1, 1),
+    c(2, 1, 1, 1),
+    c(3, 1, 1, 1),
+    c(4, 1, 1, 1),
+    c(5, 1, 1, 1),
+    c(0, 2, 1, 1),
+    c(1, 2, 1, 1),
+    c(2, 2, 1, 1),
+    c(3, 2, 1, 1),
+    c(4, 2, 1, 1),
+    c(5, 2, 1, 1),
+    c(0, 3, 1, 1),
+    c(1, 3, 1, 1),
+    c(2, 3, 1, 1),
+    c(3, 3, 1, 1),
+    c(4, 3, 1, 1),
+    c(5, 3, 1, 1),
+    c(0, 4, 1, 1),
+    c(1, 4, 1, 1),
+    c(2, 4, 1, 1),
+    c(3, 4, 1, 1),
+    c(4, 4, 1, 1),
+    c(5, 4, 1, 1),
+    c(0, 5, 1, 1),
+    c(1, 5, 1, 1),
+    c(2, 5, 1, 1),
+    c(3, 5, 1, 1),
+    c(4, 5, 1, 1),
+    c(5, 5, 1, 1),
+];
 /// 2 cells, a 2x1 grid split left/right. Each cell is 8:9.
 const CELLS_N2: &[Cell] = &[c(0, 0, 1, 1), c(1, 0, 1, 1)];
 /// 3 cells on a 3x2 grid: one tall cell on the left, two stacked on the right.
@@ -169,6 +236,10 @@ pub enum GridLayout {
     G3x3,
     #[serde(rename = "4x4")]
     G4x4,
+    #[serde(rename = "5x5")]
+    G5x5,
+    #[serde(rename = "6x6")]
+    G6x6,
     #[serde(rename = "2")]
     N2,
     #[serde(rename = "3")]
@@ -213,7 +284,7 @@ impl GridLayout {
         [GridLayout::G1x1, GridLayout::G2x2, GridLayout::G3x3, GridLayout::G4x4];
 
     /// The layouts chosen from the picker, in the order the picker lists them.
-    pub const EXTENDED: [GridLayout; 9] = [
+    pub const EXTENDED: [GridLayout; 11] = [
         GridLayout::N2,
         GridLayout::N3,
         GridLayout::N5,
@@ -223,14 +294,18 @@ impl GridLayout {
         GridLayout::N10,
         GridLayout::N12,
         GridLayout::N13,
+        GridLayout::G5x5,
+        GridLayout::G6x6,
     ];
 
     /// All layouts: the square ones first, then the rest by viewport count.
-    pub const ALL: [GridLayout; 13] = [
+    pub const ALL: [GridLayout; 15] = [
         GridLayout::G1x1,
         GridLayout::G2x2,
         GridLayout::G3x3,
         GridLayout::G4x4,
+        GridLayout::G5x5,
+        GridLayout::G6x6,
         GridLayout::N2,
         GridLayout::N3,
         GridLayout::N5,
@@ -256,6 +331,8 @@ impl GridLayout {
             GridLayout::G2x2 => CELLS_2X2,
             GridLayout::G3x3 => CELLS_3X3,
             GridLayout::G4x4 => CELLS_4X4,
+            GridLayout::G5x5 => CELLS_5X5,
+            GridLayout::G6x6 => CELLS_6X6,
             GridLayout::N2 => CELLS_N2,
             GridLayout::N3 => CELLS_N3,
             GridLayout::N5 => CELLS_N5,
@@ -279,6 +356,8 @@ impl GridLayout {
             GridLayout::G2x2 => 2,
             GridLayout::G3x3 => 3,
             GridLayout::G4x4 => 4,
+            GridLayout::G5x5 => 5,
+            GridLayout::G6x6 => 6,
             GridLayout::N2 => 2,
             GridLayout::N3 => 3,
             GridLayout::N5 => 6,
@@ -299,6 +378,8 @@ impl GridLayout {
             GridLayout::G2x2 => 2,
             GridLayout::G3x3 => 3,
             GridLayout::G4x4 => 4,
+            GridLayout::G5x5 => 5,
+            GridLayout::G6x6 => 6,
             GridLayout::N2 => 1,
             GridLayout::N3 => 2,
             GridLayout::N5 => 5,
@@ -334,6 +415,8 @@ impl GridLayout {
             GridLayout::G2x2 => "2x2",
             GridLayout::G3x3 => "3x3",
             GridLayout::G4x4 => "4x4",
+            GridLayout::G5x5 => "5x5",
+            GridLayout::G6x6 => "6x6",
             GridLayout::N2 => "2",
             GridLayout::N3 => "3",
             GridLayout::N5 => "5",
