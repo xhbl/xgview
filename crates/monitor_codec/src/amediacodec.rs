@@ -171,6 +171,14 @@ use crate::surface::{
 /// makes two of them comparable. See `priv/docs/playback-decode-cost.md`.
 const PACE_FRAMES: u32 = 60;
 
+/// How long the first ask of a drain waits for the picture just handed over.
+///
+/// Long enough for a codec that answers "nothing yet" while it closes the picture
+/// it was given, and short enough that one with nothing at all does not hold the
+/// session. Given only to a stream fed one picture per frame interval; a replay
+/// at speed is asked with no patience at all. See `drain_inner`.
+const DRAIN_PATIENCE_US: i64 = 15_000;
+
 /// Access units a codec may starve on before it is judged dead rather than slow.
 ///
 /// A hardware session the platform could not really start still opens, still
@@ -371,6 +379,15 @@ pub struct AMediaCodecDecoder {
     stat_total: Duration,
     stat_frames: u32,
     stat_packed: u32,
+    /// Pictures that came back with no bytes to read.
+    ///
+    /// Some codecs report a zero `size` for every picture while still handing
+    /// over a buffer that has one. A session in that state decodes at its own
+    /// rate and publishes nothing, which a tile shows as a picture that only
+    /// moves every second or so.
+    stat_zero_size: u32,
+    /// Pictures that reached the session this window.
+    stat_out: u32,
     /// Pictures decoded this window that were not handed to the compositor
     /// because the previous handover was too recent.
     stat_skipped: u32,
@@ -733,6 +750,18 @@ impl AMediaCodecDecoder {
             // ask is refused, opens again without it.
             if low_latency {
                 AMediaFormat_setInt32(format, c"low-latency".as_ptr(), 1);
+                // And the number of pictures it may hold for reordering, said
+                // separately: `low-latency` is what should make a decoder hand
+                // each picture over as it finishes it, but a decoder can take
+                // that parameter without acting on it, and one on this box
+                // does. A doorbell here is the case in point - level 5.1 on a
+                // 640x480 stream with no B-frame anywhere, which is a decoder
+                // told it may hold a 4K's worth of pictures before releasing
+                // the first. Asked only alongside `low-latency`, because that
+                // is the flag this session raises only for a stream it has no
+                // reason to think reorders: a stream that does reorder would
+                // have its pictures shown out of order by this one.
+                AMediaFormat_setInt32(format, c"max-bframes".as_ptr(), 0);
             }
             if window.is_none() {
                 AMediaFormat_setInt32(format, c"color-format".as_ptr(), colour_format);
@@ -874,11 +903,28 @@ impl AMediaCodecDecoder {
         let Some(_) = self.handle else {
             return;
         };
-        // The first ask is given a few milliseconds: a codec asked with no
-        // patience can answer that it has nothing while it is still closing the
-        // picture it was given, and the answer would be a picture left in the
-        // codec until the next access unit came, one frame interval later.
-        let mut patience = 5_000i64;
+        // How long the first ask may wait for the picture the codec was just
+        // given.
+        //
+        // Fifteen milliseconds for a stream fed one picture per frame interval:
+        // a codec asked with no patience can answer that it has nothing while it
+        // is still closing the picture it was handed, and the answer would be a
+        // picture left inside it until the next access unit came, one frame
+        // interval later. Measured on a grid, a decoder answers "nothing yet" for
+        // longer than five and then hands back four or five pictures together,
+        // which the wall can only show one of - a stream that moves in jumps of
+        // a third of a second while every counter on the reading side says it is
+        // arriving evenly.
+        //
+        // None at all for a session feeding faster than the display follows,
+        // which is a replay at speed: there the pictures are worth five
+        // milliseconds each and the wait is not a wait for a picture that is
+        // late, it is the decoder being asked to keep up with a clock nobody is
+        // watching. Waiting here cost a replay at eight times its length two
+        // thirds of its speed. `Handover::thinned` is the session's own answer
+        // to "faster than the screen", the same one that decides which pictures
+        // go to a surface at all.
+        let mut patience = if self.handover.thinned() { 0 } else { DRAIN_PATIENCE_US };
         loop {
             let mut info = AMediaCodecBufferInfo::default();
             let waiting = Instant::now();
@@ -927,10 +973,25 @@ impl AMediaCodecDecoder {
                                 );
                                 self.stat_pack += packing.elapsed();
                                 self.stat_packed += 1;
-                                if let Some(frame) = frame {
-                                    frames.push(frame);
+                                match frame {
+                                    Some(frame) => frames.push(frame),
+                                    // A picture that came back and could not be
+                                    // laid out. The geometry below is what says
+                                    // why: a buffer shorter than the picture it
+                                    // describes cannot be read as one.
+                                    None => tracing::debug!(
+                                        target: "xgview::codec",
+                                        capacity,
+                                        width = self.width,
+                                        height = self.height,
+                                        stride = self.stride,
+                                        slice_height = self.slice_height,
+                                        "a decoded picture could not be packed"
+                                    ),
                                 }
                             }
+                        } else {
+                            self.stat_zero_size += 1;
                         }
                     }
                     // Nothing is rendered in byte-buffer mode, so there is
@@ -940,7 +1001,7 @@ impl AMediaCodecDecoder {
                     // surface to render into. A session reading faster than the
                     // surface can show - a recording at eight times its speed -
                     // hands over only the pictures that could be seen: see
-                    // [`RENDER_GAP`].
+                    // [`RENDER_GAP`](crate::handover::RENDER_GAP).
                     let render = self.on_surface
                         && info.flags & BUFFER_FLAG_END_OF_STREAM == 0
                         && self.take_handover();
@@ -1432,11 +1493,16 @@ impl VideoDecoder for AMediaCodecDecoder {
 
         let mut frames = Vec::new();
         self.drain(&mut frames);
+        self.stat_out += frames.len() as u32;
         self.stat_total += whole.elapsed();
         self.stat_frames += 1;
         if self.stat_frames >= PACE_FRAMES {
             tracing::debug!(
                 target: "xgview::codec",
+                // Which decoder this is, so three sessions on one grid can be
+                // told apart: their sizes, rates and picture counts are alike
+                // and nothing else in this line identifies them.
+                codec = self.handle.map_or(0, |handle| handle as usize),
                 size = ?(self.width, self.height),
                 calls = self.stat_frames,
                 packed = self.stat_packed,
@@ -1450,6 +1516,25 @@ impl VideoDecoder for AMediaCodecDecoder {
                 pictures = self.pictures,
                 skipped = self.stat_skipped,
                 total_ms = self.stat_total.as_millis() as u64,
+                // Whether this session's pictures leave as a rendering or as
+                // bytes, and whether the stream was wide enough that the
+                // surface path was even considered. A tile that shows a frozen
+                // picture while these say `on_surface` is a picture going into
+                // a view that is not on screen.
+                on_surface = self.on_surface,
+                surface_eligible = self.surface_eligible,
+                surface_active = video_layer_active(),
+                // What became of the pictures: `packed` calls, `out` arrived
+                // and `zero_size` came back with no bytes at all.
+                out = self.stat_out,
+                zero_size = self.stat_zero_size,
+                // Whether this session asked for low latency, and whether the
+                // process was told by some earlier session that the device
+                // refuses it. A decoder holding several pictures before it
+                // releases the first is exactly what the ask prevents, and a
+                // tile fed that way moves in steps of four or five.
+                low_latency = self.opened_low_latency,
+                low_latency_refused = LOW_LATENCY_REFUSED.load(Ordering::Relaxed),
                 "the decoder's pace"
             );
             self.stat_dequeue = Duration::ZERO;
@@ -1462,6 +1547,8 @@ impl VideoDecoder for AMediaCodecDecoder {
             self.stat_total = Duration::ZERO;
             self.stat_frames = 0;
             self.stat_packed = 0;
+            self.stat_zero_size = 0;
+            self.stat_out = 0;
             self.stat_skipped = 0;
         }
         Ok(frames)
@@ -1476,6 +1563,24 @@ impl VideoDecoder for AMediaCodecDecoder {
 
     fn pictures(&self) -> u64 {
         self.pictures
+    }
+
+    fn reordering(&self) -> bool {
+        self.reorder_seen
+    }
+
+    /// Closes the codec and leaves the next access unit to open it.
+    ///
+    /// The same shape the other reopens in `decode` take, and for the same
+    /// reason: a codec takes its surface and its layout at the moment it is
+    /// configured, and neither is something a running one can be given. What
+    /// makes this one different is that the parameter sets the next access unit
+    /// carries are the ones the camera sends - the session stopped rewriting
+    /// them before it asked for this.
+    fn restart(&mut self) {
+        self.close();
+        self.on_surface = false;
+        self.generation = 0;
     }
 
     fn info(&self) -> Option<&VideoStreamInfo> {

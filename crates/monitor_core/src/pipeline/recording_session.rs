@@ -143,6 +143,11 @@ pub(super) async fn run_recording_session(
     let mut decoder: Option<Box<dyn VideoDecoder>> = None;
     let mut audio_decoder: Option<(Box<dyn AudioDecoder>, AudioStreamInfo)> = None;
     let mut codec: Option<Codec> = None;
+    // The baseline flag and nothing else: a recording hands its decoder the
+    // parameter sets once, at the init segment, and every sample after is a
+    // picture without them. A decoder reopened here would have nothing to
+    // configure from, so a rewrite that turned out to be wrong could not be
+    // taken back. See [`BaselineFix::new`].
     let mut baseline_fix = BaselineFix::new();
     let mut codec_label: Option<String> = None;
     let mut width: Option<u32> = None;

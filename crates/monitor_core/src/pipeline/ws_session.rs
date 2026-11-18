@@ -267,7 +267,9 @@ pub(super) async fn run_ws_session(
     let mut decoder: Option<Box<dyn VideoDecoder>> = None;
     // The codec the init segment named, so the plain-Baseline fix can apply to
     // the media segments - and the fix itself, decided from the init's parameter
-    // sets. See [`BaselineFix`].
+    // sets. Only the baseline flag: this path hands its parameter sets over at
+    // the init segment and never again, so a decoder reopened for a retraction
+    // would have nothing to configure from. See [`BaselineFix::new`].
     let mut codec: Option<Codec> = None;
     let mut baseline_fix = BaselineFix::new();
     let mut codec_label: Option<String> = None;

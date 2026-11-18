@@ -194,6 +194,16 @@ impl VideoDecoder for Fallback {
         self.active().pictures()
     }
 
+    /// Handed to whichever decoder is doing the work: a stream is reordering to
+    /// the one that noticed, whether or not it is the one preferred.
+    fn reordering(&self) -> bool {
+        self.active().reordering()
+    }
+
+    fn restart(&mut self) {
+        self.active_mut().restart()
+    }
+
     fn configure(&mut self, config: &DecoderConfig) -> Result<()> {
         self.config = Some(config.clone());
         match self.preferred.configure(config) {
