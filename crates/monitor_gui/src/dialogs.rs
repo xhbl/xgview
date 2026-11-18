@@ -1353,6 +1353,14 @@ fn credentials_fields(
     }
 }
 
+/// A stream is a duplicate only within the group currently being edited.
+fn bulk_camera_exists(config: &AppConfig, source: &CameraSource) -> bool {
+    let active_group = config.active_index();
+    config.cameras.iter().any(|known| {
+        usize::from(known.group) == active_group
+            && known.rtsp_main == source.rtsp_main
+    })
+}
 fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {
     let mut changed = false;
     let fields = camera_fields(ui, nav, "manual-camera", &mut state.manual, None);
@@ -1446,9 +1454,7 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
                 let mut skipped = 0usize;
 
                 for source in cameras {
-                    let duplicate = config.cameras.iter().any(|known| {
-                        known.rtsp_main == source.rtsp_main
-                    });
+                    let duplicate = bulk_camera_exists(config, &source);
 
                     if duplicate {
                         skipped += 1;
@@ -2148,6 +2154,123 @@ fn grid_spinner(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_cameras_allow_reuse_across_groups() {
+        let draft = BulkCameraDraft {
+            main_template: "rtsp://192.168.1.100/channel/{n}".into(),
+            count: 2,
+            infer_sub: false,
+            ..Default::default()
+        };
+        let mut config = AppConfig::default();
+
+        for source in draft.build().unwrap() {
+            assert!(!bulk_camera_exists(&config, &source));
+            config.upsert_camera(source);
+        }
+        assert_eq!(config.cameras.len(), 2);
+
+        for source in draft.build().unwrap() {
+            assert!(bulk_camera_exists(&config, &source));
+        }
+
+        let second = config.add_group("Second wall".into());
+        config.active_group = second;
+
+        for source in draft.build().unwrap() {
+            assert!(!bulk_camera_exists(&config, &source));
+            config.upsert_camera(source);
+        }
+
+        assert_eq!(config.cameras.len(), 4);
+        assert_eq!(
+            config.cameras.iter()
+                .filter(|camera| usize::from(camera.group) == second)
+                .count(),
+            2
+        );
+
+        for source in draft.build().unwrap() {
+            assert!(bulk_camera_exists(&config, &source));
+        }
+    }
+    #[test]
+    fn bulk_cameras_expand_channel_templates() {
+        let draft = BulkCameraDraft {
+            name_prefix: "Recorder A".into(),
+            main_template: "rtsp://192.168.1.100/Streaming/Channels/{n}01".into(),
+            sub_template: "rtsp://192.168.1.100/Streaming/Channels/{n}02".into(),
+            username: "admin".into(),
+            password: "secret".into(),
+            first: 1,
+            count: 16,
+            step: 1,
+            ..Default::default()
+        };
+
+        let cameras = draft.build().unwrap();
+        assert_eq!(cameras.len(), 16);
+        assert_eq!(cameras[0].name, "Recorder A — Камера 01");
+        assert_eq!(cameras[0].rtsp_main, "rtsp://192.168.1.100/Streaming/Channels/101");
+        assert_eq!(cameras[0].rtsp_sub.as_deref(), Some("rtsp://192.168.1.100/Streaming/Channels/102"));
+        assert_eq!(cameras[15].rtsp_main, "rtsp://192.168.1.100/Streaming/Channels/1601");
+        assert_eq!(cameras[15].rtsp_sub.as_deref(), Some("rtsp://192.168.1.100/Streaming/Channels/1602"));
+        assert_eq!(cameras[0].username.as_deref(), Some("admin"));
+        assert_eq!(cameras[0].password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn bulk_cameras_respect_first_channel_and_step() {
+        let draft = BulkCameraDraft {
+            main_template: "rtsp://192.168.1.100/channel/{n}".into(),
+            first: 3,
+            count: 3,
+            step: 2,
+            infer_sub: false,
+            ..Default::default()
+        };
+
+        let cameras = draft.build().unwrap();
+        assert_eq!(cameras.len(), 3);
+        assert_eq!(cameras[0].name, "Камера 03");
+        assert_eq!(cameras[1].rtsp_main, "rtsp://192.168.1.100/channel/5");
+        assert_eq!(cameras[2].rtsp_main, "rtsp://192.168.1.100/channel/7");
+        assert!(cameras.iter().all(|camera| camera.rtsp_sub.is_none()));
+    }
+
+    #[test]
+    fn bulk_cameras_reject_invalid_parameters() {
+        let valid = BulkCameraDraft {
+            main_template: "rtsp://192.168.1.100/channel/{n}".into(),
+            infer_sub: false,
+            ..Default::default()
+        };
+
+        for count in [0, 257] {
+            assert!(BulkCameraDraft { count, ..valid.clone() }.build().is_err());
+        }
+        assert!(BulkCameraDraft { step: 0, ..valid.clone() }.build().is_err());
+        assert!(BulkCameraDraft {
+            main_template: "rtsp://192.168.1.100/channel/1".into(),
+            ..valid.clone()
+        }.build().is_err());
+        assert!(BulkCameraDraft {
+            sub_template: "rtsp://192.168.1.100/sub/1".into(),
+            ..valid.clone()
+        }.build().is_err());
+        assert!(BulkCameraDraft {
+            first: usize::MAX,
+            count: 2,
+            ..valid.clone()
+        }.build().is_err());
+        assert!(BulkCameraDraft {
+            first: 1,
+            count: 3,
+            step: usize::MAX,
+            ..valid
+        }.build().is_err());
+    }
 
     /// A configuration from 1.x has no `frigate` on a camera a Frigate import
     /// brought in. Every field `add_offer` used to compare is unchanged, so a
