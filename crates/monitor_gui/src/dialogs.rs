@@ -398,6 +398,83 @@ impl CameraDraft {
     }
 }
 
+/// Parameters for adding multiple RTSP cameras from one recorder.
+#[derive(Debug, Clone)]
+pub struct BulkCameraDraft {
+    pub name_prefix: String,
+    pub main_template: String,
+    pub sub_template: String,
+    pub username: String,
+    pub password: String,
+    pub first: usize,
+    pub count: usize,
+    pub step: usize,
+    pub infer_sub: bool,
+}
+
+impl Default for BulkCameraDraft {
+    fn default() -> Self {
+        Self {
+            name_prefix: String::new(),
+            main_template: String::new(),
+            sub_template: String::new(),
+            username: String::new(),
+            password: String::new(),
+            first: 1,
+            count: 16,
+            step: 1,
+            infer_sub: true,
+        }
+    }
+}
+impl BulkCameraDraft {
+    pub fn build(&self) -> Result<Vec<CameraSource>, String> {
+        if self.count == 0 || self.count > 256 {
+            return Err("Количество камер должно быть от 1 до 256".into());
+        }
+        if self.step == 0 {
+            return Err("Шаг нумерации должен быть больше нуля".into());
+        }
+        if !self.main_template.contains("{n}") {
+            return Err("Основной RTSP-шаблон должен содержать {n}".into());
+        }
+        if !self.sub_template.trim().is_empty()
+            && !self.sub_template.contains("{n}")
+        {
+            return Err("Дополнительный RTSP-шаблон должен содержать {n}".into());
+        }
+
+        let mut cameras = Vec::with_capacity(self.count);
+
+        for index in 0..self.count {
+            let offset = index.checked_mul(self.step)
+                .ok_or("Переполнение номера канала")?;
+            let number = self.first.checked_add(offset)
+                .ok_or("Переполнение номера канала")?;
+
+            let prefix = self.name_prefix.trim();
+            let name = if prefix.is_empty() {
+                format!("Камера {:02}", number)
+            } else {
+                format!("{} — Камера {:02}", prefix, number)
+            };
+
+            let draft = CameraDraft {
+                name,
+                main: self.main_template.replace("{n}", &number.to_string()),
+                sub: self.sub_template.replace("{n}", &number.to_string()),
+                username: self.username.clone(),
+                password: self.password.clone(),
+                infer_sub: self.sub_template.trim().is_empty() && self.infer_sub,
+                ..Default::default()
+            };
+
+            cameras.push(draft.build()?);
+        }
+
+        Ok(cameras)
+    }
+}
 /// State of the "Add devices" window.
 #[derive(Debug, Default)]
 pub struct DiscoveryUi {
@@ -417,6 +494,7 @@ pub struct DiscoveryUi {
     pub error: Option<(Tab, String)>,
     pub message: Option<(Tab, String)>,
     pub manual: CameraDraft,
+    pub bulk: BulkCameraDraft,
     /// The manual tab's test button, which needs the runtime the dialog has not
     /// got: the application picks it up after drawing the dialog and plays the
     /// tone the way the edit window's button does.
@@ -1310,6 +1388,86 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
         }
     });
 
+    ui.add_space(theme::space::M);
+    ui.separator();
+    ui.heading("Все камеры с регистратора");
+    ui.label("Укажите RTSP-шаблон с {n} вместо номера канала.");
+
+    ui.label("Название регистратора");
+    text_field(ui, nav, &mut state.bulk.name_prefix, "bulk-camera-name", false, false, |s| {
+        egui::TextEdit::singleline(s)
+            .desired_width(f32::INFINITY)
+            .hint_text("Регистратор 1")
+    });
+
+    ui.label("Основной RTSP-шаблон");
+    text_field(ui, nav, &mut state.bulk.main_template, "bulk-camera-main", false, false, |s| {
+        egui::TextEdit::singleline(s)
+            .desired_width(f32::INFINITY)
+            .hint_text("rtsp://192.168.1.100/Streaming/Channels/{n}01")
+    });
+
+    ui.label("Дополнительный RTSP-шаблон (необязательно)");
+    text_field(ui, nav, &mut state.bulk.sub_template, "bulk-camera-sub", false, false, |s| {
+        egui::TextEdit::singleline(s)
+            .desired_width(f32::INFINITY)
+            .hint_text("rtsp://192.168.1.100/Streaming/Channels/{n}02")
+    });
+
+    ui.label("Учётные данные");
+    credentials_row(ui, nav, &mut state.bulk.username, &mut state.bulk.password);
+
+    ui.horizontal(|ui| {
+        ui.label("Первый канал");
+        nav.tracked(ui.add(egui::DragValue::new(&mut state.bulk.first).range(0..=65535)));
+        ui.label("Количество");
+        nav.tracked(ui.add(egui::DragValue::new(&mut state.bulk.count).range(1..=256)));
+        ui.label("Шаг");
+        nav.tracked(ui.add(egui::DragValue::new(&mut state.bulk.step).range(1..=65535)));
+    });
+
+    if state.bulk.sub_template.trim().is_empty() {
+        nav.tracked(ui.checkbox(&mut state.bulk.infer_sub, "Определять дополнительный поток автоматически"));
+    }
+
+    if !state.bulk.main_template.trim().is_empty() {
+        let first_url = state.bulk.main_template
+            .replace("{n}", &state.bulk.first.to_string());
+        ui.label(RichText::new(format!("Пример: {}", first_url))
+            .small()
+            .color(theme::TEXT_DIM));
+    }
+
+    let button_label = format!("Добавить {} камер", state.bulk.count);
+    if nav.tracked(ui.button(button_label)).clicked() {
+        match state.bulk.build() {
+            Ok(cameras) => {
+                let mut added = 0usize;
+                let mut skipped = 0usize;
+
+                for source in cameras {
+                    let duplicate = config.cameras.iter().any(|known| {
+                        known.rtsp_main == source.rtsp_main
+                    });
+
+                    if duplicate {
+                        skipped += 1;
+                    } else {
+                        config.upsert_camera(source);
+                        added += 1;
+                    }
+                }
+
+                state.clear_status(Tab::Manual);
+                state.note(
+                    Tab::Manual,
+                    format!("Добавлено камер: {}. Пропущено дубликатов: {}.", added, skipped),
+                );
+                changed |= added > 0;
+            }
+            Err(err) => state.fail(Tab::Manual, err),
+        }
+    }
     status_lines(ui, state, Tab::Manual);
     changed
 }
