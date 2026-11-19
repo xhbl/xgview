@@ -407,6 +407,83 @@ impl CameraDraft {
     }
 }
 
+/// Parameters for adding multiple RTSP cameras from one recorder.
+#[derive(Debug, Clone)]
+pub struct BulkCameraDraft {
+    pub name_prefix: String,
+    pub main_template: String,
+    pub sub_template: String,
+    pub username: String,
+    pub password: String,
+    pub first: usize,
+    pub count: usize,
+    pub step: usize,
+    pub infer_sub: bool,
+}
+
+impl Default for BulkCameraDraft {
+    fn default() -> Self {
+        Self {
+            name_prefix: String::new(),
+            main_template: String::new(),
+            sub_template: String::new(),
+            username: String::new(),
+            password: String::new(),
+            first: 1,
+            count: 16,
+            step: 1,
+            infer_sub: true,
+        }
+    }
+}
+impl BulkCameraDraft {
+    pub fn build(&self) -> Result<Vec<CameraSource>, String> {
+        if self.count == 0 || self.count > 256 {
+            return Err(monitor_i18n::tr("dialog-bulk-error-count"));
+        }
+        if self.step == 0 {
+            return Err(monitor_i18n::tr("dialog-bulk-error-step"));
+        }
+        if !self.main_template.contains("{n}") {
+            return Err(monitor_i18n::tr("dialog-bulk-error-main-template"));
+        }
+        if !self.sub_template.trim().is_empty()
+            && !self.sub_template.contains("{n}")
+        {
+            return Err(monitor_i18n::tr("dialog-bulk-error-sub-template"));
+        }
+
+        let mut cameras = Vec::with_capacity(self.count);
+
+        for index in 0..self.count {
+            let offset = index.checked_mul(self.step)
+                .ok_or_else(|| monitor_i18n::tr("dialog-bulk-error-overflow"))?;
+            let number = self.first.checked_add(offset)
+                .ok_or_else(|| monitor_i18n::tr("dialog-bulk-error-overflow"))?;
+
+            let prefix = self.name_prefix.trim();
+            let name = if prefix.is_empty() {
+                monitor_i18n::tr_args("dialog-bulk-camera-name", &[("number", format!("{:02}", number).into())])
+            } else {
+                monitor_i18n::tr_args("dialog-bulk-camera-name-prefixed", &[("prefix", prefix.into()), ("number", format!("{:02}", number).into())])
+            };
+
+            let draft = CameraDraft {
+                name,
+                main: self.main_template.replace("{n}", &number.to_string()),
+                sub: self.sub_template.replace("{n}", &number.to_string()),
+                username: self.username.clone(),
+                password: self.password.clone(),
+                infer_sub: self.sub_template.trim().is_empty() && self.infer_sub,
+                ..Default::default()
+            };
+
+            cameras.push(draft.build()?);
+        }
+
+        Ok(cameras)
+    }
+}
 /// State of the "Add devices" window.
 #[derive(Debug, Default)]
 pub struct DiscoveryUi {
@@ -426,6 +503,7 @@ pub struct DiscoveryUi {
     pub error: Option<(Tab, String)>,
     pub message: Option<(Tab, String)>,
     pub manual: CameraDraft,
+    pub bulk: BulkCameraDraft,
     /// The manual tab's test button, which needs the runtime the dialog has not
     /// got: the application picks it up after drawing the dialog and plays the
     /// tone the way the edit window's button does.
@@ -1286,6 +1364,14 @@ fn credentials_fields(
     }
 }
 
+/// A stream is a duplicate only within the group currently being edited.
+fn bulk_camera_exists(config: &AppConfig, source: &CameraSource) -> bool {
+    let active_group = config.active_index();
+    config.cameras.iter().any(|known| {
+        usize::from(known.group) == active_group
+            && known.rtsp_main == source.rtsp_main
+    })
+}
 fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {
     let mut changed = false;
     let fields = camera_fields(ui, nav, "manual-camera", &mut state.manual, None);
@@ -1321,6 +1407,84 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
         }
     });
 
+    ui.add_space(theme::space::M);
+    ui.separator();
+    ui.heading(monitor_i18n::tr("dialog-bulk-title"));
+    ui.label(monitor_i18n::tr("dialog-bulk-hint"));
+
+    ui.label(monitor_i18n::tr("dialog-bulk-recorder-name"));
+    text_field(ui, nav, &mut state.bulk.name_prefix, "bulk-camera-name", false, false, |s| {
+        egui::TextEdit::singleline(s)
+            .desired_width(f32::INFINITY)
+            .hint_text(monitor_i18n::tr("dialog-bulk-recorder-placeholder"))
+    });
+
+    ui.label(monitor_i18n::tr("dialog-bulk-main-template"));
+    text_field(ui, nav, &mut state.bulk.main_template, "bulk-camera-main", false, false, |s| {
+        egui::TextEdit::singleline(s)
+            .desired_width(f32::INFINITY)
+            .hint_text("rtsp://192.168.1.100/Streaming/Channels/{n}01")
+    });
+
+    ui.label(monitor_i18n::tr("dialog-bulk-sub-template"));
+    text_field(ui, nav, &mut state.bulk.sub_template, "bulk-camera-sub", false, false, |s| {
+        egui::TextEdit::singleline(s)
+            .desired_width(f32::INFINITY)
+            .hint_text("rtsp://192.168.1.100/Streaming/Channels/{n}02")
+    });
+
+    ui.label(monitor_i18n::tr("dialog-bulk-credentials"));
+    credentials_row(ui, nav, &mut state.bulk.username, &mut state.bulk.password);
+
+    ui.horizontal(|ui| {
+        ui.label(monitor_i18n::tr("dialog-bulk-first-channel"));
+        nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.first).range(0..=65535)));
+        ui.label(monitor_i18n::tr("dialog-bulk-count"));
+        nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.count).range(1..=256)));
+        ui.label(monitor_i18n::tr("dialog-bulk-step"));
+        nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.step).range(1..=65535)));
+    });
+
+    if state.bulk.sub_template.trim().is_empty() {
+        nav.tracked(ui.checkbox(&mut state.bulk.infer_sub, monitor_i18n::tr("dialog-bulk-infer-sub")));
+    }
+
+    if !state.bulk.main_template.trim().is_empty() {
+        let first_url = state.bulk.main_template
+            .replace("{n}", &state.bulk.first.to_string());
+        ui.label(RichText::new(monitor_i18n::tr_args("dialog-bulk-example", &[("url", first_url.into())]))
+            .small()
+            .color(theme::TEXT_DIM));
+    }
+
+    let button_label = monitor_i18n::tr_args("dialog-bulk-add", &[("count", state.bulk.count.into())]);
+    if nav.tracked(ui.button(button_label)).clicked() {
+        match state.bulk.build() {
+            Ok(cameras) => {
+                let mut added = 0usize;
+                let mut skipped = 0usize;
+
+                for source in cameras {
+                    let duplicate = bulk_camera_exists(config, &source);
+
+                    if duplicate {
+                        skipped += 1;
+                    } else {
+                        config.upsert_camera(source);
+                        added += 1;
+                    }
+                }
+
+                state.clear_status(Tab::Manual);
+                state.note(
+                    Tab::Manual,
+                    monitor_i18n::tr_args("dialog-bulk-result", &[("added", added.into()), ("skipped", skipped.into())]),
+                );
+                changed |= added > 0;
+            }
+            Err(err) => state.fail(Tab::Manual, err),
+        }
+    }
     status_lines(ui, state, Tab::Manual);
     changed
 }
@@ -2001,6 +2165,125 @@ fn grid_spinner(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_cameras_allow_reuse_across_groups() {
+        let draft = BulkCameraDraft {
+            main_template: "rtsp://192.168.1.100/channel/{n}".into(),
+            count: 2,
+            infer_sub: false,
+            ..Default::default()
+        };
+        let mut config = AppConfig::default();
+
+        for source in draft.build().unwrap() {
+            assert!(!bulk_camera_exists(&config, &source));
+            config.upsert_camera(source);
+        }
+        assert_eq!(config.cameras.len(), 2);
+
+        for source in draft.build().unwrap() {
+            assert!(bulk_camera_exists(&config, &source));
+        }
+
+        let second = config.add_group("Second wall".into());
+        config.active_group = second;
+
+        for source in draft.build().unwrap() {
+            assert!(!bulk_camera_exists(&config, &source));
+            config.upsert_camera(source);
+        }
+
+        assert_eq!(config.cameras.len(), 4);
+        assert_eq!(
+            config.cameras.iter()
+                .filter(|camera| usize::from(camera.group) == second)
+                .count(),
+            2
+        );
+
+        for source in draft.build().unwrap() {
+            assert!(bulk_camera_exists(&config, &source));
+        }
+    }
+    #[test]
+    fn bulk_cameras_expand_channel_templates() {
+        monitor_i18n::init("en", &[]);
+        let draft = BulkCameraDraft {
+            name_prefix: "Recorder A".into(),
+            main_template: "rtsp://192.168.1.100/Streaming/Channels/{n}01".into(),
+            sub_template: "rtsp://192.168.1.100/Streaming/Channels/{n}02".into(),
+            username: "admin".into(),
+            password: "secret".into(),
+            first: 1,
+            count: 16,
+            step: 1,
+            ..Default::default()
+        };
+
+        let cameras = draft.build().unwrap();
+        assert_eq!(cameras.len(), 16);
+        assert_eq!(cameras[0].name, "Recorder A — Camera 01");
+        assert_eq!(cameras[0].rtsp_main, "rtsp://192.168.1.100/Streaming/Channels/101");
+        assert_eq!(cameras[0].rtsp_sub.as_deref(), Some("rtsp://192.168.1.100/Streaming/Channels/102"));
+        assert_eq!(cameras[15].rtsp_main, "rtsp://192.168.1.100/Streaming/Channels/1601");
+        assert_eq!(cameras[15].rtsp_sub.as_deref(), Some("rtsp://192.168.1.100/Streaming/Channels/1602"));
+        assert_eq!(cameras[0].username.as_deref(), Some("admin"));
+        assert_eq!(cameras[0].password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn bulk_cameras_respect_first_channel_and_step() {
+        monitor_i18n::init("en", &[]);
+        let draft = BulkCameraDraft {
+            main_template: "rtsp://192.168.1.100/channel/{n}".into(),
+            first: 3,
+            count: 3,
+            step: 2,
+            infer_sub: false,
+            ..Default::default()
+        };
+
+        let cameras = draft.build().unwrap();
+        assert_eq!(cameras.len(), 3);
+        assert_eq!(cameras[0].name, "Camera 03");
+        assert_eq!(cameras[1].rtsp_main, "rtsp://192.168.1.100/channel/5");
+        assert_eq!(cameras[2].rtsp_main, "rtsp://192.168.1.100/channel/7");
+        assert!(cameras.iter().all(|camera| camera.rtsp_sub.is_none()));
+    }
+
+    #[test]
+    fn bulk_cameras_reject_invalid_parameters() {
+        let valid = BulkCameraDraft {
+            main_template: "rtsp://192.168.1.100/channel/{n}".into(),
+            infer_sub: false,
+            ..Default::default()
+        };
+
+        for count in [0, 257] {
+            assert!(BulkCameraDraft { count, ..valid.clone() }.build().is_err());
+        }
+        assert!(BulkCameraDraft { step: 0, ..valid.clone() }.build().is_err());
+        assert!(BulkCameraDraft {
+            main_template: "rtsp://192.168.1.100/channel/1".into(),
+            ..valid.clone()
+        }.build().is_err());
+        assert!(BulkCameraDraft {
+            sub_template: "rtsp://192.168.1.100/sub/1".into(),
+            ..valid.clone()
+        }.build().is_err());
+        assert!(BulkCameraDraft {
+            first: usize::MAX,
+            count: 2,
+            ..valid.clone()
+        }.build().is_err());
+        assert!(BulkCameraDraft {
+            first: 1,
+            count: 3,
+            step: usize::MAX,
+            ..valid
+        }.build().is_err());
+    }
 
     /// A configuration from 1.x has no `frigate` on a camera a Frigate import
     /// brought in. Every field `add_offer` used to compare is unchanged, so a
