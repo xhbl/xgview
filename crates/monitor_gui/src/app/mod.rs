@@ -3819,29 +3819,38 @@ impl XgViewApp {
 
         self.draw_layout_picker(ctx);
         // The editor sits above the picker: a confirm writes the preview into
-        // its slot, and changes the wall only when that slot was the layout on
-        // screen. Editing a different slot just updates its panel item; the
-        // viewer has to choose the item to put it on the wall. Back drops the
+        // its slot, Delete clears the slot, and changes to the wall happen
+        // only when that slot was the layout on screen. Back drops the
         // preview entirely. Either way the Custom page comes back underneath,
         // so the ring always has a control to land on.
         if self.layout_editor.is_open() {
             let (_, finished) = self.draw_layout_editor(ctx);
             if let Some(state) = finished {
-                let grid = state.grid;
                 let slot = state.slot.min(3);
-                let active = matches!(
-                    self.scheduler.layout(),
-                    GridLayout::Custom(current) if Some(current) == self.config.group().custom_layouts[slot]
-                );
-                self.config.group_mut().custom_layouts[slot] = Some(grid);
-                if active {
-                    self.set_layout(GridLayout::Custom(grid));
-                }
-                self.mark_dirty();
-                // Confirm puts the ring on the slot just written. Cancel left
-                // `restore_focus` pointing at the pencil the editor came from.
-                if let Some(id) = state.slot_focus {
-                    self.restore_focus = Some(id);
+                if state.delete {
+                    // Delete clears the slot and leaves the picker on its
+                    // empty card. The ring goes to that card only when the
+                    // editor was opened with one.
+                    self.config.group_mut().custom_layouts[slot] = None;
+                    self.mark_dirty();
+                    if let Some(id) = state.slot_focus {
+                        self.restore_focus = Some(id);
+                    }
+                } else {
+                    let grid = state.grid;
+                    let active = matches!(
+                        self.scheduler.layout(),
+                        GridLayout::Custom(current) if Some(current) == self.config.group().custom_layouts[slot]
+                    );
+                    self.config.group_mut().custom_layouts[slot] = Some(grid);
+                    if active {
+                        self.set_layout(GridLayout::Custom(grid));
+                    }
+                    self.mark_dirty();
+                    // Confirm puts the ring on the slot just written.
+                    if let Some(id) = state.slot_focus {
+                        self.restore_focus = Some(id);
+                    }
                 }
             }
             if !self.layout_editor.is_open() {
@@ -5257,11 +5266,19 @@ mod tests {
             !app.contains(&cleared_origin) && !input.contains(&cleared_origin),
             "visiting the editor must not lose the control that opened the picker"
         );
+        let editor = include_str!("layout_editor.rs");
+        assert!(
+            app.contains("if state.delete {") && app.contains("custom_layouts[slot] = None"),
+            "Delete clears the edited slot and leaves the picker on its card"
+        );
+        assert!(
+            editor.contains("layout-editor-delete") && editor.contains("let can_delete = !matches!"),
+            "Delete is greyed out while the slot is on the wall"
+        );
         assert!(
             app.contains("if active {") && app.contains("set_layout(GridLayout::Custom(grid))"),
             "Confirm switches the wall only when the edited slot is already on it"
         );
-        let editor = include_str!("layout_editor.rs");
         assert!(
             editor.contains("input::CONFIRM_KEYS") && editor.contains("focused == Some(response.id)"),
             "Enter on a focused preview cell is a merge press"

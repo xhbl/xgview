@@ -55,6 +55,9 @@ pub(super) struct EditorState {
     /// Cell under the focus on the preview. Re-sorted after each edit, so
     /// this is an index, never an identity a camera could rely on.
     pub(super) selected: usize,
+    /// Set when the Delete button was pressed: the caller clears the slot
+    /// instead of writing the preview into it.
+    pub(super) delete: bool,
     /// First half of a merge pair. Set by the first Enter on a cell, then the
     /// viewer walks to a neighbour and presses Enter again. Keeping it
     /// explicit means a single press can never merge something by accident.
@@ -66,7 +69,7 @@ impl EditorState {
     /// small uniform grid rather than an empty preview.
     pub(super) fn open(slot: usize, existing: Option<CustomGrid>) -> Self {
         let grid = existing.unwrap_or_else(|| CustomGrid::uniform(2, 2));
-        EditorState { slot, slot_focus: None, grid, selected: 0, anchor: None }
+        EditorState { slot, slot_focus: None, grid, selected: 0, anchor: None, delete: false }
     }
 
     /// Rebuild from plain dimensions. The selection is clamped to the new
@@ -203,6 +206,7 @@ mod tests {
         assert_eq!(state.slot, 2);
         assert_eq!(state.grid.cells().len(), 4);
         assert_eq!(state.anchor, None);
+        assert!(!state.delete);
         assert!(state.valid());
     }
 
@@ -338,8 +342,9 @@ mod tests {
 /// is a button the remote can walk onto rather than a key that would close the
 /// window under the viewer.
 impl XgViewApp {
-    /// Returns the finished preview only on Confirm, so the caller can write
-    /// it to the slot. Back and the cross return `None` and change nothing.
+    /// Returns the finished state on Confirm or Delete, so the caller can
+    /// write the preview to the slot or clear it. Back and the cross return
+    /// `None` and change nothing.
     pub(super) fn draw_layout_editor(
         &mut self,
         ctx: &egui::Context,
@@ -595,7 +600,7 @@ impl XgViewApp {
                     let labels = [
                         monitor_i18n::tr("layout-editor-split"),
                         monitor_i18n::tr("ok"),
-                        monitor_i18n::tr("cancel"),
+                        monitor_i18n::tr("layout-editor-delete"),
                     ];
                     let used = labels.iter().map(|text| button_width(ui, text)).sum::<f32>()
                         + 2.0 * ui.spacing().item_spacing.x;
@@ -650,9 +655,27 @@ impl XgViewApp {
                         confirmed = true;
                         finished = Some(*payload);
                     }
-                    let cancel = app.nav.tracked(ui.button(labels[2].clone()));
-                    if cancel.clicked() {
-                        back = true;
+                    // A slot that is on the wall cannot be removed under the
+                    // viewer: switch to another layout first. The greyed
+                    // button is skipped by the walk, and a ring already on it
+                    // is handed to OK.
+                    let can_delete = !matches!(
+                        app.scheduler.layout(),
+                        GridLayout::Custom(current)
+                            if Some(current)
+                                == app.config.group().custom_layouts[payload.slot.min(3)]
+                    );
+                    let delete = ui.add_enabled(can_delete, egui::Button::new(labels[2].clone()));
+                    if can_delete {
+                        let delete = app.nav.tracked(delete);
+                        if delete.clicked() {
+                            payload.delete = true;
+                            confirmed = true;
+                            finished = Some(*payload);
+                        }
+                    } else if focus_before == Some(delete.id) {
+                        app.restore_focus = Some(ok.id);
+                        app.swallow_confirm = 2;
                     }
                 });
                 app.nav.close();

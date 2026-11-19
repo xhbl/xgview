@@ -298,6 +298,7 @@ layout-editor-clear-tail = Press it again to clear.
 layout-editor-merge-picked = { layout-editor-picked-head } Choose a neighbour. { layout-editor-clear-tail }
 layout-editor-merge-picked-splittable = { layout-editor-picked-head } Choose a neighbour to merge, or walk to Split to units. { layout-editor-clear-tail }
 layout-editor-split = Split to units
+layout-editor-delete = Delete
 layout-picker-title = Layouts
 portrait-aspect-picker-title = Picture fit
 portrait-aspect-picker-hint = These settings apply only to the portrait tile; the landscape tile and the magnified view keep their own fits.

@@ -292,6 +292,7 @@ layout-editor-clear-tail = 再按一次取消。
 layout-editor-merge-picked = { layout-editor-picked-head }选择相邻格合并，{ layout-editor-clear-tail }
 layout-editor-merge-picked-splittable = { layout-editor-picked-head }可选相邻格合并，或到「拆成最小格」拆开；{ layout-editor-clear-tail }
 layout-editor-split = 拆成最小格
+layout-editor-delete = 删除
 layout-picker-title = 布局
 portrait-aspect-picker-title = 画面比例
 portrait-aspect-picker-hint = 此画面比例设置仅应用于竖屏格子；横屏格子和放大画面各自保留自己的比例。
