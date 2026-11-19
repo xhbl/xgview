@@ -815,31 +815,39 @@ impl CameraSource {
         }
     }
 
+    /// The name the connection switch shows for one of this camera's stops.
+    /// Kept beside `connection_label` so a menu can name the next stop without
+    /// changing the camera first.
+    pub fn connection_label_for(&self, stop: ConnectionStop) -> &'static str {
+        match stop {
+            ConnectionStop::Auto => "AUTO",
+            ConnectionStop::Mse => "MSE",
+            ConnectionStop::RtspTcp if self.has_mse() => "RTSP",
+            ConnectionStop::RtspTcp => "TCP",
+            ConnectionStop::RtspUdp => "UDP",
+        }
+    }
+
     /// The label the connection switch shows for the camera's current stop. It
     /// names the protocol where there are two to choose from, and the transport
     /// where there is only RTSP.
     pub fn connection_label(&self) -> &'static str {
-        match self.connection_stop() {
-            ConnectionStop::Auto => "AUTO",
-            ConnectionStop::Mse => "MSE",
-            ConnectionStop::RtspTcp => {
-                if self.has_mse() {
-                    "RTSP"
-                } else {
-                    "TCP"
-                }
-            }
-            ConnectionStop::RtspUdp => "UDP",
-        }
+        self.connection_label_for(self.connection_stop())
+    }
+
+    /// The next stop the connection switch would move to, without changing the
+    /// camera. A menu names it before the viewer commits to the switch.
+    pub fn next_connection(&self) -> ConnectionStop {
+        let stops = self.connection_stops();
+        let current = self.connection_stop();
+        let index = stops.iter().position(|stop| *stop == current).unwrap_or(0);
+        stops[(index + 1) % stops.len()]
     }
 
     /// Moves the connection switch on to the next stop it offers, writing both
     /// the mode and the transport back.
     pub fn advance_connection(&mut self) {
-        let stops = self.connection_stops();
-        let current = self.connection_stop();
-        let index = stops.iter().position(|stop| *stop == current).unwrap_or(0);
-        let next = stops[(index + 1) % stops.len()];
+        let next = self.next_connection();
         match next {
             ConnectionStop::Auto => self.connect = ConnectionMode::Auto,
             ConnectionStop::RtspTcp => {
@@ -868,14 +876,24 @@ impl CameraSource {
         self.rtsp_sub.is_some() || self.mse_sub.is_some()
     }
 
+    /// The other stop the grid's stream switch would move to, without
+    /// changing the camera. The wall pulls sub by default and pins main when
+    /// the viewer asks for it; coming back clears the pin.
+    pub fn next_stream(&self) -> StreamKind {
+        match self.grid_stream() {
+            StreamKind::Main => StreamKind::Sub,
+            StreamKind::Sub => StreamKind::Main,
+        }
+    }
+
     /// Moves the tile's stream switch on to its other stop, as a press on the
     /// row's button does: the sub stream the wall pulls by default, and the main
     /// stream the viewer pinned. Coming back to the default clears the pin, so
     /// the configuration keeps only the tiles that were singled out.
     pub fn advance_stream(&mut self) {
-        self.stream = match self.grid_stream() {
-            StreamKind::Main => None,
-            StreamKind::Sub => Some(StreamKind::Main),
+        self.stream = match self.next_stream() {
+            StreamKind::Main => Some(StreamKind::Main),
+            StreamKind::Sub => None,
         };
     }
 
@@ -1485,6 +1503,26 @@ mod tests {
         let camera = CameraSource::new("Front door", "rtsp://10.0.0.9:8554/live");
         assert_eq!(camera.host, "10.0.0.9");
         assert_eq!(camera.display_address(), "10.0.0.9:8554");
+    }
+
+    #[test]
+    fn the_next_stream_and_connection_are_read_without_changing_the_camera() {
+        let mut camera = CameraSource::new("Door", "rtsp://10.0.0.9/live").with_sub(
+            "rtsp://10.0.0.9/live/sub",
+        );
+        assert_eq!(camera.next_stream(), StreamKind::Main);
+        assert_eq!(camera.connection_stop(), ConnectionStop::RtspTcp);
+        assert_eq!(camera.next_connection(), ConnectionStop::RtspUdp);
+        assert_eq!(camera.connection_label_for(camera.next_connection()), "UDP");
+
+        camera.advance_stream();
+        assert_eq!(camera.grid_stream(), StreamKind::Main);
+        assert_eq!(camera.next_stream(), StreamKind::Sub);
+        camera.advance_stream();
+        assert_eq!(camera.grid_stream(), StreamKind::Sub);
+
+        camera.advance_connection();
+        assert_eq!(camera.next_connection(), ConnectionStop::RtspTcp);
     }
 
     #[test]

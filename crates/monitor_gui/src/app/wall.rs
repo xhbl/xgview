@@ -827,7 +827,20 @@ impl XgViewApp {
             let response = grid::paint(ui, rect, &tile);
             if interactive {
                 if let Some(camera_index) = *index {
-                    response.context_menu(|ui| {
+                    // Re-right-clicking the same tile while its menu is open
+                    // would otherwise close it on the same frame: egui sees a
+                    // click outside the old popup and applies CloseOnClickOutside
+                    // after the new position has been opened. Ignore that one
+                    // close so the menu simply moves to the new pointer.
+                    let moved_same_menu =
+                        response.secondary_clicked() && response.context_menu_opened();
+                    let menu = egui::Popup::context_menu(&response);
+                    let menu = if moved_same_menu {
+                        menu.close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+                    } else {
+                        menu
+                    };
+                    menu.show(|ui| {
                         if ui.button(monitor_i18n::tr("camera-context-edit")).clicked() {
                             actions.edit_camera = Some(camera_index);
                             ui.close();
@@ -835,6 +848,41 @@ impl XgViewApp {
                         if ui.button(monitor_i18n::tr("camera-context-delete")).clicked() {
                             actions.delete_camera = Some(camera_index);
                             ui.close();
+                        }
+                        let Some(camera) = cameras.get(camera_index) else {
+                            return;
+                        };
+                        // Name the stop the switch will move to, so a menu
+                        // press is not a guess. The next values are read
+                        // without changing the camera: the action below does
+                        // that once, after the whole wall has been painted.
+                        let fit = monitor_i18n::tr_args(
+                            "camera-context-picture-fit",
+                            &[("next", monitor_i18n::tr(camera.aspect.next().label()).into())],
+                        );
+                        if ui.button(fit).clicked() {
+                            actions.picture_fit = Some(camera_index);
+                            ui.close();
+                        }
+                        if camera.has_sub() {
+                            let stream = monitor_i18n::tr_args(
+                                "camera-context-stream",
+                                &[("next", monitor_i18n::tr(camera.next_stream().label()).into())],
+                            );
+                            if ui.button(stream).clicked() {
+                                actions.stream_change = Some(camera_index);
+                                ui.close();
+                            }
+                        }
+                        if !camera.is_ws_stream() {
+                            let connection = monitor_i18n::tr_args(
+                                "camera-context-connection",
+                                &[("next", camera.connection_label_for(camera.next_connection()).into())],
+                            );
+                            if ui.button(connection).clicked() {
+                                actions.connection_change = Some(camera_index);
+                                ui.close();
+                            }
                         }
                     });
                 }
@@ -1179,6 +1227,39 @@ impl XgViewApp {
                         });
                         self.remove_confirm.from = None;
                     }
+                }
+            }
+        }
+
+        if actions.picture_fit.is_some()
+            || actions.stream_change.is_some()
+            || actions.connection_change.is_some()
+        {
+            let slots = self.config.active_slots();
+            if let Some(index) = actions.picture_fit {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(camera) = self.config.cameras.get_mut(slot) {
+                        camera.aspect = camera.aspect.next();
+                    }
+                    self.mark_dirty();
+                }
+            }
+            if let Some(index) = actions.stream_change {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(camera) = self.config.cameras.get_mut(slot) {
+                        camera.advance_stream();
+                    }
+                    self.needs_sync = true;
+                    self.mark_dirty();
+                }
+            }
+            if let Some(index) = actions.connection_change {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(camera) = self.config.cameras.get_mut(slot) {
+                        camera.advance_connection();
+                    }
+                    self.needs_sync = true;
+                    self.mark_dirty();
                 }
             }
         }
@@ -2340,6 +2421,31 @@ fn paint_band(painter: &egui::Painter, bar: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_right_click_moves_the_same_menu() {
+        let source = include_str!("wall.rs");
+        let opened = format!("{}.{}()", "response", "context_menu_opened");
+        assert!(source.contains(&opened), "the menu knows it is already open");
+        assert!(
+            source.contains("PopupCloseBehavior::IgnoreClicks"),
+            "that frame must not close the menu it just moved"
+        );
+    }
+
+    #[test]
+    fn context_menu_names_the_next_stop_without_mutating_the_camera() {
+        let source = include_str!("wall.rs");
+        for key in [
+            "camera-context-picture-fit",
+            "camera-context-stream",
+            "camera-context-connection",
+        ] {
+            assert!(source.contains(key), "missing context entry: {key}");
+        }
+        let lookup = format!("cameras.get({})", "camera_index");
+        assert!(source.contains(&lookup), "the menu reads the camera it names");
+    }
 
     #[test]
     fn settings_dismiss_precedes_the_early_returns() {
