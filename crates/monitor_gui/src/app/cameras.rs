@@ -209,8 +209,19 @@ impl XgViewApp {
             .filter(|(_, camera)| usize::from(camera.group) == active)
             .map(|(slot, _)| slot)
             .collect();
-        for slot in slots {
-            self.camera_row(ui, slot, &mut actions);
+        for (row, slot) in slots.into_iter().enumerate() {
+            let fill = if row % 2 == 0 {
+                theme::PANEL
+            } else {
+                egui::Color32::from_rgb(26, 30, 38)
+            };
+            egui::Frame::new()
+                .fill(fill)
+                .inner_margin(egui::Margin::symmetric(4, 3))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    self.camera_row(ui, slot, &mut actions);
+                });
         }
         if let Some((slot, aspect)) = actions.aspect_change {
             if let Some(camera) = self.config.cameras.get_mut(slot) {
@@ -282,7 +293,18 @@ impl XgViewApp {
             if enable.changed() {
                 actions.toggle = Some((slot, camera_enabled));
             }
-            ui.label(RichText::new(camera.short_label(18)).strong());
+            let name_width = (ui.available_width() - 205.0).max(32.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(name_width, ui.spacing().interact_size.y),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(camera.name.trim()).strong())
+                            .truncate()
+                            .halign(egui::Align::LEFT),
+                    );
+                },
+            );
             if let Some(sub) = camera.rtsp_sub.as_deref() {
                 let inferred = sub_is_derived(camera, sub);
                 ui.label(
@@ -381,8 +403,20 @@ impl XgViewApp {
             // The address follows the connection mode, so a camera on MSE
             // reads out its MSE address. Where there is a second address,
             // the tooltip names both.
-            let address = theme::truncate(&camera.masked_uri(StreamKind::Main), 26);
-            let address_label = ui.label(RichText::new(address).small().monospace().color(theme::TEXT_DIM));
+            let address = camera.masked_uri(StreamKind::Main);
+            let address_width = (ui.available_width() - 110.0).max(32.0);
+            let address_label = ui.allocate_ui_with_layout(
+                egui::vec2(address_width, ui.spacing().interact_size.y),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(&address).small().monospace().color(theme::TEXT_DIM))
+                            .truncate()
+                            .halign(egui::Align::LEFT)
+                            .show_tooltip_when_elided(!camera.has_mse()),
+                    )
+                },
+            ).inner;
             if let Some(mse) = camera.masked_mse_uri(StreamKind::Main) {
                 address_label.on_hover_text(format!(
                     "rtsp: {}\nmse:  {}",
