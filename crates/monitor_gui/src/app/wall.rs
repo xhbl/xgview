@@ -826,6 +826,20 @@ impl XgViewApp {
                 );
             let response = grid::paint(ui, rect, &tile);
             if interactive {
+                if let Some(camera_index) = *index {
+                    response.context_menu(|ui| {
+                        if ui.button(monitor_i18n::tr("camera-context-edit")).clicked() {
+                            actions.edit_camera = Some(camera_index);
+                            ui.close();
+                        }
+                        if ui.button(monitor_i18n::tr("camera-context-delete")).clicked() {
+                            actions.delete_camera = Some(camera_index);
+                            ui.close();
+                        }
+                    });
+                }
+            }
+            if interactive {
                 if response.clicked() {
                     actions.focus = *index;
                     actions.click_pos = response.interact_pointer_pos();
@@ -865,6 +879,19 @@ impl XgViewApp {
         // The band is what this frame paints, and no other frame's: a frame that
         // draws no wall has none to show. See [`Self::strip_band`].
         self.strip_band = None;
+        // Closing the settings panel from the wall is handled here, before
+        // any early return and before a tile can see the press. Returning
+        // without painting keeps a click meant only to dismiss the panel from
+        // also focusing or magnifying the picture underneath it.
+        if self.show_settings
+            && ui.ctx().input(|input| {
+                input.pointer.button_clicked(egui::PointerButton::Primary)
+                    && input.pointer.interact_pos().is_some_and(|pos| area.contains(pos))
+            })
+        {
+            self.show_settings = false;
+            return;
+        }
         if area.width() < 24.0 || area.height() < 24.0 {
             return;
         }
@@ -1132,6 +1159,29 @@ impl XgViewApp {
         }
 
         let mut actions = self.paint_view(ui, picture_area, &cameras, &view, dx, true, 2);
+
+        if actions.edit_camera.is_some() || actions.delete_camera.is_some() {
+            let slots = self.config.active_slots();
+
+            if let Some(index) = actions.edit_camera {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(draft) = self.config.cameras.get(slot).map(CameraDraft::from_source) {
+                        self.camera_edit.open(CameraEdit { slot, draft });
+                        self.camera_edit.from = None;
+                    }
+                }
+            } else if let Some(index) = actions.delete_camera {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(camera) = self.config.cameras.get(slot) {
+                        self.remove_confirm.open(RemoveConfirm {
+                            slot,
+                            name: camera.name.clone(),
+                        });
+                        self.remove_confirm.from = None;
+                    }
+                }
+            }
+        }
 
         // A drag on the magnified picture is the picture moving, not the page:
         // the wall has one picture on it and nowhere to turn to, and the channel
@@ -2290,6 +2340,19 @@ fn paint_band(painter: &egui::Painter, bar: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_dismiss_precedes_the_early_returns() {
+        let source = include_str!("wall.rs");
+        let draw = source.find("pub(super) fn draw_grid").unwrap();
+        let tail = &source[draw..];
+        let dismiss = tail.find("self.show_settings = false;").unwrap();
+        let empty_wall = tail.find("if total == 0").unwrap();
+        assert!(
+            dismiss < empty_wall,
+            "a click on an empty wall must also close the settings panel"
+        );
+    }
 
     /// The band the strip stands in is as deep as the panel asks, never more
     /// than half the area, and the picture has everything above it: the whole

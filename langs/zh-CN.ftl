@@ -642,3 +642,6 @@ dialog-bulk-error-main-template = 主码流 RTSP 模板必须包含 {"{n}"}
 dialog-bulk-error-sub-template = 子码流 RTSP 模板必须包含 {"{n}"}
 dialog-bulk-camera-name = 摄像头 { $number }
 dialog-bulk-camera-name-prefixed = { $prefix } — 摄像头 { $number }
+
+camera-context-edit = 编辑摄像头
+camera-context-delete = 删除摄像头

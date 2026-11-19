@@ -698,3 +698,6 @@ dialog-bulk-error-main-template = Main RTSP template must contain {"{n}"}
 dialog-bulk-error-sub-template = Substream RTSP template must contain {"{n}"}
 dialog-bulk-camera-name = Camera { $number }
 dialog-bulk-camera-name-prefixed = { $prefix } — Camera { $number }
+
+camera-context-edit = Edit camera
+camera-context-delete = Delete camera
