@@ -243,7 +243,15 @@ fn format_message(
     for error in &errors {
         tracing::warn!(target: "xgview::i18n", key, %error, "translation formatting error");
     }
-    Some(text.into_owned())
+    // Fluent wraps a placeable that lives inside a referenced message in
+    // isolate marks (U+2068/U+2069). They only matter for bidirectional
+    // scripts; egui lays text out left to right and would draw them as
+    // invisible noise, so drop them after formatting.
+    let text: String = text
+        .chars()
+        .filter(|c| *c != '\u{2068}' && *c != '\u{2069}')
+        .collect();
+    Some(text)
 }
 
 /// The English bundle: the embedded pack, then any external English pack that
@@ -415,6 +423,22 @@ mod tests {
         init(DEFAULT_LANGUAGE, &[]);
         let text = tr_args("greeting", &[("name", "world".into())]);
         assert_eq!(text, "Hello, world!");
+    }
+
+    #[test]
+    fn the_picked_hints_reuse_their_common_parts() {
+        init(DEFAULT_LANGUAGE, &[]);
+        assert_eq!(
+            tr_args("layout-editor-merge-picked", &[("cell", 3usize.into())]),
+            "Cell 3 picked. Choose a neighbour. Press it again to clear."
+        );
+        assert_eq!(
+            tr_args(
+                "layout-editor-merge-picked-splittable",
+                &[("cell", 3usize.into())]
+            ),
+            "Cell 3 picked. Choose a neighbour to merge, or walk to Split to units. Press it again to clear."
+        );
     }
 
     #[test]

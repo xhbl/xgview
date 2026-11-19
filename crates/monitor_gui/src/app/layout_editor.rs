@@ -14,6 +14,26 @@
 use super::*;
 use monitor_core::layout::{Cell, CustomGrid, MAX_CUSTOM_DIMENSION};
 
+/// Every row of the editor starts at this same inset from the panel edge.
+/// The row/column labels, hint, preview and buttons all share it, so their
+/// left edges line up whatever the width of the text in any one row.
+const INSET: f32 = theme::space::XS;
+
+/// Exact width egui gives a text button: the Button-font text plus both pads.
+/// `horizontal_centered` only centres vertically, so a leading space built
+/// from the real button widths is what actually centres the row.
+fn button_width(ui: &egui::Ui, text: &str) -> f32 {
+    let galley = ui.fonts(|fonts| {
+        fonts.layout_no_wrap(
+            text.to_owned(),
+            egui::TextStyle::Button.resolve(ui.style()),
+            theme::TEXT,
+        )
+    });
+    galley.rect.width() + ui.spacing().button_padding.x * 2.0
+}
+
+
 /// How many unit columns two cells share. A vertical neighbour with no
 /// overlap is not above or below this one, even if its row is adjacent.
 fn overlap_columns(a: &Cell, b: &Cell) -> u16 {
@@ -227,6 +247,18 @@ mod tests {
     }
 
     #[test]
+    fn split_is_only_available_while_a_cell_can_be_broken_up() {
+        let mut state = EditorState::open(0, None);
+        assert_eq!(state.split_target(), None);
+        state.enter();
+        state.selected = 1;
+        assert!(state.enter());
+        assert_eq!(state.split_target(), Some(0));
+        assert!(state.split(state.split_target().unwrap()));
+        assert_eq!(state.split_target(), None);
+    }
+
+    #[test]
     fn the_selection_follows_the_shape_the_press_made() {
         let mut state = EditorState::open(0, None);
         state.set_dimensions(3, 2);
@@ -315,12 +347,16 @@ impl XgViewApp {
         let mut answer = Answer::STAY;
         let mut confirmed = false;
         let mut back = false;
-        let mut finished: Option<EditorState> = None;
+                let mut finished: Option<EditorState> = None;
+                // egui gives up the focus the moment a control is drawn grey,
+                // so the greyed Split button cannot tell us afterwards that
+                // the ring was on it. Remember it before anything is drawn.
+                let focus_before = ctx.memory(|memory| memory.focused());
 
-        self.modal_frame(
+                self.modal_frame(
             ctx,
             "xgview-layout-editor",
-            460.0,
+            400.0,
             |app| &mut app.layout_editor,
             |app, ui, payload: &mut EditorState| {
                 let bar = dialogs::title_bar(
@@ -336,6 +372,29 @@ impl XgViewApp {
                 }
 
                 // The remote enters on the first row button, not on the cross.
+                // One fixed slot for both labels: "Columns" is wider than
+                // "Rows", so a hard-coded width lets the digit columns drift
+                // apart. Measure the translated text at the same size egui
+                // will draw it, then force that width on both rows.
+                // Match the digits: those are Button text, whose font can be
+                // larger than Body. Using the row height as a font size made
+                // the labels visibly bigger than the buttons.
+                let label_font = egui::TextStyle::Button.resolve(ui.style());
+                let label_w = ui.fonts(|fonts| {
+                    ["layout-editor-rows", "layout-editor-columns"]
+                        .iter()
+                        .map(|key| {
+                            fonts
+                                .layout_no_wrap(
+                                    monitor_i18n::tr(key).to_string(),
+                                    label_font.clone(),
+                                    theme::TEXT,
+                                )
+                                .rect
+                                .width()
+                        })
+                        .fold(0.0_f32, f32::max)
+                }) + theme::space::M;
                 app.layout_editor.anchor = None;
                 ui.add_space(theme::space::S);
                 for (key, scope, is_rows) in [
@@ -344,7 +403,22 @@ impl XgViewApp {
                 ] {
                     app.nav.open(scope);
                     ui.horizontal(|ui| {
-                        ui.label(monitor_i18n::tr(key));
+                        ui.add_space(INSET);
+                        // Reserve the whole slot before drawing into it: a
+                        // child label only reports the width of its own text,
+                        // so the shorter "Rows" let the digits slide left.
+                        let row_h = ui.text_style_height(&egui::TextStyle::Button)
+                            + ui.spacing().button_padding.y * 2.0;
+                        let slot = ui
+                            .allocate_exact_size(vec2(label_w, row_h), egui::Sense::hover())
+                            .0;
+                        ui.painter().text(
+                            slot.left_center(),
+                            egui::Align2::LEFT_CENTER,
+                            monitor_i18n::tr(key),
+                            label_font.clone(),
+                            theme::TEXT,
+                        );
                         for value in 1..=MAX_CUSTOM_DIMENSION {
                             let current =
                                 if is_rows { payload.grid.rows } else { payload.grid.cols };
@@ -367,20 +441,43 @@ impl XgViewApp {
                     app.nav.close();
                 }
 
-                ui.add_space(theme::space::XS);
                 let hint = if let Some(anchor) = payload.anchor {
-                    monitor_i18n::tr_args(
-                        "layout-editor-merge-picked",
-                        &[("cell", (anchor + 1).into())],
-                    )
+                    // A merged cell has a second way out besides merging:
+                    // say so while it is the one under the ring.
+                    let key = if payload.grid.can_split(anchor) {
+                        "layout-editor-merge-picked-splittable"
+                    } else {
+                        "layout-editor-merge-picked"
+                    };
+                    monitor_i18n::tr_args(key, &[("cell", (anchor + 1).into())])
                 } else {
                     monitor_i18n::tr("layout-editor-merge-hint")
                 };
-                ui.label(RichText::new(hint).small().color(theme::ACCENT));
-
-                ui.add_space(theme::space::S);
-                let preview_w = ui.available_width().min(220.0);
-                let area = ui.allocate_space(vec2(preview_w, 110.0)).1;
+                let column_w = 220.0;
+                ui.add_space(theme::space::M);
+                let mut area = egui::Rect::NOTHING;
+                ui.horizontal(|ui| {
+                    ui.add_space(INSET);
+                    area = ui.allocate_exact_size(vec2(column_w, 110.0), egui::Sense::hover()).0;
+                    ui.add_space(theme::space::M);
+                    // The hint sits beside the preview in a fixed-height
+                    // block. Its wording changes when a cell is picked; with
+                    // its own column the rows below no longer jump as it
+                    // re-wraps.
+                    let hint_w = ui.available_width();
+                    ui.allocate_ui_with_layout(
+                        vec2(hint_w, 110.0),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(hint).small().color(theme::ACCENT),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                        },
+                    );
+                });
                 let layout = GridLayout::Custom(payload.grid);
                 grid::layout_thumbnail(ui.painter(), area, layout);
                 // egui turns Enter/Space into a click on a focused widget
@@ -439,12 +536,15 @@ impl XgViewApp {
                         if ui.is_rect_visible(rect) {
                             let painter = ui.painter();
                             let corner = egui::CornerRadius::same(theme::radius::S);
-                        let fill = if anchored {
-                            theme::ACCENT.gamma_multiply(0.55)
-                        } else {
-                            visuals.weak_bg_fill
-                        };
-                        painter.rect_filled(rect, corner, fill);
+                        // The thumbnail's white grid lines live under these
+                        // cells. Fill only the one state that needs a fill,
+                        // and keep it inside the line so the full outline
+                        // stays visible.
+                        if anchored {
+                            painter.rect_filled(rect.shrink(1.0), corner, theme::ACCENT.gamma_multiply(0.55));
+                        } else if response.hovered() || response.has_focus() {
+                            painter.rect_filled(rect.shrink(1.0), corner, visuals.weak_bg_fill);
+                        }
                         if anchored {
                             // The cyan ring means "the remote is here"; the
                             // anchor needs a different signal, or the first
@@ -475,22 +575,70 @@ impl XgViewApp {
                 }
 
                 ui.add_space(theme::space::S);
+                // `horizontal_centered` centres vertically, not horizontally,
+                // so pad by the measured width of the three buttons instead.
+                // This keeps the row centred without claiming extra height.
                 app.nav.open("layout-editor-actions");
                 ui.horizontal(|ui| {
-                    let split = app
-                        .nav
-                        .tracked(ui.button(monitor_i18n::tr("layout-editor-split")));
-                    if split.clicked() {
-                        if let Some(target) = payload.split_target() {
-                            payload.split(target);
+                    let labels = [
+                        monitor_i18n::tr("layout-editor-split"),
+                        monitor_i18n::tr("ok"),
+                        monitor_i18n::tr("cancel"),
+                    ];
+                    let used = labels.iter().map(|text| button_width(ui, text)).sum::<f32>()
+                        + 2.0 * ui.spacing().item_spacing.x;
+                    ui.add_space(((ui.available_width() - used) * 0.5).max(0.0));
+                    let can_split = payload.split_target().is_some();
+                    // A disabled control must not stay in the ring: the
+                    // remote would land on a grey button with no focus ring
+                    // and think the focus was lost. Skip tracking it and, if
+                    // the ring is already here, hand it back to the preview.
+                    let split = ui.add_enabled(
+                        can_split,
+                        egui::Button::new(labels[0].clone()),
+                    );
+                    if can_split {
+                        let split = app.nav.tracked(split);
+                        if split.clicked() {
+                            if let Some(target) = payload.split_target() {
+                                // Only move a ring that was actually here:
+                                // a pointer press with the ring elsewhere
+                                // leaves it where the viewer put it.
+                                let ring_was_on_split = focus_before == Some(split.id);
+                                let ring_was_on_target = focus_before
+                                    == Some(egui::Id::new(("layout-editor-cell", target)));
+                                payload.split(target);
+                                if ring_was_on_split || ring_was_on_target {
+                                    // Splitting greys this button out. Put the
+                                    // ring on the first unit it just made,
+                                    // not on the row of dimension buttons.
+                                    app.restore_focus = Some(egui::Id::new((
+                                        "layout-editor-cell",
+                                        payload.selected,
+                                    )));
+                                    if ring_was_on_split {
+                                        // The Enter that pressed Split must not
+                                        // also set an anchor on the new cell.
+                                        app.swallow_confirm = 2;
+                                    }
+                                }
+                            }
                         }
+                    } else if focus_before == Some(split.id) {
+                        // Greying a control surrenders egui's focus, so asking
+                        // from `has_focus()` here is too late. The frame's
+                        // starting focus is the only record that the ring was
+                        // on this button.
+                        app.restore_focus =
+                            Some(egui::Id::new(("layout-editor-cell", payload.selected)));
+                        app.swallow_confirm = 2;
                     }
-                    let ok = app.nav.tracked(ui.button(monitor_i18n::tr("ok")));
+                    let ok = app.nav.tracked(ui.button(labels[1].clone()));
                     if ok.clicked() && payload.valid() {
                         confirmed = true;
                         finished = Some(*payload);
                     }
-                    let cancel = app.nav.tracked(ui.button(monitor_i18n::tr("cancel")));
+                    let cancel = app.nav.tracked(ui.button(labels[2].clone()));
                     if cancel.clicked() {
                         back = true;
                     }

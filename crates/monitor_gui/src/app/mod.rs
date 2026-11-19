@@ -5240,6 +5240,14 @@ mod tests {
                 && app.contains("Exit::ScopeAt(\"layout-editor-grid-row-1\")"),
             "Up/Down cross the preview rows instead of leaving the grid"
         );
+        assert!(
+            editor.contains("focus_before == Some(split.id)"),
+            "greying Split hands the ring to the preview, not the dimension row"
+        );
+        assert!(
+            editor.contains("ring_was_on_split || ring_was_on_target"),
+            "a pointer press leaves a ring that was elsewhere alone"
+        );
         let at = editor.find("for (index, cell)").expect("the preview cell loop");
         let rest = &editor[at..];
         let end = rest.find("app.nav.close()").expect("the end of the preview loop");

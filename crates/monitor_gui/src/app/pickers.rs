@@ -3,6 +3,15 @@
 
 use super::*;
 
+/// Horizontal centring without taking the row's full height.
+///
+/// `horizontal_centred` hands the child the whole available rect and centres
+/// in both axes, which made the modal fill the screen. A plain row with a
+/// measured left pad only spends width.
+fn left_pad(ui: &egui::Ui, used: f32) -> f32 {
+    ((ui.available_width() - used) * 0.5).max(0.0)
+}
+
 impl XgViewApp {
     /// The picker that offers the layouts with no button of their own.
     ///
@@ -51,6 +60,7 @@ impl XgViewApp {
                 ui.add_space(theme::space::XS);
                 app.nav.open("layout-picker-tabs");
                 ui.horizontal(|ui| {
+                    ui.add_space(left_pad(ui, 200.0));
                     for (page, key) in [
                         (PickerTab::Presets, "layout-picker-tab-presets"),
                         (PickerTab::Custom, "layout-picker-tab-custom"),
@@ -73,6 +83,7 @@ impl XgViewApp {
                         for (row, chunk) in GridLayout::EXTENDED.chunks(3).enumerate() {
                             let scope = LAYOUT_PICKER_ROWS[row];
                             ui.horizontal(|ui| {
+                                ui.add_space(left_pad(ui, 108.0 * 3.0 + 2.0 * ui.spacing().item_spacing.x));
                                 app.nav.open(scope);
                                 for layout in chunk {
                                     let selected = app.scheduler.layout() == *layout;
@@ -119,6 +130,7 @@ impl XgViewApp {
                         for (row, pair) in [0usize, 2].into_iter().enumerate() {
                             let scope = LAYOUT_PICKER_ROWS[row];
                             ui.horizontal(|ui| {
+                                ui.add_space(left_pad(ui, 150.0 * 2.0 + ui.spacing().item_spacing.x));
                                 app.nav.open(scope);
                                 for (slot, grid) in slots
                                     .iter()
@@ -126,72 +138,114 @@ impl XgViewApp {
                                     .filter(|(index, _)| *index >= pair && *index < pair + 2)
                                 {
                                     let grid = *grid;
-                                    let (rect, response) =
-                                        ui.allocate_exact_size(vec2(150.0, 116.0), Sense::click());
-                                    if app.layout_picker.anchor.is_none() {
-                                        app.layout_picker.anchor = Some(response.id);
-                                    }
-                                    let painter = ui.painter();
-                                    let active = match app.scheduler.layout() {
-                                        GridLayout::Custom(g) => Some(g) == grid,
-                                        _ => false,
-                                    };
-                                    let visuals = ui.style().interact_selectable(&response, active);
-                                    let corner = CornerRadius::same(theme::radius::S);
-                                    if active || response.hovered() {
-                                        painter.rect_filled(rect, corner, visuals.weak_bg_fill);
-                                    }
-                                    if visuals.bg_stroke.width > 0.0 {
-                                        painter.rect_stroke(rect, corner, visuals.bg_stroke, StrokeKind::Inside);
-                                    }
-                                    match grid {
-                                        Some(grid) => {
-                                            let thumb = Rect::from_min_size(
-                                                rect.left_top() + vec2(6.0, 6.0),
-                                                vec2(rect.width() - 12.0, rect.height() - 32.0),
-                                            );
-                                            grid::layout_thumbnail(painter, thumb, GridLayout::Custom(grid));
-                                            painter.text(
-                                                egui::pos2(rect.center().x, rect.bottom() - 12.0),
-                                                Align2::CENTER_CENTER,
-                                                grid.display_label(),
-                                                FontId::proportional(13.0),
-                                                visuals.text_color(),
-                                            );
+                                    ui.vertical(|ui| {
+                                        ui.set_width(150.0);
+                                        let (rect, response) =
+                                            ui.allocate_exact_size(vec2(150.0, 116.0), Sense::click());
+                                        if app.layout_picker.anchor.is_none() {
+                                            app.layout_picker.anchor = Some(response.id);
                                         }
-                                        None => {
-                                            painter.text(
-                                                rect.center(),
-                                                Align2::CENTER_CENTER,
-                                                "+",
-                                                FontId::proportional(28.0),
-                                                theme::TEXT_DIM,
-                                            );
+                                        let painter = ui.painter();
+                                        let active = match app.scheduler.layout() {
+                                            GridLayout::Custom(g) => Some(g) == grid,
+                                            _ => false,
+                                        };
+                                        let visuals = ui.style().interact_selectable(&response, active);
+                                        let corner = CornerRadius::same(theme::radius::S);
+                                        if active || response.hovered() {
+                                            painter.rect_filled(rect, corner, visuals.weak_bg_fill);
                                         }
-                                    }
-                                    let response = app.nav.tracked(response);
-                                    app.name(&response, "layout-picker-custom-slot");
-                                    let tile_id = response.id;
-                                    if response.clicked() {
+                                        if grid.is_some() && visuals.bg_stroke.width > 0.0 {
+                                            painter.rect_stroke(rect, corner, visuals.bg_stroke, StrokeKind::Inside);
+                                        }
                                         match grid {
-                                            Some(grid) => chosen = Some(GridLayout::Custom(grid)),
+                                            Some(grid) => {
+                                                let thumb = Rect::from_min_size(
+                                                    rect.left_top() + vec2(6.0, 6.0),
+                                                    vec2(rect.width() - 12.0, rect.height() - 32.0),
+                                                );
+                                                grid::layout_thumbnail(painter, thumb, GridLayout::Custom(grid));
+                                                painter.text(
+                                                    egui::pos2(rect.center().x, rect.bottom() - 12.0),
+                                                    Align2::CENTER_CENTER,
+                                                    grid.display_label(),
+                                                    FontId::proportional(13.0),
+                                                    visuals.text_color(),
+                                                );
+                                            }
                                             None => {
-                                                let from = (!response.clicked_by(egui::PointerButton::Primary))
-                                                    .then_some(tile_id);
-                                                edit_slot = Some((slot, from, from));
+                                                let frame = rect.shrink(6.0);
+                                                let corners = [
+                                                    frame.left_top(),
+                                                    frame.right_top(),
+                                                    frame.right_bottom(),
+                                                    frame.left_bottom(),
+                                                    frame.left_top(),
+                                                ];
+                                                for dash in egui::Shape::dashed_line(
+                                                    &corners,
+                                                    egui::Stroke::new(1.0_f32, theme::TILE_BORDER),
+                                                    8.0,
+                                                    6.0,
+                                                ) {
+                                                    painter.add(dash);
+                                                }
+                                                painter.text(
+                                                    rect.center(),
+                                                    Align2::CENTER_CENTER,
+                                                    "+",
+                                                    FontId::proportional(28.0),
+                                                    theme::TEXT_DIM,
+                                                );
+                                                if response.hovered() || response.has_focus() {
+                                                    if visuals.bg_stroke.width > 0.0 {
+                                                        painter.rect_stroke(rect, corner, visuals.bg_stroke, StrokeKind::Inside);
+                                                    }
+                                                }
                                             }
                                         }
-                                    }
-                                    let pencil = ui.button(monitor_i18n::tr("layout-picker-edit"));
-                                    let pencil = app.nav.tracked(pencil);
-                                    if pencil.clicked() {
-                                        let from = (!pencil.clicked_by(egui::PointerButton::Primary))
-                                            .then_some(pencil.id);
-                                        // Confirm lands on the slot the pencil
-                                        // edits; Cancel goes back to the pencil
-                                        // itself. Pointer presses move no ring.
-                                        edit_slot = Some((slot, from, from.map(|_| tile_id)));
-                                    }
+                                        let response = app.nav.tracked(response);
+                                        app.name(&response, "layout-picker-custom-slot");
+                                        let tile_id = response.id;
+                                        if response.clicked() {
+                                            match grid {
+                                                Some(grid) => chosen = Some(GridLayout::Custom(grid)),
+                                                None => {
+                                                    let from = (!response.clicked_by(egui::PointerButton::Primary))
+                                                        .then_some(tile_id);
+                                                    edit_slot = Some((slot, from, from));
+                                                }
+                                            }
+                                        }
+                                        // The pencil belongs to the tile, not
+                                        // to a row below it: it sits in the
+                                        // tile's bottom-right corner so the two
+                                        // cards keep one height and one row.
+                                        let edit_rect = Rect::from_min_size(
+                                            egui::pos2(rect.right() - 28.0, rect.bottom() - 28.0),
+                                            vec2(24.0, 24.0),
+                                        );
+                                        let edit = icons::button_in(
+                                            ui,
+                                            edit_rect,
+                                            egui::Id::new(("layout-picker-edit", slot)),
+                                            icons::Icon::Edit,
+                                            false,
+                                            false,
+                                            &monitor_i18n::tr("layout-picker-edit"),
+                                            false,
+                                        );
+                                        let edit = app.nav.tracked(edit);
+                                        app.name(&edit, "layout-picker-edit");
+                                        if edit.clicked() {
+                                            let from = (!edit.clicked_by(egui::PointerButton::Primary))
+                                                .then_some(edit.id);
+                                            // Confirm lands on the slot the pencil
+                                            // edits; Cancel goes back to the pencil
+                                            // itself. Pointer presses move no ring.
+                                            edit_slot = Some((slot, from, from.map(|_| tile_id)));
+                                        }
+                                    });
                                 }
                                 app.nav.close();
                             });
