@@ -5276,6 +5276,11 @@ mod tests {
             "Delete is greyed out while the slot is on the wall"
         );
         assert!(
+            editor.contains("payload.split_target_for(focused_cell")
+                && editor.contains("app.restore_focus = Some(ok.id)"),
+            "Split follows the ring only on a cell; a greyed Split hands it to OK"
+        );
+        assert!(
             app.contains("if active {") && app.contains("set_layout(GridLayout::Custom(grid))"),
             "Confirm switches the wall only when the edited slot is already on it"
         );

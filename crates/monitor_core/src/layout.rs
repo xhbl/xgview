@@ -184,6 +184,64 @@ impl CustomGrid {
         next.is_valid().then_some(next)
     }
 
+    /// Merge every cell inside the rectangle spanned by two cells. A drag
+    /// from one viewport to another names a rectangle, not necessarily two
+    /// neighbours: all cells wholly inside it must tile it exactly, or the
+    /// edit is refused. A drag inside one cell, or one that cuts through a
+    /// larger cell, makes no change.
+    pub fn merge_rect(&self, a: usize, b: usize) -> Option<Self> {
+        let cells = self.cells();
+        let (Some(first), Some(second)) = (cells.get(a), cells.get(b)) else {
+            return None;
+        };
+        if a == b {
+            return None;
+        }
+        let left = u16::from(first.col.min(second.col));
+        let top = u16::from(first.row.min(second.row));
+        let right = (u16::from(first.col) + u16::from(first.col_span))
+            .max(u16::from(second.col) + u16::from(second.col_span));
+        let bottom = (u16::from(first.row) + u16::from(first.row_span))
+            .max(u16::from(second.row) + u16::from(second.row_span));
+        let (width, height) = (right - left, bottom - top);
+        if width == 0 || height == 0 || left + width > u16::from(self.cols)
+            || top + height > u16::from(self.rows)
+        {
+            return None;
+        }
+
+        let mut picked = Vec::new();
+        let mut area = 0usize;
+        for (index, cell) in cells.iter().enumerate() {
+            let (col, row) = (u16::from(cell.col), u16::from(cell.row));
+            if col >= left && col + u16::from(cell.col_span) <= right
+                && row >= top && row + u16::from(cell.row_span) <= bottom
+            {
+                picked.push(index);
+                area += usize::from(cell.col_span) * usize::from(cell.row_span);
+            }
+        }
+        if picked.len() < 2 || area != usize::from(width) * usize::from(height) {
+            return None;
+        }
+
+        let mut next = *self;
+        let mut out = [c(0, 0, 1, 1); 36];
+        let mut index = 0;
+        for (position, cell) in cells.iter().enumerate() {
+            if !picked.contains(&position) {
+                out[index] = *cell;
+                index += 1;
+            }
+        }
+        out[index] = c(left as u8, top as u8, width as u8, height as u8);
+        index += 1;
+        next.count = index as u8;
+        next.cells = out;
+        next.sort();
+        next.is_valid().then_some(next)
+    }
+
     /// A cell can be split back when one of its spans is more than one unit.
     pub fn can_split(&self, index: usize) -> bool {
         self.cells().get(index).is_some_and(|cell| cell.col_span > 1 || cell.row_span > 1)
@@ -1022,6 +1080,32 @@ mod tests {
         let wide = grid.merge(0, 1).unwrap();
         assert!(!wide.can_merge(0, 3));
         assert!(wide.merge(0, 3).is_none());
+    }
+
+    #[test]
+    fn a_drag_merges_every_cell_inside_its_rectangle() {
+        let grid = CustomGrid::uniform(3, 3);
+        let merged = grid.merge_rect(0, 8).unwrap();
+        assert!(merged.is_valid());
+        assert_eq!(merged.count, 1);
+        assert_eq!(merged.cells()[0], c(0, 0, 3, 3));
+
+        let two_by_two = grid.merge_rect(0, 4).unwrap();
+        assert_eq!(two_by_two.count, 6);
+        assert_eq!(two_by_two.cells()[0], c(0, 0, 2, 2));
+        assert!(two_by_two.is_valid());
+    }
+
+    #[test]
+    fn a_drag_that_cuts_a_larger_cell_or_stays_in_one_is_refused() {
+        let grid = CustomGrid::uniform(3, 2);
+        assert!(grid.merge_rect(0, 0).is_none(), "a drag inside one cell");
+        // A 2x2 cell at the top right. The rectangle from the top-left unit
+        // to the bottom middle cuts through the big cell, so the four cells
+        // wholly inside it cover only four of its six units.
+        let grid = CustomGrid::uniform(3, 3).merge_rect(1, 5).unwrap();
+        assert!(grid.merge_rect(0, 4).is_none());
+        assert!(grid.merge_rect(0, 2).is_some(), "the whole left column is legal");
     }
 
     #[test]

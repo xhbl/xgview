@@ -428,16 +428,18 @@ mod tests {
     #[test]
     fn the_picked_hints_reuse_their_common_parts() {
         init(DEFAULT_LANGUAGE, &[]);
-        assert_eq!(
-            tr_args("layout-editor-merge-picked", &[("cell", 3usize.into())]),
-            "Cell 3 picked. Choose a neighbour. Press it again to clear."
+        let hint = tr("layout-editor-merge-hint");
+        assert!(
+            hint.starts_with("Merge cells:") && hint.contains("drag"),
+            "the hint leads with the operation and names the drag gesture"
         );
         assert_eq!(
-            tr_args(
-                "layout-editor-merge-picked-splittable",
-                &[("cell", 3usize.into())]
-            ),
-            "Cell 3 picked. Choose a neighbour to merge, or walk to Split to units. Press it again to clear."
+            tr_args("layout-editor-merge-picked", &[("cell", 3usize.into())]),
+            "Selected cell 3. Choose a matching neighbour, or drag to another cell to merge every cell inside the rectangle. Press it again to deselect."
+        );
+        assert_eq!(
+            tr_args("layout-editor-merge-picked-splittable", &[("cell", 3usize.into())]),
+            "Selected cell 3. Choose a neighbour, drag to another cell to merge every cell inside the rectangle, or use Split cell to break it apart. Press it again to deselect."
         );
     }
 

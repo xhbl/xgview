@@ -42,6 +42,50 @@ fn overlap_columns(a: &Cell, b: &Cell) -> u16 {
     right.saturating_sub(left)
 }
 
+/// The cell under the pointer at release. A drag that ends outside the
+/// preview, or in a gap between cells, has nowhere legal to land.
+fn cell_under(
+    area: egui::Rect,
+    layout: GridLayout,
+    cells: &[Cell],
+    pos: Option<egui::Pos2>,
+) -> Option<usize> {
+    let pos = pos?;
+    if !area.contains(pos) {
+        return None;
+    }
+    cells.iter().enumerate().find_map(|(index, _)| {
+        grid::tile_rect(area, layout, index, 2.0).contains(pos).then_some(index)
+    })
+}
+
+/// The unit rectangle spanned by the two ends of a drag. Every cell wholly
+/// inside it would be merged on release, so the whole set is highlighted
+/// rather than just the endpoints.
+fn drag_bounds(cells: &[Cell], from: usize, to: usize) -> Option<(u16, u16, u16, u16)> {
+    let (Some(a), Some(b)) = (cells.get(from), cells.get(to)) else {
+        return None;
+    };
+    Some((
+        a.col.min(b.col).into(),
+        a.row.min(b.row).into(),
+        (u16::from(a.col) + u16::from(a.col_span))
+            .max(u16::from(b.col) + u16::from(b.col_span)),
+        (u16::from(a.row) + u16::from(a.row_span))
+            .max(u16::from(b.row) + u16::from(b.row_span)),
+    ))
+}
+
+/// The cell the keyboard ring was on before an edit. Its index can vanish in
+/// the re-sort, so the ring has to be put back on whatever cell now covers
+/// the same unit after a pointer merge.
+fn focused_cell(cells: &[Cell], focused: Option<egui::Id>) -> Option<(usize, Cell)> {
+    let focused = focused?;
+    cells.iter().enumerate().find_map(|(index, cell)| {
+        (focused == egui::Id::new(("layout-editor-cell", index))).then_some((index, *cell))
+    })
+}
+
 /// What the editor is showing while it is open.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct EditorState {
@@ -62,6 +106,10 @@ pub(super) struct EditorState {
     /// viewer walks to a neighbour and presses Enter again. Keeping it
     /// explicit means a single press can never merge something by accident.
     pub(super) anchor: Option<usize>,
+    /// Cell a pointer drag began on, and the cell it is over now. Both are
+    /// cleared on release; neither is written to the configuration.
+    pub(super) drag_from: Option<usize>,
+    pub(super) drag_to: Option<usize>,
 }
 
 impl EditorState {
@@ -69,7 +117,16 @@ impl EditorState {
     /// small uniform grid rather than an empty preview.
     pub(super) fn open(slot: usize, existing: Option<CustomGrid>) -> Self {
         let grid = existing.unwrap_or_else(|| CustomGrid::uniform(2, 2));
-        EditorState { slot, slot_focus: None, grid, selected: 0, anchor: None, delete: false }
+        EditorState {
+            slot,
+            slot_focus: None,
+            grid,
+            selected: 0,
+            anchor: None,
+            delete: false,
+            drag_from: None,
+            drag_to: None,
+        }
     }
 
     /// Rebuild from plain dimensions. The selection is clamped to the new
@@ -78,12 +135,16 @@ impl EditorState {
         self.grid = CustomGrid::uniform(cols, rows);
         self.selected = self.selected.min(self.grid.cells().len().saturating_sub(1));
         self.anchor = None;
+        self.drag_from = None;
+        self.drag_to = None;
     }
 
     /// The first Enter on a cell marks it; the second, on a neighbour, merges
     /// them. Pressing it on the anchor again clears the mark. Returns true
     /// when the grid actually changed.
     pub(super) fn enter(&mut self) -> bool {
+        self.drag_from = None;
+        self.drag_to = None;
         match self.anchor {
             None => {
                 self.anchor = Some(self.selected);
@@ -111,12 +172,37 @@ impl EditorState {
         }
     }
 
-    /// Which cell the Split button acts on. An anchor the viewer just picked
-    /// wins: walking down to the button changes the focus cell, but the split
-    /// should still undo the shape they selected. Fall back to the last focus
-    /// when there is no anchor, and to a cell that can actually be split.
-    pub(super) fn split_target(&self) -> Option<usize> {
-        [self.anchor, Some(self.selected)]
+    /// Finish a pointer drag from one cell to another. The rectangle has to
+    /// be tiled exactly by the cells inside it; an illegal landing changes
+    /// nothing. The survivor is followed through the re-sort so a later
+    /// split or merge still acts on the shape under the pointer.
+    pub(super) fn merge_drag(&mut self, to: usize) -> bool {
+        let Some(from) = self.drag_from.take() else {
+            return false;
+        };
+        self.drag_to = None;
+        let first = self.grid.cells()[from];
+        let second = self.grid.cells()[to];
+        if let Some(grid) = self.grid.merge_rect(from, to) {
+            self.grid = grid;
+            self.select_at(first.row.min(second.row), first.col.min(second.col));
+            // A pointer drag leaves the ring where it was. Marking the new
+            // cell as picked gives it the same visible selection the second
+            // Enter press gives, so Split is lit on a cell the viewer can
+            // actually see is selected.
+            self.anchor = Some(self.selected);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The Split button's target during a frame. An anchor is an explicit
+    /// pick and survives the ring walking away. Without one, the only valid
+    /// target is the cell the ring is on right now: a cell that merely used
+    /// to have the ring must not keep Split lit after the ring has left.
+    pub(super) fn split_target_for(&self, focused: Option<usize>) -> Option<usize> {
+        [self.anchor, focused]
             .into_iter()
             .flatten()
             .find(|&index| self.grid.can_split(index))
@@ -132,6 +218,8 @@ impl EditorState {
         if let Some(grid) = self.grid.split(index) {
             self.grid = grid;
             self.anchor = None;
+            self.drag_from = None;
+            self.drag_to = None;
             self.select_at(cell.row, cell.col);
             true
         } else {
@@ -206,6 +294,8 @@ mod tests {
         assert_eq!(state.slot, 2);
         assert_eq!(state.grid.cells().len(), 4);
         assert_eq!(state.anchor, None);
+        assert_eq!(state.drag_from, None);
+        assert_eq!(state.drag_to, None);
         assert!(!state.delete);
         assert!(state.valid());
     }
@@ -251,15 +341,74 @@ mod tests {
     }
 
     #[test]
+    fn split_follows_the_ring_only_while_it_is_on_the_cell() {
+        let merged = CustomGrid::uniform(2, 2).merge(0, 1).unwrap();
+        let mut state = EditorState::open(0, Some(merged));
+        state.selected = 0;
+        assert_eq!(state.split_target_for(Some(0)), Some(0));
+        assert_eq!(state.split_target_for(None), None, "the ring left the cell");
+        state.anchor = Some(0);
+        assert_eq!(state.split_target_for(None), Some(0), "an explicit pick stays");
+    }
+
+    #[test]
     fn split_is_only_available_while_a_cell_can_be_broken_up() {
         let mut state = EditorState::open(0, None);
-        assert_eq!(state.split_target(), None);
+        assert_eq!(state.split_target_for(None), None);
         state.enter();
         state.selected = 1;
         assert!(state.enter());
-        assert_eq!(state.split_target(), Some(0));
-        assert!(state.split(state.split_target().unwrap()));
-        assert_eq!(state.split_target(), None);
+        assert_eq!(state.split_target_for(Some(0)), Some(0));
+        assert!(state.split(state.split_target_for(Some(0)).unwrap()));
+        assert_eq!(state.split_target_for(None), None);
+    }
+
+    #[test]
+    fn a_focused_cell_is_found_before_the_grid_is_re_sorted() {
+        let grid = CustomGrid::uniform(2, 2);
+        let (index, cell) = focused_cell(
+            grid.cells(),
+            Some(egui::Id::new(("layout-editor-cell", 1))),
+        )
+        .unwrap();
+        assert_eq!(index, 1);
+        assert_eq!((cell.row, cell.col), (0, 1));
+        assert_eq!(focused_cell(grid.cells(), None), None);
+        assert_eq!(
+            focused_cell(grid.cells(), Some(egui::Id::new("layout-editor-cell"))),
+            None
+        );
+    }
+
+    #[test]
+    fn the_drag_highlight_covers_the_whole_rectangle() {
+        let grid = CustomGrid::uniform(3, 3);
+        assert_eq!(drag_bounds(grid.cells(), 0, 8), Some((0, 0, 3, 3)));
+        assert_eq!(drag_bounds(grid.cells(), 1, 5), Some((1, 0, 3, 2)));
+        assert_eq!(drag_bounds(grid.cells(), 0, 9), None);
+    }
+
+    #[test]
+    fn a_pointer_drag_merges_the_rectangle_it_covers() {
+        let mut state = EditorState::open(0, None);
+        state.drag_from = Some(0);
+        state.drag_to = Some(3);
+        assert!(state.merge_drag(3));
+        assert_eq!(state.grid.count, 1);
+        assert_eq!(
+            state.grid.cells()[0],
+            monitor_core::layout::Cell { col: 0, row: 0, col_span: 2, row_span: 2 }
+        );
+        assert_eq!(state.drag_from, None);
+        assert_eq!(state.drag_to, None);
+        assert_eq!(state.anchor, Some(state.selected));
+
+        let merged = state.grid;
+        state.drag_from = Some(0);
+        assert!(!state.merge_drag(0), "a drag inside one cell changes nothing");
+        assert_eq!(state.grid, merged);
+        assert_eq!(state.drag_from, None);
+        assert_eq!(state.anchor, Some(state.selected));
     }
 
     #[test]
@@ -302,8 +451,8 @@ mod tests {
         assert_eq!(state.anchor, None);
         state.enter(); // anchor that wide cell
         state.selected = 2; // walking down to the button visits a unit cell
-        assert_eq!(state.split_target(), Some(0));
-        assert!(state.split(state.split_target().unwrap()));
+        assert_eq!(state.split_target_for(None), Some(0));
+        assert!(state.split(state.split_target_for(None).unwrap()));
         assert_eq!(state.grid, CustomGrid::uniform(2, 2));
     }
 
@@ -509,6 +658,12 @@ impl XgViewApp {
                 // row above or below. A snapshot keeps the borrow of `payload`
                 // clear while a press edits the grid mid-walk.
                 let cells = payload.grid.cells().to_vec();
+                let focused_cell = focused_cell(&cells, focused);
+                let pointer = ctx.input(|input| input.pointer.latest_pos());
+                let drag_region = payload
+                    .drag_from
+                    .zip(payload.drag_to)
+                    .and_then(|(from, to)| drag_bounds(&cells, from, to));
                 let mut changed = false;
                 for (row, scope) in LAYOUT_EDITOR_GRID_ROWS.iter().enumerate() {
                     app.nav.open(scope);
@@ -518,28 +673,69 @@ impl XgViewApp {
                         }
                         let rect = grid::tile_rect(area, layout, index, 2.0);
                         let id = egui::Id::new(("layout-editor-cell", index));
-                        let response = ui.interact(rect, id, egui::Sense::click());
+                        let response = ui.interact(rect, id, egui::Sense::click_and_drag());
                         if response.has_focus() {
                             payload.selected = index;
                         }
-                        if response.clicked() {
+                        // A press starts a rectangle drag. The cells under
+                        // the start and the pointer are marked while it is
+                        // held; only the release edits the grid.
+                        if response.drag_started() {
+                            payload.drag_from = Some(index);
+                            payload.drag_to = Some(index);
                             payload.selected = index;
-                            changed = payload.enter();
+                            payload.anchor = None;
                         }
-                        let by_key = changed
-                            && focused == Some(response.id)
+                        if payload.drag_from == Some(index) {
+                            payload.drag_to = cell_under(area, layout, &cells, pointer);
+                            if response.drag_stopped() {
+                                let landing = payload.drag_to.unwrap_or(index);
+                                changed = payload.merge_drag(landing);
+                            }
+                        }
+                        let dragged = response.drag_started()
+                            || response.dragged()
+                            || response.drag_stopped();
+                        let confirm_by_key = focused == Some(response.id)
                             && ctx.input(|input| {
                                 input::CONFIRM_KEYS.iter().any(|key| input.key_pressed(*key))
                             });
+                        if response.clicked() && !dragged {
+                            payload.selected = index;
+                            changed = payload.enter();
+                            if changed && !confirm_by_key {
+                                // A pointer press moves no ring, so mark the
+                                // survivor as picked to show what Split acts
+                                // on. The keyboard already gets the ring.
+                                payload.anchor = Some(payload.selected);
+                            }
+                        }
                         app.nav.item(&response);
                         if changed {
-                            // The merge re-sorted the cells. The surviving
-                            // shape is at `selected`; a remote needs the ring
-                            // put on it rather than on the index that just
-                            // went away. A pointer press moves no ring.
-                            if by_key {
+                            // An edit re-sorts the cells, so the index the
+                            // ring held can name another shape or none at
+                            // all. Put it back on the cell that now covers
+                            // the same unit, whether the merge came from a
+                            // key or from a pointer. With no ring in the
+                            // grid a pointer press creates none.
+                            if let Some((_, was)) = focused_cell {
+                                let target = payload
+                                    .grid
+                                    .cells()
+                                    .iter()
+                                    .position(|cell| {
+                                        cell.row <= was.row
+                                            && cell.col <= was.col
+                                            && u16::from(cell.row)
+                                                + u16::from(cell.row_span)
+                                                >= u16::from(was.row) + 1
+                                            && u16::from(cell.col)
+                                                + u16::from(cell.col_span)
+                                                >= u16::from(was.col) + 1
+                                    })
+                                    .unwrap_or(payload.selected);
                                 app.restore_focus =
-                                    Some(egui::Id::new(("layout-editor-cell", payload.selected)));
+                                    Some(egui::Id::new(("layout-editor-cell", target)));
                             }
                             break;
                         }
@@ -548,7 +744,14 @@ impl XgViewApp {
                         // own: `interact_selectable` is what turns a focus
                         // ring into a visible stroke, the same way the
                         // picker's thumbnails do.
-                        let anchored = payload.anchor == Some(index);
+                        let in_drag = drag_region.is_some_and(|(left, top, right, bottom)| {
+                            let (col, row) = (u16::from(cell.col), u16::from(cell.row));
+                            col >= left
+                                && col + u16::from(cell.col_span) <= right
+                                && row >= top
+                                && row + u16::from(cell.row_span) <= bottom
+                        });
+                        let anchored = payload.anchor == Some(index) || in_drag;
                         let visuals = ui.style().interact_selectable(&response, anchored);
                         if ui.is_rect_visible(rect) {
                             let painter = ui.painter();
@@ -590,6 +793,13 @@ impl XgViewApp {
                         break;
                     }
                 }
+                // A drag released off the preview never reaches a cell's
+                // `drag_released`. Drop the marks rather than leaving them
+                // lit into the next press.
+                if payload.drag_from.is_some() && !ctx.input(|input| input.pointer.primary_down()) {
+                    payload.drag_from = None;
+                    payload.drag_to = None;
+                }
 
                 ui.add_space(theme::space::S);
                 // `horizontal_centered` centres vertically, not horizontally,
@@ -605,11 +815,14 @@ impl XgViewApp {
                     let used = labels.iter().map(|text| button_width(ui, text)).sum::<f32>()
                         + 2.0 * ui.spacing().item_spacing.x;
                     ui.add_space(((ui.available_width() - used) * 0.5).max(0.0));
-                    let can_split = payload.split_target().is_some();
+                    let split_target =
+                        payload.split_target_for(focused_cell.as_ref().map(|(index, _)| *index));
+                    let can_split = split_target.is_some();
                     // A disabled control must not stay in the ring: the
                     // remote would land on a grey button with no focus ring
-                    // and think the focus was lost. Skip tracking it and, if
-                    // the ring is already here, hand it back to the preview.
+                    // and think the focus was lost. Skip tracking it; if the
+                    // ring was on it when the cell lost focus, OK takes it.
+                    let mut split_greyed_with_ring = false;
                     let split = ui.add_enabled(
                         can_split,
                         egui::Button::new(labels[0].clone()),
@@ -617,7 +830,7 @@ impl XgViewApp {
                     if can_split {
                         let split = app.nav.tracked(split);
                         if split.clicked() {
-                            if let Some(target) = payload.split_target() {
+                            if let Some(target) = split_target {
                                 // Only move a ring that was actually here:
                                 // a pointer press with the ring elsewhere
                                 // leaves it where the viewer put it.
@@ -643,14 +856,16 @@ impl XgViewApp {
                         }
                     } else if focus_before == Some(split.id) {
                         // Greying a control surrenders egui's focus, so asking
-                        // from `has_focus()` here is too late. The frame's
-                        // starting focus is the only record that the ring was
-                        // on this button.
-                        app.restore_focus =
-                            Some(egui::Id::new(("layout-editor-cell", payload.selected)));
-                        app.swallow_confirm = 2;
+                        // from `has_focus()` here is too late. The ring came
+                        // here from a cell that was not anchored; OK is the
+                        // next control in the row and takes it over.
+                        split_greyed_with_ring = true;
                     }
                     let ok = app.nav.tracked(ui.button(labels[1].clone()));
+                    if split_greyed_with_ring {
+                        app.restore_focus = Some(ok.id);
+                        app.swallow_confirm = 2;
+                    }
                     if ok.clicked() && payload.valid() {
                         confirmed = true;
                         finished = Some(*payload);
