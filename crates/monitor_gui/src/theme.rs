@@ -9,6 +9,8 @@ use egui::{Color32, FontFamily, FontId, Stroke, TextStyle};
 pub const BACKGROUND: Color32 = Color32::from_rgb(10, 12, 16);
 /// Panels (toolbar, settings, status bar).
 pub const PANEL: Color32 = Color32::from_rgb(19, 22, 28);
+/// The lighter of the two backgrounds in a striped list row.
+pub const ROW_ALT: Color32 = Color32::from_rgb(26, 30, 38);
 /// Tile border.
 pub const TILE_BORDER: Color32 = Color32::from_rgb(40, 46, 58);
 /// The grid line between two tiles, and around the wall.

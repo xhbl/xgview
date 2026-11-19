@@ -3,6 +3,16 @@
 
 use super::*;
 
+/// Row width kept for the controls after the camera name: sub-stream badge,
+/// infer button, aspect button, address and origin. The name takes what is
+/// left so a long name cannot push the controls off the row.
+const NAME_RESERVE: f32 = 205.0;
+/// Row width kept for the origin label and the remove icon after the RTSP
+/// address. "Synology" is the longest origin; the icon is 24pt.
+const ADDRESS_RESERVE: f32 = 85.0;
+/// The theme's monospace style is 14pt; the address sits one step below it.
+const ADDRESS_FONT_SIZE: f32 = 12.0;
+
 /// What the camera list collected while it was drawn.
 ///
 /// Every control in a row writes here rather than to the configuration: the
@@ -213,11 +223,11 @@ impl XgViewApp {
             let fill = if row % 2 == 0 {
                 theme::PANEL
             } else {
-                egui::Color32::from_rgb(26, 30, 38)
+                theme::ROW_ALT
             };
             egui::Frame::new()
                 .fill(fill)
-                .inner_margin(egui::Margin::symmetric(4, 3))
+                .inner_margin(egui::Margin::symmetric(4, 1))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     self.camera_row(ui, slot, &mut actions);
@@ -293,7 +303,7 @@ impl XgViewApp {
             if enable.changed() {
                 actions.toggle = Some((slot, camera_enabled));
             }
-            let name_width = (ui.available_width() - 205.0).max(32.0);
+            let name_width = (ui.available_width() - NAME_RESERVE).max(32.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(name_width, ui.spacing().interact_size.y),
                 Layout::left_to_right(Align::Center),
@@ -301,7 +311,8 @@ impl XgViewApp {
                     ui.add(
                         egui::Label::new(RichText::new(camera.name.trim()).strong())
                             .truncate()
-                            .halign(egui::Align::LEFT),
+                            .halign(egui::Align::LEFT)
+                            .show_tooltip_when_elided(true),
                     );
                 },
             );
@@ -360,24 +371,12 @@ impl XgViewApp {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Drawn right to left so the pair reads edit, remove;
-                // registered edit first, so the walk reaches the control
-                // that changes before the one that deletes.
-                let remove_button = icons::button_sized(ui, Icon::Trash, false, false, &monitor_i18n::tr("cameras-remove-tip"), ROW_ICON);
+                // The edit icon stays on the controller row; the remove icon
+                // has its own row with the address. Registered here first so
+                // a remote reaches the change before the delete.
                 let edit_button = icons::button_sized(ui, Icon::Edit, false, false, &monitor_i18n::tr("cameras-edit-tip"), ROW_ICON);
                 self.nav.item(&edit_button);
                 self.focus_names.insert(edit_button.id, "cameras-edit-name");
-                self.nav.item(&remove_button);
-                self.focus_names.insert(remove_button.id, "cameras-remove-name");
-                if remove_button.clicked() {
-                    // Only for a press that came from the keyboard or a
-                    // remote: a pointer does not move the focus anywhere else
-                    // in this program, so it must not appear to move it here
-                    // either.
-                    let from = (!remove_button.clicked_by(egui::PointerButton::Primary))
-                        .then_some(remove_button.id);
-                    actions.ask_remove = Some((slot, camera.name.clone(), from));
-                }
                 if edit_button.clicked() {
                     let from = (!edit_button.clicked_by(egui::PointerButton::Primary))
                         .then_some(edit_button.id);
@@ -404,13 +403,13 @@ impl XgViewApp {
             // reads out its MSE address. Where there is a second address,
             // the tooltip names both.
             let address = camera.masked_uri(StreamKind::Main);
-            let address_width = (ui.available_width() - 110.0).max(32.0);
+            let address_width = (ui.available_width() - ADDRESS_RESERVE).max(32.0);
             let address_label = ui.allocate_ui_with_layout(
                 egui::vec2(address_width, ui.spacing().interact_size.y),
                 Layout::left_to_right(Align::Center),
                 |ui| {
                     ui.add(
-                        egui::Label::new(RichText::new(&address).small().monospace().color(theme::TEXT_DIM))
+                        egui::Label::new(RichText::new(&address).monospace().size(ADDRESS_FONT_SIZE).color(theme::TEXT_DIM))
                             .truncate()
                             .halign(egui::Align::LEFT)
                             .show_tooltip_when_elided(!camera.has_mse()),
@@ -425,8 +424,20 @@ impl XgViewApp {
                 ));
             }
             ui.label(RichText::new(monitor_i18n::tr(camera.origin.label())).small().color(theme::TEXT_DIM));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // The remove icon has the address row to itself, away from
+                // the edit icon above. A pointer does not move the focus in
+                // this program, so only a key press hands it back on delete.
+                let remove_button = icons::button_sized(ui, Icon::Trash, false, false, &monitor_i18n::tr("cameras-remove-tip"), ROW_ICON);
+                self.nav.item(&remove_button);
+                self.focus_names.insert(remove_button.id, "cameras-remove-name");
+                if remove_button.clicked() {
+                    let from = (!remove_button.clicked_by(egui::PointerButton::Primary))
+                        .then_some(remove_button.id);
+                    actions.ask_remove = Some((slot, camera.name.clone(), from));
+                }
+            });
         });
-        ui.add_space(theme::space::XS);
     }
 
     /// The button that starts rearranging.
@@ -717,5 +728,23 @@ impl XgViewApp {
         }
         self.reorder_focus = false;
         self.restore_focus = self.reorder_trigger_anchor;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn camera_list_layout_uses_named_palette_and_widths() {
+        let source = include_str!("cameras.rs");
+        let raw_alt = format!("Color32::from_rgb({}, {}, {})", 26, 30, 38);
+        assert!(!source.contains(&raw_alt), "the striped row colour belongs to the theme");
+        let name_reserve = format!("ui.available_width() - {}", "NAME_RESERVE");
+        let address_reserve = format!("ui.available_width() - {}", "ADDRESS_RESERVE");
+        assert!(source.contains(&name_reserve), "the name reserve is named");
+        assert!(source.contains(&address_reserve), "the address reserve is named");
+        let tooltip = format!("show_tooltip_when_elided({})", true);
+        assert!(source.contains(&tooltip), "a long camera name reveals itself on hover");
+        let address_size = format!("size({})", "ADDRESS_FONT_SIZE");
+        assert!(source.contains(&address_size), "the address uses the smaller font");
     }
 }
