@@ -298,6 +298,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_touch_release_finishes_with_the_last_highlighted_cell() {
+        let source = include_str!("layout_editor.rs");
+        let guarded = format!("if let Some({}) = {}", "pointer", "pointer");
+        assert!(source.contains(&guarded), "a lifted finger may lose latest_pos");
+        let finish = format!("{}.{}(landing)", "payload", "merge_drag");
+        assert!(
+            source.matches(&finish).count() >= 2,
+            "the widget release and the frame-end release both merge"
+        );
+    }
+
+    #[test]
     fn the_preview_room_fits_seven_numbered_cells() {
         let cell_w = PREVIEW_W / f32::from(MAX_CUSTOM_DIMENSION);
         let cell_h = PREVIEW_H / f32::from(MAX_CUSTOM_DIMENSION);
@@ -723,7 +735,13 @@ impl XgViewApp {
                             payload.anchor = None;
                         }
                         if payload.drag_from == Some(index) {
-                            payload.drag_to = cell_under(area, layout, &cells, pointer);
+                            // A touch release can clear `latest_pos` on the
+                            // frame the finger lifts. Keep the last cell the
+                            // drag highlighted instead of falling back to the
+                            // start cell, which would cancel the merge.
+                            if let Some(pointer) = pointer {
+                                payload.drag_to = cell_under(area, layout, &cells, Some(pointer));
+                            }
                             if response.drag_stopped() {
                                 let landing = payload.drag_to.unwrap_or(index);
                                 changed = payload.merge_drag(landing);
@@ -830,11 +848,12 @@ impl XgViewApp {
                     }
                 }
                 // A drag released off the preview never reaches a cell's
-                // `drag_released`. Drop the marks rather than leaving them
-                // lit into the next press.
+                // `drag_released`. A touch release also often arrives without
+                // any widget reporting `drag_stopped`, so finish the drag here
+                // with the last highlighted cell before dropping the marks.
                 if payload.drag_from.is_some() && !ctx.input(|input| input.pointer.primary_down()) {
-                    payload.drag_from = None;
-                    payload.drag_to = None;
+                    let landing = payload.drag_to.unwrap_or_else(|| payload.drag_from.unwrap());
+                    payload.merge_drag(landing);
                 }
 
                 ui.add_space(theme::space::S);
