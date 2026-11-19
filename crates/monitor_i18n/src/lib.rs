@@ -482,7 +482,7 @@ mod tests {
             let hint = tr("dialog-bulk-hint");
             assert!(hint.contains(expected_hint), "language: {language}, hint: {hint}");
             assert!(hint.contains("{n}"), "language: {language}, hint: {hint}");
-            assert_ne!(tr("dialog-bulk-error-count"), "dialog-bulk-error-count");
+            assert_ne!(tr("dialog-bulk-error-channels"), "dialog-bulk-error-channels");
         }
     }
     #[test]

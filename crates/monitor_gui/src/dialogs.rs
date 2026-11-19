@@ -415,9 +415,10 @@ pub struct BulkCameraDraft {
     pub sub_template: String,
     pub username: String,
     pub password: String,
-    pub first: usize,
-    pub count: usize,
-    pub step: usize,
+    /// Channel numbers to generate, as `1-4,7,9-11`. Replaces the old
+    /// first/count/step triple: real recorders rarely number every channel
+    /// with one arithmetic step.
+    pub channels: String,
     pub infer_sub: bool,
 }
 
@@ -429,21 +430,55 @@ impl Default for BulkCameraDraft {
             sub_template: String::new(),
             username: String::new(),
             password: String::new(),
-            first: 1,
-            count: 16,
-            step: 1,
+            channels: "1-16".into(),
             infer_sub: true,
         }
     }
 }
+/// Expand `1-4,7,9-11` into channel numbers. Duplicates are dropped in the
+/// order they appear, so a pasted list cannot import the same stream twice in
+/// one batch. The 256-entry cap matches the old count limit.
+fn parse_channels(spec: &str) -> Result<Vec<usize>, String> {
+    let invalid = || monitor_i18n::tr("dialog-bulk-error-channels");
+    let mut numbers = Vec::new();
+    for token in spec.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(invalid());
+        }
+        if let Some((first, last)) = token.split_once('-') {
+            let first = first.trim().parse::<usize>().map_err(|_| invalid())?;
+            let last = last.trim().parse::<usize>().map_err(|_| invalid())?;
+            if first > last {
+                return Err(invalid());
+            }
+            for number in first..=last {
+                if number > 65535 || numbers.len() >= 256 {
+                    return Err(invalid());
+                }
+                if !numbers.contains(&number) {
+                    numbers.push(number);
+                }
+            }
+        } else {
+            let number = token.parse::<usize>().map_err(|_| invalid())?;
+            if number > 65535 || numbers.len() >= 256 {
+                return Err(invalid());
+            }
+            if !numbers.contains(&number) {
+                numbers.push(number);
+            }
+        }
+    }
+    if numbers.is_empty() {
+        return Err(invalid());
+    }
+    Ok(numbers)
+}
+
 impl BulkCameraDraft {
     pub fn build(&self) -> Result<Vec<CameraSource>, String> {
-        if self.count == 0 || self.count > 256 {
-            return Err(monitor_i18n::tr("dialog-bulk-error-count"));
-        }
-        if self.step == 0 {
-            return Err(monitor_i18n::tr("dialog-bulk-error-step"));
-        }
+        let channels = parse_channels(&self.channels)?;
         if !self.main_template.contains("{n}") {
             return Err(monitor_i18n::tr("dialog-bulk-error-main-template"));
         }
@@ -453,14 +488,9 @@ impl BulkCameraDraft {
             return Err(monitor_i18n::tr("dialog-bulk-error-sub-template"));
         }
 
-        let mut cameras = Vec::with_capacity(self.count);
+        let mut cameras = Vec::with_capacity(channels.len());
 
-        for index in 0..self.count {
-            let offset = index.checked_mul(self.step)
-                .ok_or_else(|| monitor_i18n::tr("dialog-bulk-error-overflow"))?;
-            let number = self.first.checked_add(offset)
-                .ok_or_else(|| monitor_i18n::tr("dialog-bulk-error-overflow"))?;
-
+        for number in channels {
             let prefix = self.name_prefix.trim();
             let name = if prefix.is_empty() {
                 monitor_i18n::tr_args("dialog-bulk-camera-name", &[("number", format!("{:02}", number).into())])
@@ -483,6 +513,20 @@ impl BulkCameraDraft {
 
         Ok(cameras)
     }
+
+    /// How many cameras the Add button will create, or zero while the channel
+    /// specification is being edited and cannot be parsed yet.
+    pub fn channel_count(&self) -> usize {
+        parse_channels(&self.channels).map_or(0, |channels| channels.len())
+    }
+
+    /// The first channel for the URL example under the form.
+    pub fn first_channel(&self) -> usize {
+        parse_channels(&self.channels)
+            .ok()
+            .and_then(|channels| channels.first().copied())
+            .unwrap_or(1)
+    }
 }
 /// State of the "Add devices" window.
 #[derive(Debug, Default)]
@@ -502,6 +546,10 @@ pub struct DiscoveryUi {
     /// to ("on Surveillance Station", "in Frigate"), so it is only drawn on that tab.
     pub error: Option<(Tab, String)>,
     pub message: Option<(Tab, String)>,
+    /// An error from a press inside this dialog that the app should also show
+    /// as a toast. Background failures already get one in the event loop, so
+    /// only the synchronous form paths set this.
+    pub toast_error: Option<String>,
     pub manual: CameraDraft,
     pub bulk: BulkCameraDraft,
     /// The manual tab's test button, which needs the runtime the dialog has not
@@ -870,6 +918,7 @@ pub fn add_devices_window(
     handle: &Handle,
     events: &Sender<BackgroundEvent>,
     nav: &mut Nav,
+    body_scroll: &mut Option<f32>,
 ) -> bool {
     let mut changed = false;
     let mut close = false;
@@ -915,12 +964,20 @@ pub fn add_devices_window(
         egui::ScrollArea::vertical()
             .max_height(420.0)
             .auto_shrink([false, false])
-            .show(ui, |ui| match state.tab {
-                Tab::Onvif => changed |= onvif_tab(ui, state, config, handle, events, nav),
-                Tab::Manual => changed |= manual_tab(ui, state, config, nav),
-                Tab::Synology => changed |= synology_tab(ui, state, config, handle, events, nav),
-                Tab::Frigate => changed |= frigate_tab(ui, state, config, handle, events, nav),
-                Tab::Go2rtc => changed |= go2rtc_tab(ui, state, config, handle, events, nav),
+            .show(ui, |ui| {
+                // A Down off the last control has nowhere else to go. The
+                // settings panel spends the same request from its scroll area;
+                // here it lets a remote reach the far end of a long form.
+                if let Some(points) = body_scroll.take() {
+                    ui.scroll_with_delta(egui::vec2(0.0, -points));
+                }
+                match state.tab {
+                    Tab::Onvif => changed |= onvif_tab(ui, state, config, handle, events, nav),
+                    Tab::Manual => changed |= manual_tab(ui, state, config, nav),
+                    Tab::Synology => changed |= synology_tab(ui, state, config, handle, events, nav),
+                    Tab::Frigate => changed |= frigate_tab(ui, state, config, handle, events, nav),
+                    Tab::Go2rtc => changed |= go2rtc_tab(ui, state, config, handle, events, nav),
+                }
             });
         nav.close();
     });
@@ -1399,7 +1456,10 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
                     state.note(Tab::Manual, monitor_i18n::tr("dialog-camera-added"));
                     changed = true;
                 }
-                Err(err) => state.fail(Tab::Manual, err),
+                Err(err) => {
+                    state.fail(Tab::Manual, err.clone());
+                    state.toast_error = Some(err);
+                },
             }
         }
         if nav.tracked(ui.button(monitor_i18n::tr("dialog-clear"))).clicked() {
@@ -1409,40 +1469,42 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
 
     ui.add_space(theme::space::M);
     ui.separator();
-    ui.heading(monitor_i18n::tr("dialog-bulk-title"));
-    ui.label(monitor_i18n::tr("dialog-bulk-hint"));
+    ui.label(monitor_i18n::tr("dialog-bulk-title"));
+    ui.label(
+        RichText::new(monitor_i18n::tr("dialog-bulk-hint"))
+            .small()
+            .color(theme::TEXT_DIM),
+    );
 
     ui.label(monitor_i18n::tr("dialog-bulk-recorder-name"));
-    text_field(ui, nav, &mut state.bulk.name_prefix, "bulk-camera-name", false, false, |s| {
+    text_field(ui, nav, &mut state.bulk.name_prefix, &monitor_i18n::tr("dialog-bulk-recorder-name"), false, false, |s| {
         egui::TextEdit::singleline(s)
             .desired_width(f32::INFINITY)
-            .hint_text(monitor_i18n::tr("dialog-bulk-recorder-placeholder"))
+            .hint_text(theme::hint(&monitor_i18n::tr("dialog-bulk-recorder-placeholder")))
     });
 
     ui.label(monitor_i18n::tr("dialog-bulk-main-template"));
-    text_field(ui, nav, &mut state.bulk.main_template, "bulk-camera-main", false, false, |s| {
+    text_field(ui, nav, &mut state.bulk.main_template, &monitor_i18n::tr("dialog-bulk-main-template"), false, false, |s| {
         egui::TextEdit::singleline(s)
             .desired_width(f32::INFINITY)
-            .hint_text("rtsp://192.168.1.100/Streaming/Channels/{n}01")
+            .hint_text(theme::hint("rtsp://192.168.1.100/Streaming/Channels/{n}01"))
     });
 
     ui.label(monitor_i18n::tr("dialog-bulk-sub-template"));
-    text_field(ui, nav, &mut state.bulk.sub_template, "bulk-camera-sub", false, false, |s| {
+    text_field(ui, nav, &mut state.bulk.sub_template, &monitor_i18n::tr("dialog-bulk-sub-template"), false, false, |s| {
         egui::TextEdit::singleline(s)
             .desired_width(f32::INFINITY)
-            .hint_text("rtsp://192.168.1.100/Streaming/Channels/{n}02")
+            .hint_text(theme::hint("rtsp://192.168.1.100/Streaming/Channels/{n}02"))
     });
 
-    ui.label(monitor_i18n::tr("dialog-bulk-credentials"));
+    ui.label(RichText::new(monitor_i18n::tr("dialog-bulk-credentials")).small());
     credentials_row(ui, nav, &mut state.bulk.username, &mut state.bulk.password);
 
-    ui.horizontal(|ui| {
-        ui.label(monitor_i18n::tr("dialog-bulk-first-channel"));
-        nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.first).range(0..=65535)));
-        ui.label(monitor_i18n::tr("dialog-bulk-count"));
-        nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.count).range(1..=256)));
-        ui.label(monitor_i18n::tr("dialog-bulk-step"));
-        nav.tracked_kind(Kind::DragValue, ui.add(egui::DragValue::new(&mut state.bulk.step).range(1..=65535)));
+    ui.label(monitor_i18n::tr("dialog-bulk-channels"));
+    text_field(ui, nav, &mut state.bulk.channels, &monitor_i18n::tr("dialog-bulk-channels"), false, false, |s| {
+        egui::TextEdit::singleline(s)
+            .desired_width(f32::INFINITY)
+            .hint_text(theme::hint("1-16, 20, 23-24"))
     });
 
     if state.bulk.sub_template.trim().is_empty() {
@@ -1451,13 +1513,13 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
 
     if !state.bulk.main_template.trim().is_empty() {
         let first_url = state.bulk.main_template
-            .replace("{n}", &state.bulk.first.to_string());
+            .replace("{n}", &state.bulk.first_channel().to_string());
         ui.label(RichText::new(monitor_i18n::tr_args("dialog-bulk-example", &[("url", first_url.into())]))
             .small()
             .color(theme::TEXT_DIM));
     }
 
-    let button_label = monitor_i18n::tr_args("dialog-bulk-add", &[("count", state.bulk.count.into())]);
+    let button_label = monitor_i18n::tr_args("dialog-bulk-add", &[("count", state.bulk.channel_count().into())]);
     if nav.tracked(ui.button(button_label)).clicked() {
         match state.bulk.build() {
             Ok(cameras) => {
@@ -1482,7 +1544,10 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
                 );
                 changed |= added > 0;
             }
-            Err(err) => state.fail(Tab::Manual, err),
+            Err(err) => {
+                state.fail(Tab::Manual, err.clone());
+                state.toast_error = Some(err);
+            },
         }
     }
     status_lines(ui, state, Tab::Manual);
@@ -2149,11 +2214,16 @@ fn go2rtc_tab(
 /// to ("on Surveillance Station", "in Frigate"), so anything tagged with another tab is left
 /// out rather than read where it does not apply.
 fn status_lines(ui: &mut egui::Ui, state: &DiscoveryUi, tab: Tab) {
+    let message = state.message.as_ref().filter(|(other, _)| *other == tab);
+    let error = state.error.as_ref().filter(|(other, _)| *other == tab);
+    if message.is_none() && error.is_none() {
+        return;
+    }
     ui.add_space(8.0);
-    if let Some((_, message)) = state.message.as_ref().filter(|(other, _)| *other == tab) {
+    if let Some((_, message)) = message {
         ui.label(RichText::new(message).color(theme::LIVE));
     }
-    if let Some((_, error)) = state.error.as_ref().filter(|(other, _)| *other == tab) {
+    if let Some((_, error)) = error {
         ui.label(RichText::new(error).color(theme::ERROR));
     }
 }
@@ -2167,10 +2237,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_background_failure_keeps_its_one_toast() {
+        let mut state = DiscoveryUi::default();
+        assert!(state.toast_error.is_none());
+        state.fail(Tab::Synology, "already toasted by the event loop");
+        assert!(state.toast_error.is_none(), "fail() alone must not flash twice");
+    }
+
+    #[test]
+    fn form_errors_in_the_devices_dialog_ask_for_a_toast() {
+        let source = include_str!("dialogs.rs");
+        let call = format!("state.toast_error = Some({});", "err");
+        assert_eq!(
+            source.matches(&call).count(),
+            2,
+            "manual add and bulk add both answer a press with a toast"
+        );
+    }
+
+    #[test]
+    fn the_bulk_form_uses_the_existing_label_and_hint_styles() {
+        let source = include_str!("dialogs.rs");
+        let plain_title = format!("ui.label(monitor_i18n::tr(\"{}\"));", "dialog-bulk-title");
+        assert!(
+            source.contains(&plain_title),
+            "the section title uses the same plain label as the field names"
+        );
+        assert!(
+            source.contains("RichText::new(monitor_i18n::tr(\"dialog-bulk-credentials\")).small()"),
+            "the credentials caption matches the other tabs"
+        );
+        assert!(
+            source.contains("theme::hint(") && source.contains("dialog-bulk-recorder-placeholder"),
+            "placeholders use the dialog's dimmed hint colour"
+        );
+        assert!(
+            !source.contains("text_field(ui, nav, &mut state.bulk.name_prefix, \"bulk-camera-name\""),
+            "the Android mirror needs the localized field label"
+        );
+    }
+
+    #[test]
     fn bulk_cameras_allow_reuse_across_groups() {
         let draft = BulkCameraDraft {
             main_template: "rtsp://192.168.1.100/channel/{n}".into(),
-            count: 2,
+            channels: "1-2".into(),
             infer_sub: false,
             ..Default::default()
         };
@@ -2215,9 +2326,7 @@ mod tests {
             sub_template: "rtsp://192.168.1.100/Streaming/Channels/{n}02".into(),
             username: "admin".into(),
             password: "secret".into(),
-            first: 1,
-            count: 16,
-            step: 1,
+            channels: "1-16".into(),
             ..Default::default()
         };
 
@@ -2233,22 +2342,21 @@ mod tests {
     }
 
     #[test]
-    fn bulk_cameras_respect_first_channel_and_step() {
+    fn bulk_cameras_expand_channel_lists() {
         monitor_i18n::init("en", &[]);
         let draft = BulkCameraDraft {
             main_template: "rtsp://192.168.1.100/channel/{n}".into(),
-            first: 3,
-            count: 3,
-            step: 2,
+            channels: "3,5-6,9".into(),
             infer_sub: false,
             ..Default::default()
         };
 
         let cameras = draft.build().unwrap();
-        assert_eq!(cameras.len(), 3);
+        assert_eq!(cameras.len(), 4);
         assert_eq!(cameras[0].name, "Camera 03");
         assert_eq!(cameras[1].rtsp_main, "rtsp://192.168.1.100/channel/5");
-        assert_eq!(cameras[2].rtsp_main, "rtsp://192.168.1.100/channel/7");
+        assert_eq!(cameras[2].rtsp_main, "rtsp://192.168.1.100/channel/6");
+        assert_eq!(cameras[3].rtsp_main, "rtsp://192.168.1.100/channel/9");
         assert!(cameras.iter().all(|camera| camera.rtsp_sub.is_none()));
     }
 
@@ -2260,27 +2368,30 @@ mod tests {
             ..Default::default()
         };
 
-        for count in [0, 257] {
-            assert!(BulkCameraDraft { count, ..valid.clone() }.build().is_err());
+        for channels in ["", "x", "5-3", "1-", "1,,2", "65536", "1-65536"] {
+            assert!(
+                BulkCameraDraft { channels: channels.into(), ..valid.clone() }
+                    .build()
+                    .is_err(),
+                "channels: {channels}"
+            );
         }
-        assert!(BulkCameraDraft { step: 0, ..valid.clone() }.build().is_err());
+        let too_many = format!("1-{}", 257);
+        assert!(BulkCameraDraft {
+            channels: too_many,
+            ..valid.clone()
+        }.build().is_err());
+        let duplicated = BulkCameraDraft {
+            channels: "1,1,2".into(),
+            ..valid.clone()
+        };
+        assert_eq!(duplicated.build().unwrap().len(), 2, "duplicates are dropped");
         assert!(BulkCameraDraft {
             main_template: "rtsp://192.168.1.100/channel/1".into(),
             ..valid.clone()
         }.build().is_err());
         assert!(BulkCameraDraft {
             sub_template: "rtsp://192.168.1.100/sub/1".into(),
-            ..valid.clone()
-        }.build().is_err());
-        assert!(BulkCameraDraft {
-            first: usize::MAX,
-            count: 2,
-            ..valid.clone()
-        }.build().is_err());
-        assert!(BulkCameraDraft {
-            first: 1,
-            count: 3,
-            step: usize::MAX,
             ..valid
         }.build().is_err());
     }

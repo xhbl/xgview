@@ -3787,9 +3787,15 @@ impl XgViewApp {
                 &handle,
                 &events,
                 &mut self.nav,
+                &mut self.body_scroll,
             ) {
                 self.needs_sync = true;
                 self.mark_dirty();
+            }
+            // A form press has no background event to answer it, so its error
+            // is handed here for the same toast the discovery jobs get.
+            if let Some(error) = self.discovery.toast_error.take() {
+                self.flash(error, ToastKind::Error);
             }
             // The manual tab's test button: the dialog has no runtime, so the
             // press comes back here and is played like the edit window's.

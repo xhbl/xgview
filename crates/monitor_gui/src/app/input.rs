@@ -1387,15 +1387,19 @@ impl XgViewApp {
                     ctx.memory_mut(|memory| memory.request_focus(target));
                 }
                 None => {
-                    if dir == Dir::Down && self.nav.scope_of(focused) == Some("settings-body") {
+                    if dir == Dir::Down
+                        && matches!(
+                            self.nav.scope_of(focused),
+                            Some("settings-body" | "dialog-body")
+                        )
+                    {
                         // The press had nowhere to move the focus, which is
-                        // the case at the end of a tab: what follows the last
-                        // control - the adb line, the table of keys - is text
-                        // and has no control to be walked onto. A remote has
-                        // no wheel, so the press moves the body instead.
-                        // Asked for here rather than applied here: only a
-                        // scroll area that is being drawn reads a scroll
-                        // request, and this runs before anything is drawn.
+                        // the case at the end of a tab or a long form: what
+                        // follows the last control is text with no stop in
+                        // the ring. A remote has no wheel, so the press moves
+                        // the body instead. Asked for here rather than
+                        // applied here: only a scroll area that is being
+                        // drawn reads a scroll request.
                         let points = ctx.screen_rect().height() * REMOTE_SCROLL_FRACTION;
                         self.body_scroll = Some(points);
                     }
@@ -2014,6 +2018,19 @@ mod tests {
 
         assert!(pressed(Key::Escape, true), "Escape still closes from the field");
         assert!(pressed(Key::BrowserBack, true), "the remote's Back still closes from the field");
+    }
+
+    /// A Down off the last control is the only scroll a remote has. The
+    /// settings panel already used the request; the Add devices body must
+    /// spend the same one or its status line stays below the fold.
+    #[test]
+    fn a_remote_scrolls_the_devices_body_too() {
+        let input = include_str!("input.rs");
+        let scopes = format!("Some(\"settings-body\" | \"{}\")", "dialog-body");
+        assert!(input.contains(&scopes), "both bodies ask for the scroll");
+        let dialogs = include_str!("../dialogs.rs");
+        let spent = format!("{}.take()", "body_scroll");
+        assert!(dialogs.contains(&spent), "the dialog body spends it");
     }
 
     /// A pinned strip is part of the picture, not a layer the application's keys
