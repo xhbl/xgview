@@ -26,7 +26,7 @@ impl XgViewApp {
             |app, ui, ()| {
                 let mut chosen: Option<GridLayout> = None;
                 let mut close = false;
-                let mut edit_slot: Option<usize> = None;
+                let mut edit_slot: Option<(usize, Option<egui::Id>, Option<egui::Id>)> = None;
 
                 let bar = dialogs::title_bar(
                     ui,
@@ -171,16 +171,26 @@ impl XgViewApp {
                                     }
                                     let response = app.nav.tracked(response);
                                     app.name(&response, "layout-picker-custom-slot");
+                                    let tile_id = response.id;
                                     if response.clicked() {
                                         match grid {
                                             Some(grid) => chosen = Some(GridLayout::Custom(grid)),
-                                            None => edit_slot = Some(slot),
+                                            None => {
+                                                let from = (!response.clicked_by(egui::PointerButton::Primary))
+                                                    .then_some(tile_id);
+                                                edit_slot = Some((slot, from, from));
+                                            }
                                         }
                                     }
                                     let pencil = ui.button(monitor_i18n::tr("layout-picker-edit"));
                                     let pencil = app.nav.tracked(pencil);
                                     if pencil.clicked() {
-                                        edit_slot = Some(slot);
+                                        let from = (!pencil.clicked_by(egui::PointerButton::Primary))
+                                            .then_some(pencil.id);
+                                        // Confirm lands on the slot the pencil
+                                        // edits; Cancel goes back to the pencil
+                                        // itself. Pointer presses move no ring.
+                                        edit_slot = Some((slot, from, from.map(|_| tile_id)));
                                     }
                                 }
                                 app.nav.close();
@@ -189,11 +199,16 @@ impl XgViewApp {
                     }
                 }
 
-                if let Some(slot) = edit_slot {
+                if let Some((slot, from, slot_focus)) = edit_slot {
                     let existing = app.config.group().custom_layouts[slot];
-                    app.layout_editor.open(EditorState::open(slot, existing));
+                    let mut state = EditorState::open(slot, existing);
+                    state.slot_focus = slot_focus;
+                    app.layout_editor.open(state);
+                    app.layout_editor.from = from;
                     app.layout_picker_tab = None;
-                    return Answer::CLOSE;
+                    // The focus belongs to the editor now, not back to the
+                    // toolbar button that first opened the picker.
+                    return Answer::CLOSE_LEAVING_THE_FOCUS;
                 }
                 if let Some(layout) = chosen {
                     app.set_layout(layout);

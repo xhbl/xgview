@@ -1004,6 +1004,19 @@ fn layout_hint(layout: GridLayout) -> &'static str {
 const LAYOUT_PICKER_ROWS: [&str; 3] =
     ["layout-picker-row-0", "layout-picker-row-1", "layout-picker-row-2"];
 
+/// The editor's preview grid is one navigation scope per baseline row, so
+/// Up/Down walk straight to the cell above or below instead of leaving the
+/// grid. Cells that span rows belong to their top row; empty rows are passed
+/// through by `Nav::enter`.
+const LAYOUT_EDITOR_GRID_ROWS: [&str; 6] = [
+    "layout-editor-grid-row-0",
+    "layout-editor-grid-row-1",
+    "layout-editor-grid-row-2",
+    "layout-editor-grid-row-3",
+    "layout-editor-grid-row-4",
+    "layout-editor-grid-row-5",
+];
+
 /// Keyboard / DPAD keys consumed during one frame.
 #[derive(Debug, Clone, Copy, Default)]
 struct Keys {
@@ -1812,14 +1825,20 @@ impl XgViewApp {
             ("layout-picker-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-0")).exit(Dir::Down, Exit::ScopeAt("layout-picker-row-2"))),
             ("layout-picker-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-picker-row-1"))),
             ("layout-picker-tabs", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("layout-picker-row-0"))),
-            // The custom-grid editor: two stage tabs, dimension rows, the
-            // preview grid, and the confirm row. The grid is one row scope so
-            // Left/Right walk every cell; Back leaves through the modal.
-            ("layout-editor-tabs", ScopeDef::new(Axis::Row)),
-            ("layout-editor-rows", ScopeDef::new(Axis::Row)),
-            ("layout-editor-columns", ScopeDef::new(Axis::Row)),
-            ("layout-editor-grid", ScopeDef::new(Axis::Row)),
-            ("layout-editor-actions", ScopeDef::new(Axis::Row)),
+            // The custom-grid editor is one page: baseline rows, baseline
+            // columns, a preview grid with one scope per baseline row, then
+            // the confirm row. Left/Right walk the cells of a row; Up/Down
+            // cross to the same seat in the row above or below. Back leaves
+            // through the modal.
+            ("layout-editor-rows", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("layout-editor-columns"))),
+            ("layout-editor-columns", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope("layout-editor-rows")).exit(Dir::Down, Exit::Scope("layout-editor-grid-row-0"))),
+            ("layout-editor-grid-row-0", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope("layout-editor-columns")).exit(Dir::Down, Exit::ScopeAt("layout-editor-grid-row-1"))),
+            ("layout-editor-grid-row-1", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-0")).exit(Dir::Down, Exit::ScopeAt("layout-editor-grid-row-2"))),
+            ("layout-editor-grid-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-1")).exit(Dir::Down, Exit::ScopeAt("layout-editor-grid-row-3"))),
+            ("layout-editor-grid-row-3", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-2")).exit(Dir::Down, Exit::ScopeAt("layout-editor-grid-row-4"))),
+            ("layout-editor-grid-row-4", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-3")).exit(Dir::Down, Exit::ScopeAt("layout-editor-grid-row-5"))),
+            ("layout-editor-grid-row-5", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-4")).exit(Dir::Down, Exit::Scope("layout-editor-actions"))),
+            ("layout-editor-actions", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-5"))),
             ("status", ScopeDef::new(Axis::Row)),
             ("edit-body", ScopeDef::new(Axis::Column)),
             ("confirm-body", ScopeDef::new(Axis::Column)),
@@ -2035,6 +2054,8 @@ impl XgViewApp {
             self.camera_edit.anchor
         } else if self.discovery.open {
             self.discovery.focus_anchor
+        } else if self.layout_editor.is_open() {
+            self.layout_editor.anchor
         } else if self.layout_picker.is_open() {
             self.layout_picker.anchor
         } else if self.portrait_aspect_picker.is_open() {
@@ -2087,6 +2108,7 @@ impl XgViewApp {
     /// that covers the picture, not for one that sits beside it.
     pub fn floating_layer_open(&self, ctx: &egui::Context) -> bool {
         if self.discovery.open
+            || self.layout_editor.is_open()
             || self.layout_picker.is_open()
             || self.portrait_aspect_picker.is_open()
             || self.combined_info_picker.is_open()
@@ -3025,6 +3047,7 @@ impl XgViewApp {
         // is still in flight for a frame or two, and would confirm the control
         // the window has just been given. See `swallow_confirm`.
         let mut opened = false;
+        opened |= self.layout_editor.hand_off(ctx, false);
         opened |= self.camera_edit.hand_off(ctx, true);
         opened |= self.remove_confirm.hand_off(ctx, false);
         opened |= self.system_confirm.hand_off(ctx, false);
@@ -3794,15 +3817,35 @@ impl XgViewApp {
 
         self.draw_layout_picker(ctx);
         // The editor sits above the picker: a confirm writes the preview into
-        // its slot and puts that grid on the wall; Back drops it entirely.
+        // its slot, and changes the wall only when that slot was the layout on
+        // screen. Editing a different slot just updates its panel item; the
+        // viewer has to choose the item to put it on the wall. Back drops the
+        // preview entirely. Either way the Custom page comes back underneath,
+        // so the ring always has a control to land on.
         if self.layout_editor.is_open() {
             let (_, finished) = self.draw_layout_editor(ctx);
             if let Some(state) = finished {
                 let grid = state.grid;
                 let slot = state.slot.min(3);
+                let active = matches!(
+                    self.scheduler.layout(),
+                    GridLayout::Custom(current) if Some(current) == self.config.group().custom_layouts[slot]
+                );
                 self.config.group_mut().custom_layouts[slot] = Some(grid);
-                self.set_layout(GridLayout::Custom(grid));
+                if active {
+                    self.set_layout(GridLayout::Custom(grid));
+                }
                 self.mark_dirty();
+                // Confirm puts the ring on the slot just written. Cancel left
+                // `restore_focus` pointing at the pencil the editor came from.
+                if let Some(id) = state.slot_focus {
+                    self.restore_focus = Some(id);
+                }
+            }
+            if !self.layout_editor.is_open() {
+                self.layout_picker.open(());
+                self.layout_picker_tab = Some(PickerTab::Custom);
+                self.layout_picker.from = None;
             }
         }
         self.draw_portrait_aspect_picker(ctx);
@@ -3828,6 +3871,9 @@ impl XgViewApp {
         let mut what = String::from(if self.scheduler.is_zoomed() { "magnified" } else { "wall" });
         if self.show_settings {
             what.push_str(&format!(" settings={:?}", self.settings_tab));
+        }
+        if self.layout_editor.is_open() {
+            what.push_str(" layout-editor");
         }
         if self.layout_picker.is_open() {
             what.push_str(" layouts");
@@ -5159,9 +5205,49 @@ mod tests {
         );
         let leave = rest.find("// Nothing else is a layer").expect("the ring is the last answer");
         let head = &rest[..leave];
-        for panel in ["layout_picker.is_open()", "portrait_aspect_picker.is_open()", "show_settings"] {
+        for panel in ["layout_editor.is_open()", "layout_picker.is_open()", "portrait_aspect_picker.is_open()", "show_settings"] {
             assert!(head.contains(panel), "{panel} is a layer and Back must close it first");
         }
+    }
+
+    /// The layout editor is a page over the Custom picker, not a replacement
+    /// for it. Back leaves the ring on the control that opened it, Confirm on
+    /// the slot it just wrote, and Enter on a preview cell is the remote's
+    /// second merge press.
+    #[test]
+    fn the_layout_editor_hands_the_ring_back_to_the_right_control() {
+        let picker = include_str!("pickers.rs");
+        assert!(
+            picker.contains("Answer::CLOSE_LEAVING_THE_FOCUS"),
+            "opening the editor must not send the ring back to the toolbar"
+        );
+        assert!(picker.contains("layout_editor.from = from"), "Cancel needs the control it came from");
+        assert!(picker.contains("slot_focus"), "Confirm needs the slot the pencil edits");
+        let app = include_str!("mod.rs");
+        assert!(app.contains("state.slot_focus"), "Confirm puts the ring on that slot");
+        assert!(app.contains("PickerTab::Custom"), "both ways out return to the Custom page");
+        assert!(
+            app.contains("if active {") && app.contains("set_layout(GridLayout::Custom(grid))"),
+            "Confirm switches the wall only when the edited slot is already on it"
+        );
+        let editor = include_str!("layout_editor.rs");
+        assert!(
+            editor.contains("input::CONFIRM_KEYS") && editor.contains("focused == Some(response.id)"),
+            "Enter on a focused preview cell is a merge press"
+        );
+        assert!(
+            app.contains("layout-editor-grid-row-0")
+                && app.contains("Exit::ScopeAt(\"layout-editor-grid-row-1\")"),
+            "Up/Down cross the preview rows instead of leaving the grid"
+        );
+        let at = editor.find("for (index, cell)").expect("the preview cell loop");
+        let rest = &editor[at..];
+        let end = rest.find("app.nav.close()").expect("the end of the preview loop");
+        assert_eq!(
+            rest[..end].matches("payload.enter()").count(),
+            1,
+            "one press must take one step, not set the anchor and clear it again"
+        );
     }
 
     /// Up on a pinned strip answers what Back answers: the ring goes and the

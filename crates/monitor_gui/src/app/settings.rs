@@ -187,7 +187,7 @@ impl XgViewApp {
             let active = !current.is_standard();
             let more = self
                 .nav
-                .tracked(ui.selectable_label(active || self.layout_picker.is_open(), current.display_label()));
+                .tracked(ui.selectable_label(active || self.layout_picker.is_open(), current.toolbar_label()));
             self.name(&more, "toolbar-layout-more");
             if more.clicked() {
                 if self.layout_picker.is_open() {

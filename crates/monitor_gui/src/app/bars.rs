@@ -286,7 +286,7 @@ impl XgViewApp {
             let active = !current.is_standard() && !self.scheduler.is_zoomed();
             let more = ui.selectable_label(
                 active || self.layout_picker.is_open(),
-                current.display_label(),
+                current.toolbar_label(),
             );
             items.push((more.id, more.rect));
             self.name(&more, "toolbar-layout-more");

@@ -66,8 +66,10 @@ impl<'de> Deserialize<'de> for CustomGrid {
 pub const MAX_CUSTOM_DIMENSION: u8 = 6;
 
 impl CustomGrid {
-    /// A grid of nothing but 1x1 cells, which is where editing starts: every
-    /// later shape is made by merging whole, equal-sized neighbours.
+    /// A grid of nothing but 1x1 cells, which is where editing starts. `cols`
+    /// and `rows` stay on the grid as its baseline: every later shape is made
+    /// by merging neighbours that share a whole edge of the same length, and
+    /// splitting a cell always returns it to that baseline's unit squares.
     pub fn uniform(cols: u8, rows: u8) -> Self {
         assert!((1..=MAX_CUSTOM_DIMENSION).contains(&cols), "columns out of range");
         assert!((1..=MAX_CUSTOM_DIMENSION).contains(&rows), "rows out of range");
@@ -122,20 +124,26 @@ impl CustomGrid {
         covered.iter().all(|&n| n == 1)
     }
 
-    /// Two cells may merge when they are the same size and share one whole
-    /// edge. A partial overlap would produce an L shape and leave the grid
-    /// untileable, so it is refused.
+    /// Two cells may merge when they touch along a whole edge of the same
+    /// length: side by side means the same row and row span, one below the
+    /// other means the same column and column span. Their spans along the
+    /// shared axis may differ, so a 2x1 can absorb a 3x1 beside it. A partial
+    /// overlap would make an L shape and is refused.
     pub fn can_merge(&self, a: usize, b: usize) -> bool {
         let (Some(a), Some(b)) = (self.cells().get(a), self.cells().get(b)) else {
             return false;
         };
-        if a == b || a.col_span != b.col_span || a.row_span != b.row_span {
+        if a == b {
             return false;
         }
         let beside = a.row == b.row
-            && (a.col + a.col_span == b.col || b.col + b.col_span == a.col);
+            && a.row_span == b.row_span
+            && (u16::from(a.col) + u16::from(a.col_span) == u16::from(b.col)
+                || u16::from(b.col) + u16::from(b.col_span) == u16::from(a.col));
         let below = a.col == b.col
-            && (a.row + a.row_span == b.row || b.row + b.row_span == a.row);
+            && a.col_span == b.col_span
+            && (u16::from(a.row) + u16::from(a.row_span) == u16::from(b.row)
+                || u16::from(b.row) + u16::from(b.row_span) == u16::from(a.row));
         beside || below
     }
 
@@ -148,10 +156,12 @@ impl CustomGrid {
         }
         let first = self.cells()[a];
         let second = self.cells()[b];
-        // Only the axis they share an edge across grows. Adding both spans
-        // would make a 2x1 pair into a 2x2 block that overlaps its neighbours.
-        let beside = first.row == second.row && first.col_span == second.col_span
-            && (first.col + first.col_span == second.col || second.col + second.col_span == first.col);
+        // Only the axis they share an edge across grows. The spans across
+        // that edge are equal (that is what `can_merge` checked), so the
+        // survivor keeps them and the other pair of spans is added.
+        let beside = first.row == second.row && first.row_span == second.row_span
+            && (u16::from(first.col) + u16::from(first.col_span) == u16::from(second.col)
+                || u16::from(second.col) + u16::from(second.col_span) == u16::from(first.col));
         let merged = if beside {
             c(first.col.min(second.col), first.row, first.col_span + second.col_span, first.row_span)
         } else {
@@ -179,25 +189,19 @@ impl CustomGrid {
         self.cells().get(index).is_some_and(|cell| cell.col_span > 1 || cell.row_span > 1)
     }
 
-    /// Halve one cell along an axis. Only even spans can be split evenly, so
-    /// a cell made by merging equal neighbours can always be undone.
-    pub fn split(&self, index: usize, horizontal: bool) -> Option<Self> {
+    /// Break one cell straight back into the baseline's 1x1 units. The `cols`
+    /// and `rows` picked on the editor's row and column controls are still on
+    /// the grid, so a unit is always one column by one row of that baseline:
+    /// however many merges made the cell, one press puts all of it back.
+    pub fn split(&self, index: usize) -> Option<Self> {
         let cell = *self.cells().get(index)?;
-        let (first, second) = if horizontal {
-            if cell.col_span % 2 != 0 {
-                return None;
-            }
-            let half = cell.col_span / 2;
-            (c(cell.col, cell.row, half, cell.row_span),
-             c(cell.col + half, cell.row, half, cell.row_span))
-        } else {
-            if cell.row_span % 2 != 0 {
-                return None;
-            }
-            let half = cell.row_span / 2;
-            (c(cell.col, cell.row, cell.col_span, half),
-             c(cell.col, cell.row + half, cell.col_span, half))
-        };
+        if !self.can_split(index) {
+            return None;
+        }
+        let area = usize::from(cell.col_span) * usize::from(cell.row_span);
+        if usize::from(self.count) - 1 + area > self.cells.len() {
+            return None;
+        }
         let mut next = *self;
         let mut out = [c(0, 0, 1, 1); 36];
         let mut at = 0;
@@ -207,9 +211,12 @@ impl CustomGrid {
                 at += 1;
             }
         }
-        out[at] = first;
-        out[at + 1] = second;
-        at += 2;
+        for row in cell.row..cell.row + cell.row_span {
+            for col in cell.col..cell.col + cell.col_span {
+                out[at] = c(col, row, 1, 1);
+                at += 1;
+            }
+        }
         next.count = at as u8;
         next.cells = out;
         next.sort();
@@ -616,6 +623,17 @@ impl GridLayout {
         }
     }
 
+    /// The label on the toolbar's "more layouts" button and the settings
+    /// panel's copy of it. The four square presets have buttons of their own,
+    /// so this one collapses to an ellipsis for them; the other presets keep
+    /// their viewport count, and a custom grid spells out its runtime label.
+    pub fn toolbar_label(self) -> String {
+        match self {
+            GridLayout::Custom(_) => self.display_label(),
+            _ => self.numeric_label().unwrap_or("…").to_owned(),
+        }
+    }
+
     /// Whether this is a viewer-drawn layout, as opposed to a built-in preset.
     pub fn is_custom(self) -> bool {
         matches!(self, GridLayout::Custom(_))
@@ -967,10 +985,60 @@ mod tests {
         assert_eq!(GridLayout::Custom(merged).display_label(), "3");
 
         // The merged cell is first in fill order, and can be split back to the
-        // exact grid we started from.
-        let restored = merged.split(0, true).unwrap();
+        // exact grid we started from in one press.
+        let restored = merged.split(0).unwrap();
         assert!(restored.is_valid());
         assert_eq!(restored, grid);
+    }
+
+    #[test]
+    fn neighbours_join_when_their_shared_edge_is_the_same_length() {
+        // Horizontal: a 2x1 cell and a 1x1 cell share a one-unit-high edge.
+        let grid = CustomGrid::uniform(3, 2);
+        let twice_wide = grid.merge(0, 1).unwrap();
+        assert_eq!(twice_wide.cells()[0].col_span, 2);
+        assert!(twice_wide.can_merge(0, 1));
+        let full_row = twice_wide.merge(0, 1).unwrap();
+        assert!(full_row.is_valid());
+        assert_eq!(full_row.count, 4);
+        assert_eq!(full_row.cells()[0].col_span, 3);
+        assert_eq!(GridLayout::Custom(full_row).display_label(), "4");
+
+        // Vertical: a 1x2 cell and a 1x1 cell share a one-unit-wide edge.
+        let grid = CustomGrid::uniform(2, 3);
+        let twice_high = grid.merge(0, 2).unwrap();
+        assert!(twice_high.can_merge(0, 3));
+        let full_column = twice_high.merge(0, 3).unwrap();
+        assert!(full_column.is_valid());
+        assert_eq!(full_column.cells()[0].row_span, 3);
+        assert_eq!(full_column.count, 4);
+    }
+
+    #[test]
+    fn a_partially_overlapping_edge_still_refuses_a_merge() {
+        // The 2x1 cell at the top left and the unit cell beneath its right
+        // half touch, but the unit only covers half of the wide cell's edge.
+        let grid = CustomGrid::uniform(3, 2);
+        let wide = grid.merge(0, 1).unwrap();
+        assert!(!wide.can_merge(0, 3));
+        assert!(wide.merge(0, 3).is_none());
+    }
+
+    #[test]
+    fn splitting_goes_straight_back_to_the_baseline_units() {
+        let mut grid = CustomGrid::uniform(4, 4);
+        grid = grid.merge(0, 1).unwrap();
+        grid = grid.merge(0, 1).unwrap(); // a 3x1 cell from three unit cells
+        assert_eq!(grid.cols, 4);
+        assert_eq!(grid.rows, 4);
+        assert_eq!(grid.count, 14);
+
+        let split = grid.split(0).unwrap();
+        assert!(split.is_valid());
+        assert_eq!(split, CustomGrid::uniform(4, 4));
+        assert_eq!(split.cols, 4);
+        assert_eq!(split.rows, 4);
+        assert!(!split.can_split(0));
     }
 
     #[test]
@@ -982,6 +1050,15 @@ mod tests {
         assert_eq!(merged.count, 8);
         assert_eq!(merged.display_label(), "8");
         assert_eq!(grid.display_label(), "3x3");
+    }
+
+    #[test]
+    fn the_toolbar_label_keeps_the_ellipsis_for_standard_presets() {
+        assert_eq!(GridLayout::G1x1.toolbar_label(), "…");
+        assert_eq!(GridLayout::G4x4.toolbar_label(), "…");
+        assert_eq!(GridLayout::N7.toolbar_label(), "7");
+        assert_eq!(GridLayout::P2.toolbar_label(), "1x2");
+        assert_eq!(GridLayout::Custom(CustomGrid::uniform(3, 2)).toolbar_label(), "3x2");
     }
 
     #[test]
