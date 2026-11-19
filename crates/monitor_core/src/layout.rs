@@ -14,21 +14,26 @@ pub struct Cell {
     pub row_span: u8,
 }
 
+/// The largest grid a custom layout may use. Also the side of the fixed cell
+/// array, so a layout at the limit still fits.
+pub const MAX_CUSTOM_DIMENSION: u8 = 7;
+const CUSTOM_CELL_CAPACITY: usize = MAX_CUSTOM_DIMENSION as usize * MAX_CUSTOM_DIMENSION as usize;
+
 /// A layout the viewer draws: a `cols x rows` unit grid tiled exactly once by
 /// `count` rectangles, each covering whole units. Stored inline in
 /// [`GridLayout::Custom`] as a fixed array so the enum stays `Copy` - every
 /// layout is passed by value throughout the scheduler and the GUI, and losing
 /// that would ripple through well over a hundred call sites. The array holds at
-/// most 6x6 = 36 cells; only the first `count` are read.
+/// most 7x7 = 49 cells; only the first `count` are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CustomGrid {
     pub cols: u8,
     pub rows: u8,
     pub count: u8,
-    cells: [Cell; 36],
+    cells: [Cell; CUSTOM_CELL_CAPACITY],
 }
 
-/// serde only implements arrays up to 32 elements, and a custom grid holds 36.
+/// serde only implements arrays up to 32 elements, and a custom grid holds 49.
 /// Only the first `count` cells are meaningful, so the wire form carries just
 /// that slice in a helper struct and the array is padded back out on load.
 #[derive(Serialize, Deserialize)]
@@ -54,16 +59,12 @@ impl Serialize for CustomGrid {
 impl<'de> Deserialize<'de> for CustomGrid {
     fn deserialize<D: serde::Deserializer<'de>>(deser: D) -> Result<Self, D::Error> {
         let wire = CustomGridWire::deserialize(deser)?;
-        let mut cells = [c(0, 0, 1, 1); 36];
-        let used = wire.cells.len().min(36);
+        let mut cells = [c(0, 0, 1, 1); CUSTOM_CELL_CAPACITY];
+        let used = wire.cells.len().min(CUSTOM_CELL_CAPACITY);
         cells[..used].copy_from_slice(&wire.cells[..used]);
         Ok(CustomGrid { cols: wire.cols, rows: wire.rows, count: wire.count, cells })
     }
 }
-
-/// The largest grid a custom layout may use. Also the size of the fixed cell
-/// array, so a layout at the limit still fits.
-pub const MAX_CUSTOM_DIMENSION: u8 = 6;
 
 impl CustomGrid {
     /// A grid of nothing but 1x1 cells, which is where editing starts. `cols`
@@ -73,7 +74,7 @@ impl CustomGrid {
     pub fn uniform(cols: u8, rows: u8) -> Self {
         assert!((1..=MAX_CUSTOM_DIMENSION).contains(&cols), "columns out of range");
         assert!((1..=MAX_CUSTOM_DIMENSION).contains(&rows), "rows out of range");
-        let mut cells = [c(0, 0, 1, 1); 36];
+        let mut cells = [c(0, 0, 1, 1); CUSTOM_CELL_CAPACITY];
         let mut index = 0;
         for row in 0..rows {
             for col in 0..cols {
@@ -168,7 +169,7 @@ impl CustomGrid {
             c(first.col, first.row.min(second.row), first.col_span, first.row_span + second.row_span)
         };
         let mut next = *self;
-        let mut out = [c(0, 0, 1, 1); 36];
+        let mut out = [c(0, 0, 1, 1); CUSTOM_CELL_CAPACITY];
         let mut index = 0;
         for (position, cell) in self.cells().iter().enumerate() {
             if position != a && position != b {
@@ -226,7 +227,7 @@ impl CustomGrid {
         }
 
         let mut next = *self;
-        let mut out = [c(0, 0, 1, 1); 36];
+        let mut out = [c(0, 0, 1, 1); CUSTOM_CELL_CAPACITY];
         let mut index = 0;
         for (position, cell) in cells.iter().enumerate() {
             if !picked.contains(&position) {
@@ -261,7 +262,7 @@ impl CustomGrid {
             return None;
         }
         let mut next = *self;
-        let mut out = [c(0, 0, 1, 1); 36];
+        let mut out = [c(0, 0, 1, 1); CUSTOM_CELL_CAPACITY];
         let mut at = 0;
         for (position, existing) in self.cells().iter().enumerate() {
             if position != index {
@@ -282,7 +283,7 @@ impl CustomGrid {
     }
 
     /// Keep the fill order after an edit: top to bottom, then left to right.
-    /// Insertion sort over at most 36 cells is ample.
+    /// Insertion sort over at most 49 cells is ample.
     fn sort(&mut self) {
         for i in 1..usize::from(self.count) {
             let mut j = i;
@@ -1013,9 +1014,9 @@ mod tests {
 
     #[test]
     fn a_custom_grid_is_copy_and_round_trips_through_json() {
-        let grid = CustomGrid::uniform(6, 6);
+        let grid = CustomGrid::uniform(MAX_CUSTOM_DIMENSION, MAX_CUSTOM_DIMENSION);
         assert!(grid.is_valid());
-        assert_eq!(grid.cells().len(), 36);
+        assert_eq!(grid.cells().len(), CUSTOM_CELL_CAPACITY);
         let layout = GridLayout::Custom(grid);
         // The enum is still Copy - that is the whole reason for the fixed
         // array. This assignment would not compile if it were not.
@@ -1023,11 +1024,11 @@ mod tests {
         assert_eq!(copied, layout);
 
         let json = serde_json::to_string(&layout).unwrap();
-        // Only the 36 live cells travel, padded back on load.
+        // Only the live cells travel, padded back on load.
         let restored: GridLayout = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, layout);
-        assert_eq!(restored.cells().len(), 36);
-        assert_eq!(restored.display_label(), "6x6");
+        assert_eq!(restored.cells().len(), CUSTOM_CELL_CAPACITY);
+        assert_eq!(restored.display_label(), "7x7");
     }
 
     #[test]

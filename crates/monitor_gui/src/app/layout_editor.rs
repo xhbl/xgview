@@ -19,6 +19,15 @@ use monitor_core::layout::{Cell, CustomGrid, MAX_CUSTOM_DIMENSION};
 /// left edges line up whatever the width of the text in any one row.
 const INSET: f32 = theme::space::XS;
 
+/// The preview has to hold seven numbered cells a side. The first pass at
+/// 260x180 gave ~37x26pt cells, which the screenshot showed was roomy; 238x134
+/// keeps the preview near 16:9 while still leaving ~19pt per row for the 13pt
+/// digits. The modal follows the preview so the hint beside it keeps its own
+/// readable column.
+const EDITOR_WIDTH: f32 = 420.0;
+const PREVIEW_W: f32 = 238.0;
+const PREVIEW_H: f32 = 134.0;
+
 /// Exact width egui gives a text button: the Button-font text plus both pads.
 /// `horizontal_centered` only centres vertically, so a leading space built
 /// from the real button widths is what actually centres the row.
@@ -113,10 +122,10 @@ pub(super) struct EditorState {
 }
 
 impl EditorState {
-    /// Editing an existing slot loads its shape; a new slot starts from a
-    /// small uniform grid rather than an empty preview.
+    /// Editing an existing slot loads its shape; a new slot starts from the
+    /// default 5x5 uniform grid rather than an empty preview.
     pub(super) fn open(slot: usize, existing: Option<CustomGrid>) -> Self {
-        let grid = existing.unwrap_or_else(|| CustomGrid::uniform(2, 2));
+        let grid = existing.unwrap_or_else(|| CustomGrid::uniform(5, 5));
         EditorState {
             slot,
             slot_focus: None,
@@ -289,10 +298,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_new_slot_starts_from_a_small_uniform_grid() {
+    fn the_preview_room_fits_seven_numbered_cells() {
+        let cell_w = PREVIEW_W / f32::from(MAX_CUSTOM_DIMENSION);
+        let cell_h = PREVIEW_H / f32::from(MAX_CUSTOM_DIMENSION);
+        assert!(
+            cell_w >= 24.0 && cell_h >= 17.0,
+            "13pt digits need their own box"
+        );
+        assert!(
+            cell_w <= 40.0 && cell_h <= 24.0,
+            "the cells should stay compact at 7x7"
+        );
+        assert!(
+            (PREVIEW_W / PREVIEW_H - 16.0 / 9.0).abs() < 0.08,
+            "the preview stays close to 16:9"
+        );
+        assert!(
+            EDITOR_WIDTH > PREVIEW_W + theme::space::M * 3.0,
+            "the hint keeps a column beside the preview"
+        );
+    }
+
+    #[test]
+    fn a_new_slot_starts_from_the_default_grid() {
         let state = EditorState::open(2, None);
         assert_eq!(state.slot, 2);
-        assert_eq!(state.grid.cells().len(), 4);
+        assert_eq!(state.grid.cells().len(), 25);
+        assert_eq!(state.grid.display_label(), "5x5");
         assert_eq!(state.anchor, None);
         assert_eq!(state.drag_from, None);
         assert_eq!(state.drag_to, None);
@@ -321,6 +353,7 @@ mod tests {
     #[test]
     fn merging_takes_two_presses_and_only_on_a_real_neighbour() {
         let mut state = EditorState::open(0, None);
+        state.set_dimensions(2, 2);
         let before = state.grid;
         assert!(!state.enter());
         assert_eq!(state.anchor, Some(0));
@@ -391,6 +424,7 @@ mod tests {
     #[test]
     fn a_pointer_drag_merges_the_rectangle_it_covers() {
         let mut state = EditorState::open(0, None);
+        state.set_dimensions(2, 2);
         state.drag_from = Some(0);
         state.drag_to = Some(3);
         assert!(state.merge_drag(3));
@@ -445,6 +479,7 @@ mod tests {
     #[test]
     fn split_acts_on_the_anchor_even_after_walking_to_the_button() {
         let mut state = EditorState::open(0, None);
+        state.set_dimensions(2, 2);
         state.enter(); // anchor on the 2x1 made below
         state.selected = 1;
         assert!(state.enter()); // merge the top pair into a wide cell
@@ -510,7 +545,7 @@ impl XgViewApp {
                 self.modal_frame(
             ctx,
             "xgview-layout-editor",
-            400.0,
+            EDITOR_WIDTH,
             |app| &mut app.layout_editor,
             |app, ui, payload: &mut EditorState| {
                 let bar = dialogs::title_bar(
@@ -605,13 +640,14 @@ impl XgViewApp {
                 } else {
                     monitor_i18n::tr("layout-editor-merge-hint")
                 };
-                let column_w = 220.0;
                 ui.add_space(theme::space::M);
                 let mut area = egui::Rect::NOTHING;
                 let mut hint_rect = egui::Rect::NOTHING;
                 ui.horizontal(|ui| {
                     ui.add_space(INSET);
-                    area = ui.allocate_exact_size(vec2(column_w, 110.0), egui::Sense::hover()).0;
+                    area = ui
+                        .allocate_exact_size(vec2(PREVIEW_W, PREVIEW_H), egui::Sense::hover())
+                        .0;
                     ui.add_space(theme::space::M);
                     // The hint sits beside the preview in a fixed-height
                     // block. Its wording changes when a cell is picked; with
@@ -619,7 +655,7 @@ impl XgViewApp {
                     // re-wraps.
                     let hint_w = ui.available_width();
                     ui.allocate_ui_with_layout(
-                        vec2(hint_w, 110.0),
+                        vec2(hint_w, PREVIEW_H),
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
                             let label = ui.add(

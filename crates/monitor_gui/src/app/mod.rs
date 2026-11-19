@@ -1008,13 +1008,14 @@ const LAYOUT_PICKER_ROWS: [&str; 3] =
 /// Up/Down walk straight to the cell above or below instead of leaving the
 /// grid. Cells that span rows belong to their top row; empty rows are passed
 /// through by `Nav::enter`.
-const LAYOUT_EDITOR_GRID_ROWS: [&str; 6] = [
+const LAYOUT_EDITOR_GRID_ROWS: [&str; 7] = [
     "layout-editor-grid-row-0",
     "layout-editor-grid-row-1",
     "layout-editor-grid-row-2",
     "layout-editor-grid-row-3",
     "layout-editor-grid-row-4",
     "layout-editor-grid-row-5",
+    "layout-editor-grid-row-6",
 ];
 
 /// Keyboard / DPAD keys consumed during one frame.
@@ -1839,8 +1840,9 @@ impl XgViewApp {
             ("layout-editor-grid-row-2", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-1")).exit(Dir::Down, Exit::ScopeAt("layout-editor-grid-row-3"))),
             ("layout-editor-grid-row-3", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-2")).exit(Dir::Down, Exit::ScopeAt("layout-editor-grid-row-4"))),
             ("layout-editor-grid-row-4", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-3")).exit(Dir::Down, Exit::ScopeAt("layout-editor-grid-row-5"))),
-            ("layout-editor-grid-row-5", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-4")).exit(Dir::Down, Exit::Scope("layout-editor-actions"))),
-            ("layout-editor-actions", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-5"))),
+            ("layout-editor-grid-row-5", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-4")).exit(Dir::Down, Exit::ScopeAt("layout-editor-grid-row-6"))),
+            ("layout-editor-grid-row-6", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-5")).exit(Dir::Down, Exit::Scope("layout-editor-actions"))),
+            ("layout-editor-actions", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::ScopeAt("layout-editor-grid-row-6"))),
             ("status", ScopeDef::new(Axis::Row)),
             ("edit-body", ScopeDef::new(Axis::Column)),
             ("confirm-body", ScopeDef::new(Axis::Column)),
@@ -4391,6 +4393,16 @@ mod tests {
         assert_eq!(follows(showing, (1, Some(0)), cursor, true), showing, "an arrow walked off the edge");
         assert_eq!(follows(showing, cursor, cursor, false), showing, "no move, no change");
         assert_eq!(follows(showing, (0, Some(2)), cursor, true), showing, "an aim keeps it wherever it went");
+    }
+
+    /// Every baseline row of a custom grid needs its own navigation scope,
+    /// or the last row of a 7x7 edit cannot be reached from the one above.
+    #[test]
+    fn every_baseline_row_has_a_preview_scope() {
+        assert_eq!(
+            LAYOUT_EDITOR_GRID_ROWS.len(),
+            usize::from(monitor_core::layout::MAX_CUSTOM_DIMENSION)
+        );
     }
 
     /// The layout picker's nine thumbnails are three rows of three, and the
