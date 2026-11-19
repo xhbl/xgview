@@ -58,27 +58,56 @@ impl XgViewApp {
                 app.layout_picker_tab = Some(tab);
 
                 ui.add_space(theme::space::XS);
+                // The tabs are the ring's entry, the same as in Settings:
+                // opening the picker leaves it on the active tab, a press
+                // selects and keeps it there, and Left/Right select as they
+                // land so the body follows the ring.
                 app.nav.open("layout-picker-tabs");
                 ui.horizontal(|ui| {
-                    ui.add_space(left_pad(ui, 200.0));
-                    for (page, key) in [
-                        (PickerTab::Presets, "layout-picker-tab-presets"),
-                        (PickerTab::Custom, "layout-picker-tab-custom"),
-                    ] {
-                        let response = app.nav.tracked(ui.selectable_label(tab == page, monitor_i18n::tr(key)));
-                        if tab == page {
-                            app.nav.set_entry("layout-picker-tabs", response.id);
-                        }
+                    let labels = [
+                        monitor_i18n::tr("layout-picker-tab-presets"),
+                        monitor_i18n::tr("layout-picker-tab-custom"),
+                    ];
+                    let used = labels
+                        .iter()
+                        .map(|text| super::layout_editor::button_width(ui, text))
+                        .sum::<f32>()
+                        + ui.spacing().item_spacing.x;
+                    ui.add_space(left_pad(ui, used));
+                    let mut ids = [Id::NULL; 2];
+                    let mut focused = None;
+                    for (slot, (page, text)) in [
+                        (PickerTab::Presets, labels[0].clone()),
+                        (PickerTab::Custom, labels[1].clone()),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let response =
+                            app.nav.tracked(ui.selectable_label(tab == page, text));
                         if response.clicked() {
                             app.layout_picker_tab = Some(page);
+                            response.request_focus();
                         }
+                        if response.has_focus() {
+                            focused = Some(page);
+                        }
+                        ids[slot] = response.id;
                     }
+                    if let Some(page) = focused {
+                        app.layout_picker_tab = Some(page);
+                    }
+                    let active = app.layout_picker_tab.unwrap_or(tab);
+                    let slot = if active == PickerTab::Custom { 1 } else { 0 };
+                    // The window opens here, and Up out of the body comes
+                    // back to the tab in use.
+                    app.layout_picker.anchor = Some(ids[slot]);
+                    app.nav.set_entry("layout-picker-tabs", ids[slot]);
                 });
                 app.nav.close();
                 ui.add_space(theme::space::XS);
 
-                app.layout_picker.anchor = None;
-                match tab {
+                match app.layout_picker_tab.unwrap_or(tab) {
                     PickerTab::Presets => {
                         for (row, chunk) in GridLayout::EXTENDED.chunks(3).enumerate() {
                             let scope = LAYOUT_PICKER_ROWS[row];
@@ -89,9 +118,6 @@ impl XgViewApp {
                                     let selected = app.scheduler.layout() == *layout;
                                     let (rect, response) =
                                         ui.allocate_exact_size(vec2(108.0, 84.0), Sense::click());
-                                    if app.layout_picker.anchor.is_none() {
-                                        app.layout_picker.anchor = Some(response.id);
-                                    }
                                     if ui.is_rect_visible(rect) {
                                         let painter = ui.painter();
                                         let visuals = ui.style().interact_selectable(&response, selected);
@@ -142,9 +168,6 @@ impl XgViewApp {
                                         ui.set_width(150.0);
                                         let (rect, response) =
                                             ui.allocate_exact_size(vec2(150.0, 116.0), Sense::click());
-                                        if app.layout_picker.anchor.is_none() {
-                                            app.layout_picker.anchor = Some(response.id);
-                                        }
                                         let painter = ui.painter();
                                         let active = match app.scheduler.layout() {
                                             GridLayout::Custom(g) => Some(g) == grid,

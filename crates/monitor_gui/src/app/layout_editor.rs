@@ -22,7 +22,7 @@ const INSET: f32 = theme::space::XS;
 /// Exact width egui gives a text button: the Button-font text plus both pads.
 /// `horizontal_centered` only centres vertically, so a leading space built
 /// from the real button widths is what actually centres the row.
-fn button_width(ui: &egui::Ui, text: &str) -> f32 {
+pub(super) fn button_width(ui: &egui::Ui, text: &str) -> f32 {
     let galley = ui.fonts(|fonts| {
         fonts.layout_no_wrap(
             text.to_owned(),
@@ -395,7 +395,8 @@ impl XgViewApp {
                         })
                         .fold(0.0_f32, f32::max)
                 }) + theme::space::M;
-                app.layout_editor.anchor = None;
+                // The remote enters on the hint, an invisible focus target,
+                // so opening the editor shows no ring until a key moves it.
                 ui.add_space(theme::space::S);
                 for (key, scope, is_rows) in [
                     ("layout-editor-rows", "layout-editor-rows", true),
@@ -426,9 +427,6 @@ impl XgViewApp {
                                 current == value,
                                 value.to_string(),
                             ));
-                            if app.layout_editor.anchor.is_none() && is_rows && value == 1 {
-                                app.layout_editor.anchor = Some(response.id);
-                            }
                             if response.clicked() && current != value {
                                 if is_rows {
                                     payload.set_dimensions(payload.grid.cols, value);
@@ -456,6 +454,7 @@ impl XgViewApp {
                 let column_w = 220.0;
                 ui.add_space(theme::space::M);
                 let mut area = egui::Rect::NOTHING;
+                let mut hint_rect = egui::Rect::NOTHING;
                 ui.horizontal(|ui| {
                     ui.add_space(INSET);
                     area = ui.allocate_exact_size(vec2(column_w, 110.0), egui::Sense::hover()).0;
@@ -469,15 +468,28 @@ impl XgViewApp {
                         vec2(hint_w, 110.0),
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
-                            ui.add(
+                            let label = ui.add(
                                 egui::Label::new(
                                     RichText::new(hint).small().color(theme::ACCENT),
                                 )
                                 .wrap_mode(egui::TextWrapMode::Wrap),
                             );
+                            hint_rect = label.rect;
                         },
                     );
                 });
+                // Like the portrait-aspect panel: the hint is a focus target
+                // with no visuals of its own. The window hands the ring here
+                // and the viewer sees nothing until an arrow moves it on.
+                let hint_focus = ui.interact(
+                    hint_rect,
+                    ui.id().with("layout-editor-hint-focus"),
+                    egui::Sense::focusable_noninteractive(),
+                );
+                app.nav.open("layout-editor-entry");
+                app.nav.item(&hint_focus);
+                app.nav.close();
+                app.layout_editor.anchor = Some(hint_focus.id);
                 let layout = GridLayout::Custom(payload.grid);
                 grid::layout_thumbnail(ui.painter(), area, layout);
                 // egui turns Enter/Space into a click on a focused widget

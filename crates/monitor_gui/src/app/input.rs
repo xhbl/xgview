@@ -1464,7 +1464,9 @@ impl XgViewApp {
                 self.restore_focus = self.layout_editor.close_restoring();
                 self.layout_picker.open(());
                 self.layout_picker_tab = Some(PickerTab::Custom);
-                self.layout_picker.from = None;
+                // Keep the control that first opened the picker: leaving the
+                // editor and then backing out of the picker still has to
+                // return the ring to it. Clearing this here lost it forever.
             } else if self.layout_picker.is_open() {
                 self.restore_focus = self.layout_picker.close_restoring();
             } else if self.portrait_aspect_picker.is_open() {

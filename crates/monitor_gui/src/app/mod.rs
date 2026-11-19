@@ -1829,7 +1829,9 @@ impl XgViewApp {
             // columns, a preview grid with one scope per baseline row, then
             // the confirm row. Left/Right walk the cells of a row; Up/Down
             // cross to the same seat in the row above or below. Back leaves
-            // through the modal.
+            // through the modal. The entry is an invisible focus target on
+            // the hint: opening the page shows no ring until a key moves it.
+            ("layout-editor-entry", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("layout-editor-rows")).exit(Dir::Right, Exit::Scope("layout-editor-rows"))),
             ("layout-editor-rows", ScopeDef::new(Axis::Row).exit(Dir::Down, Exit::Scope("layout-editor-columns"))),
             ("layout-editor-columns", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope("layout-editor-rows")).exit(Dir::Down, Exit::Scope("layout-editor-grid-row-0"))),
             ("layout-editor-grid-row-0", ScopeDef::new(Axis::Row).exit(Dir::Up, Exit::Scope("layout-editor-columns")).exit(Dir::Down, Exit::ScopeAt("layout-editor-grid-row-1"))),
@@ -3845,7 +3847,9 @@ impl XgViewApp {
             if !self.layout_editor.is_open() {
                 self.layout_picker.open(());
                 self.layout_picker_tab = Some(PickerTab::Custom);
-                self.layout_picker.from = None;
+                // The editor's origin and the picker's are different things:
+                // the first takes the ring now, the second must survive for
+                // the Back that later closes the picker.
             }
         }
         self.draw_portrait_aspect_picker(ctx);
@@ -4419,10 +4423,31 @@ mod tests {
         assert_eq!(nav.step(ids[0], Dir::Down), Some(ids[3]));
     }
 
-    /// The picker's thumbnails are drawn inside an `egui::Modal`, and the
-    /// hand-off asks for the focus on the first of them. This reproduces that
-    /// shape headlessly: the focus has to land on a thumbnail and stay there,
-    /// or the arrows have nothing to walk.
+    /// The layout picker opens on its tab strip, the same way Settings does:
+    /// a click keeps the ring there, an arrow selects the tab it lands on, and
+    /// the active tab is the anchor the hand-off asks for.
+    #[test]
+    fn the_layout_picker_opens_on_its_active_tab() {
+        let source = include_str!("pickers.rs");
+        assert!(
+            source.contains("app.layout_picker.anchor = Some(ids[slot]);"),
+            "the modal hand-off must ask for the active tab"
+        );
+        assert!(
+            source.contains("response.request_focus();")
+                && source.contains("if let Some(page) = focused {"),
+            "a click keeps the ring on the tab, and an arrow follows it"
+        );
+        assert!(
+            source.contains("app.nav.set_entry(\"layout-picker-tabs\", ids[slot]);"),
+            "Up out of the body returns to the tab in use"
+        );
+    }
+
+    /// The picker's thumbnails are drawn inside an `egui::Modal`. The window
+    /// opens on the tab row now, but Down hands the focus to a thumbnail; this
+    /// reproduces that shape headlessly. The focus has to stay on a thumbnail
+    /// once it is there, or the arrows have nothing to walk.
     #[test]
     fn a_modal_thumbnail_keeps_the_focus_the_handoff_gave_it() {
         let ctx = egui::Context::default();
@@ -5226,6 +5251,12 @@ mod tests {
         let app = include_str!("mod.rs");
         assert!(app.contains("state.slot_focus"), "Confirm puts the ring on that slot");
         assert!(app.contains("PickerTab::Custom"), "both ways out return to the Custom page");
+        let input = include_str!("input.rs");
+        let cleared_origin = format!("{}layout_picker.from = None;", "self.");
+        assert!(
+            !app.contains(&cleared_origin) && !input.contains(&cleared_origin),
+            "visiting the editor must not lose the control that opened the picker"
+        );
         assert!(
             app.contains("if active {") && app.contains("set_layout(GridLayout::Custom(grid))"),
             "Confirm switches the wall only when the edited slot is already on it"
@@ -5239,6 +5270,14 @@ mod tests {
             app.contains("layout-editor-grid-row-0")
                 && app.contains("Exit::ScopeAt(\"layout-editor-grid-row-1\")"),
             "Up/Down cross the preview rows instead of leaving the grid"
+        );
+        assert!(
+            app.contains("(\"layout-editor-entry\", ScopeDef::new(Axis::Row)")
+                && app.contains("layout-editor-entry\", ScopeDef::new(Axis::Row).exit(Dir::Down")
+                && app.contains(".exit(Dir::Right, Exit::Scope(\"layout-editor-rows\"))")
+                && editor.contains("app.layout_editor.anchor = Some(hint_focus.id)")
+                && editor.contains("egui::Sense::focusable_noninteractive()"),
+            "the editor opens on a focus target with no visible ring"
         );
         assert!(
             editor.contains("focus_before == Some(split.id)"),
