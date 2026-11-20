@@ -983,6 +983,14 @@ impl XgViewApp {
                 ui.label(monitor_i18n::tr("about-cpu-unknown"));
             }
         }
+        ui.label(monitor_i18n::tr_args(
+            "about-network-current",
+            &[("mbps", format!("{:.2}", self.network_traffic.current_mbps).into())],
+        ));
+        ui.label(monitor_i18n::tr_args(
+            "about-network-average",
+            &[("mbps", format!("{:.2}", self.network_traffic.average_mbps()).into())],
+        ));
         ui.label(monitor_i18n::tr_args("about-system", &[("os", self.vitals.os().into())]));
         ui.label(monitor_i18n::tr_args(
             "about-uptime",
