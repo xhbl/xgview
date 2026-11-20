@@ -3,9 +3,10 @@
 # XGView - A grid viewer for surveillance cameras
 
 **A lightweight, production-grade camera wall written in Rust.** It turns one
-screen into a live grid of your IP cameras - 1x1 up to 4x4, nine mixed layouts
-of up to 13 cells, or four stacked grids when the screen stands upright, with
-paging beyond that. No cloud, no account, MIT licensed.
+screen into a live grid of your IP cameras - the built-in square and mixed
+layouts, or a custom grid you shape yourself with merged cells up to 7x7, with
+four stacked grids when the screen stands upright, and paging beyond that. No
+cloud, no account, MIT licensed.
 
 - **One program for every screen.** Android TV boxes and wall-mounted
   displays, phones and tablets - upright or on their side - and Windows, Linux
@@ -30,11 +31,11 @@ paging beyond that. No cloud, no account, MIT licensed.
 
 | Platform                            | File                                                                                                                    |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Android / Android TV (arm64, 8.1+)  | [`xgview-2.2.106-android-arm64-v8a.apk`](../../releases/download/xgview-v2.2.106/xgview-2.2.106-android-arm64-v8a.apk)     |
-| Android / Android TV (32-bit, 8.1+) | [`xgview-2.2.106-android-armeabi-v7a.apk`](../../releases/download/xgview-v2.2.106/xgview-2.2.106-android-armeabi-v7a.apk) |
-| Windows x64                         | [`xgview-2.2.106-windows-x86_64.zip`](../../releases/download/xgview-v2.2.106/xgview-2.2.106-windows-x86_64.zip)           |
-| Linux x64                           | [`xgview-2.2.106-linux-x86_64.tar.gz`](../../releases/download/xgview-v2.2.106/xgview-2.2.106-linux-x86_64.tar.gz)         |
-| macOS (universal)                   | [`xgview-2.2.106-macos-universal.zip`](../../releases/download/xgview-v2.2.106/xgview-2.2.106-macos-universal.zip)         |
+| Android / Android TV (arm64, 8.1+)  | [`xgview-2.3.24-android-arm64-v8a.apk`](../../releases/download/xgview-v2.3.24/xgview-2.3.24-android-arm64-v8a.apk)     |
+| Android / Android TV (32-bit, 8.1+) | [`xgview-2.3.24-android-armeabi-v7a.apk`](../../releases/download/xgview-v2.3.24/xgview-2.3.24-android-armeabi-v7a.apk) |
+| Windows x64                         | [`xgview-2.3.24-windows-x86_64.zip`](../../releases/download/xgview-v2.3.24/xgview-2.3.24-windows-x86_64.zip)           |
+| Linux x64                           | [`xgview-2.3.24-linux-x86_64.tar.gz`](../../releases/download/xgview-v2.3.24/xgview-2.3.24-linux-x86_64.tar.gz)         |
+| macOS (universal)                   | [`xgview-2.3.24-macos-universal.zip`](../../releases/download/xgview-v2.3.24/xgview-2.3.24-macos-universal.zip)         |
 
 **Note: This is a personal project, shared as-is, with no warranty.** It was developed with **AI assistance** under my direction and testing; please review the code before using
 it in sensitive setups.
@@ -43,7 +44,7 @@ it in sensitive setups.
 *The wall with the settings panel open.*
 
 ![XGView full screen grid](xgview_fs.jpg)
-*Multiple layouts with full screen, from 1 cell up to 16.*
+*Multiple layouts with full screen, including custom grids you build yourself.*
 
 ![XGView portrait layout](xgview_pt.jpg)
 *Portrait layout supported on a phone / tablet.*
@@ -118,7 +119,7 @@ it in sensitive setups.
 
 | Area                | What it does                                                                                                                                                                                                                                                                                                                                                                     |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Grid layouts        | 1x1, 2x2, 3x3 and 4x4 as direct buttons, plus nine mixed layouts (2, 3, 5, 6, 7, 8, 10, 12, 13 cells) behind a graphical picker; switchable at runtime with the digit keys or the toolbar. Held upright, the four stacked grids (1x1 to 1x4) stand in their place                                                                                                                |
+| Grid layouts        | 1x1, 2x2, 3x3 and 4x4 as direct buttons, plus nine mixed layouts (2, 3, 5, 6, 7, 8, 10, 12, 13 cells) behind a graphical picker; switchable at runtime with the digit keys or the toolbar. Four **custom layouts** can hold a rectangular grid of any size up to 7x7, with cells merged into larger ones and split again - by button or by dragging across them - each saved and switchable from the picker. Held upright, the four stacked grids (1x1 to 1x4) stand in their place                                                                                                                |
 | Portrait            | Where the device can stand upright - a phone or a tablet, not a television - the wall turns: four stacked grids, the on-screen display rotated with the video, a picture fit of its own per camera, and the page arrows floated at the screen edges. The settings panel is reached in landscape, and the choice is remembered across restarts - the wall comes up already turned |
 | Pagination          | Channels beyond the grid's capacity are paged; swipe, `PageUp` / `PageDown` or the toolbar slides between pages                                                                                                                                                                                                                                                                  |
 | Focus navigation    | A 2 px cyan focus ring walks the tiles with the arrow keys or a TV remote's DPAD; the sideways arrows turn the page at the left and right edges, and the vertical ones stop at the top and bottom, where the wall hands the keys to the bars. It is the remote's cursor: a press of the mouse or a finger does not move it, and it is drawn only while that cursor is being handled - a key that walks it, or a click on a tile, brings it back and it goes again eight seconds later, on its own clock rather than the bars'. A page turn is never one of those: the page keys, the toolbar's page arrows and a swipe all move the picture rather than the ring, so all three behave alike - and a page turn, like a layout that moves the cursor under the viewer, takes a ring that is showing down with it. The bars are the other thing it has to do with: it is taken down as they hide and brought back as they appear, and a wall driven in full screen with the bars away keeps its ring |
@@ -127,19 +128,19 @@ it in sensitive setups.
 | Stream switching    | Every layout pulls the cheap sub stream (360P / 480P), the 1x1 grid included; a tile can be pinned to its main stream (1080P / 4K) from its row in Cameras, for the camera worth watching closely while the wall stays a wall - and a magnified viewport always pulls the main stream |
 | Seamless transition | The frame a tile was showing is held until the new stream delivers its first keyframe - no black or green frames                                                                                                                                                                                                                                                                 |
 | Suspend             | Channels on a non-visible page are suspended to save bandwidth, CPU and decoder handles                                                                                                                                                                                                                                                                                          |
-| Reconnection        | Exponential-backoff self-healing with a non-blocking "reconnecting…" overlay; the backoff shape and the handshake timeout are configurable and reach channels already running                                                                                                                                                                                                    |
+| Reconnection        | Exponential-backoff self-healing with a non-blocking "reconnecting…" overlay; the backoff shape and the handshake timeout are configurable and reach channels already running. Failures and retries are named in the active language - rejected credentials, unreachable, timed out, retrying, gave up - rather than shown as a raw English error string                                                                                                                                                                                                    |
 | Decoding            | H.264 and H.265 on the GPU where the machine offers a decoder (Direct3D 11 Video / CUDA on Windows, VAAPI / CUDA on Linux, VideoToolbox on macOS, `AMediaCodec` on Android) and on the CPU elsewhere - Android falling back to OpenH264 by itself for an H.264 stream its own decoder will not take; MJPEG on the CPU everywhere. Each tile shows `HW` or `SW`                   |
 | Codecs              | H.264, H.265 (HEVC) and MJPEG are decoded and displayed. H.265 uses the platform's decoder (VideoToolbox on macOS, `AMediaCodec` on Android) or FFmpeg on the desktop, on the GPU or the CPU. Android has no software HEVC, so a stream a device's own decoder will not take shows no picture - use its H.264 sub stream there                                                   |
 | Transports          | RTSP over TCP (interleaved, the default) or UDP, chosen per camera; HTTP / HTTPS MJPEG (`multipart/x-mixed-replace`) cameras are supported too. A Frigate or go2rtc camera also carries an MSE (fMP4 over WebSocket) address, which the connection switch can prefer or fall back to when RTSP cannot be reached                                                                 |
-| On-screen display   | Each tile corner independently shows one of: none, name, number + name, live-dot + stream, codec + bitrate, decoder + fps, resolution + aspect ratio, transport + url, date + time, or one of four **combined** slots, each stacking the items you pick for it                                                                                                                   |
+| On-screen display   | Each tile corner independently shows one of: none, name, number + name, live-dot + stream (with a recording marker on Frigate cameras: red while recording, grey when not), codec + bitrate, decoder + fps, resolution + aspect ratio, transport + url, date + time, or one of four **combined** slots, each stacking the items you pick for it                                                                                                                   |
 | Power management    | Keeps the machine awake and/or the screen on while the wall is up (`SetThreadExecutionState` on Windows, `caffeinate` on macOS, `systemd-inhibit` + the desktop's D-Bus inhibit on Linux, `WakeLock` + `FLAG_KEEP_SCREEN_ON` on Android); both switches default on                                                                                                               |
 | Blackout            | Scheduled periods, per weekday, in which the wall blanks itself and parks every channel - sockets closed, decoders dropped; input brings it back for a chosen number of minutes                                                                                                                                                                                                  |
-| Language            | English, Chinese, or any language added as an external `.ftl` pack; a partial pack falls back to English key by key                                                                                                                                                                                                                                                              |
+| Language            | English, Chinese, Russian, or any language added as an external `.ftl` pack; a partial pack falls back to English key by key                                                                                                                                                                                                                                                              |
 | Toolbar             | An on-screen bar for the layout, paging, full screen, settings and adding cameras, plus the orientation switch where the device can stand upright; usable with a mouse, touch or a remote                                                                                                                                                                                        |
 | Discovery           | ONVIF WS-Discovery multicast probe, cross-subnet unicast scan, and a TCP 554/80/8000 fallback probe, followed by `GetProfiles` / `GetStreamUri`                                                                                                                                                                                                                                  |
-| Server import       | Import every camera in one go from Synology Surveillance Station (`SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera`), Frigate (its API, each camera's main and sub stream paired by measured resolution) or a standalone go2rtc (`/api/streams`)                                                                                                                               |
+| Server import       | Import every camera in one go from Synology Surveillance Station (`SYNO.API.Auth` + `SYNO.SurveillanceStation.Camera`), Frigate (its API, each camera's main and sub stream paired by measured resolution) or a standalone go2rtc (`/api/streams`). The Manual tab also adds all cameras from one recorder at once, from address templates and a channel list such as `1-4,7,9-11`                                                                                                                               |
 | Recording playback  | Frigate recordings play in the magnified viewport: a timeline with recorded stretches and events, six zoom levels down to a calendar of days, play / pause, 1x-8x speed, ten-second and event jumps, sound at 1x, and corners that describe the moment on screen; playback carries on past gaps in the recording |
-| Cameras             | Add, edit, reorder and remove cameras; a per-camera display aspect, held separately for landscape and portrait, a magnified-view fit of its own (set from that view's bar), a connection switch - `AUTO`/`RTSP`/`MSE` where a WebSocket address exists, `TCP`/`UDP` otherwise - and a stream switch that pins that camera's tile to its main stream |
+| Cameras             | Add, edit, reorder and remove cameras - from the list or, on a desktop, a tile's right-click menu, which also carries Picture fit, Stream and Connection; a per-camera display aspect, held separately for landscape and portrait, a magnified-view fit of its own (set from that view's bar), a connection switch - `AUTO`/`RTSP`/`MSE` where a WebSocket address exists, `TCP`/`UDP` otherwise - and a stream switch that pins that camera's tile to its main stream |
 | Groups              | Named camera groups, each with its own cameras, a grid and paging of its own per orientation, switched from the settings; the same camera may sit in more than one                                                                                                                                                                                                               |
 | Start on boot       | A Windows `HKCU\...\Run` registry entry (or a scheduled task), an XDG autostart entry on Linux, a LaunchAgent on macOS, and an Android `BOOT_COMPLETED` receiver                                                                                                                                                                                                                 |
 | Configuration       | Everything persisted to a cross-platform `xgvconfig.json`, with a passphrase-sealed export and an import that reads either form                                                                                                                                                                                                                                                  |
@@ -378,6 +379,14 @@ The digit keys select by **cell count**, not by grid size: `1` → 1x1, `2` → 
 8, `9` → 3x3, and `0` → the 10-cell layout. The 12-, 13- and 16-cell layouts have
 no digit and are reached from the picker or the toolbar alone.
 
+The picker's **Custom** tab holds four layouts you shape yourself. Each starts
+as a plain rectangular grid - any number of rows and columns up to 7x7 - and its
+cells can be **merged** into larger ones by selecting two or dragging across a
+rectangle, then **split** back into single cells. The editor previews the shape
+before you save it. 5x5 and 6x6 need no presets here: pick that many rows and
+columns instead. The four slots are saved and switched from the same picker, and
+a layout in use cannot be deleted out from under the wall.
+
 When there are more cameras than the grid can hold, the extra ones go onto
 further pages; move between pages with `PageUp` / `PageDown`, the toolbar arrows,
 or a horizontal swipe. Channels on the pages you are not looking at are
@@ -594,7 +603,7 @@ as a portable monitoring screen:
 | Streams  | Reconnect timings (first retry, first-frame retry, max delay, handshake timeout, backoff factor / jitter / spread, attempts) and the hardware-decoding preference                                                    |
 | Blackout | The blank schedule: on/off, the periods (weekday, start, end), and how long the wall stays back after input                                                                                                          |
 | System   | Start on boot, one instance per configuration, **keep awake** (prevent sleep / keep the screen on) with the mechanism in use, the key list, and the Android boot helpers                                             |
-| About    | Version, author, decoder in use, config path, export / import, and the machine at the foot of the page: memory in use, processor load, the operating system and how long the viewer has been running, re-read once a second and only while the page is open. Android reports no load, its applications not being allowed to read the processor counters |
+| About    | Version, author, decoder in use, config path, export / import, and the machine at the foot of the page: memory in use, processor load, the operating system, how long the viewer has been running, and the incoming video rate now and averaged over the last 60 seconds, re-read once a second and only while the page is open. Android reports no load, its applications not being allowed to read the processor counters |
 
 Every change is written to `xgvconfig.json` as you make it, so there is no separate
 "save" step.
@@ -617,7 +626,11 @@ Press `F2` to open the *add devices* window, which has five pages:
    `/main` → `/sub` conventions. An HTTP or HTTPS MJPEG URL works here too, and
    so does a `ws://` / `wss://` MSE one - a camera carried over a WebSocket by
    itself rather than over RTSP, which the connection switch leaves without (a
-   single transport has nothing to switch between).
+   single transport has nothing to switch between). Below the form, **Add all
+   cameras from a recorder** takes one main and sub address template, a name
+   prefix and a channel list such as `1-4,7,9-11`, and adds every camera in one
+   go - reusing cameras already on the wall and skipping ones the group already
+   has.
 3. **Synology SS** - sign in to a Surveillance Station host and import every
    camera bound to it in one go, main stream and sub stream both.
 4. **Frigate** - sign in to Frigate's API (a JWT from `/api/login`; leave the
@@ -835,12 +848,12 @@ visible from the first frame.
 
 ### Language
 
-The interface is English by default; Chinese ships as `langs/zh-CN.ftl`. Any
-other language is a plain `.ftl` file: put it beside the executable (`langs/`) or
-under the configuration directory (`langs/`) and it appears in the **Language**
-selector in the Display tab. A pack may translate only part of the interface -
-anything it leaves out falls back to English. `Automatic` follows the system
-locale.
+The interface is English by default; Chinese (`langs/zh-CN.ftl`) and Russian
+(`langs/ru-RU.ftl`) ship as `langs/` packs. Any other language is a plain `.ftl`
+file: put it beside the executable (`langs/`) or under the configuration
+directory (`langs/`) and it appears in the **Language** selector in the Display
+tab. A pack may translate only part of the interface - anything it leaves out
+falls back to English. `Automatic` follows the system locale.
 
 ### Command line
 

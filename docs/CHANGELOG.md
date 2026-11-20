@@ -3,6 +3,45 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 2.3.24
+
+Changes since 2.2.106.
+
+- **Custom layouts.** Beyond the built-in grids, four user-defined layouts can
+  be saved and switched from the toolbar. Each is a rectangular grid up to 7x7
+  whose cells can be merged into larger ones and split again — by button or by
+  dragging across them on a touch screen — and the editor previews the result
+  before it is saved. 5x5 and 6x6 are simply sizes you can set, not fixed
+  presets.
+- **Clean View.** Settings → Display can hide the toolbar, status bar and the
+  routine tile overlays after a while idle, in full screen or in a window, with
+  the delay you choose. A click or a key brings them back; connection errors and
+  the recording indicator are never hidden.
+- **A recording indicator on live tiles.** For Frigate cameras a small square
+  beside the live dot turns red while the camera is being recorded and grey when
+  it is not, so a missed recording is visible on the wall at a glance.
+- **Right-click a tile** on a desktop for Edit, Delete, Picture fit, Stream and
+  Connection — the menu shows the state each switch will move to.
+- **Bulk camera import.** The Manual page can add every camera from one
+  recorder at once, using a name prefix, main/sub address templates and a
+  channel list such as `1-4,7,9-11`. Cameras already present are reused across
+  groups.
+- **An easier-to-read camera list.** Alternating row shades, names and RTSP
+  addresses that truncate with a tooltip instead of spilling over, and the
+  edit and delete controls on separate lines.
+- **Incoming bitrate** — current and 60-second average — is shown in About.
+- **Russian interface**, selected from the same Language picker as the other
+  packs. A pack that translates only part of the interface still falls back to
+  English for the rest.
+- **Connection failures are named in every language.** A tile now says *rejected
+  credentials*, *timed out*, *unreachable* and so on instead of an English error
+  string, whether it is retrying, reconnecting or has given up.
+- **Fixed:** low-frame-rate streams that arrived in bursts no longer hold one
+  picture and then jump, and an 8x replay no longer loses two thirds of its
+  speed to a decoder output wait; dragging across cells to merge them now works with a
+  finger as well as a mouse; and a right-click menu no longer flickers when the
+  same tile is clicked a second time.
+
 ## 2.2.106
 
 Changes since 2.2.98.

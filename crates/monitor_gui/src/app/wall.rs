@@ -834,13 +834,30 @@ impl XgViewApp {
                     // close so the menu simply moves to the new pointer.
                     let moved_same_menu =
                         response.secondary_clicked() && response.context_menu_opened();
-                    let menu = egui::Popup::context_menu(&response);
+                    let menu = egui::Popup::context_menu(&response)
+                        // `Popup::menu` uses top_down_justified, whose
+                        // cross_justify stretches every item to the area's
+                        // full width. After the first sizing pass the area
+                        // remembers its size, so once a longer language (or a
+                        // tile with more items) made the menu wider, the
+                        // justified items keep reporting that remembered width
+                        // as their min_size and it never shrinks back. A plain
+                        // top_down layout sizes each item to its own text, so
+                        // the menu follows the current language on every open.
+                        .layout(egui::Layout::top_down(egui::Align::Min));
                     let menu = if moved_same_menu {
                         menu.close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
                     } else {
                         menu
                     };
                     menu.show(|ui| {
+                        // A context menu starts with the narrow default menu
+                        // width, and labels such as "Picture fit: Fullscreen"
+                        // wrap onto a second line, making those items twice as
+                        // tall as the rest. Keep every item on one line and let
+                        // the menu grow to fit - the same fix the toast area
+                        // uses for text in a width-less container.
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         if ui.button(monitor_i18n::tr("camera-context-edit")).clicked() {
                             actions.edit_camera = Some(camera_index);
                             ui.close();
@@ -931,7 +948,18 @@ impl XgViewApp {
         // any early return and before a tile can see the press. Returning
         // without painting keeps a click meant only to dismiss the panel from
         // also focusing or magnifying the picture underneath it.
+        //
+        // A primary click alone is not enough: the wall also paints each
+        // tile's context menu, and dialogs are shown over it, so a press on a
+        // menu item or on a dialog's button is a primary click at a point
+        // inside this area too. The raw queue sees those presses before the
+        // menu or dialog can claim them; closing the panel here and returning
+        // would then skip the very frame that would have run the menu item -
+        // the item does nothing and the panel shuts with it. While a popup or
+        // a window is up it owns the click: leave it alone and keep the panel.
         if self.show_settings
+            && !self.modal_is_up()
+            && !egui::Popup::is_any_open(ui.ctx())
             && ui.ctx().input(|input| {
                 input.pointer.button_clicked(egui::PointerButton::Primary)
                     && input.pointer.interact_pos().is_some_and(|pos| area.contains(pos))
@@ -2448,6 +2476,35 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_items_stay_on_one_line() {
+        let source = include_str!("wall.rs");
+        let show = source.find("menu.show(|ui| {").unwrap();
+        let items = &source[show..];
+        let first_button = items.find("ui.button(").unwrap();
+        let before_buttons = &items[..first_button];
+        assert!(
+            before_buttons.contains("TextWrapMode::Extend"),
+            "the menu must keep its items from wrapping before the first button"
+        );
+    }
+
+    #[test]
+    fn context_menu_does_not_justify_items_to_a_remembered_width() {
+        let source = include_str!("wall.rs");
+        let menu = source.find("egui::Popup::context_menu(&response)").unwrap();
+        let show = source[menu..].find("menu.show(|ui| {").unwrap() + menu;
+        let setup = &source[menu..show];
+        assert!(
+            setup.contains(".layout(egui::Layout::top_down(egui::Align::Min))"),
+            "cross_justify off: the menu must size to the current text, not the last remembered width"
+        );
+        assert!(
+            !setup.contains(".layout(egui::Layout::top_down_justified"),
+            "a justified layout would pin item width to the remembered area size"
+        );
+    }
+
+    #[test]
     fn settings_dismiss_precedes_the_early_returns() {
         let source = include_str!("wall.rs");
         let draw = source.find("pub(super) fn draw_grid").unwrap();
@@ -2457,6 +2514,26 @@ mod tests {
         assert!(
             dismiss < empty_wall,
             "a click on an empty wall must also close the settings panel"
+        );
+    }
+
+    #[test]
+    fn a_popup_or_window_keeps_the_settings_panel_open() {
+        // The dismiss reads raw primary clicks, which cannot tell a bare wall
+        // from a menu item or a dialog button. A popup (the tile context menu)
+        // or a window (the edit / remove dialogs) owns the click while it is
+        // up, so neither may fall through to the panel dismissal.
+        let source = include_str!("wall.rs");
+        let draw = source.find("pub(super) fn draw_grid").unwrap();
+        let dismiss = &source[draw..];
+        let dismiss = &dismiss[..dismiss.find("self.show_settings = false;").unwrap()];
+        assert!(
+            dismiss.contains("!self.modal_is_up()"),
+            "a dialog's button must not also close the settings panel"
+        );
+        assert!(
+            dismiss.contains("!egui::Popup::is_any_open(ui.ctx())"),
+            "a context menu item must not also close the settings panel"
         );
     }
 
