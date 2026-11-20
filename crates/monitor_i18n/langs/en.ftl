@@ -180,7 +180,6 @@ cameras-move-camera-up = Move camera up
 cameras-move-camera-down = Move camera down
 camera-edit-title = Edit camera
 camera-edit-title-group = { camera-edit-title } ({ $group })
-camera-edit-sub-derived = sub stream url derived from the main url
 camera-edit-imported-hint = Imported camera: its addresses are set by the import. Detach to edit them by hand, or re-import to refresh them.
 camera-edit-detach = Detach from import
 
@@ -587,8 +586,7 @@ dialog-mse-main = MSE main stream
 dialog-mse-sub = MSE sub stream
 dialog-sub-hint = optional, derived from the main url
 dialog-sub-hint-plain = optional
-dialog-infer = Infer
-dialog-derive-sub = Derive the sub stream from the main url when it is empty
+dialog-derive-sub = Derive the sub stream from the main url
 
 dialog-talk = Talk-back
 camera-talk-auto = Automatic
@@ -605,7 +603,6 @@ toast-talk-test-failed-unknown = The test tone stopped without saying why
 dialog-add-camera = Add camera
 dialog-clear = Clear
 dialog-camera-added = camera added
-dialog-sub-derived-msg = sub stream url derived from the main url
 dialog-synology-hint = SYNO.API.Auth + SYNO.SurveillanceStation.Camera: pulls every camera bound to Surveillance Station with its main and sub stream.
 dialog-host = Host
 dialog-port = Port

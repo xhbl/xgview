@@ -43,13 +43,6 @@ impl XgViewApp {
                     dialogs::camera_fields(ui, &mut app.nav, "edit-camera", &mut edit.draft, camera);
                 // The dialog opens on the first control of the form.
                 app.camera_edit.anchor = fields.first;
-                if fields.inferred {
-                    ui.label(
-                        RichText::new(monitor_i18n::tr("camera-edit-sub-derived"))
-                            .small()
-                            .color(theme::LIVE),
-                    );
-                }
                 ui.add_space(theme::space::M);
                 let mut save = false;
                 let mut cancel = false;

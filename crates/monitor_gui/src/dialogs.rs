@@ -365,8 +365,6 @@ impl CameraDraft {
         let sub = self.sub.trim();
         if !sub.is_empty() {
             source.rtsp_sub = Some(sub.to_string());
-        } else if self.infer_sub {
-            source.apply_sub_inference();
         }
         // The MSE address and its own login, when the entry carries them.
         let mse_main = self.mse_main.trim();
@@ -401,7 +399,9 @@ impl CameraDraft {
             password: camera.password.clone().unwrap_or_default(),
             mse_username: camera.mse_username.clone().unwrap_or_default(),
             mse_password: camera.mse_password.clone().unwrap_or_default(),
-            // A sub stream already there is not to be overwritten by inference.
+            // An existing sub stream is shown as typed, so leave the field
+            // editable. One without starts in inference mode, showing what the
+            // main url would derive until the viewer unticks it.
             infer_sub: camera.rtsp_sub.is_none(),
             talk: camera.talk,
         }
@@ -499,13 +499,23 @@ impl BulkCameraDraft {
                 monitor_i18n::tr_args("dialog-bulk-camera-name-prefixed", &[("prefix", prefix.into()), ("number", format!("{:02}", number).into())])
             };
 
+            let main = self.main_template.replace("{n}", &number.to_string());
+            // The bulk form has no drawn `CameraDraft` field to fill from the
+            // main url, so the checkbox has to be resolved here. A template
+            // wins whenever one was typed; with neither a template nor the
+            // checkbox there is simply no sub stream.
+            let sub = if self.sub_template.trim().is_empty() && self.infer_sub {
+                infer_sub_stream(&main).unwrap_or_default()
+            } else {
+                self.sub_template.replace("{n}", &number.to_string())
+            };
             let draft = CameraDraft {
                 name,
-                main: self.main_template.replace("{n}", &number.to_string()),
-                sub: self.sub_template.replace("{n}", &number.to_string()),
+                main,
+                sub,
                 username: self.username.clone(),
                 password: self.password.clone(),
-                infer_sub: self.sub_template.trim().is_empty() && self.infer_sub,
+                infer_sub: false,
                 ..Default::default()
             };
 
@@ -1226,8 +1236,6 @@ fn onvif_tab(
 pub struct CameraFields {
     /// The first control of the form, for a window that opens on it.
     pub first: Option<egui::Id>,
-    /// Whether the "Infer" button was pressed.
-    pub inferred: bool,
     /// Whether the "Detach" button was pressed - the camera is to leave the
     /// import's hands, its addresses becoming editable by hand.
     pub detach: bool,
@@ -1276,7 +1284,6 @@ pub fn camera_fields(
 ) -> CameraFields {
     let locked = camera.is_some_and(|camera| camera.imported);
     let mut first = None;
-    let mut inferred = false;
     let mut detach = false;
     let mut test = false;
     // The MSE rows appear only when the entry carries an MSE address: an
@@ -1311,22 +1318,33 @@ pub fn camera_fields(
         ui.end_row();
 
         ui.label(monitor_i18n::tr("dialog-sub-stream"));
-        ui.horizontal(|ui| {
+        // The sub field fills its column like the name and main fields do, so
+        // all three share one right edge. Ticking "derive sub" fills this field
+        // with the address read off the main url and locks it grey; unticking
+        // keeps that address and makes the field editable again. Nothing is
+        // inferred at save time - what is shown is what gets saved.
+        if !locked && infer_ok && draft.infer_sub {
+            // Keep the field equal to the derived address for as long as the
+            // check is on - including the frame the main url first becomes
+            // inferable, so a default-checked form is never an empty grey box.
+            // Unticking stops the write and leaves this address editable.
+            if let Some(derived) = infer_sub_stream(&draft.main) {
+                draft.sub = derived;
+            }
+            let mut sub = draft.sub.as_str();
+            ui.add_enabled(
+                false,
+                egui::TextEdit::singleline(&mut sub)
+                    .hint_text(theme::hint(&monitor_i18n::tr("dialog-sub-hint")))
+                    .desired_width(f32::INFINITY),
+            );
+        } else {
             field_text(ui, nav, &mut draft.sub, &monitor_i18n::tr("dialog-sub-stream"), locked, |s| {
                 egui::TextEdit::singleline(s)
                     .hint_text(theme::hint(&monitor_i18n::tr(sub_hint)))
-                    .desired_width(320.0)
+                    .desired_width(f32::INFINITY)
             });
-            if !locked && infer_ok && nav.tracked(ui.button(monitor_i18n::tr("dialog-infer"))).clicked() {
-                draft.infer_sub = true;
-                inferred = true;
-                let mut probe = draft.clone();
-                probe.sub.clear();
-                if let Ok(source) = probe.build() {
-                    draft.sub = source.rtsp_sub.unwrap_or_default();
-                }
-            }
-        });
+        }
         ui.end_row();
 
         // The MSE address the import also captured, so both halves of the pair
@@ -1342,7 +1360,7 @@ pub fn camera_fields(
 
             ui.label(monitor_i18n::tr("dialog-mse-sub"));
             field_text(ui, nav, &mut draft.mse_sub, &monitor_i18n::tr("dialog-mse-sub"), locked, |s| {
-                egui::TextEdit::singleline(s).desired_width(320.0)
+                egui::TextEdit::singleline(s).desired_width(f32::INFINITY)
             });
             ui.end_row();
         }
@@ -1396,7 +1414,7 @@ pub fn camera_fields(
         }
     }
 
-    CameraFields { first, inferred, detach, test }
+    CameraFields { first, detach, test }
 }
 
 /// A credentials row, editable or greyed - the shape a managed camera's account
@@ -1433,9 +1451,6 @@ fn bulk_camera_exists(config: &AppConfig, source: &CameraSource) -> bool {
 fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig, nav: &mut Nav) -> bool {
     let mut changed = false;
     let fields = camera_fields(ui, nav, "manual-camera", &mut state.manual, None);
-    if fields.inferred {
-        state.note(Tab::Manual, monitor_i18n::tr("dialog-sub-derived-msg"));
-    }
     // The dialog has no runtime to play a tone with, so the press is handed
     // back to the application, which plays it like the edit window's button.
     if fields.test {
@@ -1497,6 +1512,11 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
             .desired_width(f32::INFINITY)
             .hint_text(theme::hint("rtsp://192.168.1.100/Streaming/Channels/{n}02"))
     });
+    // With no template typed, the sub addresses can be read off the main
+    // template instead. Keep the offer next to the field it stands in for.
+    if state.bulk.sub_template.trim().is_empty() {
+        nav.tracked(ui.checkbox(&mut state.bulk.infer_sub, monitor_i18n::tr("dialog-bulk-infer-sub")));
+    }
 
     ui.label(RichText::new(monitor_i18n::tr("dialog-bulk-credentials")).small());
     credentials_row(ui, nav, &mut state.bulk.username, &mut state.bulk.password);
@@ -1507,10 +1527,6 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
             .desired_width(f32::INFINITY)
             .hint_text(theme::hint("1-16, 20, 23-24"))
     });
-
-    if state.bulk.sub_template.trim().is_empty() {
-        nav.tracked(ui.checkbox(&mut state.bulk.infer_sub, monitor_i18n::tr("dialog-bulk-infer-sub")));
-    }
 
     if !state.bulk.main_template.trim().is_empty() {
         let first_url = state.bulk.main_template
@@ -2238,6 +2254,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_camera_address_field_fills_its_column() {
+        let source = include_str!("dialogs.rs");
+        let form = source.find("pub fn camera_fields").unwrap();
+        let end = source[form..].find("fn credentials_fields").unwrap() + form;
+        let body = &source[form..end];
+        // Name, main, sub (editable and derived) and both MSE addresses all
+        // stretch to the column's width, so their right edges line up.
+        assert_eq!(
+            body.matches("desired_width(f32::INFINITY)").count(),
+            6,
+            "name, main, sub (both forms) and both MSE fields must fill their column"
+        );
+        // While checked the field is kept equal to the derived address and
+        // locked grey; build() saves whatever is in the field, so nothing is
+        // inferred at save time and unticking keeps the address to edit.
+        assert!(
+            body.contains("draft.sub = derived"),
+            "the checked field must be filled from the main url"
+        );
+        assert!(
+            body.contains("infer_sub_stream(&draft.main)"),
+            "the address filled while checked comes from the main url"
+        );
+        assert!(
+            body.contains("let mut sub = draft.sub.as_str()"),
+            "the grey field shows the stored address, not a fresh preview"
+        );
+        assert!(
+            body.contains("ui.add_enabled(\n                false,"),
+            "the derived address must be greyed and read-only"
+        );
+        assert!(
+            !body.contains("dialog-infer"),
+            "the Infer button is gone; the check does its job"
+        );
+        assert!(
+            body.contains("infer_ok && draft.infer_sub"),
+            "the grey field shows only where the check is drawn"
+        );
+    }
+
+    #[test]
     fn a_background_failure_keeps_its_one_toast() {
         let mut state = DiscoveryUi::default();
         assert!(state.toast_error.is_none());
@@ -2275,6 +2333,38 @@ mod tests {
         assert!(
             !source.contains("text_field(ui, nav, &mut state.bulk.name_prefix, \"bulk-camera-name\""),
             "the Android mirror needs the localized field label"
+        );
+    }
+
+    #[test]
+    fn bulk_cameras_resolve_the_inference_checkbox_when_building() {
+        let main_template = "rtsp://192.168.1.100/Streaming/Channels/{n}01".to_owned();
+        let derived = "rtsp://192.168.1.100/Streaming/Channels/102";
+
+        let draft = BulkCameraDraft {
+            main_template: main_template.clone(),
+            channels: "1".into(),
+            infer_sub: true,
+            ..Default::default()
+        };
+        let cameras = draft.build().unwrap();
+        assert_eq!(cameras.len(), 1);
+        assert_eq!(cameras[0].rtsp_sub.as_deref(), Some(derived));
+
+        let without = BulkCameraDraft { infer_sub: false, ..draft.clone() };
+        assert!(
+            without.build().unwrap()[0].rtsp_sub.is_none(),
+            "an unticked box leaves the camera without a sub stream"
+        );
+
+        let typed = BulkCameraDraft {
+            sub_template: "rtsp://192.168.1.100/channel/{n}/sub".into(),
+            ..draft
+        };
+        assert_eq!(
+            typed.build().unwrap()[0].rtsp_sub.as_deref(),
+            Some("rtsp://192.168.1.100/channel/1/sub"),
+            "a typed template wins over the checkbox"
         );
     }
 

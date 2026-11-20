@@ -174,7 +174,6 @@ cameras-move-camera-up = Переместить камеру вверх
 cameras-move-camera-down = Переместить камеру вниз
 camera-edit-title = Изменение камеры
 camera-edit-title-group = { camera-edit-title } ({ $group })
-camera-edit-sub-derived = Адрес дополнительного потока определён по основному
 camera-edit-imported-hint = Импортированная камера: адреса задаются источником импорта. Для ручного редактирования отсоедините её от источника либо повторите импорт для обновления.
 camera-edit-detach = Отсоединить от источника импорта
 
@@ -554,8 +553,7 @@ dialog-mse-main = Основной поток MSE
 dialog-mse-sub = Дополнительный поток MSE
 dialog-sub-hint = Необязательно: можно определить по основному потоку
 dialog-sub-hint-plain = Необязательно
-dialog-infer = Определить автоматически
-dialog-derive-sub = Если дополнительный поток не указан, определить его по основному
+dialog-derive-sub = Определить дополнительный поток по основному
 
 dialog-talk = Двусторонняя аудиосвязь
 camera-talk-auto = Автоматически
@@ -572,7 +570,6 @@ toast-talk-test-failed-unknown = Проверка звука прервана б
 dialog-add-camera = Добавить камеру
 dialog-clear = Очистить
 dialog-camera-added = Камера добавлена
-dialog-sub-derived-msg = Адрес дополнительного потока определён по основному
 dialog-synology-hint = Через SYNO.API.Auth и SYNO.SurveillanceStation.Camera: получить основной и дополнительный потоки каждой камеры из Surveillance Station.
 dialog-host = Сервер
 dialog-port = Порт
