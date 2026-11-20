@@ -25,11 +25,26 @@ use monitor_core::discovery::go2rtc::{mse_url as go2rtc_mse_url, restream_url as
 use monitor_core::model::{infer_sub_stream, is_stream_url, CameraSource, FrigateOrigin, TalkMode};
 use monitor_core::recording_download::Progress;
 
-use crate::app::modal_width;
 use crate::controls;
 use crate::icons::{self, Icon};
 use crate::nav::{Kind, Nav};
 use crate::theme;
+
+/// The width a modal is actually laid out at, given the width it asks for and
+/// the screen it has to fit on. A form built for a television can be several
+/// hundred points wide, which overhangs both edges of a 360pt upright phone.
+/// Landscape screens are wider than every request, so they keep the requested
+/// width unchanged; only a screen narrower than the request plus its margins is
+/// pulled in. The margin is only enough to keep the window off the screen edge
+/// - an upright phone needs every point it can get. The floor keeps a form
+/// usable, but never wider than the screen itself.
+pub(crate) fn modal_width(requested: f32, screen_width: f32) -> f32 {
+    const MARGIN: f32 = 12.0;
+    const FLOOR: f32 = 260.0;
+    let room = (screen_width - 2.0 * MARGIN).max(0.0);
+    let floor = FLOOR.min(room);
+    requested.min(room).max(floor)
+}
 
 /// Key under which the text field being typed into leaves a copy of its text
 /// for the floating input box (Android); see [`text_field`].
@@ -490,6 +505,10 @@ impl BulkCameraDraft {
         }
 
         let mut cameras = Vec::with_capacity(channels.len());
+        // One checkbox speaks for the whole batch. When the form cannot offer
+        // it - no rule for every channel - the builder must not derive for a
+        // subset either, or cameras get an address the viewer never saw.
+        let derive = self.can_infer_sub() && self.infer_sub;
 
         for number in channels {
             let prefix = self.name_prefix.trim();
@@ -504,7 +523,7 @@ impl BulkCameraDraft {
             // main url, so the checkbox has to be resolved here. A template
             // wins whenever one was typed; with neither a template nor the
             // checkbox there is simply no sub stream.
-            let sub = if self.sub_template.trim().is_empty() && self.infer_sub {
+            let sub = if derive {
                 infer_sub_stream(&main).unwrap_or_default()
             } else {
                 self.sub_template.replace("{n}", &number.to_string())
@@ -544,7 +563,7 @@ impl BulkCameraDraft {
     /// a rule; the bulk form has to ask the same question of its template, or
     /// the offer would promise an address the builder cannot produce.
     pub fn can_infer_sub(&self) -> bool {
-        if !self.sub_template.trim().is_empty() {
+        if !self.sub_template.trim().is_empty() || !self.main_template.contains("{n}") {
             return false;
         }
         let channels = match parse_channels(&self.channels) {
@@ -1282,6 +1301,15 @@ fn field_text(
     }
 }
 
+/// A hidden infer check still remembers having been ticked. When its rule is
+/// gone and the viewer types over the address it left behind, that address is
+/// theirs: the check must not come back later and grey it away.
+fn keep_a_hand_typed_sub(infer_ok: bool, changed: bool, infer_sub: &mut bool) {
+    if !infer_ok && changed {
+        *infer_sub = false;
+    }
+}
+
 /// The camera fields, as the "Manual entry" tab and the settings panel's edit
 /// window both lay them out.
 ///
@@ -1344,7 +1372,8 @@ pub fn camera_fields(
         // with the address read off the main url and locks it grey; unticking
         // keeps that address and makes the field editable again. If the main
         // url stops matching a rule, the check goes away and the last derived
-        // address stays visible and editable rather than silently changing.
+        // address stays visible and editable; typing over it makes the address
+        // the viewer's own, so a rule matching again later cannot take it back.
         // Nothing is inferred at save time - what is shown is what gets saved.
         if !locked && infer_ok && draft.infer_sub {
             // Keep the field equal to the derived address for as long as the
@@ -1362,11 +1391,16 @@ pub fn camera_fields(
                     .desired_width(f32::INFINITY),
             );
         } else {
-            field_text(ui, nav, &mut draft.sub, &monitor_i18n::tr("dialog-sub-stream"), locked, |s| {
+            let sub = field_text(ui, nav, &mut draft.sub, &monitor_i18n::tr("dialog-sub-stream"), locked, |s| {
                 egui::TextEdit::singleline(s)
                     .hint_text(theme::hint(&monitor_i18n::tr(sub_hint)))
                     .desired_width(f32::INFINITY)
             });
+            // The check may still be set from a frame when a rule applied.
+            // Editing the visible field while no rule applies makes that
+            // address manual; otherwise a rule coming back would grey the
+            // field again and quietly replace what the viewer just typed.
+            keep_a_hand_typed_sub(infer_ok, sub.changed(), &mut draft.infer_sub);
         }
         ui.end_row();
 
@@ -2415,6 +2449,21 @@ mod tests {
             !partial.can_infer_sub(),
             "one batch checkbox cannot promise an address for every channel"
         );
+        assert!(
+            partial.build().unwrap()[0].rtsp_sub.is_none(),
+            "a hidden check must not derive for just part of the batch"
+        );
+
+        let literal = BulkCameraDraft {
+            main_template: "rtsp://192.168.1.100/Streaming/Channels/101".into(),
+            channels: "1".into(),
+            infer_sub: true,
+            ..Default::default()
+        };
+        assert!(
+            !literal.can_infer_sub(),
+            "no channel token means the form cannot build a batch at all"
+        );
     }
 
     #[test]
@@ -2431,6 +2480,7 @@ mod tests {
         );
 
         let mut stale = draft.clone();
+        stale.main = "rtsp://192.168.1.100/other/1".into();
         stale.sub = "rtsp://192.168.1.100/Streaming/Channels/102".into();
         assert_eq!(
             stale.build().unwrap().rtsp_sub.as_deref(),
@@ -2453,6 +2503,21 @@ mod tests {
             !CameraDraft::from_source(&with_sub).infer_sub,
             "an existing address is left editable"
         );
+    }
+
+    #[test]
+    fn typing_over_a_hidden_infer_check_makes_the_sub_manual() {
+        let mut check = true;
+        keep_a_hand_typed_sub(false, true, &mut check);
+        assert!(!check, "a typed address is no longer the rule's to replace");
+
+        let mut untouched = true;
+        keep_a_hand_typed_sub(false, false, &mut untouched);
+        assert!(untouched, "the address still shown is still derived");
+
+        let mut manual = false;
+        keep_a_hand_typed_sub(true, true, &mut manual);
+        assert!(!manual, "an unticked check stays unticked when a rule applies");
     }
 
     #[test]

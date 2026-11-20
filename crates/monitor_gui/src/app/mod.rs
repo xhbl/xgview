@@ -25,7 +25,7 @@ use monitor_core::scheduler::Scheduler;
 use monitor_core::talk::{TalkRoute, ToneFailure};
 use monitor_core::{CameraSource, Direction};
 
-use crate::dialogs::{self, BackgroundEvent, CameraDraft, DiscoveryUi, Tab};
+use crate::dialogs::{self, BackgroundEvent, CameraDraft, DiscoveryUi, Tab, modal_width};
 use self::file_picker::FilePicker;
 use crate::fonts;
 use crate::grid::{self, PictureZoom, Tile, TileActions};
@@ -1697,22 +1697,6 @@ fn finished_recording_stop(event: &StreamEvent) -> Option<bool> {
         }
         _ => None,
     }
-}
-
-/// The width a modal is actually laid out at, given the width it asks for and
-/// the screen it has to fit on. A form built for a television can be several
-/// hundred points wide, which overhangs both edges of a 360pt upright phone.
-/// Landscape screens are wider than every request, so they keep the requested
-/// width unchanged; only a screen narrower than the request plus its margins is
-/// pulled in. The margin is only enough to keep the window off the screen edge
-/// - an upright phone needs every point it can get. The floor keeps a form
-/// usable, but never wider than the screen itself.
-pub(crate) fn modal_width(requested: f32, screen_width: f32) -> f32 {
-    const MARGIN: f32 = 12.0;
-    const FLOOR: f32 = 260.0;
-    let room = (screen_width - 2.0 * MARGIN).max(0.0);
-    let floor = FLOOR.min(room);
-    requested.min(room).max(floor)
 }
 
 impl XgViewApp {

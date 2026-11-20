@@ -39,6 +39,18 @@ use super::{Answer, ToastKind, XgViewApp};
 /// and then goes back to being a button.
 const HINT_WINDOW: Duration = Duration::from_secs(6);
 
+/// A floating panel's width, measured against the room it actually has.
+///
+/// A panel keeps its requested width while there is room, and its floor keeps
+/// it usable - but that floor is capped by the room too, so a screen narrower
+/// than the floor never gets a panel wider than itself. The two download panels
+/// have different margins and floors from a centred modal, hence their own
+/// helper rather than `dialogs::modal_width`.
+fn panel_width(requested: f32, room: f32, floor: f32) -> f32 {
+    let room = room.max(0.0);
+    requested.min(room).max(floor.min(room))
+}
+
 /// Whether the recording's bar is put back up this frame.
 ///
 /// The save panel is drawn over the wall and takes the magnified bar down with
@@ -766,7 +778,7 @@ impl XgViewApp {
         let screen = ctx.screen_rect();
         // This panel floats over the wall rather than centring a form, so it
         // keeps its wider margin and its own floor instead of `modal_width`.
-        let width = 420.0_f32.min(screen.width() - 48.0).max(260.0);
+        let width = panel_width(420.0, screen.width() - 48.0, 260.0);
         let max_height = screen.height() * 0.8;
         // A picture turned a quarter turn takes its whole frame with it - the
         // bar, the corners, the toast. A level window over it would be the one
@@ -906,7 +918,7 @@ fn draw_turned(
     let frame = turned_frame(tile);
     // The turned panel is measured in the tile's frame and must leave the
     // tile's own edge clear, so it does not share the centred form's clamp.
-    let width = 420.0_f32.min(frame.width() - 2.0 * TURNED_EDGE).max(240.0);
+    let width = panel_width(420.0, frame.width() - 2.0 * TURNED_EDGE, 240.0);
     let inner = width - 2.0 * TURNED_PAD;
     let style = ctx.style();
     let heading = style.text_styles[&egui::TextStyle::Heading].clone();
@@ -1093,6 +1105,14 @@ mod tests {
     use super::*;
     use crate::nav::Nav;
     use egui::Id;
+
+    #[test]
+    fn a_panel_floor_never_wider_than_the_room_it_has() {
+        assert_eq!(panel_width(420.0, 600.0, 260.0), 420.0, "wide screens keep the request");
+        assert_eq!(panel_width(420.0, 300.0, 260.0), 300.0, "the request is pulled in first");
+        assert_eq!(panel_width(420.0, 200.0, 260.0), 200.0, "the floor gives way to the room");
+        assert_eq!(panel_width(420.0, 0.0, 260.0), 0.0);
+    }
 
     /// The panel as the walk sees it: three lengths, then the button under them.
     ///
