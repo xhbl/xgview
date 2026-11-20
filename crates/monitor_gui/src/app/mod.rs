@@ -1699,6 +1699,22 @@ fn finished_recording_stop(event: &StreamEvent) -> Option<bool> {
     }
 }
 
+/// The width a modal is actually laid out at, given the width it asks for and
+/// the screen it has to fit on. A form built for a television can be several
+/// hundred points wide, which overhangs both edges of a 360pt upright phone.
+/// Landscape screens are wider than every request, so they keep the requested
+/// width unchanged; only a screen narrower than the request plus its margins is
+/// pulled in. The margin is only enough to keep the window off the screen edge
+/// - an upright phone needs every point it can get. The floor keeps a form
+/// usable, but never wider than the screen itself.
+pub(crate) fn modal_width(requested: f32, screen_width: f32) -> f32 {
+    const MARGIN: f32 = 12.0;
+    const FLOOR: f32 = 260.0;
+    let room = (screen_width - 2.0 * MARGIN).max(0.0);
+    let floor = FLOOR.min(room);
+    requested.min(room).max(floor)
+}
+
 impl XgViewApp {
     /// Draws one window: takes its payload, hands it to `body`, and puts it back
     /// or closes it on the answer.
@@ -1749,6 +1765,7 @@ impl XgViewApp {
         slot: impl Fn(&mut Self) -> &mut Modal<T>,
         body: impl FnOnce(&mut Self, &mut egui::Ui, &mut T) -> Answer,
     ) -> Answer {
+        let width = modal_width(width, ctx.screen_rect().width());
         self.modal_lifecycle(slot, |app, payload| {
             let mut answer = Answer::STAY;
             egui::Modal::new(Id::new(id)).show(ctx, |ui| {
@@ -5246,6 +5263,35 @@ mod tests {
             }),
             None,
             "only a finished channel ends the recording"
+        );
+    }
+
+    /// A modal built for a television keeps its width on a landscape screen
+    /// and is pulled in on an upright phone, never past the screen's edges.
+    #[test]
+    fn a_modal_fits_the_screen_without_changing_on_wide_ones() {
+        // Landscape: wider than every request plus its margins, so unchanged.
+        assert_eq!(modal_width(480.0, 760.0), 480.0);
+        assert_eq!(modal_width(420.0, 760.0), 420.0);
+        assert_eq!(modal_width(480.0, 520.0), 480.0, "520 - 24 clears 480");
+
+        // Upright phone (S23 FE measures about 360pt wide): pulled in to the
+        // screen less two 12pt margins, whichever request it was given. The
+        // margins are kept small so the narrow screen gives the form room.
+        assert_eq!(modal_width(480.0, 360.0), 336.0);
+        assert_eq!(modal_width(380.0, 360.0), 336.0);
+        assert_eq!(modal_width(300.0, 360.0), 300.0, "a request that fits is kept");
+
+        // Taller-than-wide request on a very narrow screen still fits inside it.
+        assert_eq!(modal_width(480.0, 280.0), 256.0);
+        // The floor is never wider than the room the screen gives.
+        assert_eq!(modal_width(480.0, 200.0), 176.0);
+        // The devices dialog is the widest form and draws itself, not through
+        // `modal_frame`: it has to ask for the same clamp itself.
+        assert!(
+            include_str!("../dialogs.rs")
+                .contains("ui.set_width(modal_width(620.0, ctx.screen_rect().width()))"),
+            "the add-devices window must use the same screen clamp"
         );
     }
 

@@ -14,7 +14,7 @@ impl XgViewApp {
         self.modal_frame(
             ctx,
             "xgview-edit-camera",
-            560.0,
+            480.0,
             |app| &mut app.camera_edit,
             |app, ui, edit| {
                 // The form edits the camera where it lives, so the heading names

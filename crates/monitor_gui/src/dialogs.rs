@@ -25,6 +25,7 @@ use monitor_core::discovery::go2rtc::{mse_url as go2rtc_mse_url, restream_url as
 use monitor_core::model::{infer_sub_stream, is_stream_url, CameraSource, FrigateOrigin, TalkMode};
 use monitor_core::recording_download::Progress;
 
+use crate::app::modal_width;
 use crate::controls;
 use crate::icons::{self, Icon};
 use crate::nav::{Kind, Nav};
@@ -928,7 +929,7 @@ pub fn add_devices_window(
     // stayed live underneath, so a second press on "Add devices" toggled the
     // dialog shut and the settings panel could be rearranged from under it.
     egui::Modal::new(egui::Id::new("xgview-add-devices")).show(ctx, |ui| {
-        ui.set_width(620.0);
+        ui.set_width(modal_width(620.0, ctx.screen_rect().width()));
         // The title row carries the way out, the way the layout picker's does:
         // a cross at the far end, for a mouse or a finger. It is deliberately
         // not registered with the navigation layer - a remote leaves the dialog
