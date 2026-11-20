@@ -3183,27 +3183,38 @@ impl XgViewApp {
         // it. The panel's anchor answers only when there was nothing to put
         // back.
         let anchor = self.panel_anchor();
-        if ctx.memory(|memory| memory.focused()).is_none() && !self.file_dialog_open() {
-            // A value control confirms with Enter and gives the focus up as the
-            // form is drawn. The form hands it to the next control rather than
-            // back to the tab strip, and only the last control falls through to
-            // the anchor.
-            let confirmed = ctx.input(|input| input.key_pressed(Key::Enter));
-            let next = focus_before
-                .filter(|_| confirmed)
-                .and_then(|before| self.nav.next_in_scope(before));
-            match next {
-                Some(next) => {
-                    ctx.memory_mut(|memory| memory.request_focus(next));
-                    // It was drawn before the focus reached it: the reveal is
-                    // armed at the start of the next frame.
-                    self.reveal_next = Some(next);
-                }
-                None => {
-                    let restore = focus_before.filter(|id| self.nav.owns_now(*id)).or(anchor);
-                    if let Some(id) = restore {
-                        ctx.memory_mut(|memory| memory.request_focus(id));
-                    }
+        if ctx.memory(|memory| memory.focused()).is_none() {
+            // A control that greyed out as the frame was drawn cannot hold
+            // the ring: egui gives up its focus, and the arrows would stop
+            // there. Its next live neighbour takes it over, the same way a
+            // form passes the focus on from a field that confirms. This is
+            // not a panel repair - the file picker owns its own focus - but
+            // a grey stop there is just as dead as one in a panel.
+            let grey_next = focus_before
+                .filter(|before| self.nav.went_grey(*before))
+                .and_then(|before| self.nav.grey_handoff(before));
+            // The file picker keeps its own focus rules; only the panels and
+            // windows above take an Enter hand-off and an anchor fallback.
+            let form_next = if self.file_dialog_open() {
+                None
+            } else if ctx.input(|input| input.key_pressed(Key::Enter)) {
+                focus_before.and_then(|before| self.nav.next_in_scope(before))
+            } else {
+                None
+            };
+            let next = grey_next.or(form_next).and_then(|id| self.nav.live(id));
+            if let Some(next) = next {
+                ctx.memory_mut(|memory| memory.request_focus(next));
+                // It was drawn before the focus reached it: the reveal is
+                // armed at the start of the next frame.
+                self.reveal_next = Some(next);
+            } else if !self.file_dialog_open() {
+                let restore = focus_before
+                    .and_then(|id| self.nav.live(id).or(Some(id)))
+                    .filter(|id| self.nav.owns_now(*id))
+                    .or_else(|| anchor.and_then(|id| self.nav.live(id)));
+                if let Some(id) = restore {
+                    ctx.memory_mut(|memory| memory.request_focus(id));
                 }
             }
         }
@@ -6582,5 +6593,22 @@ mod tests {
         assert!(tail.contains("focus_before"), "the fallback must be there");
         assert!(tail.contains("!self.modal_is_up()"), "a window owns its own focus");
         assert!(tail.contains("self.panel_anchor().is_none()"), "and so does a panel");
+    }
+
+    /// A grey control inside a window or panel is not a stop either. The
+    /// navigation layer drops it from the ring, and the frame that greys it
+    /// hands the ring to the next live control rather than leaving the remote
+    /// on a button that answers nothing.
+    #[test]
+    fn a_grey_control_in_a_window_is_not_the_end_of_the_walk() {
+        let nav = include_str!("../nav.rs");
+        assert!(
+            nav.contains("if !response.enabled()"),
+            "a disabled widget must not be registered as a stop"
+        );
+        let body = include_str!("mod.rs");
+        assert!(body.contains("self.nav.went_grey(*before)"));
+        assert!(body.contains("self.nav.grey_handoff(before)"));
+        assert!(body.contains("self.nav.live(id)"));
     }
 }

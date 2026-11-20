@@ -174,6 +174,9 @@ pub struct Nav {
     /// The control the arrows moved the focus to this frame, to be scrolled
     /// into view as it is drawn. Cleared at the start of every frame.
     revealed: Option<Id>,
+    /// Controls drawn grey this frame. They are not stops in the walk, but a
+    /// ring that was on one when it greyed needs somewhere to go.
+    grey: Vec<Id>,
 }
 
 impl Nav {
@@ -188,6 +191,7 @@ impl Nav {
             open: Vec::new(),
             value_step: 0,
             revealed: None,
+            grey: Vec::new(),
         }
     }
 
@@ -198,6 +202,7 @@ impl Nav {
         self.open.clear();
         self.value_step = 0;
         self.revealed = None;
+        self.grey.clear();
     }
 
     /// Opens a scope for the widgets drawn until the matching [`close`](Self::close).
@@ -219,7 +224,15 @@ impl Nav {
     }
 
     /// Registers a plain control with the innermost open scope, in draw order.
+    ///
+    /// A grey control is not a stop: egui takes the focus away from it as it
+    /// draws, so a ring the arrows could reach would vanish on arrival. It is
+    /// remembered only so [`grey_handoff`](Self::grey_handoff) can move a ring
+    /// that was already on it when it greyed.
     pub fn item(&mut self, response: &Response) {
+        if !self.register(response) {
+            return;
+        }
         self.push(response.id, Kind::Plain);
         self.reveal(response);
     }
@@ -227,8 +240,19 @@ impl Nav {
     /// Registers a control that keeps an axis of arrows for itself - a slider
     /// or a drag value. See [`Kind`].
     pub fn item_kind(&mut self, kind: Kind, response: &Response) {
+        if !self.register(response) {
+            return;
+        }
         self.push(response.id, kind);
         self.reveal(response);
+    }
+
+    fn register(&mut self, response: &Response) -> bool {
+        if !response.enabled() {
+            self.grey.push(response.id);
+            return false;
+        }
+        true
     }
 
     /// Registers a plain control by [`Id`], in the order this is called.
@@ -490,11 +514,61 @@ impl Nav {
         members.get(slot.pos + 1).copied()
     }
 
+    /// Whether `id` was one of the controls greyed out as this frame was drawn.
+    pub fn went_grey(&self, id: Id) -> bool {
+        self.grey.contains(&id)
+    }
+
+    /// Where a ring on a control that has just greyed goes instead.
+    ///
+    /// The next live stop in the old scope is the natural answer; when the
+    /// greyed control was last, the walk wraps rather than stranding the ring.
+    /// The last frame's order is the one the viewer was walking, and this
+    /// frame's `cur` says which of those stops are still live.
+    pub fn grey_handoff(&self, id: Id) -> Option<Id> {
+        if !self.went_grey(id) {
+            return None;
+        }
+        let slot = self.prev.get(&id)?;
+        let members = self.prev_scopes.get(slot.scope)?;
+        if members.is_empty() {
+            return None;
+        }
+        let next = members.iter().skip(slot.pos + 1).copied();
+        let wrap = members.iter().take(slot.pos).copied();
+        // A stop added while the old one greyed is still in this frame's
+        // scope, even though the previous walk never saw it.
+        let added = self
+            .cur_scopes
+            .get(slot.scope)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|candidate| !self.prev.contains_key(candidate));
+        next.chain(added)
+            .chain(wrap)
+            .find(|candidate| self.cur.contains_key(candidate))
+    }
+
+    /// Keeps a hand-off target from being a control that greyed this frame.
+    pub fn live(&self, id: Id) -> Option<Id> {
+        if self.went_grey(id) {
+            self.grey_handoff(id)
+        } else {
+            Some(id)
+        }
+    }
+
     /// Ends a frame: keeps egui's own walk off the arrows of whatever this
     /// layer has focused, and makes this frame's layout the previous one.
     pub fn finish(&mut self, ctx: &Context) {
         if let Some(focused) = ctx.memory(|memory| memory.focused()) {
-            if self.cur.contains_key(&focused) || self.prev.contains_key(&focused) {
+            // A control greyed this frame is still in `prev`, but egui has
+            // taken its focus away: keeping the arrows locked there would
+            // leave a ring that answers nothing.
+            let owned = self.cur.contains_key(&focused)
+                || (self.prev.contains_key(&focused) && !self.went_grey(focused));
+            if owned {
                 ctx.memory_mut(|memory| {
                     memory.set_focus_lock_filter(
                         focused,
@@ -755,6 +829,99 @@ mod tests {
         assert_eq!(nav.next_in_scope(b), Some(c));
         assert_eq!(nav.next_in_scope(c), None, "the last control has no next");
         assert_eq!(nav.next_in_scope(Id::new("elsewhere")), None);
+    }
+
+    /// A grey control is drawn, but it is not a stop: egui takes the focus
+    /// away from it as it draws, so a ring the arrows reached there would
+    /// simply vanish. The walk goes from the live control before it to the
+    /// live one after it.
+    #[test]
+    fn a_grey_control_is_not_a_stop_in_the_walk() {
+        let ctx = Context::default();
+        let mut nav = Nav::new(&[("body", ScopeDef::new(Axis::Row))]);
+        let mut ids = Vec::new();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 60.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                nav.open("body");
+                for (slot, enabled) in [true, false, true].into_iter().enumerate() {
+                    let response = ui.add_enabled(enabled, egui::Button::new(format!("control {slot}")));
+                    ids.push(response.id);
+                    nav.tracked(response);
+                }
+                // A whole disabled UI gives every child the same grey flag.
+                ui.add_enabled_ui(false, |ui| {
+                    let response = ui.button("disabled ui");
+                    ids.push(response.id);
+                    nav.tracked(response);
+                });
+                nav.close();
+            });
+            nav.finish(ctx);
+        });
+
+        assert_eq!(ids.len(), 4);
+        assert!(nav.owns(ids[0]), "the first button is live");
+        assert!(!nav.owns(ids[1]), "the grey button must not be in the ring");
+        assert!(!nav.owns(ids[3]), "a disabled UI's child must not be in the ring");
+        assert!(nav.went_grey(ids[1]));
+        assert!(nav.went_grey(ids[3]));
+        assert_eq!(nav.step(ids[0], Dir::Right), Some(ids[2]));
+    }
+
+    /// A ring already on a control when it greys goes to the next live stop;
+    /// the last one wraps instead of stranding the ring, and an all-grey scope
+    /// has no hand-off to make.
+    #[test]
+    fn a_ring_on_a_greyed_control_moves_to_the_next_live_stop() {
+        let (a, b, c) = (Id::new("a"), Id::new("b"), Id::new("c"));
+        let ctx = Context::default();
+        let mut nav = nav();
+        frame(&mut nav, &[], &[a, b, c]);
+
+        nav.begin();
+        nav.grey.push(b);
+        nav.open("body");
+        nav.push(c, Kind::Plain);
+        nav.close();
+        // The hand-off is read in `end_frame`, before `finish` swaps the
+        // previous and current layouts.
+        assert_eq!(nav.grey_handoff(b), Some(c), "the next live stop takes the ring");
+        assert_eq!(nav.live(c), Some(c));
+        nav.finish(&ctx);
+
+        frame(&mut nav, &[], &[a, b]);
+        nav.begin();
+        nav.grey.push(b);
+        nav.open("body");
+        nav.push(a, Kind::Plain);
+        // `c` is drawn in place of the greyed `b` on this frame.
+        nav.push(c, Kind::Plain);
+        nav.close();
+        assert_eq!(nav.grey_handoff(b), Some(c), "a control drawn in the grey one's place takes the ring");
+        nav.finish(&ctx);
+
+        frame(&mut nav, &[], &[a, b, c]);
+        nav.begin();
+        nav.grey.extend([a, b, c]);
+        nav.open("body");
+        nav.push(a, Kind::Plain);
+        nav.push(b, Kind::Plain);
+        nav.close();
+        assert_eq!(nav.grey_handoff(c), Some(a), "the last stop wraps around");
+        nav.finish(&ctx);
+
+        frame(&mut nav, &[], &[a, b, c]);
+        nav.begin();
+        nav.grey.extend([a, b, c]);
+        nav.open("body");
+        nav.close();
+        assert_eq!(nav.grey_handoff(a), None, "nowhere live to hand to");
+        assert_eq!(nav.live(a), None);
+        nav.finish(&ctx);
     }
 
     /// The reveal for the control the form handed the focus to is armed on the

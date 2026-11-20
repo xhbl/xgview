@@ -473,8 +473,9 @@ impl FilePicker {
         let mut up: Option<(Id, bool)> = None;
         // Where the focus goes when the listing has no rows at all - a folder
         // that is empty or cannot be read. The shortcuts above it are then the
-        // only controls in the window, and the home folder is the one a viewer
-        // would reach for.
+        // first choice; with neither a shortcut nor a way up, the name field
+        // below is the one the viewer can still use. A grey control is never
+        // the answer.
         let mut first: Option<Id> = None;
         ui.add_space(theme::space::S);
         app.nav.open(PLACES_SCOPE);
@@ -491,7 +492,10 @@ impl FilePicker {
             }
             let button = ui.add_enabled(above.is_some(), egui::Button::new(UP_ICON));
             let button = app.nav.tracked(button);
-            if first.is_none() {
+            // At a root the up button is grey: it must not become the anchor
+            // an empty folder falls back to, or the window opens on a stop
+            // that answers no key.
+            if first.is_none() && above.is_some() {
                 first = Some(button.id);
             }
             // What the status line calls it. A control whose label is a glyph
@@ -767,6 +771,9 @@ impl FilePicker {
                         |text| egui::TextEdit::singleline(text).desired_width(240.0),
                     );
                     app.name(&field, "file-picker-name");
+                    if first.is_none() {
+                        first = Some(field.id);
+                    }
                     if std::mem::take(&mut self.refocus_field) {
                         ui.ctx().memory_mut(|memory| memory.request_focus(field.id));
                     }
