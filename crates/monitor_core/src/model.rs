@@ -1163,8 +1163,9 @@ static SUB_STREAM_RULES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(||
         )
     };
     vec![
-        // Hikvision / HiWatch / generic NVR: /Streaming/Channels/101 -> 102
-        rule(r"(/Streaming/Channels/\d)01$", "${1}02"),
+        // Hikvision / HiWatch / generic NVR: /Streaming/Channels/101 -> 102.
+        // The channel number can be more than one digit: 1601 -> 1602.
+        rule(r"(/Streaming/Channels/\d+)01$", "${1}02"),
         // Dahua / Amcrest: ...&subtype=0 -> subtype=1
         rule(r"([?&]subtype=)0\b", "${1}1"),
         // Foscam: /videoMain -> /videoSub
@@ -1530,11 +1531,28 @@ mod tests {
 
     #[test]
     fn infers_hikvision_sub_stream() {
-        let url = "rtsp://admin:pw@192.168.1.64:554/Streaming/Channels/101";
-        assert_eq!(
-            infer_sub_stream(url).as_deref(),
-            Some("rtsp://admin:pw@192.168.1.64:554/Streaming/Channels/102")
-        );
+        // The trailing 01 is the main stream and 02 the sub; the channel
+        // number in between may be one digit or several.
+        for (main, sub) in [
+            ("101", "102"),
+            ("201", "202"),
+            ("1001", "1002"),
+            ("1601", "1602"),
+            ("10101", "10102"),
+        ] {
+            let url = format!("rtsp://admin:pw@192.168.1.64:554/Streaming/Channels/{main}");
+            assert_eq!(
+                infer_sub_stream(&url).as_deref(),
+                Some(format!("rtsp://admin:pw@192.168.1.64:554/Streaming/Channels/{sub}").as_str()),
+                "{main} must infer {sub}"
+            );
+        }
+        // An address already ending in 02 is a sub stream: there is no
+        // further sub to derive from it, whatever the channel width.
+        for channel in ["102", "1002", "1602"] {
+            let url = format!("rtsp://admin:pw@192.168.1.64:554/Streaming/Channels/{channel}");
+            assert_eq!(infer_sub_stream(&url), None, "{channel} is already a sub");
+        }
     }
 
     #[test]

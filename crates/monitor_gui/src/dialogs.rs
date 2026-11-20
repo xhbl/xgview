@@ -573,9 +573,9 @@ impl BulkCameraDraft {
         };
         // One checkbox speaks for the whole batch, so it is offered when any
         // channel it will create has a rule to follow. Channels without one
-        // simply get no sub. Requiring every channel instead would hide the
-        // check on the usual `.../Channels/{n}01` template over `1-16`, where
-        // the rule covers one digit only, and lose every sub in the batch.
+        // simply get no sub. The channel list may mix main and sub addresses
+        // (a `{n}` of `101,102` for instance), and only the mains have a rule;
+        // requiring every value to match would hide the check on such a batch.
         channels.iter().any(|number| {
             let main = self.main_template.replace("{n}", &number.to_string());
             infer_sub_stream(&main).is_some()
@@ -2467,22 +2467,27 @@ mod tests {
             "the channel without a rule gets none, rather than an unseen one"
         );
 
-        // The form's own Hikvision example over its usual channel range: the
-        // rule reads a single digit, so 1-9 can be derived and 10-16 cannot.
-        // Hiding the check here would lose every sub in a normal batch.
+        // The form's own Hikvision example over its usual channel range. The
+        // channel number can be several digits, so every camera gets a sub.
         let hikvision = BulkCameraDraft {
             main_template: main_template.clone(),
             channels: "1-16".into(),
             infer_sub: true,
             ..Default::default()
         };
-        assert!(hikvision.can_infer_sub(), "a common batch must keep the offer");
+        assert!(hikvision.can_infer_sub(), "a common batch keeps the offer");
         let sixteen = hikvision.build().unwrap();
         assert_eq!(sixteen.len(), 16);
         assert_eq!(sixteen[0].rtsp_sub.as_deref(), Some(derived));
-        assert!(
-            sixteen[15].rtsp_sub.is_none(),
-            "a two-digit channel has no rule to follow"
+        assert_eq!(
+            sixteen[9].rtsp_sub.as_deref(),
+            Some("rtsp://192.168.1.100/Streaming/Channels/1002"),
+            "channel 10 still infers a sub"
+        );
+        assert_eq!(
+            sixteen[15].rtsp_sub.as_deref(),
+            Some("rtsp://192.168.1.100/Streaming/Channels/1602"),
+            "channel 16 still infers a sub"
         );
 
         let literal = BulkCameraDraft {
