@@ -107,10 +107,6 @@ pub(super) async fn run_channel(
     }
     let mut end = TaskEnd(index, "aborted");
     let mut attempt: u32 = 0;
-    // Reason of the last failure, kept so that the countdown does not hide it:
-    // a rejected password or an unreachable device is the only explanation the
-    // user has, and the grid tile truncates the detail line.
-    let mut failure = "connection attempt".to_string();
     // The stores this channel's sessions publish into. Built once: every attempt
     // writes to the same three, and the channel's own events go through
     // `events` directly.
@@ -154,7 +150,9 @@ pub(super) async fn run_channel(
                 index,
                 camera_id: endpoint.camera_id.clone(),
                 state,
-                detail: format!("#{attempt} {failure}"),
+                // The handshake is under way; there is no reason to show yet.
+                // The spinner and the state name say what is happening.
+                detail: None,
             },
         );
 
@@ -190,7 +188,7 @@ pub(super) async fn run_channel(
                     index,
                     camera_id: endpoint.camera_id.clone(),
                     state,
-                    detail: format!("#{attempt} rtsp unreachable, trying mse"),
+                    detail: Some(Diagnostic::RtspFallback { attempt: attempt as usize }),
                 },
             );
             let mse = Endpoint { uri: fallback.uri, credentials: fallback.credentials, fallback: None, ..endpoint.clone() };
@@ -245,11 +243,11 @@ pub(super) async fn run_channel(
         stats.clear(index);
 
         let lived = started.elapsed();
-        // What the attempt failed with: as text, which is what the viewer reads
-        // on the tile, and as a kind, which is what decides whether waiting can
-        // change the answer. `None` while the attempt ended cleanly.
-        let mut kind = None;
-        match outcome {
+        // What the attempt ended with, as a typed failure the renderer can name
+        // in any language and the backoff can classify. A clean finish returns
+        // above; every other ending produces one. The original text is kept
+        // alongside for logs and for a concrete reason no phrase can replace.
+        let failure = match outcome {
             // The recording reached its last frame. The channel stops here:
             // reopening the same address would replay the same stretch from
             // the beginning, and the viewer would see it loop for ever.
@@ -260,7 +258,7 @@ pub(super) async fn run_channel(
                         index,
                         camera_id: endpoint.camera_id.clone(),
                         state: ConnectionState::Finished,
-                        detail: String::new(),
+                        detail: None,
                     },
                 );
                 tracing::debug!(
@@ -272,7 +270,7 @@ pub(super) async fn run_channel(
                 end.1 = "the recording reached its end";
                 return;
             }
-            SessionEnd::Closed => failure = "stream closed by peer".to_string(),
+            SessionEnd::Closed => Failure::unclassified("stream closed by peer"),
             SessionEnd::Failed(err) => {
                 // A failing session is the only clue the user gets about a
                 // rejected password or an unreachable device, so it is
@@ -287,10 +285,11 @@ pub(super) async fn run_channel(
                     err = %describe(&err),
                     "session failed"
                 );
-                kind = Some(err.kind());
-                failure = err.to_string();
+                Failure::of(&err)
             }
-        }
+        };
+
+        let kind = failure.kind;
 
         // A session that put pictures on screen is a stream that worked and was
         // then cut, not one that never came up, so the next attempt is worth the
@@ -326,7 +325,9 @@ pub(super) async fn run_channel(
                     index,
                     camera_id: endpoint.camera_id.clone(),
                     state: ConnectionState::Finished,
-                    detail: failure,
+                    // A hole, not a clean finish: the renderer reads this to
+                    // decide whether the seek that landed here is answered.
+                    detail: Some(Diagnostic::NothingThere),
                 },
             );
             // A hole is the end of this attempt, not a task that died: without
@@ -345,7 +346,9 @@ pub(super) async fn run_channel(
                     index,
                     camera_id: endpoint.camera_id.clone(),
                     state: ConnectionState::Failed,
-                    detail: failure,
+                    detail: Some(Diagnostic::Failed {
+                        failure,
+                    }),
                 },
             );
             done.store(true, Ordering::Relaxed);
@@ -375,7 +378,10 @@ pub(super) async fn run_channel(
                     index,
                     camera_id: endpoint.camera_id.clone(),
                     state: ConnectionState::Failed,
-                    detail: format!("{failure} (gave up after {attempt} attempts)"),
+                    detail: Some(Diagnostic::GaveUp {
+                        failure: failure.clone(),
+                        attempts: attempt as usize,
+                    }),
                 },
             );
             done.store(true, Ordering::Relaxed);
@@ -394,7 +400,10 @@ pub(super) async fn run_channel(
                 index,
                 camera_id: endpoint.camera_id.clone(),
                 state: ConnectionState::Reconnecting,
-                detail: format!("{failure} | retry in {} ms", delay.as_millis()),
+                detail: Some(Diagnostic::Reconnecting {
+                    failure: failure.clone(),
+                    milliseconds: delay.as_millis() as i64,
+                }),
             },
         );
         tokio::select! {

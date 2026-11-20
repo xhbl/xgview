@@ -494,6 +494,17 @@ power-mechanism-unsupported = 不支持
 
 ## 宫格格子状态
 grid-stream-failed = 码流失败
+grid-failure-auth = 密码被拒绝
+grid-failure-empty = 该时刻无录像
+grid-failure-refused = 请求被拒绝
+grid-failure-timeout = 连接超时
+grid-failure-unreachable = 无法连接
+grid-failure-protocol = 协议错误
+grid-failure-local = 本机不支持
+grid-failure-unknown = 连接失败
+grid-detail-rtsp-fallback = RTSP 无法连接，正在尝试 MSE
+grid-detail-retry = { $ms } 毫秒后重试
+grid-detail-gave-up = 尝试 { $attempts } 次后停止重连
 
 grid-suspended = 已挂起
 grid-switching-to = 切换到 { $stream }…

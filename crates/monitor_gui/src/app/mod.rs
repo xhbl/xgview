@@ -20,7 +20,7 @@ use monitor_core::reboot;
 use monitor_core::config::{AppConfig, Orientation};
 use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{infer_sub_stream, ConnectionState, OsdItem, StreamKind, TileAspect};
-use monitor_core::pipeline::{CallFailure, ChannelManager, StreamEvent, StreamStats};
+use monitor_core::pipeline::{CallFailure, ChannelManager, Diagnostic, StreamEvent, StreamStats};
 use monitor_core::scheduler::Scheduler;
 use monitor_core::talk::{TalkRoute, ToneFailure};
 use monitor_core::{CameraSource, Direction};
@@ -226,7 +226,7 @@ pub struct ChannelTexture {
 #[derive(Debug, Clone)]
 pub struct ChannelUi {
     pub state: ConnectionState,
-    pub detail: String,
+    pub detail: Option<Diagnostic>,
     /// Stream currently decoded.
     pub stream: Option<StreamKind>,
     pub codec: Option<String>,
@@ -276,7 +276,7 @@ impl Default for ChannelUi {
     fn default() -> Self {
         Self {
             state: ConnectionState::Idle,
-            detail: String::new(),
+            detail: None,
             stream: None,
             codec: None,
             hardware: false,
@@ -1685,6 +1685,20 @@ mod streams;
 mod wall;
 mod windows;
 
+/// Whether a channel event ends a recording, and if so whether the stop was a
+/// hole in it. A clean finish carries no detail; the hole is named explicitly
+/// by its diagnostic. Kept apart from the event loop so the two can be told
+/// apart in a test: confusing them undoes a seek that landed in a hole, and a
+/// recording that ran to its end would hop on to the next stretch.
+fn finished_recording_stop(event: &StreamEvent) -> Option<bool> {
+    match event {
+        StreamEvent::State { state: ConnectionState::Finished, detail, .. } => {
+            Some(matches!(detail, Some(Diagnostic::NothingThere)))
+        }
+        _ => None,
+    }
+}
+
 impl XgViewApp {
     /// Draws one window: takes its payload, hands it to `body`, and puts it back
     /// or closes it on the answer.
@@ -2360,14 +2374,9 @@ impl XgViewApp {
             // not drawn as a broken camera (see `pipeline::channel`), and the
             // reason is the only thing that tells the two apart - a clean finish
             // carries none.
-            let (stopped, nothing_there) = match &event {
-                StreamEvent::State { state: ConnectionState::Finished, detail, .. } => {
-                    (true, !detail.is_empty())
-                }
-                _ => (false, false),
-            };
+            let stopped = finished_recording_stop(&event);
             self.channels.entry(index).or_default().apply(event);
-            if stopped {
+            if let Some(nothing_there) = stopped {
                 self.recording_stopped(index, nothing_there);
             }
         }
@@ -5195,6 +5204,40 @@ mod tests {
         assert_eq!(channel.main_size, Some((1920, 1080)), "but the main shape is kept");
     }
 
+    /// A hole in a recording is the only finish that carries a diagnostic; a
+    /// recording that simply ran to its end carries none. The playback code
+    /// reads the difference to decide whether to carry on at the next stretch,
+    /// so the two must never collapse into the same stop.
+    #[test]
+    fn only_a_hole_is_a_finish_that_moves_playback_on() {
+        let finished = |detail| StreamEvent::State {
+            index: 0,
+            camera_id: "cam".to_string(),
+            state: ConnectionState::Finished,
+            detail,
+        };
+
+        assert_eq!(finished_recording_stop(&finished(Some(Diagnostic::NothingThere))), Some(true));
+        assert_eq!(finished_recording_stop(&finished(None)), Some(false));
+        assert_eq!(
+            finished_recording_stop(&finished(Some(Diagnostic::Failed {
+                failure: monitor_core::pipeline::Failure::unclassified("stream closed by peer"),
+            }))),
+            Some(false),
+            "a finish with some other reason is not a hole"
+        );
+        assert_eq!(
+            finished_recording_stop(&StreamEvent::State {
+                index: 0,
+                camera_id: "cam".to_string(),
+                state: ConnectionState::Failed,
+                detail: Some(Diagnostic::NothingThere),
+            }),
+            None,
+            "only a finished channel ends the recording"
+        );
+    }
+
     /// The held frame is a promise that a new one is coming. A channel that has
     /// given up cannot keep it, and the band that says so would otherwise stay
     /// over the failure panel - the one thing on the tile still claiming that
@@ -5215,7 +5258,10 @@ mod tests {
             index: 0,
             camera_id: "cam".to_string(),
             state: ConnectionState::Reconnecting,
-            detail: "connection refused | retry in 1000 ms".to_string(),
+            detail: Some(Diagnostic::Reconnecting {
+                failure: monitor_core::pipeline::Failure::unclassified("connection refused"),
+                milliseconds: 1000,
+            }),
         });
         assert_eq!(channel.switching_from, Some(StreamKind::Sub), "a retry still expects a picture");
 
@@ -5224,7 +5270,9 @@ mod tests {
             index: 0,
             camera_id: "cam".to_string(),
             state: ConnectionState::Failed,
-            detail: "SETUP failed: 401 Unauthorized (digest authentication)".to_string(),
+            detail: Some(Diagnostic::Failed {
+                failure: monitor_core::pipeline::Failure::unclassified("SETUP failed: 401 Unauthorized"),
+            }),
         });
         assert_eq!(channel.switching_from, None, "nothing is coming to replace it");
     }

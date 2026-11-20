@@ -346,7 +346,6 @@ pub(super) fn announce_streaming(
     events: &Sender<StreamEvent>,
     index: usize,
     camera_id: &str,
-    stream: StreamKind,
     announced: &mut bool,
 ) {
     if *announced {
@@ -359,7 +358,7 @@ pub(super) fn announce_streaming(
             index,
             camera_id: camera_id.to_string(),
             state: ConnectionState::Streaming,
-            detail: format!("receiving {} stream", stream.label()),
+            detail: None,
         },
     );
 }

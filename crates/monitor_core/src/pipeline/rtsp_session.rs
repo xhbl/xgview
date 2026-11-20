@@ -1943,7 +1943,9 @@ impl<'a> RtspSession<'a> {
                     index: self.index,
                     camera_id: self.camera_id.clone(),
                     state: ConnectionState::Stalled,
-                    detail: format!("stalled for {} s", late.since.as_secs()),
+                    // The stalled state leaves the last picture to the viewer
+                    // and draws no detail; there is nothing to report here.
+                    detail: None,
                 },
             );
         }
@@ -2159,7 +2161,6 @@ impl<'a> RtspSession<'a> {
             self.sinks.events,
             self.index,
             &self.camera_id,
-            self.stream,
             &mut self.announced,
         );
         true
@@ -2376,7 +2377,7 @@ impl<'a> RtspSession<'a> {
                         index: self.index,
                         camera_id: self.camera_id.clone(),
                         state: ConnectionState::Streaming,
-                        detail: format!("receiving {} stream", self.stream.label()),
+                        detail: None,
                     },
                 );
             }

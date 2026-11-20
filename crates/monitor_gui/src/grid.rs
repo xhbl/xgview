@@ -15,6 +15,8 @@ use egui::{Align2, Color32, CornerRadius, FontId, Id, Rect, Response, Sense, Str
 use monitor_core::model::{
     CameraSource, ConnectionState, FrigateOrigin, Osd, OsdItem, StreamKind, TileAspect,
 };
+use monitor_core::error::FailureKind;
+use monitor_core::pipeline::{Diagnostic, Failure};
 use monitor_core::GridLayout;
 
 use crate::app::ChannelUi;
@@ -416,12 +418,49 @@ impl<'a> Panel<'a> {
 /// whole, and `XgViewApp::draw_overlay_only` has to draw it again on the layer
 /// that is seen. Two copies of the wording would drift, so there is one.
 ///
+/// The one line a tile shows for a connection diagnostic, in the active
+/// language. A failure is named by its classification, not by its original
+/// text: that text can be long and would be truncated to uselessness in the
+/// space available. It stays in the event for logs and for a future view that
+/// has room for it.
+fn diagnostic_text(diagnostic: &Diagnostic) -> String {
+    fn failure_phrase(failure: &Failure) -> String {
+        let key = match failure.kind {
+            Some(FailureKind::Auth) => "grid-failure-auth",
+            Some(FailureKind::Empty) => "grid-failure-empty",
+            Some(FailureKind::Refused) => "grid-failure-refused",
+            Some(FailureKind::Timeout) => "grid-failure-timeout",
+            Some(FailureKind::Unreachable) => "grid-failure-unreachable",
+            Some(FailureKind::Protocol) => "grid-failure-protocol",
+            Some(FailureKind::Local) => "grid-failure-local",
+            None => "grid-failure-unknown",
+        };
+        monitor_i18n::tr(key)
+    }
+
+    match diagnostic {
+        Diagnostic::Failed { failure } => failure_phrase(failure),
+        Diagnostic::RtspFallback { .. } => monitor_i18n::tr("grid-detail-rtsp-fallback"),
+        Diagnostic::Reconnecting { failure, milliseconds } => {
+            let retry = monitor_i18n::tr_args("grid-detail-retry", &[("ms", (*milliseconds).into())]);
+            format!("{} | {}", failure_phrase(failure), retry)
+        }
+        Diagnostic::GaveUp { failure, attempts } => {
+            let gave_up = monitor_i18n::tr_args("grid-detail-gave-up", &[("attempts", (*attempts).into())]);
+            format!("{} | {}", failure_phrase(failure), gave_up)
+        }
+        // A recording with nothing there is drawn as a finished tile, which
+        // shows no detail; this variant exists for the playback decision.
+        Diagnostic::NothingThere => String::new(),
+    }
+}
+
 /// Over a turned picture the panel is laid out and drawn turned; see [`Panel`].
 pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: ConnectionState) {
     let panel = Panel::new(painter, body, tile.rotated);
     let tier = Tier::of(body.size());
     let dim = |color: Color32| if tile.dim { color.gamma_multiply(0.5) } else { color };
-    let detail = tile.channel.map(|channel| channel.detail.as_str()).unwrap_or("");
+    let detail = tile.channel.and_then(|channel| channel.detail.as_ref());
     // Whether the picture on screen is being held while a stream is on its way:
     // a switch, a seek, or a channel that was parked and is being opened again.
     // A held picture is not covered: it is the thing the viewer is being left
@@ -437,14 +476,16 @@ pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: 
             panel.fill(panel.rect(), dim(theme::CANVAS_FAILED));
             panel.text(centre - vec2(0.0, 16.0), Align2::CENTER_CENTER, "!", FontId::proportional(26.0), theme::ERROR);
             panel.text(centre + vec2(0.0, 12.0), Align2::CENTER_CENTER, monitor_i18n::tr("grid-stream-failed"), FontId::proportional(14.0), theme::ERROR);
-            if tier != Tier::Minimal && !detail.is_empty() {
-                panel.text(
-                    centre + vec2(0.0, 32.0),
-                    Align2::CENTER_CENTER,
-                    theme::truncate(detail, 46),
-                    FontId::proportional(11.0),
-                    theme::TEXT_DIM,
-                );
+            if tier != Tier::Minimal {
+                if let Some(text) = detail.map(diagnostic_text).filter(|text| !text.is_empty()) {
+                    panel.text(
+                        centre + vec2(0.0, 32.0),
+                        Align2::CENTER_CENTER,
+                        theme::truncate(&text, 46),
+                        FontId::proportional(11.0),
+                        theme::TEXT_DIM,
+                    );
+                }
             }
         }
         ConnectionState::Suspended => {
@@ -456,14 +497,16 @@ pub fn state_layer(painter: &egui::Painter, body: Rect, tile: &Tile<'_>, state: 
                 panel.fill(panel.rect(), dim(theme::CANVAS_PENDING));
                 panel.spinner(centre - vec2(0.0, 16.0), 12.0, tile.time, theme::ACCENT);
                 panel.text(centre + vec2(0.0, 14.0), Align2::CENTER_CENTER, monitor_i18n::tr(state.label()), FontId::proportional(14.0), theme::TEXT);
-                if tier != Tier::Minimal && !detail.is_empty() {
-                    panel.text(
-                        centre + vec2(0.0, 34.0),
-                        Align2::CENTER_CENTER,
-                        theme::truncate(detail, 52),
-                        FontId::proportional(11.0),
-                        theme::TEXT_DIM,
-                    );
+                if tier != Tier::Minimal {
+                    if let Some(text) = detail.map(diagnostic_text).filter(|text| !text.is_empty()) {
+                        panel.text(
+                            centre + vec2(0.0, 34.0),
+                            Align2::CENTER_CENTER,
+                            theme::truncate(&text, 52),
+                            FontId::proportional(11.0),
+                            theme::TEXT_DIM,
+                        );
+                    }
                 }
             }
         }
@@ -1585,6 +1628,90 @@ pub fn empty_state(ui: &mut Ui, area: Rect, message: &str, hint: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_text_names_every_failure_kind() {
+        monitor_i18n::init("en", &[]);
+        let cases = [
+            (FailureKind::Auth, "rejected credentials"),
+            (FailureKind::Empty, "nothing at this moment"),
+            (FailureKind::Refused, "request refused"),
+            (FailureKind::Timeout, "timed out"),
+            (FailureKind::Unreachable, "unreachable"),
+            (FailureKind::Protocol, "protocol error"),
+            (FailureKind::Local, "not supported here"),
+        ];
+        for (kind, expected) in cases {
+            let d = Diagnostic::Failed {
+                failure: Failure { kind: Some(kind), text: "raw error text".to_string() },
+            };
+            assert_eq!(diagnostic_text(&d), expected, "a {kind:?} failure has a phrase of its own");
+        }
+    }
+
+    #[test]
+    fn diagnostic_text_names_the_kind_not_the_raw_error() {
+        monitor_i18n::init("en", &[]);
+        let raw = "network error: connect to 192.168.1.7:554 timed out";
+        let d = Diagnostic::Failed {
+            failure: Failure {
+                kind: Some(FailureKind::Timeout),
+                text: raw.to_string(),
+            },
+        };
+        let text = diagnostic_text(&d);
+        assert_eq!(text, "timed out");
+        assert!(!text.contains("192.168.1.7"), "the tile names the kind, not the address");
+    }
+
+    #[test]
+    fn diagnostic_text_joins_a_failure_with_its_modifier() {
+        monitor_i18n::init("en", &[]);
+        let failure = Failure {
+            kind: Some(FailureKind::Unreachable),
+            text: "connection refused".to_string(),
+        };
+        let retry = diagnostic_text(&Diagnostic::Reconnecting {
+            failure: failure.clone(),
+            milliseconds: 1000,
+        });
+        assert_eq!(retry, "unreachable | retry in 1000 ms");
+
+        let gave_up = diagnostic_text(&Diagnostic::GaveUp {
+            failure,
+            attempts: 5,
+        });
+        assert_eq!(gave_up, "unreachable | gave up after 5 attempts");
+    }
+
+    #[test]
+    fn diagnostic_text_covers_unclassified_and_fallback() {
+        monitor_i18n::init("en", &[]);
+        let unknown = Diagnostic::Failed {
+            failure: Failure::unclassified("stream closed by peer"),
+        };
+        assert_eq!(diagnostic_text(&unknown), "connection failed");
+        assert_eq!(
+            diagnostic_text(&Diagnostic::RtspFallback { attempt: 2 }),
+            "RTSP unreachable, trying MSE"
+        );
+        assert_eq!(diagnostic_text(&Diagnostic::NothingThere), "");
+    }
+
+    #[test]
+    fn diagnostic_text_follows_the_active_language() {
+        let langs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../langs");
+        monitor_i18n::init("zh-CN", &[langs]);
+        let d = Diagnostic::Failed {
+            failure: Failure {
+                kind: Some(FailureKind::Auth),
+                text: "401 Unauthorized".to_string(),
+            },
+        };
+        assert_eq!(diagnostic_text(&d), "密码被拒绝");
+        assert!(monitor_i18n::set_language("en"));
+        assert_eq!(diagnostic_text(&d), "rejected credentials");
+    }
 
     #[test]
     fn clean_view_drops_every_corner_label_and_nothing_else() {

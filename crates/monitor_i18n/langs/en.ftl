@@ -523,6 +523,17 @@ power-mechanism-unsupported = unsupported
 
 ## Grid tile states
 grid-stream-failed = Stream failed
+grid-failure-auth = rejected credentials
+grid-failure-empty = nothing at this moment
+grid-failure-refused = request refused
+grid-failure-timeout = timed out
+grid-failure-unreachable = unreachable
+grid-failure-protocol = protocol error
+grid-failure-local = not supported here
+grid-failure-unknown = connection failed
+grid-detail-rtsp-fallback = RTSP unreachable, trying MSE
+grid-detail-retry = retry in { $ms } ms
+grid-detail-gave-up = gave up after { $attempts } attempts
 
 grid-suspended = suspended
 grid-switching-to = Switching to { $stream }...

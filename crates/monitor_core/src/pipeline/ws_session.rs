@@ -404,7 +404,7 @@ pub(super) async fn run_ws_session(
             window.counters.frames += 1;
             total_frames += 1;
 
-            announce_streaming(events, index, camera_id_str, stream, &mut announced);
+            announce_streaming(events, index, camera_id_str, &mut announced);
 
             // The same plain-Baseline fix the RTSP path applies - an in-band
             // sequence parameter set is the only place it could still be decided

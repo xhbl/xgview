@@ -494,6 +494,17 @@ power-mechanism-unsupported = Не поддерживается
 
 ## Состояние ячеек
 grid-stream-failed = Ошибка видеопотока
+grid-failure-auth = отклонены учётные данные
+grid-failure-empty = нет записи на этот момент
+grid-failure-refused = запрос отклонён
+grid-failure-timeout = истекло время ожидания
+grid-failure-unreachable = недоступен
+grid-failure-protocol = ошибка протокола
+grid-failure-local = не поддерживается здесь
+grid-failure-unknown = ошибка подключения
+grid-detail-rtsp-fallback = RTSP недоступен, пробуем MSE
+grid-detail-retry = повтор через { $ms } мс
+grid-detail-gave-up = прекращено после { $attempts } попыток
 
 grid-suspended = Приостановлено
 grid-switching-to = Переключение на { $stream }…

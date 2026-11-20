@@ -27,7 +27,7 @@ use monitor_codec::{Codec, ColorSpace, DecodedFrame, DecoderConfig, VideoDecoder
 use crate::audio::{AacRtpParams, AudioHub};
 use crate::config::ReconnectPolicy;
 use crate::discovery::frigate::VodPlaylist;
-use crate::error::{FailureKind, Result};
+use crate::error::{CoreError, FailureKind, Result};
 use crate::h264::{nal_unit_type, AccessUnit, H264Depacketizer, START_CODE};
 use crate::hevc::{nal_unit_type as hevc_nal_unit_type, HevcDepacketizer};
 use crate::mjpeg::{JpegDepacketizer, MjpegClient};
@@ -125,6 +125,53 @@ pub enum CallFailure {
     Unreachable,
 }
 
+/// A failure and the original text it came from.
+///
+/// `kind` is the stable classification the backoff already reads; it is absent
+/// when no `CoreError` lay behind the end of the attempt — the initial
+/// placeholder and a peer that simply closed the stream. `text` is the exact
+/// error message, kept for logs and for a future detail view: it is the only
+/// place a concrete reason (a 401, a port, a hostname) survives.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Failure {
+    pub kind: Option<FailureKind>,
+    pub text: String,
+}
+
+impl Failure {
+    /// The reason with no classification behind it: nothing has failed with a
+    /// typed error yet, or the peer closed without saying why.
+    pub fn unclassified(text: impl Into<String>) -> Self {
+        Self { kind: None, text: text.into() }
+    }
+
+    pub fn of(error: &CoreError) -> Self {
+        Self { kind: Some(error.kind()), text: error.to_string() }
+    }
+}
+
+/// Why a connection state was reported, in a form the interface can name in
+/// any language.
+///
+/// A rendered line is one variant with all of its parameters. Variants that
+/// carry a failure keep it inside the variant rather than in a wrapper, so
+/// combinations that never occur cannot be built. A retry always follows an
+/// attempt that ended, so its failure is always present — its `kind` may be
+/// absent when no typed error lay behind the end of that attempt.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Diagnostic {
+    /// A session failed for a reason waiting will not change.
+    Failed { failure: Failure },
+    /// The main stream could not be reached; the MSE fallback is being tried.
+    RtspFallback { attempt: usize },
+    /// A reconnect is scheduled, with whatever reason the last attempt gave.
+    Reconnecting { failure: Failure, milliseconds: i64 },
+    /// Retries ran out, with whatever reason the last attempt gave.
+    GaveUp { failure: Failure, attempts: usize },
+    /// A recording had nothing at the requested moment.
+    NothingThere,
+}
+
 /// Everything a channel reports to the renderer.
 ///
 /// Each of these marks a change and has to be seen, so they travel on a channel
@@ -138,7 +185,9 @@ pub enum StreamEvent {
         index: usize,
         camera_id: String,
         state: ConnectionState,
-        detail: String,
+        /// Why this state was reported. `None` where there is nothing to say:
+        /// a clean finish, or an attempt still waiting on a handshake.
+        detail: Option<Diagnostic>,
     },
     /// Whether the camera behind a channel can be talked to.
     ///
@@ -1279,6 +1328,29 @@ mod tests {
     use super::supervisor::TalkEntry;
     use super::ws_session::is_frigate_mse;
     use super::*;
+
+    #[test]
+    fn a_failure_keeps_its_kind_and_its_original_text() {
+        let error = CoreError::auth("401 Unauthorized");
+        let failure = Failure::of(&error);
+        assert_eq!(failure.kind, Some(FailureKind::Auth));
+        assert_eq!(failure.text, error.to_string());
+
+        // A peer that closes without a typed error still has a reason to name,
+        // but no classification for the backoff or the tile phrase.
+        let closed = Failure::unclassified("stream closed by peer");
+        assert_eq!(closed.kind, None);
+        assert_eq!(closed.text, "stream closed by peer");
+    }
+
+    #[test]
+    fn a_recordings_hole_is_a_diagnostic_not_a_failure_kind() {
+        // The renderer reads this variant to decide a seek landed in a hole;
+        // a clean finish carries none. The two must stay distinct.
+        let hole = Some(Diagnostic::NothingThere);
+        assert!(matches!(hole, Some(Diagnostic::NothingThere)));
+        assert!(!matches!(None::<Diagnostic>, Some(Diagnostic::NothingThere)));
+    }
     use crate::model::{CameraOrigin, TileAspect};
 
     /// A control keeps what it is told before anybody is listening.

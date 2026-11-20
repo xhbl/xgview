@@ -100,7 +100,7 @@ pub(super) async fn run_mjpeg_session(
         window.counters.frames += 1;
         total_frames += 1;
         window.counters.bytes += picture.len() as u64;
-        announce_streaming(events, index, camera_id, stream, &mut announced);
+        announce_streaming(events, index, camera_id, &mut announced);
 
         if let Some(decoder) = decoder.as_mut() {
             match decoder.decode(&picture, 0, true) {
