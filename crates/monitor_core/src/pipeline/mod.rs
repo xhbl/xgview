@@ -450,6 +450,13 @@ struct StatsInner {
     /// Which session owns a channel's numbers, as [`FrameStore`] does for its
     /// Samples published since the process started.
     published: u64,
+    /// Every byte any session has taken off the wire since this store was
+    /// made. Unlike the per-channel samples this only ever climbs: a viewer
+    /// reads two instants of it and divides the difference by the time between
+    /// them to learn the bitrate actually received over that whole interval.
+    /// Counting bytes rather than averaging published rates keeps the sum
+    /// honest when channels come and go, and needs no sampling of its own.
+    total_bytes: u64,
 }
 
 impl StatsStore {
@@ -459,6 +466,19 @@ impl StatsStore {
             let sequence = inner.published;
             inner.channels.insert(stats.index, Arc::new(StatsEntry { sequence, stats }));
         }
+    }
+
+    /// Adds the bytes a closing statistics window delivered. Called once by
+    /// each session as its window closes, so a byte is counted at most once.
+    pub(crate) fn add_bytes(&self, bytes: u64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.total_bytes = inner.total_bytes.saturating_add(bytes);
+        }
+    }
+
+    /// The running total of bytes received across every session.
+    pub fn total_bytes(&self) -> u64 {
+        self.inner.lock().map_or(0, |inner| inner.total_bytes)
     }
 
     /// Newest sample of a channel, `None` until it has published one.
@@ -1718,6 +1738,23 @@ mod tests {
         assert_eq!(second.stats.fps, 25.0, "the older sample is gone, not queued");
         assert!(second.sequence > first.sequence, "and is told from the one before it");
         assert!(store.latest(4).is_none(), "one channel's sample is not another's");
+    }
+
+    /// Every session reports the bytes its closed window carried, and the
+    /// total only ever grows: a viewer takes two readings and divides by the
+    /// time between them. Clearing one channel's sample must not erase what
+    /// that channel already delivered.
+    #[test]
+    fn the_byte_total_survives_samples_and_session_changes() {
+        let store = StatsStore::default();
+        assert_eq!(store.total_bytes(), 0);
+
+        store.add_bytes(1_000);
+        store.add_bytes(2_000);
+        assert_eq!(store.total_bytes(), 3_000, "windows add up across sessions");
+
+        store.add_bytes(u64::MAX);
+        assert_eq!(store.total_bytes(), u64::MAX, "a runaway count saturates rather than wraps");
     }
 
     /// The numbers of a session that has ended describe nothing: the next one

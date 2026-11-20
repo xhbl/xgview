@@ -462,6 +462,7 @@ pub(super) async fn run_ws_session(
                 total_frames,
             });
             let counted = window.close();
+            stats.add_bytes(counted.bytes);
             tracing::debug!(
                 target: "xgview::pipeline",
                 index,

@@ -985,7 +985,7 @@ impl XgViewApp {
         }
         ui.label(monitor_i18n::tr_args(
             "about-network-current",
-            &[("mbps", format!("{:.2}", self.network_traffic.current_mbps).into())],
+            &[("mbps", format!("{:.2}", self.network_traffic.current_mbps()).into())],
         ));
         ui.label(monitor_i18n::tr_args(
             "about-network-average",

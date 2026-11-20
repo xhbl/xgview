@@ -634,7 +634,8 @@ pub(super) async fn run_recording_session(
             pace_decode = Duration::ZERO;
             pace_samples = 0;
             pace_late = 0;
-            window.close();
+            let counted = window.close();
+            stats.add_bytes(counted.bytes);
         }
     }
 

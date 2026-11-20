@@ -1045,58 +1045,62 @@ struct Keys {
 /// Incoming video traffic sampled for the About page.
 #[derive(Debug, Default)]
 struct NetworkTraffic {
-    current_mbps: f32,
-    samples: std::collections::VecDeque<(Instant, f32)>,
-    last_sample: Option<Instant>,
+    /// (instant, running byte total) snapshots, oldest first. The byte total
+    /// comes from `StatsStore`, which only climbs; a rate is the difference
+    /// between two snapshots over the time between them, so no rate has to be
+    /// published or sampled at the sessions' own cadence.
+    samples: std::collections::VecDeque<(Instant, u64)>,
 }
 impl NetworkTraffic {
     const WINDOW: Duration = Duration::from_secs(60);
+    /// A window long enough to span a whole statistics period (two seconds)
+    /// even with a single channel, whose bytes arrive in one step per period.
+    const CURRENT_WINDOW: Duration = Duration::from_secs(3);
     const INTERVAL: Duration = Duration::from_secs(1);
-    const MAX_GAP: Duration = Duration::from_secs(5);
 
-    fn sample(&mut self, now: Instant, mbps: f32) {
-        if let Some(previous) = self.last_sample {
-            let elapsed = now.saturating_duration_since(previous);
-            if elapsed < Self::INTERVAL {
+    /// Takes a snapshot of the global byte counter, about once a second.
+    fn sample(&mut self, now: Instant, total_bytes: u64) {
+        if let Some((last_at, _)) = self.samples.back() {
+            if now.saturating_duration_since(*last_at) < Self::INTERVAL {
                 return;
             }
-            if elapsed > Self::MAX_GAP {
-                self.samples.clear();
-            }
         }
-
-        self.current_mbps = if mbps.is_finite() { mbps.max(0.0) } else { 0.0 };
-        self.last_sample = Some(now);
-        self.samples.push_back((now, self.current_mbps));
-
-        let cutoff = now - Self::WINDOW;
+        self.samples.push_back((now, total_bytes));
+        let cutoff = now.checked_sub(Self::WINDOW).unwrap_or(now);
         while self.samples.len() > 1 && self.samples[1].0 <= cutoff {
             self.samples.pop_front();
         }
     }
 
-    fn average_mbps(&self) -> f32 {
-        let Some(now) = self.last_sample else {
+    /// Megabits per second over `window`, as bytes added divided by the time
+    /// they took to arrive. When the counter stops climbing the rate is zero,
+    /// which is what a stream that has gone quiet should read; no gap
+    /// detection or history clearing is needed.
+    fn rate_mbps(&self, window: Duration) -> f32 {
+        let Some(&(newest_at, newest_bytes)) = self.samples.back() else {
             return 0.0;
         };
-        let cutoff = now - Self::WINDOW;
-        let mut weighted = 0.0;
-        let mut seconds = 0.0;
-
-        for index in 1..self.samples.len() {
-            let (at, value) = self.samples[index];
-            let previous = self.samples[index - 1].0;
-            let start = previous.max(cutoff);
-            let duration = at.saturating_duration_since(start).as_secs_f32();
-            weighted += value * duration;
-            seconds += duration;
+        let cutoff = newest_at.checked_sub(window).unwrap_or(newest_at);
+        let base = self.samples.iter()
+            .find(|(at, _)| *at >= cutoff)
+            .copied()
+            .or_else(|| self.samples.front().copied());
+        let Some((base_at, base_bytes)) = base else {
+            return 0.0;
+        };
+        if newest_at <= base_at || newest_bytes < base_bytes {
+            return 0.0;
         }
+        let seconds = newest_at.duration_since(base_at).as_secs_f32();
+        ((newest_bytes - base_bytes) as f32 * 8.0 / 1_000_000.0) / seconds
+    }
 
-        if seconds > 0.0 {
-            weighted / seconds
-        } else {
-            self.current_mbps
-        }
+    fn current_mbps(&self) -> f32 {
+        self.rate_mbps(Self::CURRENT_WINDOW)
+    }
+
+    fn average_mbps(&self) -> f32 {
+        self.rate_mbps(Self::WINDOW)
     }
 }
 
@@ -2310,18 +2314,19 @@ impl XgViewApp {
         }
     }
 
-    /// Aggregate the incoming bitrate reported by active video sessions.
+    /// Snapshot the global received-byte counter for the About page. Unlike
+    /// summing each channel's published rate, one counter cannot be sampled
+    /// out of phase with a session's two-second window, and a channel that
+    /// closes between samples cannot leave a stale rate behind.
     fn update_network_traffic(&mut self) {
         let now = Instant::now();
-        if self.network_traffic.last_sample.is_some_and(|at| now.duration_since(at) < NetworkTraffic::INTERVAL) {
+        if self.network_traffic.samples.back()
+            .is_some_and(|(at, _)| now.duration_since(*at) < NetworkTraffic::INTERVAL)
+        {
             return;
         }
-        let stats = self.manager.stats();
-        let kbps: f32 = self.channels.keys()
-            .filter_map(|index| stats.latest(*index))
-            .map(|entry| entry.stats.bitrate_kbps)
-            .sum();
-        self.network_traffic.sample(now, kbps / 1000.0);
+        let total_bytes = self.manager.stats().total_bytes();
+        self.network_traffic.sample(now, total_bytes);
     }
 
     fn poll_events(&mut self, ctx: &egui::Context) {
@@ -4125,62 +4130,78 @@ fn bands_around(outer: Rect, inner: Rect) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn network_traffic_averages_samples() {
+    fn network_traffic_rates_come_from_byte_differences() {
         let start = Instant::now();
         let mut traffic = NetworkTraffic::default();
 
+        assert_eq!(traffic.current_mbps(), 0.0);
         assert_eq!(traffic.average_mbps(), 0.0);
 
-        traffic.sample(start, 10.0);
-        assert_eq!(traffic.current_mbps, 10.0);
-        assert_eq!(traffic.average_mbps(), 10.0);
-
-        traffic.sample(start + Duration::from_secs(1), 20.0);
-        traffic.sample(start + Duration::from_secs(2), 30.0);
-
-        assert!((traffic.average_mbps() - 25.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn network_traffic_keeps_sixty_second_window() {
-        let start = Instant::now();
-        let mut traffic = NetworkTraffic::default();
-
-        for second in 0..=70 {
-            traffic.sample(
-                start + Duration::from_secs(second),
-                if second < 40 { 10.0 } else { 20.0 },
-            );
+        // A megabit is 125_000 bytes. Ten seconds at one megabit a second
+        // puts 1_250_000 bytes on the wire.
+        for second in 0..=10 {
+            traffic.sample(start + Duration::from_secs(second), second as u64 * 125_000);
         }
-
-        assert!((traffic.average_mbps() - 15.166667).abs() < 0.001);
+        assert!((traffic.current_mbps() - 1.0).abs() < 0.001);
+        assert!((traffic.average_mbps() - 1.0).abs() < 0.001);
     }
 
     #[test]
-    fn network_traffic_resets_after_long_gap() {
+    fn network_traffic_average_is_the_bytes_over_the_whole_window() {
         let start = Instant::now();
         let mut traffic = NetworkTraffic::default();
 
-        traffic.sample(start, 100.0);
-        traffic.sample(start + Duration::from_secs(1), 100.0);
-        traffic.sample(start + Duration::from_secs(10), 5.0);
-
-        assert_eq!(traffic.current_mbps, 5.0);
-        assert_eq!(traffic.average_mbps(), 5.0);
-        assert_eq!(traffic.samples.len(), 1);
+        // 1 Mbps for the first forty seconds, 2 Mbps for the next thirty:
+        // the sixty-second window is ten through seventy, so it holds
+        // thirty seconds of each and averages 1.5 Mbps. A snapshot at t is
+        // the bytes received before t, hence sample before adding this
+        // second's bytes.
+        let mut total = 0u64;
+        for second in 0..=70 {
+            traffic.sample(start + Duration::from_secs(second), total);
+            total += if second < 40 { 125_000 } else { 250_000 };
+        }
+        assert!((traffic.average_mbps() - 1.5).abs() < 0.001);
     }
 
     #[test]
-    fn network_traffic_ignores_early_and_invalid_samples() {
+    fn network_traffic_reads_zero_when_the_counter_stops() {
         let start = Instant::now();
         let mut traffic = NetworkTraffic::default();
 
-        traffic.sample(start, 10.0);
-        traffic.sample(start + Duration::from_millis(500), 50.0);
-        assert_eq!(traffic.current_mbps, 10.0);
+        for second in 0..=5 {
+            traffic.sample(start + Duration::from_secs(second), second as u64 * 250_000);
+        }
+        assert!((traffic.current_mbps() - 2.0).abs() < 0.001);
 
-        traffic.sample(start + Duration::from_secs(1), f32::NAN);
-        assert_eq!(traffic.current_mbps, 0.0);
+        // The wire goes quiet: the counter stops climbing while snapshots go
+        // on, so the current rate falls at once and the minute average does
+        // so once the busy seconds leave its window - no gap bookkeeping.
+        for second in 6..=12 {
+            traffic.sample(start + Duration::from_secs(second), 1_250_000);
+        }
+        assert_eq!(traffic.current_mbps(), 0.0);
+        for second in 13..=80 {
+            traffic.sample(start + Duration::from_secs(second), 1_250_000);
+        }
+        assert_eq!(traffic.average_mbps(), 0.0);
+    }
+
+    #[test]
+    fn network_traffic_keeps_one_snapshot_a_second_and_a_minute_of_them() {
+        let start = Instant::now();
+        let mut traffic = NetworkTraffic::default();
+
+        traffic.sample(start, 0);
+        traffic.sample(start + Duration::from_millis(500), 500_000);
+        assert_eq!(traffic.samples.len(), 1, "a snapshot less than a second later is ignored");
+
+        for second in 1..=120 {
+            traffic.sample(start + Duration::from_secs(second), second as u64 * 125_000);
+        }
+        // One at the start plus at most sixty-one inside the window: the
+        // oldest snapshots past the minute must have been dropped.
+        assert!(traffic.samples.len() <= 62, "snapshots older than the window are dropped");
     }
 
     use super::*;

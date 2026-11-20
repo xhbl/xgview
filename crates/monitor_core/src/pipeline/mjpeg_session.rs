@@ -146,6 +146,7 @@ pub(super) async fn run_mjpeg_session(
                 total_frames,
             });
             let counted = window.close();
+            stats.add_bytes(counted.bytes);
             tracing::debug!(
                 target: "xgview::pipeline",
                 index,

@@ -2465,6 +2465,7 @@ impl<'a> RtspSession<'a> {
         // decoder (or the renderer), a `units` that drops to zero and then
         // bursts blames the camera, the link, or this loop being starved.
         let counted = self.window.close();
+        self.sinks.stats.add_bytes(counted.bytes);
         tracing::debug!(
             target: "xgview::pipeline",
             index = self.index,
