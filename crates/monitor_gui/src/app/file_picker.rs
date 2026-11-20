@@ -451,6 +451,9 @@ impl FilePicker {
 
         let title = if self.saving() { "file-picker-title-save" } else { "file-picker-title" };
         let bar = dialogs::title_bar(ui, &monitor_i18n::tr(title), true, &monitor_i18n::tr("dialog-close"));
+        // The close button is a live stop in every mode, so it is the last
+        // fallback when an empty folder has neither a shortcut nor a footer.
+        let close_anchor = bar.close.as_ref().map(|button| button.id);
         if let Some(button) = bar.close {
             if app.nav.tracked(button).clicked() {
                 close = true;
@@ -470,12 +473,11 @@ impl FilePicker {
         // this button is the one way up - a pointer has no keys at all - and it
         // is greyed at a root, where up is nowhere.
         let above = self.listing.above();
-        let mut up: Option<(Id, bool)> = None;
         // Where the focus goes when the listing has no rows at all - a folder
         // that is empty or cannot be read. The shortcuts above it are then the
         // first choice; with neither a shortcut nor a way up, the name field
-        // below is the one the viewer can still use. A grey control is never
-        // the answer.
+        // below is the one a save can still use, and otherwise the close
+        // button. A grey control is never the answer.
         let mut first: Option<Id> = None;
         ui.add_space(theme::space::S);
         app.nav.open(PLACES_SCOPE);
@@ -512,7 +514,6 @@ impl FilePicker {
                     go = Some((parent.clone(), true));
                 }
             }
-            up = Some((button.id, above.is_none()));
         });
         app.nav.close();
 
@@ -598,16 +599,6 @@ impl FilePicker {
                         ui.ctx().memory_mut(|memory| memory.request_focus(response.id));
                         self.reanchor = false;
                     }
-                    // A button that has just gone grey - the viewer walked back
-                    // up to a root - is no place for the ring: it answers
-                    // nothing now, and the listing's first row is what it would
-                    // have led to. Handed on in the same frame, on the row it
-                    // goes to, because that row is the one just drawn.
-                    if let Some((id, true)) = up {
-                        if ui.ctx().memory(|memory| memory.focused()) == Some(id) {
-                            ui.ctx().memory_mut(|memory| memory.request_focus(response.id));
-                        }
-                    }
                 }
                 if ui.is_rect_visible(rect) {
                     let visuals = ui.style().interact_selectable(&response, false);
@@ -675,14 +666,21 @@ impl FilePicker {
         // the wall with this window still up, and the window would open with
         // nothing in it focused at all. The shortcuts above are what is left,
         // so the window opens on the first of them, the home folder, and
-        // stepping into an empty folder hands the focus there too.
-        if self.listing.entries.is_empty() {
-            app.file_picker.anchor = first;
-            if self.reanchor {
-                if let Some(id) = first {
+        // stepping into an empty folder hands the focus there too. With no
+        // shortcut either, the footer or the close button below takes it; both
+        // are drawn later, so that case is finished where they are made.
+        let empty_listing = self.listing.entries.is_empty();
+        if empty_listing {
+            if let Some(id) = first {
+                app.file_picker.anchor = Some(id);
+                if self.reanchor {
                     ui.ctx().memory_mut(|memory| memory.request_focus(id));
+                    self.reanchor = false;
                 }
-                self.reanchor = false;
+            } else {
+                // The old first row is gone; do not let it block the footer
+                // or close fallback below, and keep reanchor for them.
+                app.file_picker.anchor = None;
             }
         }
 
@@ -771,8 +769,12 @@ impl FilePicker {
                         |text| egui::TextEdit::singleline(text).desired_width(240.0),
                     );
                     app.name(&field, "file-picker-name");
-                    if first.is_none() {
-                        first = Some(field.id);
+                    if empty_listing && app.file_picker.anchor.is_none() {
+                        app.file_picker.anchor = Some(field.id);
+                        if self.reanchor {
+                            ui.ctx().memory_mut(|memory| memory.request_focus(field.id));
+                            self.reanchor = false;
+                        }
                     }
                     if std::mem::take(&mut self.refocus_field) {
                         ui.ctx().memory_mut(|memory| memory.request_focus(field.id));
@@ -807,6 +809,19 @@ impl FilePicker {
                     app.nav.close();
                 }
             });
+        }
+
+        // An open picker has no name field to fall back on. With an empty
+        // folder and no shortcut either, the close button is still a live
+        // stop: better a ring on the way out than focus left on the wall.
+        if empty_listing && app.file_picker.anchor.is_none() {
+            if let Some(id) = close_anchor {
+                app.file_picker.anchor = Some(id);
+                if self.reanchor {
+                    ui.ctx().memory_mut(|memory| memory.request_focus(id));
+                    self.reanchor = false;
+                }
+            }
         }
 
         // There is no line of instructions under the window. The keys are the
@@ -1168,6 +1183,31 @@ mod tests {
         picker.walk(&nested, false);
         assert_eq!(picker.listing.dir, nested);
         assert!(picker.reanchor, "walking into a folder is not the up button");
+    }
+
+    /// A root with no shortcuts has only the name field left to focus. The
+    /// field is drawn below the listing, so the anchor has to be completed
+    /// there rather than at the earlier, shortcut-only fallback.
+    #[test]
+    fn an_empty_root_with_no_shortcuts_anchors_on_the_name_field() {
+        let source = include_str!("file_picker.rs");
+        let body = &source[..source.find("#[cfg(test)]").unwrap()];
+        assert!(
+            body.contains("if empty_listing && app.file_picker.anchor.is_none()"),
+            "the later field fallback must set the anchor"
+        );
+        assert!(
+            body.contains("app.file_picker.anchor = None;"),
+            "a stale first-row anchor must not block the later fallbacks"
+        );
+        assert!(
+            body.contains("close_anchor"),
+            "an open picker still needs a live fallback"
+        );
+        assert!(
+            !body.contains("let mut up: Option<(Id, bool)> = None;"),
+            "the old same-frame hand-off read a focus egui had already given up"
+        );
     }
 
     #[test]

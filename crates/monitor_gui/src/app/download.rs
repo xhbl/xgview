@@ -764,6 +764,8 @@ impl XgViewApp {
     /// opened takes it before the panel behind it does.
     pub(super) fn download_panel_window(&mut self, ctx: &egui::Context) {
         let screen = ctx.screen_rect();
+        // This panel floats over the wall rather than centring a form, so it
+        // keeps its wider margin and its own floor instead of `modal_width`.
         let width = 420.0_f32.min(screen.width() - 48.0).max(260.0);
         let max_height = screen.height() * 0.8;
         // A picture turned a quarter turn takes its whole frame with it - the
@@ -902,6 +904,8 @@ fn draw_turned(
     view: &View,
 ) -> Actions {
     let frame = turned_frame(tile);
+    // The turned panel is measured in the tile's frame and must leave the
+    // tile's own edge clear, so it does not share the centred form's clamp.
     let width = 420.0_f32.min(frame.width() - 2.0 * TURNED_EDGE).max(240.0);
     let inner = width - 2.0 * TURNED_PAD;
     let style = ctx.style();

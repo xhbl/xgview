@@ -538,6 +538,27 @@ impl BulkCameraDraft {
             .and_then(|channels| channels.first().copied())
             .unwrap_or(1)
     }
+
+    /// Whether the derive-sub checkbox has anything to derive on this form.
+    /// The single-camera form only offers the check when its main url matches
+    /// a rule; the bulk form has to ask the same question of its template, or
+    /// the offer would promise an address the builder cannot produce.
+    pub fn can_infer_sub(&self) -> bool {
+        if !self.sub_template.trim().is_empty() {
+            return false;
+        }
+        let channels = match parse_channels(&self.channels) {
+            Ok(channels) if !channels.is_empty() => channels,
+            _ => return false,
+        };
+        // One checkbox speaks for the whole batch, so it is only offered when
+        // every channel it will create has a rule to follow. A template like
+        // `/stream{n}` cannot keep that promise for `1-3`.
+        channels.iter().all(|number| {
+            let main = self.main_template.replace("{n}", &number.to_string());
+            infer_sub_stream(&main).is_some()
+        })
+    }
 }
 /// State of the "Add devices" window.
 #[derive(Debug, Default)]
@@ -1321,8 +1342,10 @@ pub fn camera_fields(
         // The sub field fills its column like the name and main fields do, so
         // all three share one right edge. Ticking "derive sub" fills this field
         // with the address read off the main url and locks it grey; unticking
-        // keeps that address and makes the field editable again. Nothing is
-        // inferred at save time - what is shown is what gets saved.
+        // keeps that address and makes the field editable again. If the main
+        // url stops matching a rule, the check goes away and the last derived
+        // address stays visible and editable rather than silently changing.
+        // Nothing is inferred at save time - what is shown is what gets saved.
         if !locked && infer_ok && draft.infer_sub {
             // Keep the field equal to the derived address for as long as the
             // check is on - including the frame the main url first becomes
@@ -1513,8 +1536,9 @@ fn manual_tab(ui: &mut egui::Ui, state: &mut DiscoveryUi, config: &mut AppConfig
             .hint_text(theme::hint("rtsp://192.168.1.100/Streaming/Channels/{n}02"))
     });
     // With no template typed, the sub addresses can be read off the main
-    // template instead. Keep the offer next to the field it stands in for.
-    if state.bulk.sub_template.trim().is_empty() {
+    // template instead, but only when that template has a rule to follow.
+    // Keep the offer next to the field it stands in for.
+    if state.bulk.can_infer_sub() {
         nav.tracked(ui.checkbox(&mut state.bulk.infer_sub, monitor_i18n::tr("dialog-bulk-infer-sub")));
     }
 
@@ -2350,6 +2374,7 @@ mod tests {
         let cameras = draft.build().unwrap();
         assert_eq!(cameras.len(), 1);
         assert_eq!(cameras[0].rtsp_sub.as_deref(), Some(derived));
+        assert!(draft.can_infer_sub(), "the offer is made where a rule applies");
 
         let without = BulkCameraDraft { infer_sub: false, ..draft.clone() };
         assert!(
@@ -2359,12 +2384,74 @@ mod tests {
 
         let typed = BulkCameraDraft {
             sub_template: "rtsp://192.168.1.100/channel/{n}/sub".into(),
-            ..draft
+            ..draft.clone()
         };
+        assert!(!typed.can_infer_sub(), "a typed template replaces the offer");
         assert_eq!(
             typed.build().unwrap()[0].rtsp_sub.as_deref(),
             Some("rtsp://192.168.1.100/channel/1/sub"),
             "a typed template wins over the checkbox"
+        );
+
+        let unmatched = BulkCameraDraft {
+            main_template: "rtsp://192.168.1.100/channel/{n}".into(),
+            channels: "1".into(),
+            infer_sub: true,
+            ..Default::default()
+        };
+        assert!(
+            !unmatched.can_infer_sub(),
+            "no rule means there is nothing to offer"
+        );
+        assert!(unmatched.build().unwrap()[0].rtsp_sub.is_none());
+
+        let partial = BulkCameraDraft {
+            main_template: "rtsp://192.168.1.100/stream{n}".into(),
+            channels: "1-2".into(),
+            infer_sub: true,
+            ..Default::default()
+        };
+        assert!(
+            !partial.can_infer_sub(),
+            "one batch checkbox cannot promise an address for every channel"
+        );
+    }
+
+    #[test]
+    fn a_camera_draft_saves_only_the_address_on_the_form() {
+        let source = CameraSource::new(
+            "cam",
+            "rtsp://192.168.1.100/Streaming/Channels/101",
+        );
+        let draft = CameraDraft::from_source(&source);
+        assert!(draft.infer_sub, "a camera without a sub starts in infer mode");
+        assert!(
+            draft.build().unwrap().rtsp_sub.is_none(),
+            "the builder saves no address the form has not shown"
+        );
+
+        let mut stale = draft.clone();
+        stale.sub = "rtsp://192.168.1.100/Streaming/Channels/102".into();
+        assert_eq!(
+            stale.build().unwrap().rtsp_sub.as_deref(),
+            Some("rtsp://192.168.1.100/Streaming/Channels/102"),
+            "when the main url no longer offers inference, the visible address is kept"
+        );
+
+        let mut edited = draft;
+        edited.sub = "rtsp://192.168.1.100/Streaming/Channels/102".into();
+        edited.infer_sub = false;
+        assert_eq!(
+            edited.build().unwrap().rtsp_sub.as_deref(),
+            Some("rtsp://192.168.1.100/Streaming/Channels/102"),
+            "unticking keeps the address for editing and saves it"
+        );
+
+        let mut with_sub = source;
+        with_sub.rtsp_sub = Some("rtsp://192.168.1.100/Streaming/Channels/102".into());
+        assert!(
+            !CameraDraft::from_source(&with_sub).infer_sub,
+            "an existing address is left editable"
         );
     }
 
