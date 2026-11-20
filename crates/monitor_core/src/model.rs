@@ -897,6 +897,36 @@ impl CameraSource {
         };
     }
 
+    /// The picture-fit mode for the wall's current orientation. Landscape and
+    /// upright keep independent fits so a camera can fill a landscape tile and
+    /// stay at its own ratio when the wall stands up; a control that cycles the
+    /// fit has to read the one the viewer is actually looking at.
+    pub fn aspect_for(&self, portrait: bool) -> TileAspect {
+        if portrait {
+            self.portrait_aspect
+        } else {
+            self.aspect
+        }
+    }
+
+    /// The fit the picture-fit control would move to, without changing the
+    /// camera. The menu names it before the viewer commits to the switch, and
+    /// it must name the same field [`Self::advance_aspect`] writes.
+    pub fn next_aspect(&self, portrait: bool) -> TileAspect {
+        self.aspect_for(portrait).next()
+    }
+
+    /// Moves the picture-fit control on to its next mode in the orientation the
+    /// wall is currently in, leaving the other orientation's fit alone.
+    pub fn advance_aspect(&mut self, portrait: bool) {
+        let next = self.next_aspect(portrait);
+        if portrait {
+            self.portrait_aspect = next;
+        } else {
+            self.aspect = next;
+        }
+    }
+
     /// `host:port` string used inside the UI.
     pub fn display_address(&self) -> String {
         match RtspUrl::parse(&self.rtsp_main) {
@@ -1220,6 +1250,38 @@ mod tests {
         assert_eq!(TileAspect::Original.ratio(), None, "the stream's own shape");
         assert_eq!(TileAspect::Ratio16x9.ratio(), Some(16.0 / 9.0));
         assert_eq!(TileAspect::Ratio1x1.ratio(), Some(1.0));
+    }
+
+    /// A picture-fit switch reads and writes the fit for the wall's current
+    /// orientation. The two fits are independent: cycling one must leave the
+    /// other exactly where it was, and the label the menu shows must be the
+    /// mode the press actually moves to.
+    #[test]
+    fn the_picture_fit_switch_follows_the_walls_orientation() {
+        let mut camera = CameraSource::new("a", "rtsp://h/x");
+        camera.aspect = TileAspect::Original;
+        camera.portrait_aspect = TileAspect::Ratio4x3;
+
+        // Landscape reads and advances only the landscape fit.
+        assert_eq!(camera.aspect_for(false), TileAspect::Original);
+        assert_eq!(camera.next_aspect(false), TileAspect::Stretch);
+        camera.advance_aspect(false);
+        assert_eq!(camera.aspect, TileAspect::Stretch);
+        assert_eq!(camera.portrait_aspect, TileAspect::Ratio4x3, "upright fit untouched");
+
+        // Upright reads and advances only the portrait fit, from where it was
+        // left - not from the landscape fit just advanced.
+        assert_eq!(camera.aspect_for(true), TileAspect::Ratio4x3);
+        assert_eq!(camera.next_aspect(true), TileAspect::Ratio1x1);
+        camera.advance_aspect(true);
+        assert_eq!(camera.portrait_aspect, TileAspect::Ratio1x1);
+        assert_eq!(camera.aspect, TileAspect::Stretch, "landscape fit untouched");
+
+        // Wrapping: the last upright mode comes back to the first, still only
+        // in the portrait field.
+        camera.advance_aspect(true);
+        assert_eq!(camera.portrait_aspect, TileAspect::Original);
+        assert_eq!(camera.aspect, TileAspect::Stretch);
     }
 
     /// The magnified viewport's fit is absent until it is set, so a camera's

@@ -808,6 +808,11 @@ impl XgViewApp {
         // Read once for the frame: the same answer for every tile, and it is the
         // frame's clock rather than each cell's turn at it.
         let ring = self.ring_shown();
+        // The picture-fit switch cycles the fit for the wall the viewer is
+        // looking at: upright uses its own fit, independent from the landscape
+        // one. Read it here so every tile's menu names the same field the press
+        // will advance.
+        let portrait = self.is_portrait();
 
         for (cell, index) in view.cells.iter().enumerate() {
             let rect = grid::tile_rect(origin, view.layout, cell, grid::LINE);
@@ -875,7 +880,7 @@ impl XgViewApp {
                         // that once, after the whole wall has been painted.
                         let fit = monitor_i18n::tr_args(
                             "camera-context-picture-fit",
-                            &[("next", monitor_i18n::tr(camera.aspect.next().label()).into())],
+                            &[("next", monitor_i18n::tr(camera.next_aspect(portrait).label()).into())],
                         );
                         if ui.button(fit).clicked() {
                             actions.picture_fit = Some(camera_index);
@@ -1266,8 +1271,9 @@ impl XgViewApp {
             let slots = self.config.active_slots();
             if let Some(index) = actions.picture_fit {
                 if let Some(&slot) = slots.get(index) {
+                    let portrait = self.is_portrait();
                     if let Some(camera) = self.config.cameras.get_mut(slot) {
-                        camera.aspect = camera.aspect.next();
+                        camera.advance_aspect(portrait);
                     }
                     self.mark_dirty();
                 }
@@ -2473,6 +2479,20 @@ mod tests {
         }
         let lookup = format!("cameras.get({})", "camera_index");
         assert!(source.contains(&lookup), "the menu reads the camera it names");
+        // The label shown and the fit advanced must both follow the wall's
+        // orientation: upright has its own fit, independent from landscape.
+        assert!(
+            source.contains("camera.next_aspect(portrait).label()"),
+            "the menu must name the next fit for the orientation on screen"
+        );
+        assert!(
+            source.contains("camera.advance_aspect(portrait)"),
+            "the press must advance the fit whose next value the menu named"
+        );
+        assert!(
+            source.contains("let portrait = self.is_portrait();"),
+            "the frame must read the orientation the fit switch follows"
+        );
     }
 
     #[test]
