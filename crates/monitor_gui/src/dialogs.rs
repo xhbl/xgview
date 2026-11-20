@@ -505,9 +505,10 @@ impl BulkCameraDraft {
         }
 
         let mut cameras = Vec::with_capacity(channels.len());
-        // One checkbox speaks for the whole batch. When the form cannot offer
-        // it - no rule for every channel - the builder must not derive for a
-        // subset either, or cameras get an address the viewer never saw.
+        // One checkbox speaks for the whole batch, and the form offers it when
+        // any channel has a rule. Derive only while that offer is on screen;
+        // each channel then takes its own address where a rule matches and
+        // none where it does not, so no camera gets an unseen address.
         let derive = self.can_infer_sub() && self.infer_sub;
 
         for number in channels {
@@ -570,10 +571,12 @@ impl BulkCameraDraft {
             Ok(channels) if !channels.is_empty() => channels,
             _ => return false,
         };
-        // One checkbox speaks for the whole batch, so it is only offered when
-        // every channel it will create has a rule to follow. A template like
-        // `/stream{n}` cannot keep that promise for `1-3`.
-        channels.iter().all(|number| {
+        // One checkbox speaks for the whole batch, so it is offered when any
+        // channel it will create has a rule to follow. Channels without one
+        // simply get no sub. Requiring every channel instead would hide the
+        // check on the usual `.../Channels/{n}01` template over `1-16`, where
+        // the rule covers one digit only, and lose every sub in the batch.
+        channels.iter().any(|number| {
             let main = self.main_template.replace("{n}", &number.to_string());
             infer_sub_stream(&main).is_some()
         })
@@ -2351,6 +2354,10 @@ mod tests {
             body.contains("infer_ok && draft.infer_sub"),
             "the grey field shows only where the check is drawn"
         );
+        assert!(
+            body.contains("keep_a_hand_typed_sub(infer_ok, sub.changed(), &mut draft.infer_sub)"),
+            "typing over a hidden check must make the address manual on the form"
+        );
     }
 
     #[test]
@@ -2446,12 +2453,36 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            !partial.can_infer_sub(),
-            "one batch checkbox cannot promise an address for every channel"
+            partial.can_infer_sub(),
+            "one channel with a rule is enough to offer the batch check"
+        );
+        let half = partial.build().unwrap();
+        assert_eq!(
+            half[0].rtsp_sub.as_deref(),
+            Some("rtsp://192.168.1.100/stream2"),
+            "the channel that has a rule gets its address"
         );
         assert!(
-            partial.build().unwrap()[0].rtsp_sub.is_none(),
-            "a hidden check must not derive for just part of the batch"
+            half[1].rtsp_sub.is_none(),
+            "the channel without a rule gets none, rather than an unseen one"
+        );
+
+        // The form's own Hikvision example over its usual channel range: the
+        // rule reads a single digit, so 1-9 can be derived and 10-16 cannot.
+        // Hiding the check here would lose every sub in a normal batch.
+        let hikvision = BulkCameraDraft {
+            main_template: main_template.clone(),
+            channels: "1-16".into(),
+            infer_sub: true,
+            ..Default::default()
+        };
+        assert!(hikvision.can_infer_sub(), "a common batch must keep the offer");
+        let sixteen = hikvision.build().unwrap();
+        assert_eq!(sixteen.len(), 16);
+        assert_eq!(sixteen[0].rtsp_sub.as_deref(), Some(derived));
+        assert!(
+            sixteen[15].rtsp_sub.is_none(),
+            "a two-digit channel has no rule to follow"
         );
 
         let literal = BulkCameraDraft {
