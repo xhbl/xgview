@@ -1168,6 +1168,23 @@ static SUB_STREAM_RULES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(||
         rule(r"(/Streaming/Channels/\d+)01$", "${1}02"),
         // Dahua / Amcrest: ...&subtype=0 -> subtype=1
         rule(r"([?&]subtype=)0\b", "${1}1"),
+        // Reolink: /Preview_01_main -> /Preview_01_sub. A 4K main stream may
+        // be h265, but Reolink's sub stream is always h264, so the h265 form
+        // has to be normalised. Keep these two rules together and in order:
+        // the first leaves h265 alone, the second rewrites it to h264.
+        rule(r"(/(?:h264)?Preview_\d+_)main\b", "${1}sub"),
+        rule(r"(/h265)(Preview_\d+_)main\b", "/h264${2}sub"),
+        // EZVIZ and older Hikvision-style IPCs: /h264/ch1/main/av_stream.
+        rule(r"(/(?:h264|h265)/ch\d+/)main(/av_stream)", "${1}sub${2}"),
+        // Xiongmai and OEM cameras with a `stream=0` query parameter.
+        rule(r"([?&]stream=)0\b", "${1}1"),
+        // Uniview: /unicast/c1/s0/live -> s1, and /media/video1 -> video2.
+        rule(r"(/unicast/c\d+/s)0(/live)", "${1}1${2}"),
+        rule(r"(/media/video)1$", "${1}2"),
+        // Bosch: /video?inst=1 -> inst=2; the rec parameter is left alone.
+        rule(r"([?&]inst=)1\b", "${1}2"),
+        // Vivotek: /live.sdp -> /live2.sdp.
+        rule(r"(/live)(\.sdp)$", "${1}2${2}"),
         // Foscam: /videoMain -> /videoSub
         rule(r"/videoMain$", "/videoSub"),
         // Axis / generic: ?stream=main -> ?stream=sub
@@ -1552,6 +1569,57 @@ mod tests {
         for channel in ["102", "1002", "1602"] {
             let url = format!("rtsp://admin:pw@192.168.1.64:554/Streaming/Channels/{channel}");
             assert_eq!(infer_sub_stream(&url), None, "{channel} is already a sub");
+        }
+    }
+
+    #[test]
+    fn infers_sub_streams_from_other_vendor_urls() {
+        // The main side flips to the documented sub side. An address already
+        // on the sub side must never be flipped again.
+        for (main, sub) in [
+            (
+                "rtsp://u:p@10.0.0.2:554/Preview_01_main",
+                "rtsp://u:p@10.0.0.2:554/Preview_01_sub",
+            ),
+            (
+                "rtsp://u:p@10.0.0.2:554/h264Preview_03_main",
+                "rtsp://u:p@10.0.0.2:554/h264Preview_03_sub",
+            ),
+            (
+                "rtsp://u:p@10.0.0.2:554/h265Preview_01_main",
+                "rtsp://u:p@10.0.0.2:554/h264Preview_01_sub",
+            ),
+            (
+                "rtsp://u:p@10.0.0.2:554/h264/ch1/main/av_stream",
+                "rtsp://u:p@10.0.0.2:554/h264/ch1/sub/av_stream",
+            ),
+            (
+                "rtsp://10.0.0.2:554/user=admin&password=pw&channel=1&stream=0.sdp?",
+                "rtsp://10.0.0.2:554/user=admin&password=pw&channel=1&stream=1.sdp?",
+            ),
+            (
+                "rtsp://u:p@10.0.0.2:554/unicast/c12/s0/live",
+                "rtsp://u:p@10.0.0.2:554/unicast/c12/s1/live",
+            ),
+            (
+                "rtsp://u:p@10.0.0.2:554/media/video1",
+                "rtsp://u:p@10.0.0.2:554/media/video2",
+            ),
+            (
+                "rtsp://u:p@10.0.0.2:554/video?inst=1&rec=0",
+                "rtsp://u:p@10.0.0.2:554/video?inst=2&rec=0",
+            ),
+            (
+                "rtsp://u:p@10.0.0.2:554/live.sdp",
+                "rtsp://u:p@10.0.0.2:554/live2.sdp",
+            ),
+        ] {
+            assert_eq!(
+                infer_sub_stream(main).as_deref(),
+                Some(sub),
+                "{main} must infer {sub}"
+            );
+            assert_eq!(infer_sub_stream(sub), None, "{sub} is already a sub");
         }
     }
 
