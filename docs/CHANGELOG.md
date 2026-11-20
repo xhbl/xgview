@@ -3,7 +3,7 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
-## 2.3.24
+## 2.3.25
 
 Changes since 2.2.106.
 

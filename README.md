@@ -31,11 +31,11 @@ cloud, no account, MIT licensed.
 
 | Platform                            | File                                                                                                                    |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Android / Android TV (arm64, 8.1+)  | [`xgview-2.3.24-android-arm64-v8a.apk`](../../releases/download/xgview-v2.3.24/xgview-2.3.24-android-arm64-v8a.apk)     |
-| Android / Android TV (32-bit, 8.1+) | [`xgview-2.3.24-android-armeabi-v7a.apk`](../../releases/download/xgview-v2.3.24/xgview-2.3.24-android-armeabi-v7a.apk) |
-| Windows x64                         | [`xgview-2.3.24-windows-x86_64.zip`](../../releases/download/xgview-v2.3.24/xgview-2.3.24-windows-x86_64.zip)           |
-| Linux x64                           | [`xgview-2.3.24-linux-x86_64.tar.gz`](../../releases/download/xgview-v2.3.24/xgview-2.3.24-linux-x86_64.tar.gz)         |
-| macOS (universal)                   | [`xgview-2.3.24-macos-universal.zip`](../../releases/download/xgview-v2.3.24/xgview-2.3.24-macos-universal.zip)         |
+| Android / Android TV (arm64, 8.1+)  | [`xgview-2.3.25-android-arm64-v8a.apk`](../../releases/download/xgview-v2.3.25/xgview-2.3.25-android-arm64-v8a.apk)     |
+| Android / Android TV (32-bit, 8.1+) | [`xgview-2.3.25-android-armeabi-v7a.apk`](../../releases/download/xgview-v2.3.25/xgview-2.3.25-android-armeabi-v7a.apk) |
+| Windows x64                         | [`xgview-2.3.25-windows-x86_64.zip`](../../releases/download/xgview-v2.3.25/xgview-2.3.25-windows-x86_64.zip)           |
+| Linux x64                           | [`xgview-2.3.25-linux-x86_64.tar.gz`](../../releases/download/xgview-v2.3.25/xgview-2.3.25-linux-x86_64.tar.gz)         |
+| macOS (universal)                   | [`xgview-2.3.25-macos-universal.zip`](../../releases/download/xgview-v2.3.25/xgview-2.3.25-macos-universal.zip)         |
 
 **Note: This is a personal project, shared as-is, with no warranty.** It was developed with **AI assistance** under my direction and testing; please review the code before using
 it in sensitive setups.
