@@ -836,6 +836,17 @@ impl XgViewApp {
         // one. Read it here so every tile's menu names the same field the press
         // will advance.
         let portrait = self.is_portrait();
+        // Magnified, the picture has a fit of its own and the stream is forced
+        // to main: the tile fit and the stream switch below are answers about
+        // the wall behind the picture, not about what the viewer is looking
+        // at. Read once for the frame so every menu names the same fields.
+        let zoomed = self.scheduler.is_zoomed();
+        // A recording playing on the magnified channel has no camera actions:
+        // edit, delete, fit, stream and connection all describe the live wall,
+        // not the file being played, and their presses would interrupt it. The
+        // picture still takes clicks and drags (the next block) - only its
+        // context menu is withheld.
+        let playing_back = self.playback.is_some();
 
         for (cell, index) in view.cells.iter().enumerate() {
             let rect = grid::tile_rect(origin, view.layout, cell, grid::LINE);
@@ -853,7 +864,7 @@ impl XgViewApp {
                     ring,
                 );
             let response = grid::paint(ui, rect, &tile);
-            if interactive {
+            if interactive && !playing_back {
                 if let Some(camera_index) = *index {
                     // Re-right-clicking the same tile while its menu is open
                     // would otherwise close it on the same frame: egui sees a
@@ -901,15 +912,36 @@ impl XgViewApp {
                         // press is not a guess. The next values are read
                         // without changing the camera: the action below does
                         // that once, after the whole wall has been painted.
+                        //
+                        // Magnified, the fit is the picture's own (`zoom_aspect`)
+                        // and the press must advance that, the same field the
+                        // bar's fit control writes - advancing the wall's tile
+                        // fit instead would change nothing the viewer can see.
+                        // The label names the same next value the press makes.
+                        let next = if zoomed {
+                            camera.next_zoom_aspect()
+                        } else {
+                            camera.next_aspect(portrait)
+                        };
                         let fit = monitor_i18n::tr_args(
                             "camera-context-picture-fit",
-                            &[("next", monitor_i18n::tr(camera.next_aspect(portrait).label()).into())],
+                            &[("next", monitor_i18n::tr(next.label()).into())],
                         );
                         if ui.button(fit).clicked() {
-                            actions.picture_fit = Some(camera_index);
+                            if zoomed {
+                                actions.picture_fit_zoom = Some(camera_index);
+                            } else {
+                                actions.picture_fit = Some(camera_index);
+                            }
                             ui.close();
                         }
-                        if camera.has_sub() {
+                        // A magnified picture is always the main stream (the
+                        // scheduler forces it), so switching the camera's grid
+                        // stream here would not move the picture at all and
+                        // would only reconnect a stream already showing. The
+                        // switch belongs to the wall, so leave it out while
+                        // magnified.
+                        if !zoomed && camera.has_sub() {
                             let stream = monitor_i18n::tr_args(
                                 "camera-context-stream",
                                 &[("next", monitor_i18n::tr(camera.next_stream().label()).into())],
@@ -1294,6 +1326,7 @@ impl XgViewApp {
         }
 
         if actions.picture_fit.is_some()
+            || actions.picture_fit_zoom.is_some()
             || actions.stream_change.is_some()
             || actions.connection_change.is_some()
         {
@@ -1303,6 +1336,16 @@ impl XgViewApp {
                     let portrait = self.is_portrait();
                     if let Some(camera) = self.config.cameras.get_mut(slot) {
                         camera.advance_aspect(portrait);
+                    }
+                    self.mark_dirty();
+                }
+            }
+            if let Some(index) = actions.picture_fit_zoom {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(camera) = self.config.cameras.get_mut(slot) {
+                        let next = camera.next_zoom_aspect();
+                        camera.zoom_aspect = Some(next);
+                        self.flash_centered(monitor_i18n::tr(next.label()), ToastKind::Info);
                     }
                     self.mark_dirty();
                 }
@@ -2223,7 +2266,7 @@ impl XgViewApp {
                 let Some(camera) = self.config.cameras.get_mut(slot) else {
                     return;
                 };
-                let next = camera.zoom_aspect.unwrap_or(TileAspect::Original).next();
+                let next = camera.next_zoom_aspect();
                 camera.zoom_aspect = Some(next);
                 self.mark_dirty();
                 self.flash_centered(monitor_i18n::tr(next.label()), ToastKind::Info);
@@ -2508,19 +2551,81 @@ mod tests {
         }
         let lookup = format!("cameras.get({})", "camera_index");
         assert!(source.contains(&lookup), "the menu reads the camera it names");
-        // The label shown and the fit advanced must both follow the wall's
-        // orientation: upright has its own fit, independent from landscape.
+        // The label shown and the fit advanced must both follow the wall the
+        // viewer is looking at: on the wall, the orientation's fit; magnified,
+        // the picture's own fit. Both labels are computed by `next`, then have
+        // `.label()` applied once below, so one name serves the two fields.
         assert!(
-            source.contains("camera.next_aspect(portrait).label()"),
-            "the menu must name the next fit for the orientation on screen"
+            source.contains("camera.next_aspect(portrait)"),
+            "the wall's menu must name the next fit for the orientation on screen"
         );
         assert!(
             source.contains("camera.advance_aspect(portrait)"),
-            "the press must advance the fit whose next value the menu named"
+            "a wall press must advance the fit whose next value the menu named"
         );
         assert!(
             source.contains("let portrait = self.is_portrait();"),
             "the frame must read the orientation the fit switch follows"
+        );
+    }
+
+    #[test]
+    fn a_magnified_context_menu_edits_the_picture_not_the_wall() {
+        let source = include_str!("wall.rs");
+        // The menu is painted for the magnified tile too. Its fit press must
+        // advance `zoom_aspect` - the field the magnified picture and the bar's
+        // fit control read - not the wall tile's fit, which the viewer cannot
+        // see while magnified.
+        assert!(
+            source.contains("let zoomed = self.scheduler.is_zoomed();"),
+            "the menu must know it is painting the magnified picture"
+        );
+        assert!(
+            source.contains("actions.picture_fit_zoom = Some(camera_index);"),
+            "a magnified fit press must be reported separately from a wall fit press"
+        );
+        assert!(
+            source.contains("camera.next_zoom_aspect()"),
+            "the magnified fit must name and advance the picture's own fit, from one shared source"
+        );
+        assert!(
+            source.matches("camera.next_zoom_aspect()").count() >= 3,
+            "the menu label, the menu press and the bar control must all read the same next fit"
+        );
+        assert!(
+            source.contains("camera.zoom_aspect = Some(next);"),
+            "the magnified fit press must write the field the magnified picture reads"
+        );
+        // The stream switch is a wall-only answer: a magnified picture is
+        // always the main stream, so the entry is left out while magnified.
+        assert!(
+            source.contains("if !zoomed && camera.has_sub()"),
+            "a stream switch must not be offered on a magnified main-stream picture"
+        );
+    }
+
+    #[test]
+    fn a_recording_playback_has_no_context_menu() {
+        let source = include_str!("wall.rs");
+        // A recording plays on the magnified channel. Every context entry -
+        // edit, delete, fit, stream, connection - describes the live wall, not
+        // the file, and its press would interrupt playback. The whole menu is
+        // withheld while a recording is up; the tile's other interactions stay.
+        assert!(
+            source.contains("let playing_back = self.playback.is_some();"),
+            "the wall must know a recording is playing"
+        );
+        assert!(
+            source.contains("if interactive && !playing_back {"),
+            "a playing recording must not paint the camera context menu"
+        );
+        // The click/drag block that follows must still run during playback: it
+        // is the picture's own interaction, not the camera menu.
+        let menu = source.find("if interactive && !playing_back {").unwrap();
+        let after = &source[menu..];
+        assert!(
+            after.contains("if interactive {") && after.contains("actions.double_clicked"),
+            "playback must keep the tile's click and double-click interaction"
         );
     }
 

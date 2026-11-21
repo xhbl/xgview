@@ -916,6 +916,14 @@ impl CameraSource {
         self.aspect_for(portrait).next()
     }
 
+    /// The fit the magnified picture's picture-fit control would move to,
+    /// without changing the camera. The context menu names this before the
+    /// viewer commits, and both it and the bar's control write the same value;
+    /// until then the magnified picture keeps its own ratio, `Original`.
+    pub fn next_zoom_aspect(&self) -> TileAspect {
+        self.zoom_aspect.unwrap_or(TileAspect::Original).next()
+    }
+
     /// Moves the picture-fit control on to its next mode in the orientation the
     /// wall is currently in, leaving the other orientation's fit alone.
     pub fn advance_aspect(&mut self, portrait: bool) {
@@ -1318,6 +1326,23 @@ mod tests {
         let text = serde_json::to_string(&camera).expect("written");
         let back: CameraSource = serde_json::from_str(&text).expect("read back");
         assert_eq!(back.zoom_aspect, Some(TileAspect::Ratio16x9));
+    }
+
+    /// The magnified fit switch and the context menu must name and write the
+    /// same mode. Absent means Original, so the first press moves to Stretch;
+    /// once written, the next press follows from there. The wall's own fit is
+    /// a different field and must not move at all.
+    #[test]
+    fn the_zoom_fit_switch_reads_and_advances_its_own_field() {
+        let mut camera = CameraSource::new("a", "rtsp://h/x");
+        camera.aspect = TileAspect::Ratio4x3;
+        assert_eq!(camera.zoom_aspect, None);
+        assert_eq!(camera.next_zoom_aspect(), TileAspect::Stretch);
+
+        camera.zoom_aspect = Some(camera.next_zoom_aspect());
+        assert_eq!(camera.zoom_aspect, Some(TileAspect::Stretch));
+        assert_eq!(camera.next_zoom_aspect(), TileAspect::Ratio16x9);
+        assert_eq!(camera.aspect, TileAspect::Ratio4x3, "the wall fit is untouched");
     }
 
     /// The OSD enum is stored in `xgvconfig.json` by variant name, so a corner

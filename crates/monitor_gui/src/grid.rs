@@ -296,6 +296,13 @@ pub struct TileActions {
     pub edit_camera: Option<usize>,
     pub delete_camera: Option<usize>,
     pub picture_fit: Option<usize>,
+    /// Picture fit pressed while the wall is magnified.
+    ///
+    /// The magnified viewport has a fit of its own (`zoom_aspect`), separate
+    /// from the tile fit `picture_fit` advances. Kept apart so a press on the
+    /// context menu changes the picture the viewer is looking at, not the tile
+    /// they will see after leaving the magnification.
+    pub picture_fit_zoom: Option<usize>,
     pub stream_change: Option<usize>,
     pub connection_change: Option<usize>,
     pub zoom: Option<usize>,
