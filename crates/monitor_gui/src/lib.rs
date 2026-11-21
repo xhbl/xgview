@@ -145,8 +145,10 @@ pub(crate) const FULLSCREEN_ON_THE_BUILDER: bool = !cfg!(target_os = "android");
 /// Vulkan without being told to.
 #[cfg(windows)]
 fn wgpu_options() -> egui_wgpu::WgpuConfiguration {
-    let mut setup = egui_wgpu::WgpuSetupCreateNew::default();
-    setup.native_adapter_selector = Some(std::sync::Arc::new(select_adapter));
+    let setup = egui_wgpu::WgpuSetupCreateNew {
+        native_adapter_selector: Some(std::sync::Arc::new(select_adapter)),
+        ..Default::default()
+    };
     egui_wgpu::WgpuConfiguration {
         wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(setup),
         ..Default::default()

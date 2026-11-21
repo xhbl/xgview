@@ -36,7 +36,7 @@ use crate::theme;
 /// Landscape screens are wider than every request, so they keep the requested
 /// width unchanged; only a screen narrower than the request plus its margins is
 /// pulled in. The margin is only enough to keep the window off the screen edge
-/// - an upright phone needs every point it can get. The floor keeps a form
+/// (an upright phone needs every point it can get). The floor keeps a form
 /// usable, but never wider than the screen itself.
 pub(crate) fn modal_width(requested: f32, screen_width: f32) -> f32 {
     const MARGIN: f32 = 12.0;
@@ -1044,7 +1044,6 @@ pub fn add_devices_window(
     }
     changed
 }
-
 
 /// The window's tab strip: draws the three tabs and registers them as a row.
 ///

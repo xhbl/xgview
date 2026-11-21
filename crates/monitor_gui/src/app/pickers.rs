@@ -220,11 +220,10 @@ impl XgViewApp {
                                                     FontId::proportional(28.0),
                                                     theme::TEXT_DIM,
                                                 );
-                                                if response.hovered() || response.has_focus() {
-                                                    if visuals.bg_stroke.width > 0.0 {
+                                                if (response.hovered() || response.has_focus())
+                                                    && visuals.bg_stroke.width > 0.0 {
                                                         painter.rect_stroke(rect, corner, visuals.bg_stroke, StrokeKind::Inside);
                                                     }
-                                                }
                                             }
                                         }
                                         let response = app.nav.tracked(response);

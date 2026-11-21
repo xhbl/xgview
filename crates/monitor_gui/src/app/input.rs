@@ -619,7 +619,6 @@ impl XgViewApp {
     ///
     /// egui hands a nested row the full width and lays its widgets out from the
     /// left, so a row that wants to be centred measures itself and pads its
-
     /// left side. The button labels are the only thing that decides the width:
     /// button padding is the theme's, and a label wider than the minimum size
     /// is the usual case here.
@@ -931,16 +930,18 @@ impl XgViewApp {
     ) -> Keys {
         ctx.input_mut(|input| {
             let none = Modifiers::NONE;
-            let mut keys = Keys::default();
             // Read before the press is consumed: `consume_key` matches key
             // repeats too, and a repeated Enter must not press the magnified
             // viewport's bar over and over. See `Keys::enter_fresh`.
-            keys.enter_fresh = input.events.iter().any(|event| {
-                matches!(
-                    event,
-                    egui::Event::Key { key: Key::Enter | Key::Space, pressed: true, repeat: false, .. }
-                )
-            });
+            let mut keys = Keys {
+                enter_fresh: input.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key { key: Key::Enter | Key::Space, pressed: true, repeat: false, .. }
+                    )
+                }),
+                ..Default::default()
+            };
             // Back is Escape on a keyboard and `BrowserBack` from an Android
             // remote: winit maps `AKEYCODE_BACK` onto that, not onto Escape, so
             // a remote that only ever sends BACK would otherwise have no way out

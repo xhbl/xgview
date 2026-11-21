@@ -715,6 +715,9 @@ impl XgViewApp {
     /// way, or the corner display and the bar would disagree about what is on
     /// screen. `ring` is passed in rather than read here so that every tile of a
     /// frame gets the same answer; see `paint_view`.
+    // The tile is described by the handful of values its caller already holds;
+    // a bundle would be repacked from these same values at every call.
+    #[allow(clippy::too_many_arguments)]
     fn tile_of<'a>(
         &'a self,
         id: Id,
@@ -813,6 +816,9 @@ impl XgViewApp {
             }
     }
 
+    // Every tile of a frame is painted from the same context: the caller
+    // gathers it once and passes it through, rather than re-deriving it per tile.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_view(
         &self,
         ui: &mut egui::Ui,
@@ -1849,9 +1855,7 @@ impl XgViewApp {
             Some(id) => tilebar::index_of(id),
             None => focus_before.and_then(tilebar::index_of),
         }?;
-        let Some(&is_live) = live.get(index) else {
-            return None;
-        };
+        let &is_live = live.get(index)?;
         if is_live {
             return None;
         }

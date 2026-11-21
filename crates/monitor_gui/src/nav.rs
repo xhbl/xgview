@@ -647,8 +647,8 @@ mod tests {
         nav.begin();
         for (row, scope) in ["row-0", "row-1", "row-2"].iter().enumerate() {
             nav.open(scope);
-            for slot in row * 3..row * 3 + 3 {
-                nav.push(ids[slot], Kind::Plain);
+            for id in &ids[row * 3..row * 3 + 3] {
+                nav.push(*id, Kind::Plain);
             }
             nav.close();
         }

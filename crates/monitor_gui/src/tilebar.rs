@@ -282,9 +282,9 @@ pub enum Control {
     /// recording. Every control is away for that wait: a live row would still
     /// offer a microphone, another way into the recording and a picture to
     /// turn, all of which are about to be replaced. The mark turns with the
-    /// clock so the press is known to have been heard, and it is not a control
-    /// - nothing presses it, nothing focuses it, and the walk has no stop on
-    /// it. See `XgViewApp::playback_is_asking`.
+    /// clock so the press is known to have been heard, and it is not a control:
+    /// nothing presses it, nothing focuses it, and the walk has no stop on it.
+    /// See `XgViewApp::playback_is_asking`.
     Waiting,
 }
 
@@ -747,6 +747,7 @@ fn to_screen_rect(rect: Rect, tile: Rect, rotated: bool) -> Rect {
 /// The bar opens on [`seat`]: it is registered as the scope's first member so
 /// the arrows have somewhere to stand before the first control, and so the
 /// confirm key on it is spent rather than pressing the first control unseen.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     ui: &mut egui::Ui,
     nav: &mut Nav,

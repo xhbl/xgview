@@ -211,7 +211,7 @@ fn scrub(candidate: &str) -> String {
     while out.len() > NAME_BYTES {
         out.pop();
     }
-    let trimmed = out.trim_end_matches(|ch| ch == '_' || ch == '.');
+    let trimmed = out.trim_end_matches(['_', '.']);
     trimmed.to_string()
 }
 

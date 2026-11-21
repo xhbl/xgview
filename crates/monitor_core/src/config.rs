@@ -510,17 +510,12 @@ impl Blackout {
 
 /// Which way the window stands. Persisted so the wall comes back the way it was
 /// left, and used to pick between the landscape grid and the portrait one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Orientation {
+    #[default]
     Landscape,
     Portrait,
-}
-
-impl Default for Orientation {
-    fn default() -> Self {
-        Orientation::Landscape
-    }
 }
 
 impl Orientation {
@@ -1670,10 +1665,12 @@ mod tests {
         assert!(!legacy.clean_view_osd);
 
         let path = std::env::temp_dir().join(format!("xgview-clean-view-{}.json", crate::model::new_id()));
-        let mut config = AppConfig::default();
-        config.clean_view_fullscreen = false;
-        config.clean_view_windowed = true;
-        config.clean_view_osd = true;
+        let mut config = AppConfig {
+            clean_view_fullscreen: false,
+            clean_view_windowed: true,
+            clean_view_osd: true,
+            ..Default::default()
+        };
         config.group_mut().layout = GridLayout::G3x3;
         config.save(&path).unwrap();
         let restored = AppConfig::load(&path).unwrap();
@@ -1726,15 +1723,17 @@ mod tests {
     /// Ten enabled cameras on one landscape grid and a portrait column of four.
     /// The two views are deliberately different, so a mix-up cannot hide.
     fn ten_cameras_on_both_walls(landscape: GridLayout) -> AppConfig {
-        let mut config = AppConfig::default();
-        config.cameras = (0..10)
-            .map(|index| {
-                CameraSource::new(
-                    format!("camera {index}"),
-                    format!("rtsp://10.0.0.{index}/live"),
-                )
-            })
-            .collect();
+        let mut config = AppConfig {
+            cameras: (0..10)
+                .map(|index| {
+                    CameraSource::new(
+                        format!("camera {index}"),
+                        format!("rtsp://10.0.0.{index}/live"),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
         let group = &mut config.groups[0];
         group.layout = landscape;
         group.portrait_layout = GridLayout::P4;
@@ -1878,8 +1877,10 @@ mod tests {
     /// than trusted.
     #[test]
     fn the_idle_time_is_kept_where_a_clock_can_hold_it() {
-        let mut config = AppConfig::default();
-        config.chrome_idle_secs = f32::INFINITY;
+        let mut config = AppConfig {
+            chrome_idle_secs: f32::INFINITY,
+            ..Default::default()
+        };
         config.normalize();
         assert_eq!(config.chrome_idle_secs, 0.0, "an infinity is no idle time");
 
@@ -1927,8 +1928,10 @@ mod tests {
         let path = dir.path().join("config.json");
         let previous = dir.path().join("config.json.prev");
 
-        let mut first = AppConfig::default();
-        first.chrome_idle_secs = 5.0;
+        let first = AppConfig {
+            chrome_idle_secs: 5.0,
+            ..Default::default()
+        };
         first.save(&path).unwrap();
         assert!(!previous.exists(), "the first save has no version to keep");
 
@@ -1951,8 +1954,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
 
-        let mut first = AppConfig::default();
-        first.chrome_idle_secs = 5.0;
+        let first = AppConfig {
+            chrome_idle_secs: 5.0,
+            ..Default::default()
+        };
         first.save(&path).unwrap();
         let mut second = first.clone();
         second.chrome_idle_secs = 9.0;
@@ -1976,10 +1981,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
 
-        let mut before_import = AppConfig::default();
-        before_import.chrome_idle_secs = 3.0;
+        let before_import = AppConfig {
+            chrome_idle_secs: 3.0,
+            ..Default::default()
+        };
         // What `App::back_up_configuration` writes before it adopts a document.
-        before_import.save_copy(&dir.path().join("config.json.bak")).unwrap();
+        before_import.save_copy(dir.path().join("config.json.bak")).unwrap();
 
         let mut imported = before_import.clone();
         imported.chrome_idle_secs = 7.0;
@@ -2000,9 +2007,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
 
-        let mut before_import = AppConfig::default();
-        before_import.chrome_idle_secs = 3.0;
-        before_import.save_copy(&dir.path().join("config.json.bak")).unwrap();
+        let before_import = AppConfig {
+            chrome_idle_secs: 3.0,
+            ..Default::default()
+        };
+        before_import.save_copy(dir.path().join("config.json.bak")).unwrap();
 
         let mut imported = before_import.clone();
         imported.chrome_idle_secs = 7.0;
@@ -2040,9 +2049,11 @@ mod tests {
         assert_eq!(config.audio_output, None);
         assert_eq!(config.audio_input, None);
 
-        let mut config = AppConfig::default();
-        config.audio_output = Some("plughw:CARD=PCH,DEV=3".to_string());
-        config.audio_input = Some("KT USB Audio".to_string());
+        let config = AppConfig {
+            audio_output: Some("plughw:CARD=PCH,DEV=3".to_string()),
+            audio_input: Some("KT USB Audio".to_string()),
+            ..Default::default()
+        };
         let text = serde_json::to_string(&config).unwrap();
         let back: AppConfig = serde_json::from_str(&text).unwrap();
         assert_eq!(back.audio_output.as_deref(), Some("plughw:CARD=PCH,DEV=3"));

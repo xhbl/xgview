@@ -1379,6 +1379,9 @@ mod tests {
     /// a level window adds it to the scroll area, a turned one to its measured
     /// height. A hole has no button, so neither window grows for it.
     #[test]
+    // Guards the spacing constants: if one is retuned past the other an assert
+    // here fails, which is the whole point of comparing two constants.
+    #[allow(clippy::assertions_on_constants)]
     fn a_save_button_does_not_sit_on_the_windows_edge() {
         let save = String::from("Download");
         assert_eq!(SAVE_FOOT, theme::space::XS, "one small gap, not a group space");

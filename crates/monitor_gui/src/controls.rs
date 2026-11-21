@@ -59,6 +59,9 @@ pub fn drag_value<T: Numeric>(
 /// the right, and the row is the slider's own - so each value gets a line to
 /// itself. `suffix` is shown after the value, `text` before the slider. A
 /// small reset button after the value restores `default` on a click.
+// A form row is described by these few independent inputs; a struct would be
+// filled from them at the call site and taken apart here again.
+#[allow(clippy::too_many_arguments)]
 pub fn slider<T: Numeric>(
     nav: &mut Nav,
     ui: &mut Ui,

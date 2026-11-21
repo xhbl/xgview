@@ -109,7 +109,7 @@ pub fn aac_access_units(
         return Vec::new();
     }
     let header_bits = u16::from_be_bytes([payload[0], payload[1]]) as usize;
-    let header_len = (header_bits + 7) / 8;
+    let header_len = header_bits.div_ceil(8);
     let per_header = (size_length + index_length) as usize;
     if per_header == 0 || header_len == 0 || header_len > payload.len() - 2 {
         return Vec::new();

@@ -839,8 +839,8 @@ mod tests {
         // Synology's relay drops the end flag on the key frame's last fragment:
         // the slice is complete, but never marked finished.
         let first = [[0x7c, 0x80 | NAL_IDR].as_slice(), &body[..2]].concat();
-        let middle = [[0x7c, 0x00 | NAL_IDR].as_slice(), &body[2..4]].concat();
-        let last = [[0x7c, 0x00 | NAL_IDR].as_slice(), &body[4..]].concat();
+        let middle = [[0x7c, NAL_IDR].as_slice(), &body[2..4]].concat();
+        let last = [[0x7c, NAL_IDR].as_slice(), &body[4..]].concat();
 
         assert!(depacketizer.push(&header(96, 1, false), &first).is_empty());
         assert!(depacketizer.push(&header(96, 1, false), &middle).is_empty());

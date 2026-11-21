@@ -132,7 +132,7 @@ impl SynologyClient {
 
         let response = self.http.get(&url).query(&query).send().await?;
         let payload: Value = response.json().await?;
-        unwrap_success(&payload, api).map(Clone::clone)
+        unwrap_success(&payload, api).cloned()
     }
 
     /// Lists every camera bound to Surveillance Station.

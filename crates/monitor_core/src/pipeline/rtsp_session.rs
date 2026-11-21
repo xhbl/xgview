@@ -2797,9 +2797,8 @@ mod tests {
         let before = pacer.folded;
         // From then on the wire sends one per frame and the clock hands one per
         // frame, so the queue keeps its depth - exactly what a batch does not do.
-        let mut now = start;
         for i in 9..24u32 {
-            now = start + Duration::from_micros(u64::from(i) * 83_333);
+            let now = start + Duration::from_micros(u64::from(i) * 83_333);
             pacer.push(picture(SLOW * i, false), now);
             while pacer.due(now).is_some() {}
         }
@@ -3047,17 +3046,21 @@ mod tests {
     /// Neither direction leaves the bounds the delay is allowed to move in.
     #[test]
     fn the_lead_stays_between_its_bounds() {
-        let mut pacer = LivePacer::default();
-        pacer.lead = LIVE_LEAD_MAX;
+        let mut pacer = LivePacer {
+            lead: LIVE_LEAD_MAX,
+            ..Default::default()
+        };
         let start = Instant::now();
         pacer.push(picture(0, true), start);
         assert!(pacer.due(start + Duration::from_secs(2)).is_some());
         assert!(pacer.due(start + Duration::from_secs(4)).is_none());
         assert_eq!(pacer.lead, LIVE_LEAD_MAX);
 
-        let mut pacer = LivePacer::default();
-        pacer.lead = LIVE_LEAD_MIN;
-        pacer.trimmed = Instant::now() - Duration::from_secs(20);
+        let mut pacer = LivePacer {
+            lead: LIVE_LEAD_MIN,
+            trimmed: Instant::now() - Duration::from_secs(20),
+            ..Default::default()
+        };
         let start = Instant::now();
         pacer.push(picture(0, true), start);
         assert!(pacer.due(start + LIVE_LEAD_MIN).is_some());

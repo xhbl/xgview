@@ -163,9 +163,9 @@ const REPOSITORY_URL: &str = "https://github.com/xhbl/xgview";
 /// How far a direction press scrolls the settings body when it has nowhere left
 /// to move the focus, as a fraction of the window's height.
 ///
-/// The body is scrolled by moving the focus onto a control - see [`crate::nav`]
-/// - which leaves whatever follows the last control out of a remote's reach:
-/// the adb line, the table of keys. The press that walks off the end of the body
+/// The body is scrolled by moving the focus onto a control (see [`crate::nav`]),
+/// which leaves whatever follows the last control out of a remote's reach: the
+/// adb line, the table of keys. The press that walks off the end of the body
 /// moves the body instead, by a little less than a screenful so the viewer keeps
 /// the context of what has just left. See `body_scroll`.
 const REMOTE_SCROLL_FRACTION: f32 = 0.6;
@@ -187,10 +187,10 @@ struct Chrome {
     visible: bool,
     /// When input was last seen, which is what the fade is timed from.
     last_input: Instant,
-    /// Set by a request for the picture and nothing else - entering full screen
-    /// - and consumed by the next `chrome_visible` call, which takes the bars
-    /// away at once. The click that asks for full screen is itself input, so
-    /// without this it would be read as a request to see the bars.
+    /// Set by a request for the picture and nothing else (entering full screen),
+    /// and consumed by the next `chrome_visible` call, which takes the bars away
+    /// at once. The click that asks for full screen is itself input, so without
+    /// this it would be read as a request to see the bars.
     hide_now: bool,
     /// Whether the viewer asked for the bars this frame. Read before the keys
     /// are handed out, because the application takes the ones it acts on out of
@@ -2541,13 +2541,16 @@ impl XgViewApp {
                         segments.clone(),
                     );
                 }
-                BackgroundEvent::RecordingStatus { camera_id, active } => {
-                    // A failed read says nothing new: keep the last answer so a
-                    // network blink does not turn a recording camera grey.
-                    if let Some(active) = active {
-                        self.recording.insert(camera_id.clone(), *active);
-                    }
+                // A failed read says nothing new: keep the last answer so a
+                // network blink does not turn a recording camera grey.
+                BackgroundEvent::RecordingStatus {
+                    camera_id,
+                    active: Some(active),
+                } => {
+                    self.recording.insert(camera_id.clone(), *active);
                 }
+                // A failed read leaves the last answer untouched.
+                BackgroundEvent::RecordingStatus { active: None, .. } => {}
                 BackgroundEvent::Go2rtcFailed(error) => {
                     toast = Some((
                         monitor_i18n::tr_args("toast-go2rtc-failed", &[("error", error.to_string().into())]),
@@ -2588,8 +2591,8 @@ impl XgViewApp {
                         ));
                     }
                 }
-                BackgroundEvent::DownloadFailed { id, reason } => {
-                    if self.download.finish_failed(*id, reason.clone()) {
+                BackgroundEvent::DownloadFailed { id, reason }
+                    if self.download.finish_failed(*id, reason.clone()) => {
                         tracing::warn!(target: "xgview::app", reason = %reason, "the clip could not be saved");
                         toast = Some((
                             monitor_i18n::tr_args(
@@ -2599,7 +2602,6 @@ impl XgViewApp {
                             ToastKind::Error,
                         ));
                     }
-                }
                 _ => {}
             }
             self.discovery.apply(event);
@@ -4161,7 +4163,7 @@ mod tests {
         // A megabit is 125_000 bytes. Ten seconds at one megabit a second
         // puts 1_250_000 bytes on the wire.
         for second in 0..=10 {
-            traffic.sample(start + Duration::from_secs(second), second as u64 * 125_000);
+            traffic.sample(start + Duration::from_secs(second), second * 125_000);
         }
         assert!((traffic.current_mbps() - 1.0).abs() < 0.001);
         assert!((traffic.average_mbps() - 1.0).abs() < 0.001);
@@ -4191,7 +4193,7 @@ mod tests {
         let mut traffic = NetworkTraffic::default();
 
         for second in 0..=5 {
-            traffic.sample(start + Duration::from_secs(second), second as u64 * 250_000);
+            traffic.sample(start + Duration::from_secs(second), second * 250_000);
         }
         assert!((traffic.current_mbps() - 2.0).abs() < 0.001);
 
@@ -4218,7 +4220,7 @@ mod tests {
         assert_eq!(traffic.samples.len(), 1, "a snapshot less than a second later is ignored");
 
         for second in 1..=120 {
-            traffic.sample(start + Duration::from_secs(second), second as u64 * 125_000);
+            traffic.sample(start + Duration::from_secs(second), second * 125_000);
         }
         // One at the start plus at most sixty-one inside the window: the
         // oldest snapshots past the minute must have been dropped.
@@ -4576,8 +4578,8 @@ mod tests {
         nav.begin();
         for (row, scope) in LAYOUT_PICKER_ROWS.iter().enumerate() {
             nav.open(scope);
-            for slot in row * 3..row * 3 + 3 {
-                nav.item_id(ids[slot]);
+            for id in &ids[row * 3..row * 3 + 3] {
+                nav.item_id(*id);
             }
             nav.close();
         }
@@ -4687,7 +4689,7 @@ mod tests {
     /// A press on the wall is the wall's, even when a control holds the focus.
     ///
     /// Waking the bars for it moves the wall under the very click that placed it
-    /// - the bars take their height from the wall - so the press lands on another
+    /// (the bars take their height from the wall), so the press lands on another
     /// tile or on none, and the second press of a double click never reaches the
     /// first. A press in the band a bar occupies is still the pointer asking for
     /// it, and so is a key.

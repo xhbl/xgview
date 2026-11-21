@@ -176,7 +176,7 @@ fn adts_prefix(info: &AudioStreamInfo) -> [u8; 7] {
     } else {
         (1, rate_index(info.sample_rate), info.channels)
     };
-    let channels = channels.max(1).min(7);
+    let channels = channels.clamp(1, 7);
     [
         0xFF,
         0xF1,
@@ -228,7 +228,7 @@ mod tests {
         let mut info = AudioStreamInfo::new(AudioCodec::Aac, 16000, 1);
         info.extradata = vec![0x14, 0x08];
         let prefix = adts_prefix(&info);
-        assert_eq!(prefix[2], (1 << 6) | (8 << 2) | 0); // profile 1, rate 8, mono
+        assert_eq!(prefix[2], (1 << 6) | (8 << 2)); // profile 1, rate 8, mono
         assert_eq!(prefix[3] & 0xC0, 0x40);
         let frame = adts_frame(&prefix, 100);
         assert_eq!(frame[0], 0xFF);

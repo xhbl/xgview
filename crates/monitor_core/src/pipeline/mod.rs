@@ -551,6 +551,10 @@ impl StatsStore {
 }
 
 /// Commands sent to the supervisor task.
+// `Activate` carries a `CameraSource` inline. Boxing it would trade a larger
+// enum for a heap allocation on every activation and a dereference at every
+// match; commands are far too rare for that trade to pay for itself.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum ChannelCommand {
     Activate {

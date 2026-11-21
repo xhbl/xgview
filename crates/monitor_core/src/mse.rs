@@ -142,7 +142,6 @@ impl MseParser {
         Ok(ParsedMessage { init, audio, samples, audio_samples })
     }
 
-
     fn parse_moov(&mut self, data: &[u8]) -> Result<MoovOut> {
         let mut video = None;
         let mut audio = None;
@@ -1017,16 +1016,12 @@ fn parse_tfhd(data: &[u8]) -> (u32, u32, u32, u32) {
         }
         pos += 4;
     }
-    if flags & 0x000020 != 0 {
-        if pos + 4 <= body.len() {
-            sflags = u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap());
-        }
-
+    if flags & 0x000020 != 0 && pos + 4 <= body.len() {
+        sflags = u32::from_be_bytes(body[pos..pos + 4].try_into().unwrap());
     }
 
     (track_id, dur, size, sflags)
 }
-
 
 fn parse_tfdt(data: &[u8]) -> u64 {
     let (version, _, body) = match full_box_header(data) {
@@ -1174,13 +1169,14 @@ mod tests {
         // lengthSizeMinusOne = 3 (→ 4), 1 SPS of 3 bytes, 1 PPS of 1 byte.
         let sps = [0x67u8, 0x42, 0x1e];
         let pps = [0x68u8];
-        let mut avcc = Vec::new();
-        avcc.push(1); // configurationVersion
-        avcc.push(0x42); // profile
-        avcc.push(0x00); // compat
-        avcc.push(0x1e); // level
-        avcc.push(0xFF); // 0xFC | 3 → lengthSize = 4
-        avcc.push(0xE1); // 0xE0 | 1 → 1 SPS
+        let mut avcc = vec![
+            1,    // configurationVersion
+            0x42, // profile
+            0x00, // compat
+            0x1e, // level
+            0xFF, // 0xFC | 3 → lengthSize = 4
+            0xE1, // 0xE0 | 1 → 1 SPS
+        ];
         avcc.extend_from_slice(&3u16.to_be_bytes());
         avcc.extend_from_slice(&sps);
         avcc.push(1); // 1 PPS

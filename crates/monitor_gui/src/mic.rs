@@ -234,8 +234,6 @@ impl Mic {
     pub fn echo_cancelled(&self) -> bool {
         self.echo_cancelled
     }
-
-
 }
 
 /// Stops the microphone and lets the input device go, on the way out of the
@@ -276,7 +274,7 @@ pub fn android_push(samples: &[i16], rate: u32) {
     if !hub.is_talking() {
         return;
     }
-    if downsampler.from_rate() != rate {
+    if downsampler.rate() != rate {
         *downsampler = Downsampler::new(rate.max(1));
     }
     let mut mono: Vec<i16> = Vec::with_capacity(samples.len() / 6 + 1);
@@ -321,7 +319,7 @@ impl Downsampler {
 
     /// Rate the input runs at, in Hz.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-    fn from_rate(&self) -> u32 {
+    fn rate(&self) -> u32 {
         self.from_rate
     }
 

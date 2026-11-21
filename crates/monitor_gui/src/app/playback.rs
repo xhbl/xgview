@@ -5938,6 +5938,8 @@ mod tests {
     /// tick must end above the labels and below the band's edge, or the row
     /// reads as one smudge.
     #[test]
+    // Guards the tick constants; retuning one past the other fails here.
+    #[allow(clippy::assertions_on_constants)]
     fn the_ruler_stands_clear_of_the_times() {
         let row = crate::tilebar::TIMELINE_ROW;
         // Half a line of the label's own type, which is where its box ends.
@@ -6254,6 +6256,8 @@ mod tests {
     /// A day's button is deep enough for its name: the row less the two insets
     /// has to be deeper than the type that goes in it.
     #[test]
+    // Guards the day-button constants against a retune that closes the gap.
+    #[allow(clippy::assertions_on_constants)]
     fn a_day_button_holds_its_name() {
         let band = crate::tilebar::TIMELINE_ROW - 2.0 * DAY_PAD;
         assert!(band > DAY_SIZE * 1.4, "a {band}pt button for {DAY_SIZE}pt type");

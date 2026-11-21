@@ -73,6 +73,10 @@ fn resume_at(recording: bool, published: bool, frame: Option<f64>) -> Option<i64
 }
 
 /// Reconnection state machine of one channel.
+// Every shared store the channel needs is handed in once at spawn. They are
+// distinct types with distinct owners; a parameters struct would be built and
+// immediately destructured here, adding a type without removing an argument.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_channel(
     mut endpoint: Endpoint,
     prefer_hardware: bool,

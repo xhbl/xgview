@@ -193,6 +193,7 @@ pub fn button_at(
 /// frame, so their rectangles are known before egui's layout runs; everything
 /// else about the button - the interaction, the frame, the focus ring - is
 /// egui's own. `turned` draws the glyph with the picture, see [`paint_turned`].
+#[allow(clippy::too_many_arguments)]
 pub fn button_in(
     ui: &mut Ui,
     rect: Rect,
@@ -298,6 +299,7 @@ pub fn label_in(
 /// lengths still have to say which one is picked. egui's `selectable_label` is
 /// not available to a turned control, so the selected look is the same one
 /// [`paint_button`] gives a selected icon.
+#[allow(clippy::too_many_arguments)]
 pub fn selectable_label_in(
     ui: &mut Ui,
     rect: Rect,
@@ -311,6 +313,7 @@ pub fn selectable_label_in(
     label_in_selected(ui, rect, id, text, tooltip, turned, muted, selected)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn label_in_selected(
     ui: &mut Ui,
     rect: Rect,

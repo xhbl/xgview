@@ -140,7 +140,7 @@ impl DiscoveryService {
             let hits = scan_ports(
                 &targets,
                 &self.config.tcp_ports,
-                Duration::from_millis(self.config.probe_timeout_ms.min(800).max(100)),
+                Duration::from_millis(self.config.probe_timeout_ms.clamp(100, 800)),
                 self.config.concurrency,
             )
             .await;
@@ -251,8 +251,10 @@ mod tests {
 
     #[test]
     fn credentials_are_optional() {
-        let mut config = DiscoveryConfig::default();
-        config.onvif_username = None;
+        let config = DiscoveryConfig {
+            onvif_username: None,
+            ..Default::default()
+        };
         let service = DiscoveryService::new(config);
         assert!(service.credentials().is_none());
     }

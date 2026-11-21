@@ -572,7 +572,6 @@ impl XgViewApp {
             }
         }
 
-
         dirty
     }
 

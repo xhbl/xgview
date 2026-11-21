@@ -402,8 +402,8 @@ impl OsdItem {
             OsdItem::Transport,
             OsdItem::DateTime,
         ];
-        for index in 0..4 {
-            if !combined[index].is_empty() {
+        for (index, slots) in combined.iter().enumerate() {
+            if !slots.is_empty() {
                 opts.push(OsdItem::combined(index));
             }
         }

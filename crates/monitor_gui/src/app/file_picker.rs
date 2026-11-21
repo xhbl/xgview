@@ -21,17 +21,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The scope the rows live in.
-const LIST_SCOPE: &'static str = "file-picker-list";
+const LIST_SCOPE: &str = "file-picker-list";
 /// The scope the shortcuts above the listing live in.
-const PLACES_SCOPE: &'static str = "file-picker-places";
+const PLACES_SCOPE: &str = "file-picker-places";
 /// The scope the name field lives in.
-const FIELD_SCOPE: &'static str = "file-picker-field";
+const FIELD_SCOPE: &str = "file-picker-field";
 /// The scope the button beside the field lives in.
 ///
 /// Beside, and a scope of its own, because a text field keeps Left and Right
 /// for its caret - so the button would have no key that reaches it if the two
 /// shared a row. Down out of the field enters this scope, and Up leaves it.
-const BUTTON_SCOPE: &'static str = "file-picker-buttons";
+const BUTTON_SCOPE: &str = "file-picker-buttons";
 
 /// The way up's label. A glyph rather than a word, so it reads as a control of
 /// its own beside the folder shortcuts and costs a fraction of their width.
@@ -891,6 +891,32 @@ impl XgViewApp {
     }
 }
 
+/// Whether a typed name stays a name on Windows.
+///
+/// More than the separators the window already refuses: `Path::join` with a
+/// drive-relative name like `C:evil.json` replaces the base with it, so the file
+/// lands in whatever directory that drive is currently in rather than the folder
+/// the window shows. Windows also silently rewrites names ending in a dot or a
+/// space, and refuses the reserved device names (`NUL`, `CON`, `COM1` …) - a
+/// save that looked like it worked would write something else, or nothing.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn plain_name_on_windows(name: &str) -> bool {
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if name.contains([':', '<', '>', '"', '|', '?', '*']) {
+        return false;
+    }
+    if name.starts_with(' ') || name.ends_with(' ') || name.ends_with('.') {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name);
+    !RESERVED
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,8 +941,8 @@ mod tests {
         let names: Vec<String> = listing
             .entries
             .iter()
-            .filter_map(|entry| match entry {
-                Entry::Directory { name, .. } | Entry::File { name, .. } => Some(name.clone()),
+            .map(|entry| match entry {
+                Entry::Directory { name, .. } | Entry::File { name, .. } => name.clone(),
             })
             .collect();
         // Case-insensitive order, directories first, and the text file - which
@@ -1291,30 +1317,4 @@ mod tests {
             assert!(!plain_name_on_windows(name), "{name} is not a plain name");
         }
     }
-}
-
-/// Whether a typed name stays a name on Windows.
-///
-/// More than the separators the window already refuses: `Path::join` with a
-/// drive-relative name like `C:evil.json` replaces the base with it, so the file
-/// lands in whatever directory that drive is currently in rather than the folder
-/// the window shows. Windows also silently rewrites names ending in a dot or a
-/// space, and refuses the reserved device names (`NUL`, `CON`, `COM1` …) - a
-/// save that looked like it worked would write something else, or nothing.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn plain_name_on_windows(name: &str) -> bool {
-    const RESERVED: [&str; 22] = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    ];
-    if name.contains([':', '<', '>', '"', '|', '?', '*']) {
-        return false;
-    }
-    if name.starts_with(' ') || name.ends_with(' ') || name.ends_with('.') {
-        return false;
-    }
-    let stem = name.split('.').next().unwrap_or(name);
-    !RESERVED
-        .iter()
-        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }

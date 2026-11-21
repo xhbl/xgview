@@ -95,6 +95,10 @@ pub(super) struct Supervisor {
 }
 
 impl Supervisor {
+    // The supervisor owns every shared store in the pipeline; construction is
+    // the one place they are all gathered. A bundle struct would be assembled
+    // here and taken apart on the next line, so the arguments stay flat.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         commands: UnboundedReceiver<ChannelCommand>,
         command_tx: UnboundedSender<ChannelCommand>,

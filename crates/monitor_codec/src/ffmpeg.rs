@@ -991,7 +991,7 @@ mod tests {
     /// past its end - a picture that cannot be cut correctly is dropped.
     #[test]
     fn a_plane_shorter_than_its_layout_is_refused() {
-        assert!(copy_padded(768, &vec![0u8; 100], 640, 2).is_none());
+        assert!(copy_padded(768, &[0u8; 100], 640, 2).is_none());
     }
 
     /// Decodes a real bitstream when one is provided, e.g.

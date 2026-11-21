@@ -456,10 +456,12 @@ const CELLS_P4: &[Cell] = &[
 /// rectangular grids, named by the number of viewports they show, and offered
 /// through the layout picker. See [`GridLayout::ALL`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum GridLayout {
     #[serde(rename = "1x1")]
     G1x1,
     #[serde(rename = "2x2")]
+    #[default]
     G2x2,
     #[serde(rename = "3x3")]
     G3x3,
@@ -499,12 +501,6 @@ pub enum GridLayout {
     /// `Copy`; every method below reads its dimensions and cells directly.
     #[serde(rename = "custom")]
     Custom(CustomGrid),
-}
-
-impl Default for GridLayout {
-    fn default() -> Self {
-        GridLayout::G2x2
-    }
 }
 
 impl GridLayout {

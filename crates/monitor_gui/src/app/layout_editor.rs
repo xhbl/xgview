@@ -42,7 +42,6 @@ pub(super) fn button_width(ui: &egui::Ui, text: &str) -> f32 {
     galley.rect.width() + ui.spacing().button_padding.x * 2.0
 }
 
-
 /// How many unit columns two cells share. A vertical neighbour with no
 /// overlap is not above or below this one, even if its row is adjacent.
 fn overlap_columns(a: &Cell, b: &Cell) -> u16 {
@@ -265,7 +264,7 @@ impl EditorState {
             if overlap == 0 {
                 continue;
             }
-            let better = best.is_none_or(|(at, best_gap, best_overlap)| {
+            let better = best.map_or(true, |(at, best_gap, best_overlap)| {
                 gap < best_gap
                     || (gap == best_gap && (overlap > best_overlap
                         || (overlap == best_overlap && position < at)))
@@ -290,243 +289,6 @@ impl EditorState {
 
     pub(super) fn valid(&self) -> bool {
         self.grid.is_valid()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_touch_release_finishes_with_the_last_highlighted_cell() {
-        let source = include_str!("layout_editor.rs");
-        let guarded = format!("if let Some({}) = {}", "pointer", "pointer");
-        assert!(source.contains(&guarded), "a lifted finger may lose latest_pos");
-        let finish = format!("{}.{}(landing)", "payload", "merge_drag");
-        assert!(
-            source.matches(&finish).count() >= 2,
-            "the widget release and the frame-end release both merge"
-        );
-    }
-
-    #[test]
-    fn the_preview_room_fits_seven_numbered_cells() {
-        let cell_w = PREVIEW_W / f32::from(MAX_CUSTOM_DIMENSION);
-        let cell_h = PREVIEW_H / f32::from(MAX_CUSTOM_DIMENSION);
-        assert!(
-            cell_w >= 24.0 && cell_h >= 17.0,
-            "13pt digits need their own box"
-        );
-        assert!(
-            cell_w <= 40.0 && cell_h <= 24.0,
-            "the cells should stay compact at 7x7"
-        );
-        assert!(
-            (PREVIEW_W / PREVIEW_H - 16.0 / 9.0).abs() < 0.08,
-            "the preview stays close to 16:9"
-        );
-        assert!(
-            EDITOR_WIDTH > PREVIEW_W + theme::space::M * 3.0,
-            "the hint keeps a column beside the preview"
-        );
-    }
-
-    #[test]
-    fn a_new_slot_starts_from_the_default_grid() {
-        let state = EditorState::open(2, None);
-        assert_eq!(state.slot, 2);
-        assert_eq!(state.grid.cells().len(), 25);
-        assert_eq!(state.grid.display_label(), "5x5");
-        assert_eq!(state.anchor, None);
-        assert_eq!(state.drag_from, None);
-        assert_eq!(state.drag_to, None);
-        assert!(!state.delete);
-        assert!(state.valid());
-    }
-
-    #[test]
-    fn editing_an_existing_slot_loads_its_shape() {
-        let grid = CustomGrid::uniform(3, 3).merge(0, 1).unwrap();
-        let state = EditorState::open(0, Some(grid));
-        assert_eq!(state.grid, grid);
-        assert_eq!(state.grid.count, 8);
-    }
-
-    #[test]
-    fn dimension_changes_reset_the_grid_and_clamp_the_cursor() {
-        let mut state = EditorState::open(0, None);
-        state.selected = 3;
-        state.set_dimensions(2, 1);
-        assert_eq!(state.grid.cells().len(), 2);
-        assert_eq!(state.selected, 1);
-        assert_eq!(state.grid.display_label(), "2x1");
-    }
-
-    #[test]
-    fn merging_takes_two_presses_and_only_on_a_real_neighbour() {
-        let mut state = EditorState::open(0, None);
-        state.set_dimensions(2, 2);
-        let before = state.grid;
-        assert!(!state.enter());
-        assert_eq!(state.anchor, Some(0));
-        assert_eq!(state.grid, before);
-        state.selected = 3;
-        assert!(!state.enter());
-        assert_eq!(state.grid, before);
-        assert!(state.anchor.is_none());
-        state.selected = 0;
-        assert!(!state.enter());
-        state.selected = 1;
-        assert!(state.enter());
-        assert_eq!(state.grid.count, 3);
-        assert!(state.grid.is_valid());
-        state.selected = 0;
-        assert!(state.split(0));
-        assert_eq!(state.grid, before);
-    }
-
-    #[test]
-    fn split_follows_the_ring_only_while_it_is_on_the_cell() {
-        let merged = CustomGrid::uniform(2, 2).merge(0, 1).unwrap();
-        let mut state = EditorState::open(0, Some(merged));
-        state.selected = 0;
-        assert_eq!(state.split_target_for(Some(0)), Some(0));
-        assert_eq!(state.split_target_for(None), None, "the ring left the cell");
-        state.anchor = Some(0);
-        assert_eq!(state.split_target_for(None), Some(0), "an explicit pick stays");
-    }
-
-    #[test]
-    fn split_is_only_available_while_a_cell_can_be_broken_up() {
-        let mut state = EditorState::open(0, None);
-        assert_eq!(state.split_target_for(None), None);
-        state.enter();
-        state.selected = 1;
-        assert!(state.enter());
-        assert_eq!(state.split_target_for(Some(0)), Some(0));
-        assert!(state.split(state.split_target_for(Some(0)).unwrap()));
-        assert_eq!(state.split_target_for(None), None);
-    }
-
-    #[test]
-    fn a_focused_cell_is_found_before_the_grid_is_re_sorted() {
-        let grid = CustomGrid::uniform(2, 2);
-        let (index, cell) = focused_cell(
-            grid.cells(),
-            Some(egui::Id::new(("layout-editor-cell", 1))),
-        )
-        .unwrap();
-        assert_eq!(index, 1);
-        assert_eq!((cell.row, cell.col), (0, 1));
-        assert_eq!(focused_cell(grid.cells(), None), None);
-        assert_eq!(
-            focused_cell(grid.cells(), Some(egui::Id::new("layout-editor-cell"))),
-            None
-        );
-    }
-
-    #[test]
-    fn the_drag_highlight_covers_the_whole_rectangle() {
-        let grid = CustomGrid::uniform(3, 3);
-        assert_eq!(drag_bounds(grid.cells(), 0, 8), Some((0, 0, 3, 3)));
-        assert_eq!(drag_bounds(grid.cells(), 1, 5), Some((1, 0, 3, 2)));
-        assert_eq!(drag_bounds(grid.cells(), 0, 9), None);
-    }
-
-    #[test]
-    fn a_pointer_drag_merges_the_rectangle_it_covers() {
-        let mut state = EditorState::open(0, None);
-        state.set_dimensions(2, 2);
-        state.drag_from = Some(0);
-        state.drag_to = Some(3);
-        assert!(state.merge_drag(3));
-        assert_eq!(state.grid.count, 1);
-        assert_eq!(
-            state.grid.cells()[0],
-            monitor_core::layout::Cell { col: 0, row: 0, col_span: 2, row_span: 2 }
-        );
-        assert_eq!(state.drag_from, None);
-        assert_eq!(state.drag_to, None);
-        assert_eq!(state.anchor, Some(state.selected));
-
-        let merged = state.grid;
-        state.drag_from = Some(0);
-        assert!(!state.merge_drag(0), "a drag inside one cell changes nothing");
-        assert_eq!(state.grid, merged);
-        assert_eq!(state.drag_from, None);
-        assert_eq!(state.anchor, Some(state.selected));
-    }
-
-    #[test]
-    fn the_selection_follows_the_shape_the_press_made() {
-        let mut state = EditorState::open(0, None);
-        state.set_dimensions(3, 2);
-        state.enter();
-        state.selected = 1;
-        assert!(state.enter()); // the 2x1 cell sorts back to seat zero
-        assert_eq!(state.selected, 0);
-        assert_eq!(state.grid.cells()[state.selected].col_span, 2);
-        assert!(state.split(0));
-        assert_eq!(state.selected, 0);
-        assert_eq!(state.grid.cells()[state.selected].col_span, 1);
-    }
-
-    #[test]
-    fn vertical_walk_picks_the_nearest_overlapping_cell() {
-        let mut state = EditorState::open(0, None);
-        state.set_dimensions(3, 3);
-        assert_eq!(state.vertical_neighbor(0, Dir::Down), Some(3));
-        assert_eq!(state.vertical_neighbor(3, Dir::Up), Some(0));
-        assert_eq!(state.vertical_neighbor(4, Dir::Up), Some(1));
-        assert_eq!(state.vertical_neighbor(6, Dir::Down), None);
-
-        // A wide top cell sits above two bottom units; the nearer column wins.
-        state.enter();
-        state.selected = 1;
-        assert!(state.enter());
-        assert_eq!(state.grid.cells()[state.selected].col_span, 2);
-        assert_eq!(state.vertical_neighbor(state.selected, Dir::Down), Some(2));
-    }
-
-    #[test]
-    fn split_acts_on_the_anchor_even_after_walking_to_the_button() {
-        let mut state = EditorState::open(0, None);
-        state.set_dimensions(2, 2);
-        state.enter(); // anchor on the 2x1 made below
-        state.selected = 1;
-        assert!(state.enter()); // merge the top pair into a wide cell
-        assert_eq!(state.anchor, None);
-        state.enter(); // anchor that wide cell
-        state.selected = 2; // walking down to the button visits a unit cell
-        assert_eq!(state.split_target_for(None), Some(0));
-        assert!(state.split(state.split_target_for(None).unwrap()));
-        assert_eq!(state.grid, CustomGrid::uniform(2, 2));
-    }
-
-    #[test]
-    fn a_wide_cell_can_absorb_a_different_sized_neighbour() {
-        let mut state = EditorState::open(0, None);
-        state.set_dimensions(3, 2);
-        state.enter();
-        state.selected = 1;
-        assert!(state.enter()); // 2x1 across the top left
-        state.selected = 0;
-        state.enter();
-        state.selected = 1;
-        assert!(state.enter()); // the 1x1 at top right joins it
-        assert_eq!(state.grid.count, 4);
-        assert_eq!(state.grid.display_label(), "4");
-        assert!(state.split(0));
-        assert_eq!(state.grid, CustomGrid::uniform(3, 2));
-    }
-
-    #[test]
-    fn pressing_enter_on_the_anchor_clears_it() {
-        let mut state = EditorState::open(0, None);
-        assert!(!state.enter());
-        assert_eq!(state.anchor, Some(0));
-        assert!(!state.enter());
-        assert!(state.anchor.is_none());
     }
 }
 
@@ -780,12 +542,8 @@ impl XgViewApp {
                                     .position(|cell| {
                                         cell.row <= was.row
                                             && cell.col <= was.col
-                                            && u16::from(cell.row)
-                                                + u16::from(cell.row_span)
-                                                >= u16::from(was.row) + 1
-                                            && u16::from(cell.col)
-                                                + u16::from(cell.col_span)
-                                                >= u16::from(was.col) + 1
+                                            && u16::from(cell.row) + u16::from(cell.row_span) > u16::from(was.row)
+                                            && u16::from(cell.col) + u16::from(cell.col_span) > u16::from(was.col)
                                     })
                                     .unwrap_or(payload.selected);
                                 app.restore_focus =
@@ -958,5 +716,244 @@ impl XgViewApp {
             },
         );
         (answer, finished)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_touch_release_finishes_with_the_last_highlighted_cell() {
+        let source = include_str!("layout_editor.rs");
+        let guarded = format!("if let Some({}) = {}", "pointer", "pointer");
+        assert!(source.contains(&guarded), "a lifted finger may lose latest_pos");
+        let finish = format!("{}.{}(landing)", "payload", "merge_drag");
+        assert!(
+            source.matches(&finish).count() >= 2,
+            "the widget release and the frame-end release both merge"
+        );
+    }
+
+    #[test]
+    // Guards the layout constants against being retuned past one another.
+    #[allow(clippy::assertions_on_constants)]
+    fn the_preview_room_fits_seven_numbered_cells() {
+        let cell_w = PREVIEW_W / f32::from(MAX_CUSTOM_DIMENSION);
+        let cell_h = PREVIEW_H / f32::from(MAX_CUSTOM_DIMENSION);
+        assert!(
+            cell_w >= 24.0 && cell_h >= 17.0,
+            "13pt digits need their own box"
+        );
+        assert!(
+            cell_w <= 40.0 && cell_h <= 24.0,
+            "the cells should stay compact at 7x7"
+        );
+        assert!(
+            (PREVIEW_W / PREVIEW_H - 16.0 / 9.0).abs() < 0.08,
+            "the preview stays close to 16:9"
+        );
+        assert!(
+            EDITOR_WIDTH > PREVIEW_W + theme::space::M * 3.0,
+            "the hint keeps a column beside the preview"
+        );
+    }
+
+    #[test]
+    fn a_new_slot_starts_from_the_default_grid() {
+        let state = EditorState::open(2, None);
+        assert_eq!(state.slot, 2);
+        assert_eq!(state.grid.cells().len(), 25);
+        assert_eq!(state.grid.display_label(), "5x5");
+        assert_eq!(state.anchor, None);
+        assert_eq!(state.drag_from, None);
+        assert_eq!(state.drag_to, None);
+        assert!(!state.delete);
+        assert!(state.valid());
+    }
+
+    #[test]
+    fn editing_an_existing_slot_loads_its_shape() {
+        let grid = CustomGrid::uniform(3, 3).merge(0, 1).unwrap();
+        let state = EditorState::open(0, Some(grid));
+        assert_eq!(state.grid, grid);
+        assert_eq!(state.grid.count, 8);
+    }
+
+    #[test]
+    fn dimension_changes_reset_the_grid_and_clamp_the_cursor() {
+        let mut state = EditorState::open(0, None);
+        state.selected = 3;
+        state.set_dimensions(2, 1);
+        assert_eq!(state.grid.cells().len(), 2);
+        assert_eq!(state.selected, 1);
+        assert_eq!(state.grid.display_label(), "2x1");
+    }
+
+    #[test]
+    fn merging_takes_two_presses_and_only_on_a_real_neighbour() {
+        let mut state = EditorState::open(0, None);
+        state.set_dimensions(2, 2);
+        let before = state.grid;
+        assert!(!state.enter());
+        assert_eq!(state.anchor, Some(0));
+        assert_eq!(state.grid, before);
+        state.selected = 3;
+        assert!(!state.enter());
+        assert_eq!(state.grid, before);
+        assert!(state.anchor.is_none());
+        state.selected = 0;
+        assert!(!state.enter());
+        state.selected = 1;
+        assert!(state.enter());
+        assert_eq!(state.grid.count, 3);
+        assert!(state.grid.is_valid());
+        state.selected = 0;
+        assert!(state.split(0));
+        assert_eq!(state.grid, before);
+    }
+
+    #[test]
+    fn split_follows_the_ring_only_while_it_is_on_the_cell() {
+        let merged = CustomGrid::uniform(2, 2).merge(0, 1).unwrap();
+        let mut state = EditorState::open(0, Some(merged));
+        state.selected = 0;
+        assert_eq!(state.split_target_for(Some(0)), Some(0));
+        assert_eq!(state.split_target_for(None), None, "the ring left the cell");
+        state.anchor = Some(0);
+        assert_eq!(state.split_target_for(None), Some(0), "an explicit pick stays");
+    }
+
+    #[test]
+    fn split_is_only_available_while_a_cell_can_be_broken_up() {
+        let mut state = EditorState::open(0, None);
+        assert_eq!(state.split_target_for(None), None);
+        state.enter();
+        state.selected = 1;
+        assert!(state.enter());
+        assert_eq!(state.split_target_for(Some(0)), Some(0));
+        assert!(state.split(state.split_target_for(Some(0)).unwrap()));
+        assert_eq!(state.split_target_for(None), None);
+    }
+
+    #[test]
+    fn a_focused_cell_is_found_before_the_grid_is_re_sorted() {
+        let grid = CustomGrid::uniform(2, 2);
+        let (index, cell) = focused_cell(
+            grid.cells(),
+            Some(egui::Id::new(("layout-editor-cell", 1))),
+        )
+        .unwrap();
+        assert_eq!(index, 1);
+        assert_eq!((cell.row, cell.col), (0, 1));
+        assert_eq!(focused_cell(grid.cells(), None), None);
+        assert_eq!(
+            focused_cell(grid.cells(), Some(egui::Id::new("layout-editor-cell"))),
+            None
+        );
+    }
+
+    #[test]
+    fn the_drag_highlight_covers_the_whole_rectangle() {
+        let grid = CustomGrid::uniform(3, 3);
+        assert_eq!(drag_bounds(grid.cells(), 0, 8), Some((0, 0, 3, 3)));
+        assert_eq!(drag_bounds(grid.cells(), 1, 5), Some((1, 0, 3, 2)));
+        assert_eq!(drag_bounds(grid.cells(), 0, 9), None);
+    }
+
+    #[test]
+    fn a_pointer_drag_merges_the_rectangle_it_covers() {
+        let mut state = EditorState::open(0, None);
+        state.set_dimensions(2, 2);
+        state.drag_from = Some(0);
+        state.drag_to = Some(3);
+        assert!(state.merge_drag(3));
+        assert_eq!(state.grid.count, 1);
+        assert_eq!(
+            state.grid.cells()[0],
+            monitor_core::layout::Cell { col: 0, row: 0, col_span: 2, row_span: 2 }
+        );
+        assert_eq!(state.drag_from, None);
+        assert_eq!(state.drag_to, None);
+        assert_eq!(state.anchor, Some(state.selected));
+
+        let merged = state.grid;
+        state.drag_from = Some(0);
+        assert!(!state.merge_drag(0), "a drag inside one cell changes nothing");
+        assert_eq!(state.grid, merged);
+        assert_eq!(state.drag_from, None);
+        assert_eq!(state.anchor, Some(state.selected));
+    }
+
+    #[test]
+    fn the_selection_follows_the_shape_the_press_made() {
+        let mut state = EditorState::open(0, None);
+        state.set_dimensions(3, 2);
+        state.enter();
+        state.selected = 1;
+        assert!(state.enter()); // the 2x1 cell sorts back to seat zero
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.grid.cells()[state.selected].col_span, 2);
+        assert!(state.split(0));
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.grid.cells()[state.selected].col_span, 1);
+    }
+
+    #[test]
+    fn vertical_walk_picks_the_nearest_overlapping_cell() {
+        let mut state = EditorState::open(0, None);
+        state.set_dimensions(3, 3);
+        assert_eq!(state.vertical_neighbor(0, Dir::Down), Some(3));
+        assert_eq!(state.vertical_neighbor(3, Dir::Up), Some(0));
+        assert_eq!(state.vertical_neighbor(4, Dir::Up), Some(1));
+        assert_eq!(state.vertical_neighbor(6, Dir::Down), None);
+
+        // A wide top cell sits above two bottom units; the nearer column wins.
+        state.enter();
+        state.selected = 1;
+        assert!(state.enter());
+        assert_eq!(state.grid.cells()[state.selected].col_span, 2);
+        assert_eq!(state.vertical_neighbor(state.selected, Dir::Down), Some(2));
+    }
+
+    #[test]
+    fn split_acts_on_the_anchor_even_after_walking_to_the_button() {
+        let mut state = EditorState::open(0, None);
+        state.set_dimensions(2, 2);
+        state.enter(); // anchor on the 2x1 made below
+        state.selected = 1;
+        assert!(state.enter()); // merge the top pair into a wide cell
+        assert_eq!(state.anchor, None);
+        state.enter(); // anchor that wide cell
+        state.selected = 2; // walking down to the button visits a unit cell
+        assert_eq!(state.split_target_for(None), Some(0));
+        assert!(state.split(state.split_target_for(None).unwrap()));
+        assert_eq!(state.grid, CustomGrid::uniform(2, 2));
+    }
+
+    #[test]
+    fn a_wide_cell_can_absorb_a_different_sized_neighbour() {
+        let mut state = EditorState::open(0, None);
+        state.set_dimensions(3, 2);
+        state.enter();
+        state.selected = 1;
+        assert!(state.enter()); // 2x1 across the top left
+        state.selected = 0;
+        state.enter();
+        state.selected = 1;
+        assert!(state.enter()); // the 1x1 at top right joins it
+        assert_eq!(state.grid.count, 4);
+        assert_eq!(state.grid.display_label(), "4");
+        assert!(state.split(0));
+        assert_eq!(state.grid, CustomGrid::uniform(3, 2));
+    }
+
+    #[test]
+    fn pressing_enter_on_the_anchor_clears_it() {
+        let mut state = EditorState::open(0, None);
+        assert!(!state.enter());
+        assert_eq!(state.anchor, Some(0));
+        assert!(!state.enter());
+        assert!(state.anchor.is_none());
     }
 }

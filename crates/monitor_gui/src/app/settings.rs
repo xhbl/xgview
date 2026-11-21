@@ -42,8 +42,11 @@ impl XgViewApp {
             let operation = wide("open");
             let file = wide(url);
             // Safety: two NUL terminated wide strings that outlive the call,
-            // and null for the rest; the return value is only compared.
-            let opened = unsafe {
+            // and null for the rest. `ShellExecuteW` reports through its return
+            // value, but a shell that found no handler leaves nothing to do
+            // here - the wall has already stepped off the top - so it is
+            // dropped.
+            unsafe {
                 ShellExecuteW(
                     std::ptr::null_mut(),
                     operation.as_ptr(),
@@ -51,11 +54,7 @@ impl XgViewApp {
                     std::ptr::null(),
                     std::ptr::null(),
                     SW_SHOWNORMAL,
-                )
-            };
-            // `ShellExecuteW` returns a value greater than 32 on success.
-            if opened as isize > 32 {
-                return;
+                );
             }
         }
         #[cfg(target_os = "macos")]

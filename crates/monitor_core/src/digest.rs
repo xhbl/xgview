@@ -130,6 +130,9 @@ pub fn basic(username: &str, password: &str) -> String {
 }
 
 /// Computes the digest `response` value.
+// The challenge and the credentials are the protocol's own fields; grouping
+// them in a struct would only re-name the same arguments at the call site.
+#[allow(clippy::too_many_arguments)]
 fn digest_response(
     challenge: &Challenge,
     method: &str,

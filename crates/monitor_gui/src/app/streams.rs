@@ -66,21 +66,19 @@ impl XgViewApp {
     /// press puts the system dialog up and says what to do about it, and the
     /// next press finds the capture open.
     pub(super) fn set_talking(&mut self, on: bool) {
-        if on {
-            if self.mic.is_none() {
-                match crate::mic::Mic::open(
-                    self.manager.talk().clone(),
-                    self.config.audio_input.as_deref(),
-                ) {
-                    Ok(mic) => self.mic = Some(mic),
-                    Err(crate::mic::MicError::Permission) => {
-                        self.flash(monitor_i18n::tr("toast-microphone-permission"), ToastKind::Error);
-                        return;
-                    }
-                    Err(crate::mic::MicError::NoDevice) => {
-                        self.flash(monitor_i18n::tr("toast-no-microphone"), ToastKind::Error);
-                        return;
-                    }
+        if on && self.mic.is_none() {
+            match crate::mic::Mic::open(
+                self.manager.talk().clone(),
+                self.config.audio_input.as_deref(),
+            ) {
+                Ok(mic) => self.mic = Some(mic),
+                Err(crate::mic::MicError::Permission) => {
+                    self.flash(monitor_i18n::tr("toast-microphone-permission"), ToastKind::Error);
+                    return;
+                }
+                Err(crate::mic::MicError::NoDevice) => {
+                    self.flash(monitor_i18n::tr("toast-no-microphone"), ToastKind::Error);
+                    return;
                 }
             }
         }
@@ -459,7 +457,7 @@ impl XgViewApp {
     pub(super) fn magnified_has_audio(&self) -> bool {
         // The picture's channel, not the camera's: a recording that carries
         // sound shows the switch, and one that does not takes it away.
-        self.scheduler.zoom().map_or(false, |index| {
+        self.scheduler.zoom().is_some_and(|index| {
             self.view_channel(index)
                 .map_or(true, |channel| channel.audio || !channel.audio_known)
         })

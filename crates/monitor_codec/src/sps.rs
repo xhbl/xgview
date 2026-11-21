@@ -695,11 +695,11 @@ fn skip_profile_tier_level(
     // then the layers the flags describe.
     let mut profile_flags = [false; 8];
     let mut level_flags = [false; 8];
-    for layer in 0..max_sub_layers_minus1 as usize {
-        profile_flags[layer] = bits.bits(1)? == 1;
+    for flag in profile_flags.iter_mut().take(max_sub_layers_minus1 as usize) {
+        *flag = bits.bits(1)? == 1;
     }
-    for layer in 0..max_sub_layers_minus1 as usize {
-        level_flags[layer] = bits.bits(1)? == 1;
+    for flag in level_flags.iter_mut().take(max_sub_layers_minus1 as usize) {
+        *flag = bits.bits(1)? == 1;
     }
     if max_sub_layers_minus1 > 0 {
         // reserved_zero_2bits for the layers the set does not describe.
@@ -943,7 +943,7 @@ impl BitReader {
     /// Signed Exp-Golomb.
     fn se(&mut self) -> Option<i32> {
         let value = self.ue()?;
-        let magnitude = ((value + 1) / 2) as i32;
+        let magnitude = value.div_ceil(2) as i32;
         Some(if value % 2 == 1 { magnitude } else { -magnitude })
     }
 }

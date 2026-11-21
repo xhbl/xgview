@@ -39,6 +39,10 @@ use crate::Result;
 const FOSCAM_PORT: u16 = 88;
 
 /// One open channel to one camera's speaker.
+// The two transports differ in size, but a talk channel is a single long-lived
+// object opened once per call. Boxing the larger variant would add an
+// allocation and a dereference on every use for no measurable gain.
+#[allow(clippy::large_enum_variant)]
 pub enum Channel {
     /// The camera's own back channel: an RTSP session carrying `a=sendonly`
     /// audio, as ONVIF Profile T describes it.
