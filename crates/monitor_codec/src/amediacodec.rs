@@ -1427,6 +1427,12 @@ impl VideoDecoder for AMediaCodecDecoder {
             return Err(CodecError::Configure("decoder was never configured".to_string()));
         };
 
+        // Frames decoded by a drain belong to the caller whatever this call
+        // manages to queue: an input that cannot be taken still owes the
+        // pictures already in the output queue. Created up front so the
+        // no-input path below can drain into it too.
+        let mut frames = Vec::new();
+
         // The wait is retried once the ceiling has grown: a codec that was a
         // hundred milliseconds short of a buffer is the case this exists for,
         // and giving the picture up there is what costs the channel its next
@@ -1434,6 +1440,31 @@ impl VideoDecoder for AMediaCodecDecoder {
         // `WAIT_MAX` and the unit is given up as before.
         let dequeuing = Instant::now();
         let Some(index) = self.dequeue_input(codec) else {
+            // No input buffer usually means the output queue is full: a codec
+            // that is holding decoded pictures stops taking new work until
+            // they are returned. The normal path drains after queueing; here
+            // nothing was queued, and returning straight away would leave the
+            // output buffers unreturned and the codec refusing input for ever.
+            // A replay reading faster than the surface shows is exactly what
+            // fills that queue, so a single missed dequeue used to lock a
+            // recording hard - the first picture had long gone, so the
+            // starved-to-software fallback below never fired either. Drain
+            // first: it returns those buffers and hands back any picture that
+            // came out of them. The timeline then keeps moving on the frames
+            // the codec really produced, and the next unit gets an input.
+            self.drain(&mut frames);
+            // Account for the wait and the drain here too: PACE prints only
+            // when enough queueing calls have piled up, so without these a
+            // session stuck taking no input has no line at all, and the next
+            // line shows a near-zero `dequeue_ms` and a high `drain_ms` that
+            // points at the wrong call. `stat_frames` is deliberately not
+            // touched - no access unit was queued on this pass.
+            self.stat_dequeue += dequeuing.elapsed();
+            self.stat_total += whole.elapsed();
+            if !frames.is_empty() {
+                self.stat_out += frames.len() as u32;
+                return Ok(frames);
+            }
             // A codec that cannot take a buffer at all is not behind the
             // stream, it is not decoding - and one that has never produced a
             // picture gives no sign that it ever will. Reported as a refusal,
@@ -1491,7 +1522,6 @@ impl VideoDecoder for AMediaCodecDecoder {
         }
         self.stat_queue += queueing.elapsed();
 
-        let mut frames = Vec::new();
         self.drain(&mut frames);
         self.stat_out += frames.len() as u32;
         self.stat_total += whole.elapsed();

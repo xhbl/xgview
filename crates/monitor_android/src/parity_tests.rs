@@ -247,6 +247,55 @@ mod tests {
         );
     }
 
+    /// A decoder that cannot take an input buffer almost always has a full
+    /// output queue: it stops accepting work until the pictures it holds are
+    /// returned. If `decode` returns on the failed dequeue without draining,
+    /// nothing ever returns those buffers, the codec refuses input for ever,
+    /// and a replay reading faster than the screen shows locks solid - the
+    /// first frame is long past, so the never-produced-a-picture fallback
+    /// cannot rescue it. Guard that the no-input path drains before it gives
+    /// up, and that a picture it did produce is handed back rather than lost.
+    #[test]
+    fn a_full_input_queue_drains_before_giving_up() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let path = root.join("monitor_codec/src/amediacodec.rs");
+        let codec = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        let at = codec
+            .find("let Some(index) = self.dequeue_input(codec) else")
+            .expect("the no-input branch must exist");
+        let next = codec[at..]
+            .find("self.starved = 0;")
+            .expect("the branch must end where the queue path resumes")
+            + at;
+        let branch = &codec[at..next];
+
+        assert!(
+            branch.contains("self.drain(&mut frames);"),
+            "a full input queue must drain the output buffers, or the codec self-locks"
+        );
+        let drained = branch
+            .find("self.drain(&mut frames);")
+            .expect("drain must be in the no-input branch");
+        let gave_up = branch
+            .find("return Err(CodecError::NoBuffer);")
+            .expect("the branch must still report NoBuffer when nothing came out");
+        assert!(
+            drained < gave_up,
+            "drain must run before NoBuffer is returned, not after"
+        );
+        assert!(
+            branch.contains("return Ok(frames);"),
+            "a picture drain produced must be returned, not dropped on the floor"
+        );
+        assert!(
+            branch.contains("self.stat_dequeue += dequeuing.elapsed();")
+                && branch.contains("self.stat_total += whole.elapsed();"),
+            "the no-input wait must reach PACE, or a stuck session prints no line and the next one blames drain"
+        );
+    }
+
     /// Android's export writes into the public `Download/xgview` folder, and
     /// the import window opens on that same folder. The two halves are spelled
     /// out in different files - the activity writes the file, the window walks
