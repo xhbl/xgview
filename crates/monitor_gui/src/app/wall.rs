@@ -208,6 +208,29 @@ impl XgViewApp {
             || self.discovery.open
     }
 
+    /// Whether a dialog drawn ahead of the wall took this frame's press.
+    ///
+    /// The settings panel, the file picker and the donation dialog on the About
+    /// page are all painted before the wall, so the cross of either of the last
+    /// two is a primary click at a point inside the wall's area by the time the
+    /// dismissal below reads the raw queue. Both leave a one-frame answer: the
+    /// picker sets `file_dialog_answered`, the donation dialog keeps the frame
+    /// its cross was pressed in. A click that closed one of them must not also
+    /// close the settings they were opened from. The dialogs this application
+    /// owns are covered by `modal_is_up` instead - they are painted after the
+    /// wall, which has already decided by the time they close.
+    fn a_front_dialog_took_the_press(&self, ctx: &egui::Context) -> bool {
+        #[cfg(juanz)]
+        {
+            self.file_dialog_answered || crate::juanz::dismissed_this_frame(ctx)
+        }
+        #[cfg(not(juanz))]
+        {
+            let _ = ctx;
+            self.file_dialog_answered
+        }
+    }
+
     /// Whether this frame *wants* the picture on the activity's surface, with
     /// no regard for whether the view has reached the screen yet.
     ///
@@ -962,8 +985,14 @@ impl XgViewApp {
         // would then skip the very frame that would have run the menu item -
         // the item does nothing and the panel shuts with it. While a popup or
         // a window is up it owns the click: leave it alone and keep the panel.
+        //
+        // Two dialogs are painted before the wall, so they are gone by the time
+        // this reads the press: the file picker and the donation dialog on the
+        // About page. Each leaves a one-frame answer for exactly this, or a
+        // click on its cross would also shut the settings it was opened from.
         if self.show_settings
             && !self.modal_is_up()
+            && !self.a_front_dialog_took_the_press(ui.ctx())
             && !egui::Popup::is_any_open(ui.ctx())
             && ui.ctx().input(|input| {
                 input.pointer.button_clicked(egui::PointerButton::Primary)
@@ -2554,6 +2583,34 @@ mod tests {
         assert!(
             dismiss.contains("!egui::Popup::is_any_open(ui.ctx())"),
             "a context menu item must not also close the settings panel"
+        );
+    }
+
+    #[test]
+    fn a_front_dialogs_cross_keeps_the_settings_panel_open() {
+        // The file picker and the donation dialog are both painted before the
+        // wall, so their cross is gone by the time the wall reads the raw
+        // primary click. The dismissal has to be told the press was spent, or
+        // shutting one of them shuts the settings panel behind it too.
+        let source = include_str!("wall.rs");
+        let draw = source.find("pub(super) fn draw_grid").unwrap();
+        let dismiss = &source[draw..];
+        let dismiss = &dismiss[..dismiss.find("self.show_settings = false;").unwrap()];
+        assert!(
+            dismiss.contains("!self.a_front_dialog_took_the_press(ui.ctx())"),
+            "a front dialog's cross must not also close the settings panel"
+        );
+
+        let guard = source.find("fn a_front_dialog_took_the_press").unwrap();
+        let guard = &source[guard..];
+        let guard = &guard[..guard.find("\n    }\n").unwrap()];
+        assert!(
+            guard.contains("self.file_dialog_answered"),
+            "the file picker's one-frame answer must be honoured"
+        );
+        assert!(
+            guard.contains("crate::juanz::dismissed_this_frame(ctx)"),
+            "the donation dialog's one-frame answer must be honoured"
         );
     }
 
