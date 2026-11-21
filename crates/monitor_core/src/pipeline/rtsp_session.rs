@@ -2269,9 +2269,26 @@ impl<'a> RtspSession<'a> {
         // moving picture, and a reconnect after the hard timeout.
         let pictures_before = decoder.pictures();
         let decoded = decoder.decode(&unit.data, unit.pts_us(), unit.keyframe);
+        // A decoder rendering into the activity's surface hands back no frame,
+        // so `release` cannot report a size from one: the picture is on screen
+        // but its width and height never reach the OSD, which then shows the
+        // last sub stream's size or `?x?`. The decoder knows the real size from
+        // the stream's own parameter set - `open` wrote it into `info` - so
+        // take it here, before `release` gets a chance to replace it with a
+        // frame's size on the byte-buffer path. `collect` holds frames back and
+        // `release` publishes the due one, so on a grid this write is replaced
+        // by the frame's own size in the same call; on a surface there is no
+        // frame and this is the size that stands.
+        let info_size = decoder.info().and_then(|info| {
+            (info.width > 0 && info.height > 0).then_some((info.width, info.height))
+        });
         self.window.counters.decode_took(started.elapsed());
         match decoded {
             Ok(decoded) => {
+                if let Some((width, height)) = info_size {
+                    self.width = Some(width);
+                    self.height = Some(height);
+                }
                 self.collect(decoded, pictures_before);
                 self.release();
             }
