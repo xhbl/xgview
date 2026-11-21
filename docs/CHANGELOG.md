@@ -3,6 +3,33 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 2.3.38
+
+Changes since 2.3.25.
+
+- **Sub-stream inference from the main address.** Ticking the derive box now
+  fills in the guessed sub address immediately and greys it out; unticking keeps
+  what was filled in and makes it editable again. The bulk importer applies the
+  same rule per channel, and shows the box whenever at least one channel's main
+  address can be derived. A hand-typed sub address is never overwritten when a
+  main address changes and changes back.
+- **More cameras infer a sub stream.** Hikvision-style `/Channels/101` now
+  derives for multi-digit channels too (1001, 1601), and rules were added for
+  Reolink, EZVIZ, Xiongmai, Uniview, Bosch and Vivotek. Reolink cameras whose
+  main stream is H.265 get an H.264 sub address, since that is all they serve.
+- **Picture fit follows the wall's orientation.** The tile menu's next-fit
+  label and the change it makes now act on the portrait aspect when the wall is
+  upright, leaving the landscape setting alone.
+- **Dialogs fit an upright screen.** Camera forms are clamped to the screen
+  width, address fields fill their column, and the edit dialog is a little
+  narrower. Landscape screens keep their previous width.
+- **Greyed-out controls stay out of the keyboard walk.** Disabled buttons no
+  longer take focus via the arrow keys; the walk hands focus to the next live
+  control instead.
+- **Fixed:** the magnified OSD on Android now reports the main stream's real
+  resolution instead of `?x?` or the sub stream's leftover size, for cameras
+  whose RTSP description carries no picture size.
+
 ## 2.3.25
 
 Changes since 2.2.106.
