@@ -3,9 +3,10 @@
 //! The core decodes a channel's audio and hands it to an [`AudioOutput`]; this is
 //! that output, built on `cpal`, which reaches WASAPI on Windows, ALSA / JACK on
 //! Linux, CoreAudio on macOS and Oboe on Android through one API. The device is
-//! opened once, at whatever rate and channel count it prefers, and the samples a
-//! camera sends are resampled into it: the camera is 8 kHz or 16 kHz mono, the
-//! device is almost always 48 kHz and often stereo.
+//! opened when the magnified picture can be heard and stopped when it cannot,
+//! at whatever rate and channel count it prefers; the samples a camera sends
+//! are resampled into it: the camera is 8 kHz or 16 kHz mono, the device is
+//! almost always 48 kHz and often stereo.
 //!
 //! Everything here is behind `&self` and shared by every channel, because there
 //! is one device and one thing being listened to. Decoding happens on a channel
@@ -83,6 +84,10 @@ impl JavaOutput {
             self.close();
         }
     }
+
+    /// Nothing to stop here: `set_active(false)` already closed the track, and
+    /// there is no thread-local stream to drop.
+    pub fn stop(&self) {}
 
     /// Sets the volume, `0.0..=1.0`.
     pub fn set_volume(&self, volume: f32) {
@@ -210,9 +215,10 @@ thread_local! {
     /// A live cpal stream is `!Send` - the crate marks it so on purpose - and so
     /// cannot sit in [`CpalOutput`], which is shared with the channel workers.
     /// It is parked on the thread that opened the device instead: the interface
-    /// opens the sink on its own thread and keeps it for the life of the window,
-    /// which is exactly how long the stream has to run. Dropping it would stop
-    /// the sound, so it is only taken back out by [`shutdown`], on the way out.
+    /// opens the sink on its own thread, and that same thread takes the stream
+    /// back out - through [`stop_output`] when the picture goes silent, and
+    /// through [`shutdown`] on the way out. Dropping the `Sink` alone leaves the
+    /// stream running.
     ///
     /// The wrapper is the important part: [`QuietDrop`] contains the cpal join
     /// panic even when the thread local is destroyed by `ExitProcess` rather
@@ -240,16 +246,24 @@ thread_local! {
 /// safe. The early call from the close path matters all the same: it lets the
 /// device go while the process is still healthy, rather than during teardown.
 pub fn shutdown() {
+    stop_output();
+}
+
+/// Stops the platform's output stream, leaving the sink itself reusable.
+///
+/// Must be called on the thread that opened it - the interface thread - because
+/// a cpal stream is `!Send`. Taking the value out of the slot before dropping
+/// it matters for the same reason it does in [`shutdown`]: a backend that
+/// touches the slot from its own drop must not collide with a live borrow.
+pub fn stop_output() {
     OUTPUT_STREAM.with(|slot| {
-        // Take it out before dropping it: the `RefMut` is gone by then, so a
-        // backend that touches this thread local from its own drop cannot
-        // collide with a borrow that is still alive.
         let stream = slot.borrow_mut().take();
         drop(stream);
     });
 }
 
-/// The sink, alive as long as the window is.
+/// The desktop sink. The stream it opens lives in [`OUTPUT_STREAM`] and is
+/// stopped when the picture goes silent, not when the window closes.
 pub struct CpalOutput {
     /// Whether sound is wanted. A channel does no audio work while this is false.
     active: AtomicBool,
@@ -384,8 +398,8 @@ pub fn device_label(name: &str, playback: bool) -> String {
 /// What ALSA calls one PCM device, read out of `/proc`.
 ///
 /// The name is `plughw:CARD=<card id>,DEV=<n>`. The card's line in
-/// `/proc/asound/cards` carries its description - `HDA Intel PCH`, `KT USB Audio`
-/// - and `pcm<n>p/info` carries the port's own name, `HDMI 0` or `USB Audio`.
+/// `/proc/asound/cards` carries its description (`HDA Intel PCH`, `KT USB Audio`)
+/// and `pcm<n>p/info` carries the port's own name (`HDMI 0` or `USB Audio`).
 /// Together they read as a device: two cards both reporting `USB Audio` are told
 /// apart by the first half, and one card's four HDMI ports by the second.
 #[cfg(target_os = "linux")]
@@ -560,6 +574,12 @@ impl CpalOutput {
         if !active {
             self.clear();
         }
+    }
+
+    /// Stops the platform stream. Call on the interface thread that opened it.
+    /// The sink can be used again afterwards.
+    pub fn stop(&self) {
+        stop_output();
     }
 
     /// Sets the volume, `0.0..=1.0`.

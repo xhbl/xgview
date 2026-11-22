@@ -1468,9 +1468,15 @@ pub struct XgViewApp {
     /// The microphone, opened on the first talk and kept for the window's life.
     /// `None` when this machine has no input device, or the platform refused it.
     mic: Option<Arc<crate::mic::Mic>>,
-    /// The audio sink, `None` when this machine has no output device. The core
-    /// only ever sees it through the audio hub, as an `AudioOutput`.
+    /// The audio sink, opened only while something can be heard through it.
+    /// The core only ever sees it through the audio hub, as an `AudioOutput`.
+    /// A machine with no working output leaves it `None` without failing the
+    /// picture.
     audio: Option<Arc<crate::audio::Sink>>,
+    /// Whether the last attempt to open the chosen device failed. Kept so a
+    /// device that will not open is tried once per change, not on every frame
+    /// the viewer spends magnified.
+    audio_open_failed: bool,
     /// Who answered the last frame's direction presses.
     owner: Owner,
     /// The focus the viewer was looking at as the last frame ended.
@@ -1865,15 +1871,10 @@ impl XgViewApp {
         // playing through.
         let audio_outputs = crate::audio::output_devices();
         let audio_inputs = crate::mic::input_devices();
-        // The audio sink, opened once. A machine without an output device leaves
-        // `None` here, and the sound switch has nothing to drive - not a failure:
-        // the picture carries on. The device is the one the configuration names,
-        // or the system's default when it names none.
-        let audio = crate::audio::Sink::open(config.audio_output.as_deref());
-        if let Some(sink) = &audio {
-            sink.set_volume(config.volume);
-            manager.audio().set_output(Some(sink.clone()));
-        }
+        // No output device is opened here. The wall starts in the grid, where
+        // no audio source is routed to a sink, and an idle ALSA stream can burn
+        // half a core on a machine nobody is listening to. `apply_audio` opens
+        // it the first time the magnified picture can actually be heard.
         let sound_on = config.sound_on;
         // A process killed mid-download cannot clean up after itself. Nothing
         // but this start can tell an orphan `.part` from one still being
@@ -2045,7 +2046,8 @@ impl XgViewApp {
             talking: false,
             talk_index: None,
             mic: None,
-            audio,
+            audio: None,
+            audio_open_failed: false,
             // The "Add devices" window, the settings panel and the top bar are
             // on this layer: each is a row (of tabs, or of controls) over a
             // column, which is the shape egui's walk handles worst. The wall

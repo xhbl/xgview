@@ -3,7 +3,67 @@
 
 use super::*;
 
+/// Whether anything can be heard from the picture right now.
+///
+/// The grid routes no source to the audio hub, so a sink open there would only
+/// wait for a source that never comes. A call with the speaker muted is silent
+/// too. Playback needs no extra case: it lives in the magnified viewport and
+/// `view_index` points the hub at the recording's channel.
+fn sound_is_wanted(zoomed: bool, sound_on: bool, call_mutes: bool) -> bool {
+    zoomed && sound_on && !call_mutes
+}
+
 impl XgViewApp {
+    /// Opens or lets go of the output device to match what can be heard.
+    ///
+    /// Opening a device that nobody listens to is not free: a kiosk with a USB
+    /// audio dongle was measured with cpal's ALSA worker burning half a core in
+    /// the kernel while the sound switch was off. The device is opened at the
+    /// first moment it can be used and closed as soon as it cannot. A failed
+    /// open is remembered so a magnified stretch does not retry it on every
+    /// page turn; changing the device clears the memory.
+    fn sync_audio_sink(&mut self) {
+        if !sound_is_wanted(
+            self.scheduler.is_zoomed(),
+            self.sound_on,
+            self.call_mutes_speaker(),
+        ) {
+            self.release_audio_sink();
+            return;
+        }
+        if let Some(sink) = &self.audio {
+            sink.set_active(true);
+            sink.set_volume(self.config.volume);
+            return;
+        }
+        if self.audio_open_failed {
+            return;
+        }
+        match crate::audio::Sink::open(self.config.audio_output.as_deref()) {
+            Some(sink) => {
+                sink.set_active(true);
+                sink.set_volume(self.config.volume);
+                self.manager.audio().set_output(Some(sink.clone()));
+                self.audio = Some(sink);
+            }
+            None => self.audio_open_failed = true,
+        }
+    }
+
+    /// Lets the device go: quiet the sink, take it away from the channel
+    /// workers, then stop the platform stream before the sink is dropped.
+    fn release_audio_sink(&mut self) {
+        if let Some(sink) = self.audio.take() {
+            // `set_active(false)` stops the work on Android and clears the ring
+            // on the desktops. Dropping the Arc is not enough there: the cpal
+            // stream lives in a thread local, and `stop` is what joins it.
+            sink.set_active(false);
+            self.manager.audio().set_output(None);
+            sink.stop();
+        }
+        self.audio_open_failed = false;
+    }
+
     /// Points the sink at the magnified camera, or at nothing when the grid is
     /// showing, and follows the sound switch. Called whenever the zoom or the
     /// switch changes; the hub's index is the camera the listener is listening
@@ -28,10 +88,6 @@ impl XgViewApp {
     /// brings it back. The sound switch is left as the viewer set it. See
     /// [`Self::set_talking`].
     pub(super) fn apply_audio(&mut self) {
-        if let Some(sink) = &self.audio {
-            sink.set_active(self.sound_on && !self.call_mutes_speaker());
-            sink.set_volume(self.config.volume);
-        }
         let index = self.scheduler.zoom();
         // The sound follows the picture: while a recording plays, the channel
         // that is audible is the one playing it, not the camera's own - which
@@ -42,8 +98,11 @@ impl XgViewApp {
         // channel carries no back channel, and nothing is behind it to talk to.
         self.manager.set_talk(index);
         if self.talking && self.talk_index != index {
-            self.set_talking(false);
+            self.set_talking_inner(false);
         }
+        // The call state is settled now, so the device is opened or released
+        // once with the final answer rather than twice on the way there.
+        self.sync_audio_sink();
     }
 
     /// Whether the call in progress has to silence the speaker to keep it quiet.
@@ -66,6 +125,16 @@ impl XgViewApp {
     /// press puts the system dialog up and says what to do about it, and the
     /// next press finds the capture open.
     pub(super) fn set_talking(&mut self, on: bool) {
+        self.set_talking_inner(on);
+        self.sync_audio_sink();
+    }
+
+    /// The call itself, leaving the speaker for the caller to settle once.
+    ///
+    /// `apply_audio` reconciles the call with a change of picture through this
+    /// function rather than through [`Self::set_talking`], so one pass settles
+    /// the device once instead of opening and closing it twice.
+    fn set_talking_inner(&mut self, on: bool) {
         if on && self.mic.is_none() {
             match crate::mic::Mic::open(
                 self.manager.talk().clone(),
@@ -99,14 +168,6 @@ impl XgViewApp {
             if let Some(index) = self.talk_index {
                 self.manager.call(index);
             }
-        }
-        // The speaker goes quiet while the microphone is open, unless the
-        // platform's canceller came with the microphone: it is the same device,
-        // and without a canceller the sound it makes comes straight back in
-        // through the microphone. See `apply_audio`.
-        if let Some(sink) = &self.audio {
-            sink.set_active(self.sound_on && !self.call_mutes_speaker());
-            sink.set_volume(self.config.volume);
         }
         tracing::debug!(target: "xgview::talk", on, "the talk-back changed");
         // The bar now carries the one control that ends the call instead of the
@@ -375,14 +436,10 @@ impl XgViewApp {
     /// The old one is dropped with the new one's arrival: a stream is not
     /// reopened in place, and the ring buffer it was draining goes with it.
     pub(super) fn reopen_audio_sink(&mut self) {
-        self.audio = crate::audio::Sink::open(self.config.audio_output.as_deref());
-        match &self.audio {
-            Some(sink) => {
-                sink.set_volume(self.config.volume);
-                self.manager.audio().set_output(Some(sink.clone()));
-            }
-            None => self.manager.audio().set_output(None),
-        }
+        // A different device deserves one attempt of its own, even if the one
+        // it replaces could not be opened. `apply_audio` then opens the new
+        // choice only if the picture can actually be heard.
+        self.release_audio_sink();
         self.apply_audio();
     }
 
@@ -485,5 +542,20 @@ impl XgViewApp {
         let slot = self.config.active_slots().get(index).copied()?;
         let camera = self.config.cameras.get(slot)?;
         Some(camera.stream_uri(StreamKind::Main).to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sound_is_wanted;
+
+    /// A device is only worth opening where a listener could hear it. Playback
+    /// is not a separate case: it happens in the magnified viewport.
+    #[test]
+    fn the_device_is_opened_only_where_sound_can_be_heard() {
+        assert!(!sound_is_wanted(false, true, false), "the grid routes no audio");
+        assert!(!sound_is_wanted(true, false, false), "the sound switch is off");
+        assert!(!sound_is_wanted(true, true, true), "a call mutes the speaker");
+        assert!(sound_is_wanted(true, true, false), "a magnified picture can play");
     }
 }

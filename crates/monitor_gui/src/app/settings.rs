@@ -65,7 +65,6 @@ impl XgViewApp {
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
         {
             let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-            return;
         }
         // Android has no shell to ask. egui's own opener is compiled out on this
         // target - eframe is built without its `webbrowser` feature - so the

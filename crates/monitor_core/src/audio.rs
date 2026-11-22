@@ -46,7 +46,8 @@ pub trait AudioOutput: Send + Sync {
 ///
 /// A channel index is the position in the enabled camera list, the same one the
 /// [`crate::scheduler`] uses. The current index changes when the user zooms or
-/// turns the sound off; the output is set once, when the interface opens it.
+/// turns the sound off. The output is installed only while the magnified
+/// picture can be heard, and cleared when it cannot.
 pub struct AudioHub {
     index: AtomicUsize,
     output: Mutex<Option<Arc<dyn AudioOutput>>>,
@@ -57,7 +58,7 @@ impl AudioHub {
         Arc::new(Self { index: AtomicUsize::new(NO_AUDIO), output: Mutex::new(None) })
     }
 
-    /// Installs the sink, or clears it. Called once by the interface.
+    /// Installs the sink, or clears it when nothing can be heard.
     pub fn set_output(&self, output: Option<Arc<dyn AudioOutput>>) {
         match self.output.lock() {
             Ok(mut slot) => *slot = output,
