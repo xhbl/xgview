@@ -148,19 +148,59 @@ export DEBIAN_FRONTEND=noninteractive
 # ---------- 1. apt sources: enable contrib / non-free / non-free-firmware ----------
 # The Intel drivers (intel-media-va-driver-non-free) are in non-free, the
 # firmware in non-free-firmware.
+#
+# `non-free` must be matched as a whole component: a naive `grep non-free`
+# also hits `non-free-firmware`, which a minimal Debian 13 install already
+# carries. On such a machine the naive test concluded non-free was enabled,
+# skipped adding it, and the driver below silently failed to install - leaving
+# the wall decoding on the CPU. Match a whitespace-delimited token instead, and
+# add only the component that is actually missing - appending a fixed string
+# would duplicate `non-free-firmware` on sources that already have it.
+has_component() { grep -qE "(^|[[:space:]])${1}([[:space:]]|$)" <<<"$2"; }
+# Echo a source line back with contrib / non-free / non-free-firmware appended
+# only where missing. $1 is everything before the component list, $2 the list.
+complete_components() {
+  local head="$1" list="$2" component
+  for component in contrib non-free non-free-firmware; do
+    has_component "$component" "$list" || list="$list $component"
+  done
+  printf '%s %s\n' "$head" "$list"
+}
 enable_nonfree() {
   if [ -f /etc/apt/sources.list.d/debian.sources ]; then
-    if ! grep -E '^Components:' /etc/apt/sources.list.d/debian.sources | grep -q 'non-free '; then
+    if ! grep -E '^Components:' /etc/apt/sources.list.d/debian.sources \
+         | grep -qE '(^|[[:space:]])non-free([[:space:]]|$)'; then
       cp -n /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.bak
-      sed -i -E '/^Components:/ { /non-free( |$)/! s/$/ contrib non-free non-free-firmware/ }' \
-        /etc/apt/sources.list.d/debian.sources
+      local tmp="$(mktemp)"
+      while IFS= read -r line; do
+        case "$line" in
+          Components:*) line="$(complete_components 'Components:' "${line#Components:}")" ;;
+        esac
+        printf '%s\n' "$line" >>"$tmp"
+      done < /etc/apt/sources.list.d/debian.sources
+      cat "$tmp" > /etc/apt/sources.list.d/debian.sources
+      rm -f "$tmp"
     fi
   fi
   if [ -f /etc/apt/sources.list ] && grep -qE '^deb ' /etc/apt/sources.list; then
-    if ! grep -E '^deb ' /etc/apt/sources.list | grep -q 'non-free'; then
+    if ! grep -E '^deb ' /etc/apt/sources.list \
+         | grep -qE '(^|[[:space:]])non-free([[:space:]]|$)'; then
       cp -n /etc/apt/sources.list /etc/apt/sources.list.bak
-      sed -i -E '/^deb / { /non-free/! s/ main( |$)/ main contrib non-free non-free-firmware\1/ }' \
-        /etc/apt/sources.list
+      local tmp="$(mktemp)"
+      while IFS= read -r line; do
+        case "$line" in
+          deb\ *)
+            # deb <uri> <suite> <components...>; keep the first three words
+            # and pass the rest as the component list.
+            local deb uri suite rest
+            read -r deb uri suite rest <<<"$line"
+            line="$(complete_components "$deb $uri $suite" "$rest")"
+            ;;
+        esac
+        printf '%s\n' "$line" >>"$tmp"
+      done < /etc/apt/sources.list
+      cat "$tmp" > /etc/apt/sources.list
+      rm -f "$tmp"
     fi
   fi
 }
@@ -200,8 +240,17 @@ if [ $IS_VM -eq 1 ]; then
 elif [ $IS_INTEL -eq 1 ]; then
   say "Intel hardware: installing iGPU firmware and the VAAPI/QSV drivers"
   apt-get install -y firmware-misc-nonfree || warn "firmware-misc-nonfree failed to install; check that the non-free-firmware source is enabled"
-  apt-get install -y intel-media-va-driver-non-free vainfo intel-gpu-tools \
-    || warn "the Intel driver packages failed to install; check that the non-free source is enabled"
+  # The free `intel-media-va-driver` lives in main and covers the common N100 /
+  # N5095 (Xe-LP) iGPUs, so it works even where the non-free source is absent.
+  # Prefer it; fall back to the non-free build for hardware the free one misses.
+  # Either way, fail loudly rather than leaving the wall decoding on the CPU.
+  if apt-get install -y intel-media-va-driver vainfo intel-gpu-tools; then
+    :
+  elif apt-get install -y intel-media-va-driver-non-free vainfo intel-gpu-tools; then
+    :
+  else
+    warn "the Intel VAAPI driver failed to install; hardware decoding will be unavailable - check the non-free source"
+  fi
 fi
 
 # ---------- 3.5 VNC (x11vnc is always installed; --vnc writes the password) ----------
@@ -289,11 +338,32 @@ chmod +x /usr/local/bin/xg
 
 # The short command that restarts the kiosk. A plain `systemctl restart
 # monitor` cancels itself: the stop's `ExecStopPost` starts `getty@tty1`, and
-# the restart's start job then conflicts with it. This does the stop and start
-# in the order that works.
+# the restart's start job then conflicts with it. Doing the stop and the start
+# separately lets systemd settle that conflict for us - `monitor.service`
+# declares `Conflicts=getty@tty1.service`, so starting it parks the getty.
+# Never stop the getty by hand here: the command is usually typed on tty1
+# itself, and stopping that getty hangs up the very shell running this script,
+# cutting it off before the start. `systemctl stop` is also only a signal:
+# xinit needs another beat to take its X server down and free vt1 / :0. If the
+# new X starts in that gap the two fight for the console and both die, which
+# on a kiosk looks like a blank screen with a blinking cursor and no service.
+# Wait for the old server to be gone, bounded so a wedged one cannot hang the
+# command, then start - systemd moves the getty aside on its own.
 cat > /usr/local/bin/xgr <<'EOF'
 #!/bin/sh
-exec sudo sh -c 'systemctl stop monitor; systemctl stop getty@tty1; systemctl reset-failed monitor; systemctl start monitor'
+exec sudo sh -c '
+  systemctl stop monitor
+  i=0
+  while [ "$i" -lt 50 ]; do
+    if ! pgrep -x Xorg >/dev/null 2>&1 && [ ! -e /tmp/.X0-lock ]; then
+      break
+    fi
+    i=$((i + 1))
+    sleep 0.1
+  done
+  systemctl reset-failed monitor
+  systemctl start monitor
+'
 EOF
 chmod +x /usr/local/bin/xgr
 
