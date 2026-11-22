@@ -437,6 +437,27 @@ impl FrameStore {
         let entry = channels.get(&index)?;
         entry.newest.as_ref().map(|frame| frame.sequence)
     }
+
+    /// Drops the picture a channel is holding, keeping the count and the moment.
+    ///
+    /// Called when a channel is suspended. The picture owns the decoded planes -
+    /// megabytes for a high-resolution stream - and nothing is going to draw it
+    /// while the channel is parked, so holding it until the next activation is
+    /// pure waste: a wall that is paged away keeps every frame it ever last saw.
+    ///
+    /// The other two fields stay. `published` spans sessions: an attempt reads
+    /// it on the way in to tell whether the session it is replacing put anything
+    /// on screen, which decides the MSE fallback, the retry back-off and the
+    /// recording resume. `moment` is where a recording broke off, read when it
+    /// is opened again. Neither belongs to the picture, and both are lost by a
+    /// removal - so only the picture goes.
+    pub fn clear_picture(&self, index: usize) {
+        if let Ok(mut channels) = self.channels.lock() {
+            if let Some(entry) = channels.get_mut(&index) {
+                entry.newest = None;
+            }
+        }
+    }
 }
 
 /// What one channel measures about the stream it is reading.
@@ -1783,6 +1804,46 @@ mod tests {
         assert_eq!(window.lost(), 3);
         assert!(matches!(window.accept(105), Arrival::Next), "and the gap is closed");
         assert_eq!(window.lost(), 3, "and counted once");
+    }
+
+    /// Parking a channel frees the picture but not the bookkeeping around it.
+    /// The planes are megabytes and nobody will draw them while the channel is
+    /// away; the count and the moment outlive the session and decide the MSE
+    /// fallback, the retry back-off and where a recording resumes. Losing those
+    /// with the picture would quietly change how the next session behaves.
+    #[test]
+    fn clearing_a_picture_keeps_the_count_and_the_moment() {
+        let store = FrameStore::default();
+        let frame = |sequence: u64, at: Option<f64>| {
+            Arc::new(VideoFrame {
+                sequence,
+                at,
+                width: 640,
+                height: 480,
+                colorspace: ColorSpace::default(),
+                y: vec![0; 640 * 480],
+                uv: vec![0; 640 * 240],
+            })
+        };
+
+        store.publish(3, frame(1, Some(100.0)));
+        store.publish(3, frame(2, Some(101.0)));
+        store.note_picture(4, Some(200.0));
+        assert_eq!(store.published(3), 2, "two pictures published");
+        assert_eq!(store.moment(3), Some(101.0));
+        assert!(store.latest(3).is_some());
+
+        store.clear_picture(3);
+
+        assert!(store.latest(3).is_none(), "the picture is gone");
+        assert_eq!(store.newest_sequence(3), None, "and so is its sequence");
+        assert_eq!(store.published(3), 2, "but what session 3 delivered stays");
+        assert_eq!(store.moment(3), Some(101.0), "and where its picture got to");
+        assert_eq!(store.moment(4), Some(200.0), "another channel is untouched");
+
+        // A channel that never had a picture is fine to clear as well.
+        store.clear_picture(9);
+        assert!(store.latest(9).is_none());
     }
 
     /// A sample describes the stream as it is now, so a newer one replaces it:

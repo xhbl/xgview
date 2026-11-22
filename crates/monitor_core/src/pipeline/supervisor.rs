@@ -464,6 +464,13 @@ impl Supervisor {
             // The numbers belonged to the session that was just stopped, and
             // the channel is nobody's until something activates it again.
             self.stats.clear(index);
+            // The last picture is nobody's either. Letting it stay makes a wall
+            // that is paged away hold a decoded frame per channel for as long
+            // as the process lives - and lets a late event hand that stale frame
+            // back to the renderer, which rebuilds a whole set of textures for
+            // a slot that is not on screen. The count and the moment stay; see
+            // `FrameStore::clear_picture`.
+            self.frames.clear_picture(index);
             tracing::debug!(target: "xgview::pipeline", index, "channel suspended");
         }
     }

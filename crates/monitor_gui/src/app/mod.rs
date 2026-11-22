@@ -2236,7 +2236,20 @@ impl XgViewApp {
     ///
     /// [`FrameStore`]: monitor_core::pipeline::FrameStore
     fn upload_frames(&mut self) {
+        // A channel that is no longer in the wall - the group was switched out
+        // from under it - can be left behind in `self.channels` by a late event
+        // from the session that just stopped. Its picture in the frame store is
+        // stale too. Drawing it would rebuild a full set of textures for a slot
+        // that is not on screen, which is how paging a wall away grew memory on
+        // every switch. Only indices the scheduler still owns are worth a look.
+        // The recording sits one past the last camera, at `channel_count`
+        // itself: it is still ours, and software-decoded recordings publish
+        // their pictures here for this very loop to upload, so it must pass.
+        let channel_count = self.scheduler.channel_count();
         for index in self.channels.keys().copied().collect::<Vec<_>>() {
+            if index > channel_count {
+                continue;
+            }
             // A slot whose picture is coming from somewhere else - a recording
             // playing over the camera - is decoded but never drawn, and a
             // texture of it would be three megabytes a frame uploaded for

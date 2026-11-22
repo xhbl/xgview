@@ -414,6 +414,11 @@ impl VideoRenderer {
         if let Some(channel) = self.channels.remove(&index) {
             self.free(&channel);
         }
+        // The rhythm is only a diagnostic counter, but it is keyed by channel
+        // and `note_rhythm` puts one back with `entry().or_default()`. Left
+        // behind, a long session that pages through many cameras leaves a
+        // counter for every slot it has ever shown.
+        self.rhythm.remove(&index);
     }
 
     /// Releases the egui texture of a channel's picture.
