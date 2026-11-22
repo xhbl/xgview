@@ -9,7 +9,7 @@
 //! |----------|------------|-----|
 //! | Windows  | the process token holds `SeShutdownPrivilege` | `shutdown /r /t 0` |
 //! | macOS    | root, or the user is in the `admin` or `wheel` group | `osascript … restart` |
-//! | Linux    | root, or `systemctl` is on the path | `systemctl reboot` |
+//! | Linux    | root, or polkit already authorises this process to reboot | `systemctl reboot` |
 //! | Android  | never — `REBOOT` is a system-only permission | — |
 
 use crate::error::Result;
@@ -188,7 +188,7 @@ mod imp {
     use crate::error::CoreError;
 
     pub(super) fn supported() -> bool {
-        is_root() || systemctl_present()
+        is_root() || (systemctl_present() && reboot_authorized())
     }
 
     pub(super) fn reboot() -> Result<()> {
@@ -209,10 +209,6 @@ mod imp {
     }
 
     /// `true` when `systemctl` is on the path and answers.
-    ///
-    /// A desktop session with polkit grants `systemctl reboot` to an
-    /// unprivileged user through an authorisation prompt; a session without it
-    /// (a container, a WSL session) does not, and the button is left out.
     fn systemctl_present() -> bool {
         Command::new("systemctl")
             .arg("--version")
@@ -220,6 +216,36 @@ mod imp {
             .map(|s| s.success())
             .unwrap_or(false)
     }
+
+    /// Whether polkit already lets *this process* restart the machine.
+    ///
+    /// `systemctl reboot` reaches logind, whose `Reboot` method is guarded by
+    /// the `org.freedesktop.login1.reboot` action. Asking `pkcheck` about that
+    /// action with our own pid answers whether the session we are running in
+    /// already has the authorization - an active local seat usually does,
+    /// without any prompt. No polkit at all, an authorization that would need
+    /// a prompt, or an explicit denial all answer `false`: a button that can
+    /// only fail with `Access denied` should not be drawn. The check is
+    /// non-interactive, so it is safe to make while painting the settings tab.
+    ///
+    fn reboot_authorized() -> bool {
+        super::polkit_authorizes("org.freedesktop.login1.reboot", std::process::id())
+    }
+}
+
+/// Asks polkit, without prompting, whether `pid` already holds `action`.
+///
+/// `pkcheck` writes any details to stdout, which is why the output is captured
+/// rather than inherited. Kept outside the platform module so the negative case
+/// can be tested directly.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+fn polkit_authorizes(action: &str, pid: u32) -> bool {
+    let pid = pid.to_string();
+    std::process::Command::new("pkcheck")
+        .args(["--action-id", action, "--process", &pid])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "android")]
@@ -261,5 +287,14 @@ mod tests {
         if !is_supported() {
             assert!(reboot().is_err());
         }
+    }
+
+    /// An action polkit has never heard of cannot be an authorization to
+    /// reboot. This also holds on machines without polkit at all, where the
+    /// missing tool is just another way to answer no.
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+    #[test]
+    fn an_unknown_action_is_never_authorized() {
+        assert!(!polkit_authorizes("org.xgview.reboot-does-not-exist", std::process::id()));
     }
 }
