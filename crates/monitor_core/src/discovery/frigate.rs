@@ -15,9 +15,13 @@
 //! stream name, and which of a camera's streams is the main one is decided by a
 //! measured resolution, never by Frigate's `detect` / `record` roles - those
 //! name a purpose, and a viewer may record the sub feed to save space. The
-//! resolution is measured over RTSP and over the MSE endpoint at once, and only
-//! where neither answers does a camera with more than one stream fall back to
-//! input order to name its sub (see [`select_pair`]).
+//! resolution is measured over RTSP and over the MSE endpoint at once; only
+//! where two or more sizes can be compared do they decide, and otherwise a
+//! camera with more than one stream falls back to input order (see
+//! [`select_pair`]). The RTSP size is asked first and MSE is only its fallback:
+//! an MSE init segment can carry a placeholder size before a slow camera's
+//! first key frame. A single size is never enough either - the high-bitrate main
+//! feed is the one most likely to time out, so the lone answer is usually the sub.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -750,15 +754,27 @@ fn credentialless(url: &str) -> String {
 /// Main and sub indices into one camera's streams, from their measured sizes.
 ///
 /// The main stream is the largest one whose size could be read, and the sub the
-/// smallest one that is *smaller* than it. When that leaves no sub - the sizes
-/// came back equal, or none could be read at all - a camera with more than one
-/// stream still gets one, by input order: Frigate lists the main feed first, so
-/// the first stream that is not the main becomes the sub. That last part is the
-/// one guess here, kept as the fallback for when the reliable fact (the
-/// picture size) is missing - a closed port, say - rather than leaving the
-/// camera without a sub stream.
+/// smallest one that is *smaller* than it. When the sizes cannot be compared -
+/// fewer than two were read, or they came back equal - a camera with more than
+/// one stream falls back to input order: Frigate lists the main feed first, so
+/// index 0 is the main and the next one is the sub. That guess is the fallback
+/// for when the reliable fact (the picture size) is missing, rather than
+/// leaving the camera without a sub stream.
+///
+/// The missing case matters as much as the present one: a failed measurement
+/// says nothing about how large that feed is. The main feed is the high-bitrate
+/// one with the longest GOP, so it is the likeliest to miss a bounded SPS probe
+/// (no `sprop-parameter-sets` in the SDP, no IDR inside the timeout). Promoting
+/// the single feed that did answer to main then reverses a camera whose main
+/// probe failed and whose sub answered - which is exactly what happened to a
+/// Frigate camera whose sub reported 640x480 while its 1080p main timed out.
 fn select_pair(sizes: &[Option<(u32, u32)>]) -> (usize, Option<usize>) {
     let pixels = |size: Option<(u32, u32)>| size.map(|(w, h)| u64::from(w) * u64::from(h));
+    // One size, or none, cannot be compared. Trust Frigate's input order (main
+    // first) instead of letting the one readable feed - usually the sub - win.
+    if sizes.iter().filter(|size| size.is_some()).count() < 2 {
+        return (0, (sizes.len() >= 2).then_some(1));
+    }
     // The largest size wins; among equal sizes the earlier input is the main,
     // so a camera with several feeds of one size does not depend on how the
     // device happened to order them.
@@ -800,35 +816,29 @@ fn rtsp_credentials(config: &FrigateConfig, read: Option<(String, String)>) -> O
     }
 }
 
-/// Measures one target's resolution over both its addresses at once.
+/// Measures one target's resolution over both its addresses.
 ///
-/// The protocol only decides what a camera is *played* with, not how it is
-/// measured, so the probe is the same for `auto`, `rtsp` and `mse`: RTSP and
-/// MSE are asked together and whichever reads a size first answers. A closed
-/// RTSP port therefore costs the measurement nothing - which is the case MSE is
-/// for.
+/// RTSP answers first and MSE is the fallback, not a race. Both paths read the
+/// sequence parameter set, but they do not read the *same* one: RTSP waits for
+/// the camera's own SPS, so its size is the picture the stream really carries.
+/// go2rtc's MSE init segment, by contrast, is built the moment a client joins -
+/// before a slow camera has sent its first SPS - and can advertise a placeholder
+/// 128x96 that never gets corrected (the player only learns the real size later,
+/// from an in-band SPS in a media segment). Taking whichever answer arrived
+/// first let that placeholder win the main/sub decision and reverse it. Asking
+/// RTSP first keeps the trustworthy measurement authoritative; a camera whose
+/// RTSP port is closed still gets measured, just after RTSP fails over to MSE.
 async fn probe_target(
     rtsp_url: String,
     mse_url: String,
     rtsp_credentials: Option<(String, String)>,
     ws_credentials: Option<(String, String)>,
 ) -> Option<(u32, u32)> {
-    let rtsp = probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT);
-    let mse = probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT);
-    tokio::pin!(rtsp);
-    tokio::pin!(mse);
-    // The first to read a size wins; the other is waited on only when the first
-    // could not.
-    tokio::select! {
-        size = &mut rtsp => match size {
-            Some(size) => Some(size),
-            None => mse.await,
-        },
-        size = &mut mse => match size {
-            Some(size) => Some(size),
-            None => rtsp.await,
-        },
+    let rtsp_size = probe_resolution(&rtsp_url, rtsp_credentials, PROBE_TIMEOUT).await;
+    if rtsp_size.is_some() {
+        return rtsp_size;
     }
+    probe_resolution_mse(&mse_url, ws_credentials, PROBE_TIMEOUT).await
 }
 
 async fn probe_all(
@@ -1170,17 +1180,30 @@ mod tests {
         assert_eq!(select_pair(&sizes), (1, Some(0)));
     }
 
-    /// When the sizes cannot name a sub - they are equal, or none was read at
-    /// all - a camera with more than one stream still gets one by input order:
-    /// the first stream that is not the main.
+    /// When the sizes cannot be compared - fewer than two were read, or they
+    /// came back equal - a camera with more than one stream falls back to input
+    /// order: Frigate lists the main feed first, so index 0 is the main.
     #[test]
-    fn a_pair_with_no_measured_sub_falls_back_to_input_order() {
+    fn an_unread_or_equal_pair_falls_back_to_input_order() {
         // Equal sizes: nothing is smaller than the main.
         assert_eq!(select_pair(&[Some((1920, 1080)), Some((1920, 1080))]), (0, Some(1)));
         // Nothing read at all.
         assert_eq!(select_pair(&[None, None]), (0, Some(1)));
-        // One size known: the readable input is the main and the other the sub.
-        assert_eq!(select_pair(&[None, Some((1920, 1080))]), (1, Some(0)));
+        // One size known: it cannot be compared, so input order decides even
+        // though the other input failed to report. The main feed is the one
+        // likelier to time out (high bitrate, long GOP, no SPS in its SDP), so
+        // treating the lone readable feed as main would reverse the pair.
+        assert_eq!(select_pair(&[None, Some((1920, 1080))]), (0, Some(1)));
+        // Same when the readable one is the earlier input.
+        assert_eq!(select_pair(&[Some((1920, 1080)), None]), (0, Some(1)));
+    }
+
+    /// Regression: a Frigate camera whose main feed misses the bounded probe
+    /// while its sub reports a size must keep the main feed as main. The main
+    /// is index 0 in Frigate's input order; the sub is index 1.
+    #[test]
+    fn a_timed_out_main_does_not_promote_the_sub() {
+        assert_eq!(select_pair(&[None, Some((640, 480))]), (0, Some(1)));
     }
 
     #[test]
