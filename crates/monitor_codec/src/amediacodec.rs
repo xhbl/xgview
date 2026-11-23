@@ -868,21 +868,40 @@ impl AMediaCodecDecoder {
         }
     }
 
-    /// Releases every output buffer the codec has ready, packing the pictures it
-    /// hands over.
+    /// Releases the output buffers the codec has ready, taking as many as this
+    /// session takes in one call.
     ///
-    /// Every buffer has to be taken and given back: a buffer the codec hands out
+    /// Every buffer that is taken has to be given back: one the codec hands out
     /// is not returned until it is released, and there are only a handful of
     /// them. What the release does with the picture is the one thing that
     /// differs: a byte buffer is thrown away after the copy, and a picture on
     /// the activity's surface is `render = true` - the release *is* the hand-off.
+    ///
+    /// How many are taken is [`Self::drain_inner`]'s answer; a session fed one
+    /// picture per frame interval takes one, so that a codec which holds a queue
+    /// of them cannot put several into the same refresh.
     fn drain(&mut self, frames: &mut Vec<DecodedFrame>) {
+        self.drain_with(frames, false);
+    }
+
+    /// Releases every output buffer the codec has ready, whatever this session
+    /// would take in one call.
+    ///
+    /// For the end of a session: what is still inside a codec that is about to
+    /// be dropped or flushed is not going to be waited for, and leaving it there
+    /// would make the last pictures of a recording disappear rather than being
+    /// handed over.
+    fn drain_all(&mut self, frames: &mut Vec<DecodedFrame>) {
+        self.drain_with(frames, true);
+    }
+
+    fn drain_with(&mut self, frames: &mut Vec<DecodedFrame>, all: bool) {
         let Some(codec) = self.handle else {
             return;
         };
-        let whole = Instant::now();
-        self.drain_inner(codec, frames);
-        self.stat_drain += whole.elapsed();
+        let started = Instant::now();
+        self.drain_inner(codec, frames, all);
+        self.stat_drain += started.elapsed();
     }
 
     /// Whether this picture is one to hand to the surface's compositor.
@@ -899,7 +918,7 @@ impl AMediaCodecDecoder {
         take
     }
 
-    fn drain_inner(&mut self, codec: *mut AMediaCodec, frames: &mut Vec<DecodedFrame>) {
+    fn drain_inner(&mut self, codec: *mut AMediaCodec, frames: &mut Vec<DecodedFrame>, all: bool) {
         let Some(_) = self.handle else {
             return;
         };
@@ -1043,6 +1062,35 @@ impl AMediaCodecDecoder {
                     }
                 }
                 _ => break,
+            }
+            // One picture per call.
+            //
+            // A decoder asked to hand each picture over as it finishes it does
+            // that on the boxes - and sometimes does not on a phone, where the
+            // ask is accepted and then ignored: measured on a Galaxy S23 FE, the
+            // recording's pictures came back nine at a time at the end of every
+            // second, the whole of the decoder's output queue released together
+            // once the group closed. A surface shows the newest picture it is
+            // given, so eight of those nine were never seen at all - the picture
+            // stood still for half a second and then jumped, once a second, on a
+            // stream that arrived evenly and on time. Every counter on the
+            // reading side said it was arriving at twenty a second, because it
+            // was.
+            //
+            // Taking one per call leaves the rest where they are: decoded, in
+            // order, waiting for the calls that follow. The handovers then come
+            // one per frame interval, the way a live stream's do, and the
+            // decoder is no longer holding a full queue against a surface that
+            // cannot take it - which is also why the wait inside this loop fell
+            // from twenty-eight milliseconds a picture to five. What is shown is
+            // up to that many frames behind the moment the session is playing.
+            // A recording is not watched against a clock, so that is a delay
+            // nobody is waiting on - though it does move the picture relative to
+            // its sound, which leaves through a buffer of its own and is late by
+            // about as much. A live decoder hands over one at a time already, so
+            // no live picture gains a delay here.
+            if !all && self.on_surface && !self.handover.thinned() {
+                break;
             }
         }
     }
@@ -1585,9 +1633,11 @@ impl VideoDecoder for AMediaCodecDecoder {
     }
 
     fn flush(&mut self) -> Result<Vec<DecodedFrame>> {
-        // The end of a session: hand over whatever the codec is still holding.
+        // The end of a session: hand over whatever the codec is still holding,
+        // all of it - the one place where a queue is taken rather than read a
+        // picture at a time.
         let mut frames = Vec::new();
-        self.drain(&mut frames);
+        self.drain_all(&mut frames);
         Ok(frames)
     }
 

@@ -6615,3 +6615,63 @@ Section 74 is the right state to leave the player in: sound is written as it is
 decoded, and the device buffer is half a second, the smallest of the settings
 tried. Any further alignment has to come from the forwarder or the recording,
 not from here.
+
+## 76. Nine pictures at once, and the eight that were never seen
+
+*Landed 2026-11-23, in 2.3.49.*
+
+A Galaxy S23 FE played the front doorbell's recording with a jump forward about
+once a second: the picture stood still, then moved on. The same recording was
+smooth on an HK1RBOX (Amlogic), on the NVR and on a desktop, and so was the same
+doorbell's live picture on the same phone, in the grid and magnified. The second
+camera's recording on the same phone was smooth too.
+
+**Every counter said the stream was fine.** Twenty pictures a second arrived,
+decoded and were counted; `late` stayed at zero, so the pacer dropped nothing;
+`reordered` stayed at zero, so no B-frames were being put back in order; the
+display ran at a fixed sixty hertz; turning the audio off changed nothing.
+
+**What the codec was doing.** Timed per picture on that phone, the live main
+stream spent 2-3 ms inside the decode call and the recording spent 12-28. The
+live path came back with a picture every time; the recording's came back nine at
+a time, the whole output queue released together. The decoder had been asked for
+low latency and had accepted it - the key is ignored below API 30, this phone is
+API 34, so it was applied - and then did not honour it. A surface shows the
+newest picture it is given, so eight of those nine were rendered into the same
+refresh and never seen at all. The recording arrived evenly; the picture did
+not.
+
+**Why only the recording.** The doorbell's parameter sets carry no VUI, which
+leaves a hardware decoder to its own reorder depth (§12, §14). A live session can
+put that right: `BaselineFix::new_live` adds `max_num_reorder_frames = 0`, and a
+stream that turns out to reorder has the declaration taken back and its decoder
+reopened on the set the camera sends. A recording cannot. Its parameter sets
+arrive once, in the init segment, and every sample after carries none - a decoder
+reopened there would have nothing to configure from, and a wrong declaration
+could never be taken back. It gets the baseline constraint flag and nothing else
+(`pipeline/shared.rs`). The second camera carries a VUI of its own, which is why
+it never batched; the Amlogic boxes honour the low-latency request and hand over
+one picture at a time, which is why they were smooth; and the desktop never takes
+this path at all, since it decodes through libavcodec and has no surface to fill.
+
+**The fix is in the reading, not the declaring.** `drain_inner` took every output
+buffer the codec had ready. It now takes one per call when the session renders
+into a surface and is not being thinned: the rest stay decoded, in order, for the
+calls that follow, so the handovers come one per frame interval rather than nine
+in one refresh. A replay faster than the display follows (`Handover::thinned`)
+still takes the whole queue, because the pictures in between are ones nobody
+asked to see. `flush` takes all of them - what is left in a codec at the end of a
+session is not going to be waited for.
+
+Measured on the same phone: the decode call fell from 28 ms to 5-6 ms a picture,
+the burst disappeared, screen-capture differencing showed seven freezes of 200 ms
+or more become none, the longest gap between two changed pictures fell from
+390 ms to 147 ms, and picture updates rose from 15.9 to 23.7 a second.
+
+**What it costs.** The picture now runs a queue-depth behind the decoder: eight
+frames, about four hundred milliseconds at twenty a second. A recording is not
+watched against a clock, so nothing waits on it, and it moves the picture closer
+to the sound, which is about half a second late on its own (§75). A live decoder
+hands over one picture at a time already, so no live picture gains a delay here.
+The trade is worth knowing rather than discovering: if the sound is ever given a
+shorter buffer, the picture will then be the one that is late.
