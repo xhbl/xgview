@@ -343,8 +343,16 @@ pub(super) struct Day {
 
 /// A range read before it was needed, and the answer to it.
 pub(super) struct Ahead {
-    /// The range asked for.
+    /// The range asked for. Answers are matched against this, so a prefetch
+    /// cached under a wide range is recognised when the seek that wants it
+    /// arrives, and so a finger that stays inside the range asks only once.
     pub(super) window: (i64, i64),
+    /// The range the box actually served. A wide request can be refused by a
+    /// box whose vod module overflows, and retried narrower; the playlist only
+    /// covers this one, so the session has to open on it rather than on
+    /// `window`. Kept beside the answer because it is only known once the box
+    /// has replied. Equal to `window` when the first request worked.
+    pub(super) served_window: (i64, i64),
     /// The fragments it was cut into, once the box has answered - `None` while
     /// the answer is still on its way, and `Some(None)` for a box that serves no
     /// playlist for that range.
@@ -1608,6 +1616,11 @@ impl XgViewApp {
             if ahead.window != window {
                 return;
             }
+            // The answer can cover a narrower range than the one asked for,
+            // when a wide request was refused and retried. Keep both: `window`
+            // is what a later seek is matched on, `served_window` is what the
+            // session it lands on must open on.
+            ahead.served_window = served_window;
             ahead.answer = Some(playlist.clone());
             playback.awaiting.filter(|wanted| covered(Some(window), *wanted))
         };
@@ -3572,7 +3585,7 @@ impl XgViewApp {
         );
         start_playlist(&self.handle, &self.events_tx, index, source, window, at, None);
         if let Some(playback) = self.playback.as_mut() {
-            playback.ahead = Some(Ahead { window, answer: None });
+            playback.ahead = Some(Ahead { window, served_window: window, answer: None });
         }
     }
 
@@ -3745,16 +3758,21 @@ impl XgViewApp {
         // A range read while the finger was down is this seek's own request:
         // the answer is used rather than asked for again, and one still being
         // read is waited for - which is the whole point of having asked early.
+        // Match the cached answer on the range asked for, but open the session
+        // on the range the box actually served: a wide request that was refused
+        // is retried narrower, and the playlist covers only that narrow range.
+        // Passing the wide one here would clamp the begin into a manifest that
+        // does not reach it - a picture that never starts, or starts elsewhere.
         let ahead = playback
             .ahead
             .as_ref()
             .filter(|ahead| covered(Some(ahead.window), target))
-            .map(|ahead| (ahead.window, ahead.answer.clone()));
-        if let Some((window, answer)) = ahead {
+            .map(|ahead| (ahead.served_window, ahead.answer.clone()));
+        if let Some((served_window, answer)) = ahead {
             match answer {
                 Some(playlist) => {
                     let camera_id = playback.source.camera.clone();
-                    self.start_seek(index, camera_id, window, target, playlist);
+                    self.start_seek(index, camera_id, served_window, target, playlist);
                 }
                 // Still on its way: the seek waits for it rather than asking
                 // again, and the cursor stays where the finger left it.
