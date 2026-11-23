@@ -636,6 +636,23 @@ impl XgViewApp {
         // are not both pulling a 1080p picture through a box that can carry one.
         self.scheduler.set_recording(Some(channel));
         self.needs_sync = true;
+        // The recording lives one channel past the last camera, and every
+        // camera's recording reuses that slot. The last picture of the one
+        // before can survive leaving it: the Suspend that clears the frame
+        // store is asynchronous, and a late event from the old session can
+        // even upload that frame into the slot's texture on the way out. Left
+        // alone, the slot then shows the previous camera's recording until
+        // this one's first frame arrives - a flash of the wrong picture.
+        // Clear both the store and the texture here, in step: with neither
+        // there, `view_texture` falls back to the camera's own live picture,
+        // which is what the viewport should hold while the first frame is
+        // fetched. Both clears are safe when there is nothing to clear.
+        // Only opening does this: a seek deliberately holds the frame it
+        // leaves, and goes through `start_seek` rather than here. See
+        // [`Self::view_texture`] and [`FrameStore::clear_picture`].
+        self.manager.frames().clear_picture(index);
+        self.textures.remove(&index);
+        self.video.release(index);
         let vod = self.play_recording(index, &source, window, playlist, begin);
         let merged = stretches(&segments);
         // What opening actually heard back: without it the first drag would
