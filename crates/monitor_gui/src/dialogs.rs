@@ -164,7 +164,15 @@ pub enum BackgroundEvent {
         /// The camera whose recording it is, which is what says whether this
         /// answer still belongs to the recording on screen.
         camera_id: String,
+        /// The range that was asked for. Answers are matched against this, so a
+        /// prefetch cached under a wide range is still recognised when the seek
+        /// that wanted it arrives.
         window: (i64, i64),
+        /// The range the playlist was actually served for. A wide range can be
+        /// refused by boxes whose vod module overflows, in which case it is
+        /// retried narrower; playback opens on this one. Equal to `window` when
+        /// the first request worked.
+        served_window: (i64, i64),
         /// The moment asked for, which the stretch is played from.
         at: i64,
         playlist: Option<VodPlaylist>,

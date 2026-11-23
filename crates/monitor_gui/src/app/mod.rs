@@ -2527,16 +2527,25 @@ impl XgViewApp {
                         );
                     }
                 }
-                BackgroundEvent::PlaylistReady { index, camera_id, window, at, playlist, gen } => {
+                BackgroundEvent::PlaylistReady { index, camera_id, window, served_window, at, playlist, gen } => {
                     match *gen {
                         // Read ahead of the finger: kept until a seek wants it.
                         None => {
-                            self.range_arrived(*index, camera_id.clone(), *window, playlist.clone());
+                            self.range_arrived(
+                                *index,
+                                camera_id.clone(),
+                                *window,
+                                *served_window,
+                                playlist.clone(),
+                            );
                         }
                         // A seek's own answer, and only the newest seek's is
                         // played: an older one is a moment already left behind.
+                        // Playback opens on the range actually served, which can
+                        // be narrower than the one asked for when a wide request
+                        // was refused.
                         Some(gen) if self.seek_is_current(gen) => {
-                            self.start_seek(*index, camera_id.clone(), *window, *at, playlist.clone());
+                            self.start_seek(*index, camera_id.clone(), *served_window, *at, playlist.clone());
                         }
                         Some(_) => {}
                     }

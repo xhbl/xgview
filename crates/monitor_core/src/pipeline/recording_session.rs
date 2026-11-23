@@ -588,6 +588,7 @@ pub(super) async fn run_recording_session(
                                     target: "xgview::pipeline",
                                     index,
                                     len = sample.data.len(),
+                                    keyframe = sample.keyframe,
                                     %err,
                                     "recording sample rejected by decoder",
                                 );
@@ -842,10 +843,27 @@ impl Recording {
     fn jump_to(&mut self, at: i64) -> bool {
         match self {
             Self::Clip { .. } => false,
-            Self::Vod { playlist, next, response, ahead, .. } => {
+            Self::Vod { playlist, next, response, ahead, init_reuse, .. } => {
                 let index = fragment_at(playlist, at);
                 *next = index;
                 *response = None;
+                // A seek leaves the decoder behind. Frigate's fragments carry no
+                // parameter sets of their own - the init segment is read once,
+                // before the first fragment, and configures the decoder for the
+                // whole session. A decoder kept across a jump keeps the old
+                // sequence state: samples from the fragment landed on are then
+                // decoded against a stale reference (or, after a camera change,
+                // stale parameter sets), so pictures stop coming out while the
+                // sample clock keeps running - the picture stands still and only
+                // the occasional keyframe shows through. Re-read the init segment
+                // so the loop sees a fresh init, rebuilds the decoder from it and
+                // feeds the parameter sets again, exactly as a new range does.
+                // INIT_FRESH already caches these bytes, so this costs no extra
+                // request when the camera has not been reconfigured.
+                if let Some(reuse) = init_reuse.as_mut() {
+                    reuse.read = false;
+                    reuse.bytes = None;
+                }
                 // What is in hand is the fragment after the one being left, and
                 // a jump that does not land on it is a fragment nothing is going
                 // to read from here: kept, it would be the slot every read-ahead
@@ -1556,11 +1574,17 @@ mod tests {
         assert_eq!(*next, 1, "the fragment that holds 125");
     }
 
-    /// A jump moves the reading to another fragment and never makes it skip the
-    /// init segment: one that has not been read yet still is, and one that has is
-    /// not fetched twice.
+    /// A jump moves the reading to another fragment and puts the init segment
+    /// back to unread, so the decoder is rebuilt from its parameter sets.
+    ///
+    /// A jump before the first read leaves it unread as before. One after the
+    /// read is marked unread again: the fragments carry no parameter sets of
+    /// their own, and a decoder kept across a jump decodes the new fragment
+    /// against stale sequence state - the picture stands still until a keyframe
+    /// happens to come out. Re-reading the init (served from the cache when the
+    /// camera has not changed) rebuilds the decoder and feeds the sets again.
     #[test]
-    fn a_jump_moves_the_reading_and_never_skips_the_init_segment() {
+    fn a_jump_moves_the_reading_and_re_reads_the_init_segment() {
         let mut source = Recording::vod(three_fragments(), None, None, "cam-a-jump-before-read");
         assert!(source.jump_to(135), "a playlist can jump");
         let Recording::Vod { next, init_reuse, .. } = &source else {
@@ -1572,11 +1596,12 @@ mod tests {
             "a jump before the first read still fetches it"
         );
 
-        // And the reading the session has already done is not undone: the init
-        // segment stays read, and only the fragment moves.
+        // A jump after the init was read puts it back to unread. The bytes may
+        // be cached, but the loop must see the init again to rebuild the decoder.
         let mut source = Recording::vod(three_fragments(), None, None, "cam-a-jump-after-read");
         if let Recording::Vod { init_reuse: Some(reuse), .. } = &mut source {
             reuse.read = true;
+            reuse.bytes = Some(Bytes::from_static(b"\x00\x00\x00\x08ftypisom"));
         }
         assert!(source.jump_to(101));
         let Recording::Vod { next, init_reuse, .. } = &source else {
@@ -1584,8 +1609,12 @@ mod tests {
         };
         assert_eq!(*next, 0, "backwards is the same move");
         assert!(
-            init_reuse.as_ref().is_some_and(|reuse| reuse.read),
-            "and the init segment is not fetched again"
+            !init_reuse.as_ref().is_some_and(|reuse| reuse.read),
+            "and the init segment is read again to rebuild the decoder"
+        );
+        assert!(
+            init_reuse.as_ref().is_some_and(|reuse| reuse.bytes.is_none()),
+            "the stale cached bytes are let go so a fresh read happens"
         );
     }
 

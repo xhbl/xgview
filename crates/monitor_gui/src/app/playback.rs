@@ -1590,6 +1590,7 @@ impl XgViewApp {
         index: usize,
         camera_id: String,
         window: (i64, i64),
+        served_window: (i64, i64),
         playlist: Option<VodPlaylist>,
     ) {
         let wanted = {
@@ -1617,7 +1618,7 @@ impl XgViewApp {
             playback.ahead = None;
             playback.awaiting = None;
         }
-        self.start_seek(index, camera_id, window, wanted, playlist);
+        self.start_seek(index, camera_id, served_window, wanted, playlist);
     }
 
     /// Asks a channel to play a stretch of a recording, and says which stretch
@@ -4006,6 +4007,18 @@ const HOLE_LIMIT: i64 = 30 * 24 * 3600;
 /// of 2.5 hours is served and one of 3 hours is `503`.
 const RANGE_CAP: i64 = 7200;
 
+/// The range to fall back to when the box refuses the wide one.
+///
+/// Some boxes (Frigate 0.18 with its bundled nginx vod module) answer `502` to
+/// a playlist whose range spans too many recorded fragments - the durations
+/// array the module builds overflows. A range of about fifteen minutes or less
+/// is served; anything wider can fail. A seek whose wide range is refused is
+/// retried around the moment asked for at this width, which is the same answer
+/// the player would have got from a narrow timeline and keeps the recording
+/// playing instead of falling back to a `clip.mp4` that the same box no longer
+/// serves at all.
+const PLAYLIST_RETRY_SPAN: i64 = 900;
+
 /// The next width up or down the ladder, or `None` at an end of it.
 ///
 /// The ends are the ends: two buttons that wrapped would make "one step more
@@ -5140,13 +5153,24 @@ fn start_window(
         // where a `clip.mp4` is cut.
         let width = RANGE_CAP;
         let range = window_at(&segments, range_start(&segments, at, width / 2), width);
-        let playlist = match (range, client.as_mut()) {
-            (Some(range), Some(client)) => {
-                read_playlist(client, &source.origin.camera, range).await
+        // A wide range can be refused by boxes whose vod module overflows on
+        // long ranges (Frigate's nginx answers 502). Retry around the moment at
+        // a width the box serves rather than giving up and using a `clip.mp4`
+        // that the same box no longer has.
+        let mut playlist = None;
+        let mut served_range = range;
+        if let (Some(range), Some(client)) = (range, client.as_mut()) {
+            playlist = read_playlist(client, &source.origin.camera, range).await;
+            if playlist.is_none() {
+                let half = PLAYLIST_RETRY_SPAN / 2;
+                let retry = (at - half, at + half);
+                if retry != range {
+                    served_range = Some(retry);
+                    playlist = read_playlist(client, &source.origin.camera, retry).await;
+                }
             }
-            _ => None,
-        };
-        let (window, begin) = match (&playlist, range) {
+        }
+        let (window, begin) = match (&playlist, served_range) {
             (Some(_), Some(range)) => (Some(range), Some(begin_in(range, at))),
             _ => (window_at(&segments, at, WINDOW), None),
         };
@@ -5182,14 +5206,33 @@ fn start_playlist(
     handle.spawn(async move {
         let (user, pass) = source.credentials.clone().unwrap_or_default();
         let config = FrigateConfig::at(&source.origin.base_url, &user, &pass);
-        let playlist = match FrigateClient::new(config) {
-            Ok(mut client) => read_playlist(&mut client, &source.origin.camera, window).await,
-            Err(_) => None,
-        };
+        let mut playlist = None;
+        // The range a seek asks for is deliberately wide, so a drag inside it
+        // costs no new session. Some boxes refuse a wide playlist (Frigate's
+        // nginx vod answers 502 once the range holds too many fragments), and
+        // the old answer was to give up and play a `clip.mp4` - an endpoint the
+        // same boxes no longer have, which is a recording that stops for ever.
+        // Retry around the moment at a width the box does serve, and hand the
+        // range that actually worked back with the playlist so the session is
+        // opened on it.
+        let mut served_window = window;
+        if let Ok(mut client) = FrigateClient::new(config) {
+            playlist = read_playlist(&mut client, &source.origin.camera, window).await;
+            if playlist.is_none() {
+                let half = PLAYLIST_RETRY_SPAN / 2;
+                let retry = (at - half, at + half);
+                if retry != window {
+                    served_window = retry;
+                    playlist =
+                        read_playlist(&mut client, &source.origin.camera, retry).await;
+                }
+            }
+        }
         let _ = sender.send(BackgroundEvent::PlaylistReady {
             index,
             camera_id: source.camera,
             window,
+            served_window,
             at,
             playlist,
             gen,
