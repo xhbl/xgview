@@ -43,10 +43,28 @@ Options:
   -V, --version        Print the version
 ";
 
+#[cfg(windows)]
+#[link(name = "winmm")]
+extern "system" {
+    #[link_name = "timeBeginPeriod"]
+    fn time_begin_period(period: u32) -> u32;
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     setup_console(&args);
     init_logging();
+
+    // A live picture's pace is placed on this machine's timers, and Windows
+    // gives a process a timer period of 15.6 ms by default: a sleep asked for
+    // fifty milliseconds comes back at sixty-two. Measured on the doorbell's
+    // main stream, the interval between two handovers ran 36 to 63 ms around a
+    // mean of 50; asked for at one millisecond it ran 48 to 51. Without this the
+    // lead has nothing steady to place a picture against, whatever its depth.
+    #[cfg(windows)]
+    unsafe {
+        time_begin_period(1);
+    }
 
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         cli_print(HELP);
