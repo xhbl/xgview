@@ -957,14 +957,16 @@ impl XgViewApp {
                                 ui.close();
                             }
                         }
-                        if !camera.is_ws_stream() {
-                            let connection = monitor_i18n::tr_args(
-                                "camera-context-connection",
-                                &[("next", camera.connection_label_for(camera.next_connection()).into())],
-                            );
-                            if ui.button(connection).clicked() {
-                                actions.connection_change = Some(camera_index);
-                                ui.close();
+                        use monitor_core::model::ConnectionStop;
+                        match camera.connection_stop() {
+                            ConnectionStop::RtspTcp | ConnectionStop::RtspUdp => {
+                                ui.label(monitor_i18n::tr_args(
+                                    "camera-context-rtsp-transport",
+                                    &[("transport", camera.transport.as_str().into())],
+                                ));
+                            }
+                            ConnectionStop::Auto | ConnectionStop::Mse => {
+                                ui.label(camera.connection_label());
                             }
                         }
                     });
@@ -1313,8 +1315,8 @@ impl XgViewApp {
 
             if let Some(index) = actions.edit_camera {
                 if let Some(&slot) = slots.get(index) {
-                    if let Some(draft) = self.config.cameras.get(slot).map(CameraDraft::from_source) {
-                        self.camera_edit.open(CameraEdit { slot, draft });
+                    if let Some(camera) = self.config.cameras.get(slot) {
+                        self.camera_edit.open(CameraEdit::new(slot, camera));
                         self.camera_edit.from = None;
                     }
                 }
@@ -1334,7 +1336,6 @@ impl XgViewApp {
         if actions.picture_fit.is_some()
             || actions.picture_fit_zoom.is_some()
             || actions.stream_change.is_some()
-            || actions.connection_change.is_some()
         {
             let slots = self.config.active_slots();
             if let Some(index) = actions.picture_fit {
@@ -1360,15 +1361,6 @@ impl XgViewApp {
                 if let Some(&slot) = slots.get(index) {
                     if let Some(camera) = self.config.cameras.get_mut(slot) {
                         camera.advance_stream();
-                    }
-                    self.needs_sync = true;
-                    self.mark_dirty();
-                }
-            }
-            if let Some(index) = actions.connection_change {
-                if let Some(&slot) = slots.get(index) {
-                    if let Some(camera) = self.config.cameras.get_mut(slot) {
-                        camera.advance_connection();
                     }
                     self.needs_sync = true;
                     self.mark_dirty();
@@ -2549,12 +2541,14 @@ mod tests {
         for key in [
             "camera-context-picture-fit",
             "camera-context-stream",
-            "camera-context-connection",
+            "camera-context-rtsp-transport",
         ] {
             assert!(source.contains(key), "missing context entry: {key}");
         }
         let lookup = format!("cameras.get({})", "camera_index");
         assert!(source.contains(&lookup), "the menu reads the camera it names");
+        let old_action = ["advance", "connection"].join("_");
+        assert!(!source.contains(&old_action), "the wall cannot change transport");
         // The label shown and the fit advanced must both follow the wall the
         // viewer is looking at: on the wall, the orientation's fit; magnified,
         // the picture's own fit. Both labels are computed by `next`, then have

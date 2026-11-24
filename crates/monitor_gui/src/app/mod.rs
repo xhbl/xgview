@@ -791,6 +791,19 @@ struct CameraEdit {
     /// edit came from shows.
     slot: usize,
     draft: CameraDraft,
+    transport: monitor_core::model::RtspTransport,
+    connect: monitor_core::model::ConnectionMode,
+}
+
+impl CameraEdit {
+    fn new(slot: usize, camera: &CameraSource) -> Self {
+        Self {
+            slot,
+            draft: CameraDraft::from_source(camera),
+            transport: camera.transport,
+            connect: camera.connect,
+        }
+    }
 }
 
 /// A camera the settings panel is asking about removing.

@@ -2,6 +2,7 @@
 //! confirmations and the passphrase prompt.
 
 use super::*;
+use monitor_core::model::{ConnectionMode, ConnectionStop, RtspTransport};
 
 impl XgViewApp {
     /// The window one camera of the settings panel is edited in.
@@ -43,6 +44,38 @@ impl XgViewApp {
                     dialogs::camera_fields(ui, &mut app.nav, "edit-camera", &mut edit.draft, camera);
                 // The dialog opens on the first control of the form.
                 app.camera_edit.anchor = fields.first;
+                if let Some(camera) = camera.filter(|camera| !camera.is_ws_stream()) {
+                    if camera.has_mse() {
+                        ui.horizontal(|ui| {
+                            ui.label(monitor_i18n::tr("camera-connection-mode"));
+                            for (mode, label) in [
+                                (ConnectionMode::Auto, "AUTO"),
+                                (ConnectionMode::Rtsp, "RTSP"),
+                                (ConnectionMode::Mse, "MSE"),
+                            ] {
+                                let option = ui.selectable_value(&mut edit.connect, mode, label);
+                                app.nav.item(&option);
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(monitor_i18n::tr("camera-rtsp-transport"));
+                        for transport in [RtspTransport::Tcp, RtspTransport::Udp] {
+                            if transport == RtspTransport::Udp
+                                && !camera.connection_stops().contains(&ConnectionStop::RtspUdp)
+                                && camera.transport != RtspTransport::Udp
+                            {
+                                continue;
+                            }
+                            let option = ui.selectable_value(
+                                &mut edit.transport,
+                                transport,
+                                transport.as_str(),
+                            );
+                            app.nav.item(&option);
+                        }
+                    });
+                }
                 ui.add_space(theme::space::M);
                 let mut save = false;
                 let mut cancel = false;
@@ -80,14 +113,20 @@ impl XgViewApp {
 
                 if save {
                     match edit.draft.build() {
-                        Ok(source) => {
+                        Ok(mut source) => {
+                            source.transport = edit.transport;
+                            source.connect = edit.connect;
                             // Only what the form shows is written back. The entry
-                            // keeps its identifier, its origin, its transport and
+                            // keeps its identifier, its origin and
                             // everything else the form has no field for - the
                             // display aspect among them - so an edit to a name or
                             // a url cannot reset them.
                             match app.config.cameras.get_mut(edit.slot) {
-                                Some(camera) => camera.apply_edit(&source),
+                                Some(camera) => {
+                                    camera.apply_edit(&source);
+                                    camera.transport = source.transport;
+                                    camera.connect = source.connect;
+                                }
                                 None => {
                                     app.config.upsert_camera(source);
                                 }

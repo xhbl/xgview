@@ -1010,6 +1010,21 @@ mod tests {
     }
 
     #[test]
+    fn changing_transport_reactivates_only_that_channel() {
+        let mut cameras = cameras(4);
+        let mut scheduler = Scheduler::new(GridLayout::G2x2, 0, Some(0), cameras.len());
+        assert_eq!(scheduler.refresh(&cameras).len(), 4);
+        assert!(scheduler.refresh(&cameras).is_empty());
+
+        cameras[1].transport = RtspTransport::Udp;
+        assert!(matches!(
+            scheduler.refresh(&cameras).as_slice(),
+            [ScheduleChange::Activate { index: 1, previous_stream: None, .. }]
+        ));
+        assert!(scheduler.refresh(&cameras).is_empty());
+    }
+
+    #[test]
     fn page_turn_changes_the_live_set() {
         let cameras = cameras(8);
         let mut scheduler = Scheduler::new(GridLayout::G2x2, 0, Some(0), cameras.len());

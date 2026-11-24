@@ -25,7 +25,6 @@ struct RowActions {
     edit: Option<(usize, Option<Id>)>,
     aspect_change: Option<(usize, TileAspect)>,
     infer: Option<usize>,
-    connect_change: Option<usize>,
     stream_change: Option<usize>,
 }
 
@@ -263,20 +262,10 @@ impl XgViewApp {
             }
         }
         if let Some((slot, from)) = actions.edit {
-            let draft = self.config.cameras.get(slot).map(CameraDraft::from_source);
-            if let Some(draft) = draft {
-                self.camera_edit.open(CameraEdit { slot, draft });
+            if let Some(camera) = self.config.cameras.get(slot) {
+                self.camera_edit.open(CameraEdit::new(slot, camera));
                 self.camera_edit.from = from;
             }
-        }
-        if let Some(slot) = actions.connect_change {
-            if let Some(camera) = self.config.cameras.get_mut(slot) {
-                camera.advance_connection();
-            }
-            // The connection is part of the schedule plan, so the channel is
-            // reopened with the new one on the next sync.
-            self.needs_sync = true;
-            dirty = true;
         }
         if let Some(slot) = actions.stream_change {
             if let Some(camera) = self.config.cameras.get_mut(slot) {
@@ -353,22 +342,8 @@ impl XgViewApp {
                     actions.stream_change = Some(slot);
                 }
             }
-            // The connection switch: a press moves the camera on to the next
-            // stop it offers - `AUTO/RTSP/MSE` for a camera with an MSE
-            // address, `TCP/UDP` for one on RTSP alone. Its tip names what it
-            // switches: the protocol where there are two to choose from, the
-            // RTSP transport where there is only RTSP. A camera carried over
-            // a WebSocket url has a single transport, so it has nothing to
-            // switch and the button is left off.
             if !camera.is_ws_stream() {
-                let tip = if camera.has_mse() { "cameras-connect-tip" } else { "cameras-transport-tip" };
-                let connect_button = ui
-                    .small_button(RichText::new(camera.connection_label()).small().color(theme::ACCENT))
-                    .on_hover_text(monitor_i18n::tr(tip));
-                self.nav.item(&connect_button);
-                if connect_button.clicked() {
-                    actions.connect_change = Some(slot);
-                }
+                ui.label(RichText::new(camera.connection_label()).small());
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // The edit icon stays on the controller row; the remove icon

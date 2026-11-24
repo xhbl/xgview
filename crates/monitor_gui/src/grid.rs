@@ -304,7 +304,6 @@ pub struct TileActions {
     /// they will see after leaving the magnification.
     pub picture_fit_zoom: Option<usize>,
     pub stream_change: Option<usize>,
-    pub connection_change: Option<usize>,
     pub zoom: Option<usize>,
     pub drag_started: bool,
     pub drag_delta: f32,
