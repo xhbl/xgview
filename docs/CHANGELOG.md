@@ -3,6 +3,49 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 2.3.53
+
+Changes since 2.3.38.
+
+- **Smoother live pictures.** A live channel could stutter while the same
+  camera's recordings played smoothly. The buffer that keeps a live picture's
+  pacing steady was being spent on the first frame instead of held, and a healthy
+  queue was then mistaken for a backlog and flushed once a second. Both are
+  fixed: pictures now reach the screen at an even interval, at the cost of a
+  fraction of a second of delay, which is the buffer doing its job. On Windows
+  the system timer no longer rounds a picture's interval up either.
+- **Smoother magnified picture and playback.** Both are painted on every screen
+  refresh rather than on a timer, so a picture no longer stays up one refresh
+  longer than the one before it. The grid keeps its timer, where the extra
+  repaints bought nothing visible.
+- **The tile menu follows what is on screen.** Magnified, Picture fit cycles the
+  camera's zoom fit instead of the wall's grid fit, and Stream is left out
+  because magnification pins the main stream. During playback the camera menu is
+  not drawn at all; clicks, drags and paging still work.
+- **Audio output opens only when it can be heard** - a magnified, unmuted
+  picture - instead of holding an idle stream open on the grid. A failed open is
+  remembered for that stretch rather than retried on every page turn.
+- **Fixed:** paging to a group with no cameras no longer grows memory on every
+  switch, and a suspended channel no longer hands its last frame back to the
+  renderer.
+- **Fixed:** the Debian kiosk installer installs the VAAPI driver it was supposed
+  to, no longer confuses `non-free-firmware` with `non-free`, stays idempotent,
+  and restarts without racing X or hanging up its own console.
+- **Fixed:** the Linux restart button is drawn only where the session is
+  authorised to reboot.
+- **Fixed:** Frigate integration - main and sub are no longer reversed when the
+  main size is unavailable, recordings refused a wide playlist range retry on a
+  narrow one, a seek rebuilds its decoder from a fresh init segment, and a
+  prefetched answer opens on the range the server sent.
+- **Fixed:** opening a recording no longer flashes the previous camera's last
+  frame.
+- **Fixed:** recordings on Android no longer play in jumps, where one decoder
+  released its whole output queue at once and only the last picture was ever
+  seen.
+- **Documented:** on Android 14 and newer, an unattended device can still sleep
+  from `Settings.Secure.ATTENTIVE_TIMEOUT` even with the wake lock held; the
+  README notes how to turn that timer off while provisioning.
+
 ## 2.3.38
 
 Changes since 2.3.25.
