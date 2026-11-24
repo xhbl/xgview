@@ -732,15 +732,41 @@ pub(super) async fn run_session(
 /// a lead shorter than that has nothing in hand to place, so each picture is
 /// handed the moment it lands and the arrival jitter is played out on the
 /// screen. One frame is what makes a slow stream even.
+///
+/// What it widens to is the ceiling's business: the doorbell - five megapixels
+/// at twenty a second, the heaviest picture here - settles around three hundred
+/// and twenty milliseconds, because that is what its batches cost. Forty is the
+/// first picture's delay and the delay of a stream that never strains.
 const LIVE_LEAD: Duration = Duration::from_millis(40);
 
 /// The narrowest and widest the lead is allowed to become.
 ///
 /// The floor is the smallest distance that still leaves a picture a place of its
 /// own before the one behind it; the ceiling is where a second of delay would
-/// begin to be felt as a lag rather than as a buffer.
+/// begin to be felt as a lag rather than as a buffer. Four hundred is under that,
+/// and it is where the doorbell settles.
+///
+/// A hundred and sixty was the ceiling, and the doorbell sat on it. Its main
+/// stream is five megapixels at twenty a second, the batches it arrives in are
+/// separated by anything from three milliseconds to two hundred and twenty-nine,
+/// and three pictures of lead were emptied by them about once a second: the
+/// handover spacing measured 37 to 61 milliseconds around a mean of 49, and one
+/// picture in ten stayed up sixty to a hundred and forty - the stutter the eye
+/// caught while every counter said the pacing was exact. Given the room, the
+/// same stream settled at three hundred and twenty and handed over between 48 and
+/// 51, with the pictures out of step under one percent.
 const LIVE_LEAD_MIN: Duration = Duration::from_millis(20);
-const LIVE_LEAD_MAX: Duration = Duration::from_millis(160);
+const LIVE_LEAD_MAX: Duration = Duration::from_millis(400);
+
+/// What the frame interval is taken to be before two pictures have said
+/// otherwise: twenty-five a second, the commonest sub-stream.
+///
+/// The lead and the interval were one number while the lead was forty
+/// milliseconds, which was also a plausible frame. They are not the same
+/// question any more: a quarter of a second read as a frame interval would space
+/// a session's first pictures a quarter of a second apart, and the average that
+/// corrects it needs a window to fill.
+const LIVE_INTERVAL_START: Duration = Duration::from_millis(40);
 
 /// The shortest and longest gap between two pictures that still reads as a frame
 /// interval.
@@ -976,25 +1002,17 @@ struct LivePacer {
     handed: u64,
     dropped: u64,
     moved: u64,
-    /// Whether the clock is still opening, and how many pictures were folded
-    /// into the one moment they are all shown at.
+    /// Whether the clock has yet to hand over its first picture.
     ///
-    /// A stream that was already sending when the session joined arrives as a
-    /// crowd - the forwarder flushing what it buffered - and anchoring on the
-    /// first of those pictures would keep the viewer that far behind the wire
-    /// for as long as the session lasts.
-    ///
-    /// The fold ends at the first picture the loop actually hands over, which
-    /// covers a crowd that arrives before the first moment comes: with the lead
-    /// at a hundred and sixty milliseconds, two pictures of a twenty-five frame
-    /// stream. A forwarder that flushes more than that is not lost, only caught
-    /// late: the queue stays deeper than a batch, and `deep_since` folds it back
-    /// to the present a second later, which the viewer sees as one jump rather
-    /// than as half a second of lag.
+    /// The anchor is a picture's arrival, so every picture of a stream that was
+    /// already sending arrives after its own moment by about the whole lead:
+    /// what the wire is doing cannot be measured until one has been handed over
+    /// and the clock is placing pictures against the stream rather than against
+    /// the session's own start.
     opening: bool,
+    /// How many times the queue was folded to its newest picture, because what
+    /// it held was the past rather than a buffer.
     folded: u64,
-    /// When the queue first went deeper than a batch, if it still is.
-    deep_since: Option<Instant>,
     widened: u64,
     narrowed: u64,
     /// Whether the last thing that moved the lead was a narrowing rather than a
@@ -1027,6 +1045,15 @@ struct LivePacer {
     gap_max: Duration,
     gap_min: Duration,
     last_handed: Option<Instant>,
+    /// Whether the lead was fixed from outside and is not to be retuned.
+    ///
+    /// See [`LivePacer::pinned_by_env`]: a measurement taken while the clock
+    /// moves under it is measuring the clock and not the stream.
+    pinned: bool,
+    /// How many times the clock was thrown away and rebuilt on a timestamp
+    /// jump. A count that climbs with the pictures handed over says the stream
+    /// keeps restarting its timestamps and no buffer can form.
+    resets: u32,
 }
 
 impl Default for LivePacer {
@@ -1043,7 +1070,7 @@ impl Default for LivePacer {
             step_count: 0,
             queue: VecDeque::new(),
             lead: LIVE_LEAD,
-            interval: LIVE_LEAD,
+            interval: LIVE_INTERVAL_START,
             window: Instant::now(),
             late: 0,
             starved: Duration::ZERO,
@@ -1054,7 +1081,6 @@ impl Default for LivePacer {
             moved: 0,
             opening: false,
             folded: 0,
-            deep_since: None,
             widened: 0,
             narrowed: 0,
             pending_narrowing: false,
@@ -1068,7 +1094,44 @@ impl Default for LivePacer {
             gap_max: Duration::ZERO,
             gap_min: Duration::MAX,
             last_handed: None,
+            pinned: false,
+            resets: 0,
         }
+    }
+}
+
+impl LivePacer {
+    /// The same clock, held at a lead a test run asks for.
+    ///
+    /// `XGVIEW_LIVE_LEAD_MS` fixes the lead and stops it being retuned in
+    /// either direction - widened when a picture arrives late, narrowed when
+    /// the stream stops straining. The question a hand-set lead answers is
+    /// whether a stream whose buffer is deep enough by construction plays
+    /// smoothly; a clock that keeps moving under the measurement answers
+    /// whether the retuning works instead.
+    ///
+    /// Nothing set, or something that is not a plausible delay, leaves the
+    /// stream paced exactly as it is.
+    fn pinned_by_env(self) -> Self {
+        let Ok(text) = std::env::var("XGVIEW_LIVE_LEAD_MS") else {
+            return self;
+        };
+        let Ok(ms) = text.trim().parse::<u64>() else {
+            return self;
+        };
+        if !(1..=4000).contains(&ms) {
+            return self;
+        }
+        Self {
+            lead: Duration::from_millis(ms),
+            pinned: true,
+            ..self
+        }
+    }
+
+    /// Whether the lead is fixed from outside.
+    fn is_pinned(&self) -> bool {
+        self.pinned
     }
 }
 
@@ -1129,18 +1192,15 @@ impl LivePacer {
         }
         let at = self.held;
         self.queue.push_back(HeldPicture { at, unit });
-        // Nothing has been handed over yet, so the clock is still finding where
-        // the stream is now. A stream that opened while the camera was already
-        // sending arrives as a crowd - a forwarder flushing what it buffered
-        // before the session joined - and anchoring on the first of those would
-        // pin the viewer that far behind the wire for as long as the session
-        // lasts. The anchor follows the newest instead: the crowd ends up
-        // sharing one moment, and the pictures before it are decoded as fast as
-        // the decoder takes them, which is a stream settling and not a stutter.
-        if self.opening {
-            self.reanchor(at, raw, now);
-            self.folded += 1;
-        }
+        // The anchor taken when the clock started is kept, including the lead
+        // placed on it. Re-anchoring on every picture of the opening put the
+        // anchor at "now" each time, and a moment placed at now has already
+        // passed by the time the next picture is asked for: the lead was spent
+        // on the first picture and never came back, so the queue stayed empty
+        // and every handover was one the clock had reached late. A crowd - a
+        // forwarder flushing what it buffered before the session joined - is
+        // handled below by giving up the run, which catches up without
+        // spending the buffer.
         while self.queue.len() > LIVE_MAX_HELD {
             // Give up a run rather than a picture. Every picture but the newest
             // is predicted from the one before it, so dropping the oldest
@@ -1200,24 +1260,26 @@ impl LivePacer {
             }
         }
         self.deepest = self.deepest.max(self.queue.len());
-        // A batch fills the queue for a frame or two and is gone. A queue still
-        // deeper than a batch a second later is not a batch: it is a wire that
-        // was already sending when the session joined, and the pictures in it are
-        // the past. The clock moves to the newest of them, and the ones before it
-        // are decoded as fast as the decoder takes them - a stream settling, not a
-        // viewer left half a second behind for as long as the session lasts.
-        if self.queue.len() > LIVE_BATCH_PICTURES {
-            let since = *self.deep_since.get_or_insert(now);
-            if now.duration_since(since) >= LIVE_CROWD_AFTER {
-                if let Some(back) = self.queue.back() {
-                    let (at, raw) = (back.at, back.unit.timestamp);
-                    self.reanchor(at, raw, now);
-                    self.folded += 1;
-                }
-                self.deep_since = None;
+        // A queue deeper than a batch is what a buffer looks like, not what a
+        // backlog looks like: a lead of four hundred milliseconds holds eight
+        // pictures of a twenty-a-second stream, and reading the depth as a
+        // backlog folded that buffer away once a second - the stream was then
+        // paced from the wire with no room in hand, which is the stutter this
+        // was meant to remove. What says the wire was already sending when the
+        // session joined is the picture in front being a second past its own
+        // moment; the queue is the past then, and the clock moves to the newest
+        // of them.
+        let front_overdue = self
+            .queue
+            .front()
+            .map(|front| now.saturating_duration_since(self.moment(front.at)))
+            .unwrap_or_default();
+        if self.queue.len() > LIVE_BATCH_PICTURES && front_overdue >= LIVE_CROWD_AFTER {
+            if let Some(back) = self.queue.back() {
+                let (at, raw) = (back.at, back.unit.timestamp);
+                self.reanchor(at, raw, now);
+                self.folded += 1;
             }
-        } else {
-            self.deep_since = None;
         }
     }
 
@@ -1294,7 +1356,7 @@ impl LivePacer {
     /// what a clock moved this way did once.
     fn reanchor(&mut self, at: i64, raw: u32, now: Instant) {
         self.anchor_at = at;
-        self.anchor_wall = now.checked_sub(self.lead).unwrap_or(now);
+        self.anchor_wall = now;
         // The place the timestamps are measured from moves with the clock, or
         // the distance to them would be read against a picture that is no longer
         // where the clock says the present is.
@@ -1389,6 +1451,12 @@ impl LivePacer {
     /// narrows again for as long as the session lasts, and every one of those
     /// steps is a picture's moment moving under the viewer.
     fn retune(&mut self, now: Instant) {
+        // A lead fixed from outside is not a lead to reconsider: the run is
+        // asking what this setting plays like, and would be answered by a
+        // different one if the clock were let loose.
+        if self.pinned {
+            return;
+        }
         if now.duration_since(self.window) < LIVE_RETUNE {
             return;
         }
@@ -1466,6 +1534,7 @@ impl LivePacer {
     }
 
     fn clear(&mut self) {
+        self.resets = self.resets.saturating_add(1);
         self.queue.clear();
         self.started = false;
         self.held = 0;
@@ -1475,7 +1544,6 @@ impl LivePacer {
         self.step_count = 0;
         self.starved = Duration::ZERO;
         self.opening = false;
-        self.deep_since = None;
         // A reconnect is a different stream until it says otherwise: a camera
         // that restarted may have a new group of pictures or a new key frame
         // interval, and the proof that the old one needed its lead is not
@@ -1774,7 +1842,7 @@ impl<'a> RtspSession<'a> {
             talk_sender,
             decoder,
             depacketizer,
-            pacer: LivePacer::default(),
+            pacer: LivePacer::default().pinned_by_env(),
             baseline_fix,
             sequence,
             decode_errors,
@@ -2226,7 +2294,19 @@ impl<'a> RtspSession<'a> {
     /// hundred and twenty milliseconds, and a decoder that fell behind would be
     /// handed them a loop iteration apart instead of at once.
     fn hand_over_due(&mut self) {
-        while let Some(unit) = self.pacer.due(Instant::now()) {
+        // One per pass, not a run of them.
+        //
+        // The loop above used to hand over every picture whose moment had come,
+        // and a moment is a thing a slow decode can miss: five megapixels cost
+        // six and a half milliseconds to decode and copy back, and a batch of
+        // four arriving while the last was still being read leaves two or three
+        // due at once. Those were then handed over six milliseconds apart and
+        // published six milliseconds apart - an interval the eye reads as a
+        // stutter followed by a wait, on a stream whose timestamps are fifty
+        // milliseconds apart to the tenth. One per pass leaves the rest in the
+        // queue for the passes that follow, and the interval between handovers
+        // is then the loop's own clock rather than the decoder's.
+        if let Some(unit) = self.pacer.due(Instant::now()) {
             self.decode_unit(unit);
         }
     }
@@ -2462,6 +2542,7 @@ impl<'a> RtspSession<'a> {
         if !self.window.due() {
             return;
         }
+        let now = Instant::now();
         let seconds = self.window.seconds();
         let fps = self.window.counters.fps(seconds);
         let kbps = self.window.counters.kbps(seconds);
@@ -2519,6 +2600,20 @@ impl<'a> RtspSession<'a> {
             moved_clock = self.pacer.moved,
             folded = self.pacer.folded,
             lead_ms = self.pacer.lead.as_millis() as u64,
+            // Whether that lead was fixed from outside rather than learned, so
+            // a run that is asked to hold one can be told from one that is not.
+            pinned = self.pacer.is_pinned(),
+            // How long ago the clock was anchored, and how much longer the
+            // picture in front has to wait. A lead that is being held shows as
+            // a wait of about its own length; a wait near zero says the moment
+            // has been placed at the arrival and the lead is doing nothing.
+            anchor_age_ms = now.duration_since(self.pacer.anchor_wall).as_millis() as u64,
+            front_wait_ms = self
+                .pacer
+                .next_due()
+                .map(|due| due.saturating_duration_since(now).as_millis() as u64)
+                .unwrap_or(0),
+            resets = self.pacer.resets,
             // The stream's own rate, which is the floor the lead is held at: a
             // doorbell at twelve frames a second is eighty milliseconds a frame.
             frame_ms = self.pacer.interval.as_millis() as u64,
@@ -2736,11 +2831,12 @@ mod tests {
     }
 
     /// A stream that opens while the camera was already sending arrives as a
-    /// crowd, and the clock settles on the newest of it: the pictures before are
-    /// decoded as fast as the decoder takes them rather than played out one
-    /// frame at a time, which would leave the viewer that far behind for ever.
+    /// crowd. One less than a second behind is not folded: its pictures keep the
+    /// moments their timestamps name and come out one per frame, which is the
+    /// stream catching up at its own speed. Only a crowd that is the past is
+    /// folded - see `a_queue_that_is_the_past_is_folded_into_the_present`.
     #[test]
-    fn a_stream_that_opens_on_a_crowd_settles_on_the_newest_picture() {
+    fn a_stream_that_opens_on_a_crowd_keeps_its_own_timestamps() {
         let mut pacer = LivePacer::default();
         let start = Instant::now();
         // Eight pictures of a twelve frame a second stream arrive together, the
@@ -2749,22 +2845,29 @@ mod tests {
         for i in 0..8u32 {
             pacer.push(picture(SLOW * i, i == 0), start);
         }
-        assert_eq!(pacer.folded, 7, "the crowd was not folded into one moment");
-        // The whole crowd falls due at once, so the loop hands all of it over.
+        assert_eq!(
+            pacer.folded, 0,
+            "a crowd inside a second was folded into one moment"
+        );
+        // Played out a millisecond at a time, the way the loop reaches them:
+        // the eight span 581 milliseconds, so they are handed over one a piece.
         let mut handed = 0;
-        while pacer.due(start).is_some() {
-            handed += 1;
+        let mut now = start;
+        while handed < 8 && now < start + Duration::from_secs(2) {
+            now += Duration::from_millis(1);
+            while pacer.due(now).is_some() {
+                handed += 1;
+            }
         }
-        assert_eq!(handed, 8, "the crowd was played out instead of settled");
+        assert_eq!(handed, 8, "the crowd was not played out: {handed} pictures");
         assert!(!pacer.opening, "the clock never started");
         // What arrives next keeps its own moment, a frame after the last.
-        pacer.push(picture(SLOW * 8, false), start + Duration::from_millis(83));
+        pacer.push(picture(SLOW * 8, false), now);
         let next = pacer.next_due().expect("held");
         assert!(
             next.duration_since(start) >= pacer.lead,
             "the picture after the crowd was not placed at its own moment"
         );
-        assert_eq!(pacer.folded, 7, "the clock kept folding pictures in");
     }
 
     /// The sound is a crowd too, but not the picture's: an ordinary start of one
@@ -2781,11 +2884,14 @@ mod tests {
         assert_eq!(pacer.anchor_at, 0);
     }
 
-    /// A batch is gone within a frame or two. A queue that is still deeper than
-    /// one a second later is not a batch but a wire that was already sending, and
-    /// the clock moves to the newest picture rather than playing the past out.
+    /// A queue deeper than a batch is what a buffer looks like: a lead of a few
+    /// hundred milliseconds holds that many pictures and is not the past. What
+    /// makes it the past is the picture in front being a second past its own
+    /// moment - then the clock moves to the newest rather than playing the past
+    /// out one frame at a time, which would leave the viewer that far behind for
+    /// as long as the session lasts.
     #[test]
-    fn a_queue_that_stays_deep_is_folded_into_the_present() {
+    fn a_queue_that_is_the_past_is_folded_into_the_present() {
         let mut pacer = LivePacer::default();
         let start = establish(&mut pacer);
         const SLOW: u32 = 7500;
@@ -2795,21 +2901,30 @@ mod tests {
         }
         assert_eq!(pacer.queue.len(), 8);
         let before = pacer.folded;
-        // From then on the wire sends one per frame and the clock hands one per
-        // frame, so the queue keeps its depth - exactly what a batch does not do.
-        for i in 9..24u32 {
-            let now = start + Duration::from_micros(u64::from(i) * 83_333);
-            pacer.push(picture(SLOW * i, false), now);
-            while pacer.due(now).is_some() {}
+        // A second and more later the wire is still sending, and what it sends
+        // is a stretch that was recorded before the session joined.
+        let later = start + Duration::from_secs(2);
+        for i in 9..17u32 {
+            pacer.push(picture(SLOW * i, false), later);
         }
         assert!(
             pacer.folded > before,
-            "a queue that stayed deep for a second was kept as if it were a batch"
+            "a queue that was the past was kept as if it were a batch"
         );
+        // The whole queue now falls due together, so the loop is not left
+        // playing it out at one frame per frame interval. It falls due a lead
+        // after the anchor, which is where the queue after it also begins.
+        let mut handed = 0;
+        let mut now = later + pacer.lead;
+        while now < later + Duration::from_secs(3) && handed < 16 {
+            now += Duration::from_millis(1);
+            while pacer.due(now).is_some() {
+                handed += 1;
+            }
+        }
         assert!(
-            pacer.queue.len() <= LIVE_BATCH_PICTURES,
-            "the clock is still holding the past: {} pictures",
-            pacer.queue.len()
+            handed >= 8,
+            "the past was played out instead of settled: {handed} pictures"
         );
     }
 
@@ -2927,14 +3042,14 @@ mod tests {
         pacer.starved = Duration::from_millis(20);
         now += LIVE_RETUNE;
         pacer.retune(now);
-        assert_eq!(pacer.lead, LIVE_LEAD_MAX);
+        assert_eq!(pacer.lead, Duration::from_millis(170));
         assert_eq!(pacer.bounces, 2, "the second rebound was not counted");
         assert!(pacer.settled, "two rebounds did not settle the stream");
 
         // From here it keeps its lead: a minute of quiet does not narrow it.
         now += LIVE_TRIM_AFTER * 4;
         pacer.retune(now);
-        assert_eq!(pacer.lead, LIVE_LEAD_MAX, "a settled stream was narrowed anyway");
+        assert_eq!(pacer.lead, Duration::from_millis(170), "a settled stream was narrowed anyway");
     }
 
     /// A widening long after a narrowing is not that narrowing being undone:
@@ -3115,8 +3230,12 @@ mod tests {
         assert_eq!(pacer.dropped, 9, "the run before the key frame was not given up");
     }
 
-    /// A picture that is due and long past is not shown late: the clock moves to
-    /// it, so a decoder that fell behind does not turn into a growing delay.
+    /// A picture that is due and long past is shown now rather than played out
+    /// from where it should have been, so a decoder that fell behind does not
+    /// turn into a growing delay. The clock is anchored at the arrival and not
+    /// at a moment with the lead taken off it: the pictures after this one queue
+    /// into that lead, and spending it here leaves the queue empty for the rest
+    /// of the session - every handover then being one the clock reached late.
     #[test]
     fn a_clock_far_behind_the_wire_is_moved_to_the_picture() {
         let mut pacer = LivePacer::default();
@@ -3124,7 +3243,8 @@ mod tests {
         pacer.push(picture(0, true), arrival);
         let late = arrival + Duration::from_secs(2);
         assert!(pacer.due(late).is_some());
-        assert_eq!(pacer.anchor_wall + pacer.lead, late);
+        assert_eq!(pacer.anchor_wall, late);
+        assert_eq!(pacer.moment(pacer.anchor_at), late + pacer.lead);
     }
 
     /// Two seconds of timestamps in one step is the camera starting its counter

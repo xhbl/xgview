@@ -6675,3 +6675,223 @@ to the sound, which is about half a second late on its own (§75). A live decode
 hands over one picture at a time already, so no live picture gains a delay here.
 The trade is worth knowing rather than discovering: if the sound is ever given a
 shorter buffer, the picture will then be the one that is late.
+
+## 77. A screen with no clock of its own
+
+The doorbell's live picture stuttered - a small hesitation every second or so -
+on every platform at once: Windows, the two Linux boxes, three phones. The same
+stream in VLC was smooth. The other nine cameras on the same walls were smooth.
+A replay of the same camera was smooth, after §76. That combination is what
+ruled out almost everything the first look suspected.
+
+**What it was not.** `decoded` equalled `units` and `dropped` was zero, window
+after window: no picture was lost in assembly, none in decoding, and the slowest
+decode was 1 ms. `timeBeginPeriod(1)` did make the pacer's sleeps land where they
+were asked to (50 ms became 51.6 ms of p95 jitter, down from 61.9 ms on the
+15.6 ms system tick) and made no difference to the stutter, which ruled out the
+timer's resolution as the cause. Three platforms, three decoder backends, three
+compositors - and one symptom.
+
+**What the wire does.** ffmpeg, reading the same RTSP address over TCP, printed
+the wall-clock moment of every picture: the gaps ran from 3 ms to 229 ms around a
+mean of 50. Pictures arrive in batches - two or three inside five milliseconds,
+then a hundred, then two hundred - because that is how the forwarder and the
+camera's own packets pace a five-megapixel frame. Every other camera here is
+1080p at 51.7 a second, where the same batching is 19 ms between pictures and
+never shows.
+
+**Two clocks, both the wrong one.**
+
+*The magnified picture.* `LivePacer` places pictures on a clock built from their
+own timestamps and hands them over when their moment comes, which is the right
+design; its lead was 40 ms and its ceiling 160 ms, three pictures. A batch's
+inter-arrival gap is often longer than three pictures, so the queue emptied about
+once a second. Measured: handover spacing 37 to 61 ms around a mean of 49, and
+one picture in ten stayed up 60 to 140 ms - the stutter, with every counter
+insisting the pacing was exact. Raising only the ceiling to 400 ms and letting
+the existing feedback find its own depth settled the same stream at 253-283 ms
+within eight seconds, after which the spacing measured 48 to 51 with fewer than
+one picture in a hundred out of step. `LIVE_LEAD` stays 40: a stream that never
+strains never pays, and the doorbell pays what its batches cost.
+
+*The wall.* A grid of more than four tiles is painted on `LIVE_REPAINT`, 40 ms.
+The doorbell's sub-stream is 15 a second - 66.7 ms a picture - and 40 is not a
+divisor of 66.7, so each picture stayed up for two of those waits or for three by
+turns: 50 ms, then 75, then 50. The neighbouring tile, 51.7 a second, showed
+50 ms and 50 ms and 50 ms, because it has pictures to spare. Painting the wall on
+the stream's clock instead (`FRAME_PACED_TILES` 4 to 10) put every doorbell
+picture up for 66 or 67 ms, and cost the N5095 with ten cameras a third of a core:
+71% of one core on the timer, 101% on the waker.
+
+**And then it was put back.** Watched on the real wall rather than measured, ten
+small tiles showed no difference the eye could find, at three times the cost. What
+a magnified picture shows is a step of one picture in a large frame; a tile a
+tenth of the screen tall, with the same step, reads as continuous. Four is the
+number again, and the wall is painted on the timer; only the magnified picture and
+the replay are painted every refresh (§78). The argument for ten was arithmetic
+that was right and a conclusion that mattered less than it looked.
+
+**Why VLC is smooth.** It has a video output thread of its own and about a second
+of buffer, and it presents on a clock it owns, so the wire's batching is absorbed
+before anything is drawn. Nothing in that path is the UI's frame loop. What this
+program had was a picture that arrived in batches, a queue three pictures deep,
+and a repaint asked for by a 40 ms timer - three independent rates, none of them
+the stream's.
+
+**The cost, stated plainly.** A doorbell now runs 250 to 300 ms behind the wire
+where it ran 40 to 160; the viewer accepted that, and it is still a quarter of
+what VLC costs. Neither change touches a stream that does not strain: a wall of
+fast cameras keeps its 40 ms lead and its timer.
+
+## 78. The present that came between two refreshes
+
+Section 77 fixed the two rates the program owned - the pacer's lead and the
+wall's timer - and the doorbell still stuttered. What was left was not a counter
+the program kept. `units` equalled `decoded`, `dropped` was zero, the handover
+spacing read 48 to 51 around 49, the timestamps straight off the wire were 50.0 ms
+apart in 596 of 601 intervals, and a picture waited 0.3 ms in the store before a
+repaint took it. Every number the process could report said the picture was
+arriving on time and being picked up on time.
+
+**Measuring the screen itself.** The only thing left to measure was the screen,
+so this section is the first here measured that way: ten seconds recorded with
+Desktop Duplication at 59 a second, lossless, then every pair of consecutive
+frames compared pixel by pixel. A picture that has not changed compares as
+exactly zero - no compression, no colour conversion - so the moments the screen
+actually changed are a precise answer and owe nothing to a counter. One way of
+capturing had to be thrown out first: GDI (`gdigrab`) reported 167 changes where
+Desktop Duplication showed 155, and capping at 4K it could not reach 60 a second
+at all.
+
+**What the screen did.** Ten seconds of the doorbell's main stream, twenty
+pictures a second, two hundred changes owed:
+
+| asked for a repaint | changes | 50 ms | 100 ms | p90 |
+|---|---|---|---|---|
+| when a picture landed (the timer and the waker) | 155 | 53 | 23 | 100 ms |
+| every refresh | 193 | 114 | 19 | 67 ms |
+
+Twenty-three times in ten seconds a picture stayed up for a whole extra refresh.
+The content was never late and never dropped - the present was. A picture handed
+over at an arbitrary instant is shown at the next refresh, and whether that is six
+refreshes away or seven is a coin toss; asking for a repaint as soon as the frame
+before it is finished puts every present on a refresh boundary, so a picture up
+for six refreshes is up for exactly six.
+
+**The batches inside the process.** One more source of the same shape was in the
+handover itself. `hand_over_due` used to hand over every picture whose moment had
+come, `while` there was one; five megapixels cost 6.5 ms to decode and copy back,
+so a wire batch of four arriving during that left two or three due at once, and
+they went out six milliseconds apart and were published six milliseconds apart -
+a burst and a wait, on a stream whose timestamps are fifty milliseconds apart to
+the tenth. `xgview::video`'s own `picture rhythm` showed it: half the three-second
+windows read `50 (33-91)` before, `49 (47-52)` after handing over one per pass.
+
+The handover needs the timer to be fine as well as the lead to be deep. Asked
+for at the system's 15.6 ms period, the interval between two handovers measured
+36 to 63 ms; with `timeBeginPeriod(1)` at start-up it measured 48 to 51. That
+one was in §77 already and looked like it had done nothing, because the stutter
+it was meant to cure was being made by the present, not by the clock - but
+removing it now takes the handover back to 36 to 63, so it stays.
+
+**What is left, and where it comes from.** 193 of 200 is not 200: about one
+picture in fifty still stays up 66.7 ms instead of 50, and a viewer watching for
+it can see that. The cause is not the wire, the decoder or the timer. Measured
+inside the app, the gap between two repaints has a median of 23 ms while no
+frame's own work reaches 6 ms - `XGVIEW_FRAME_MS=6` for forty-five seconds wrote
+not one line. The frame loop therefore runs on a 23 ms grid that belongs to
+eframe, and a picture handed over every fifty milliseconds is rounded to two of
+those steps or to three, 46 ms then 69, however exactly it was placed.
+
+Taking the grid away was tried. `PresentMode::Immediate` with Direct3D 12 as the
+backend put seventy per cent of the recorded gaps at 50 ms against fifty-four per
+cent for the shipped configuration, and was left out anyway: it trades a present
+that waits for one that does not, and on Vulkan that present tore - only
+twenty-eight per cent of recorded frames were identical to the one before them,
+against sixty-five per cent on DXGI - so it would also have meant a new backend
+for a Windows-only gain. What would remove the grid is taking the picture out of
+egui's frame loop entirely and presenting it on a surface of its own, the way the
+Android build already does with a `SurfaceView`. That is a structural change, and
+this section is where it is recorded as the next step rather than done here.
+
+**The cost, and what it is not paid for.** A ten camera wall repainting every
+refresh measured 110% of one core on the N5095 (four cores), against 101% driven by
+the waker and 71% by the timer. Watched on the wall, the difference between the
+last two was not visible - a tile is too small for a step of one picture to show -
+so the wall went back to its timer (§77) and keeps 71%. Only the magnified picture
+and the replay repaint every refresh; one large picture is the cheapest thing
+there is to composite, and the magnified view measured 27% of one core for the
+whole of it - decode, upload, composition and present - against a stream that
+costs 6.5 ms a picture to decode. The wall, having gone back to its timer, pays
+nothing at all.
+
+## 79. The lead that was spent on the first picture
+
+*Landed 2026-11-23, in 2.3.51.*
+
+The front doorbell's live picture stuttered and its recording did not. Every
+counter on the pacing said the stream was fine: twenty pictures a second
+arrived, the frame interval was forty-nine to fifty, and the handover mean was
+forty-nine. The stutter was there on every platform and only on that camera.
+
+**A recording was never the reference it looked like.** A recording is played
+against a clock and from a buffer: `recording_session` reads seconds of pictures
+at a time and places each at `began + played`, sleeping until its moment comes
+and giving a picture up only when it is a quarter of a second past its own. The
+arrival of a byte has nothing to do with when a picture is shown. A live session
+has no such freedom - it shows what it has, and its clock can only be as good as
+the lead between the moment a picture is due and the moment it is in hand. So
+the recording proves the stream, the decoder (6.5 ms a picture) and the whole
+drawing path are sound, and says nothing at all about the wire's rhythm. That
+was the only variable left.
+
+**The lead was doing nothing.** Measured with `XGVIEW_LIVE_LEAD_MS=400` pinned
+(the switch added for this), `lead_ms` read 400 and the queue read `held=0`,
+`deepest=1`, with `late_handed` gaining a picture a window - every handover was
+one the clock had reached after its own moment. Two things spent the lead:
+
+- `reanchor` set the anchor's wall clock to `now - lead`, which puts the anchor
+  picture's moment *at* now rather than a lead after it. That is right for a
+  clock being thrown at the present and wrong as a state to stay in: the lead is
+  not re-applied afterwards, so one re-anchor leaves the lead at zero for the
+  rest of the session. The opening re-anchored on every picture of a crowd, so
+  the session began at zero buffer and never left it.
+- The crowd rule read *depth* as backlog: a queue still deeper than five
+  pictures a second after it formed was folded to its newest member. A lead of
+  four hundred milliseconds holds eight pictures of a twenty-a-second stream,
+  so a working buffer was folded away once a second - the buffer and the rule
+  were fighting, and the rule won.
+
+**What was changed.**
+
+- `reanchor` anchors at `now`. A picture that is two seconds late is still
+  shown now, because its moment is in the past either way, and the pictures
+  after it queue into the lead instead of into nothing.
+- The crowd rule asks what the past looks like rather than how deep the queue
+  is: a queue deeper than a batch *and* a picture in front a second past its own
+  moment. Depth alone is what a buffer is, and a live camera's batch gaps are
+  what it is for.
+- The opening no longer re-anchors on every arrival; a short crowd keeps its own
+  timestamps and plays out one per frame, which is the stream catching up at its
+  own speed rather than a jump.
+
+**Measured.** With the lead pinned at 400 ms: `held=8`, `deepest=9`,
+`gave_up=0`, `folded=0`, `moved_clock=0`, and the handover gaps 47-52 ms where
+they had been 0 to 223. Left to learn on its own the lead settled at 154 ms and
+the same figures held. Eight seconds of the screen captured at sixty a second
+(`ddagrab`, passthrough, frame hashes): 202 changes, not one gap over 80 ms, the
+longest 67 ms - one refresh short of four frames at 60 Hz, and no double
+changes. The same screen before the change had gaps of 100 and 220 ms.
+
+**What the switch is for.** `XGVIEW_LIVE_LEAD_MS` fixes the lead and stops
+`retune` in both directions. It answers "does this stream play smoothly with
+this much buffer"; it is not a setting, and nothing sets it in normal use.
+`lead_ms`, `anchor_age_ms`, `front_wait_ms` and `resets` in the window log are
+what the diagnosis was made from and are cheap enough to keep.
+
+**What the figures are.** The queue settles at about `lead / interval`: two or
+three pictures at a hundred and fifty milliseconds of a forty-nine millisecond
+stream, eight at four hundred. A window read while the lead is being narrowed
+shows more than that, because a narrowing moves the moments of the pictures
+already queued and not the pictures themselves; the depth settles over the
+following second or two.
