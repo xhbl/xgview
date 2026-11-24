@@ -304,8 +304,13 @@ else
   warn "unpack the package as the ordinary user ($USER_NAME, not root) and run its install.sh, or pass --xg with the package"
 fi
 
-# xset: disable the screen saver and display power saving; a monitor wall must
-# stay lit. To force every attached display on at its preferred resolution, add
+# xset: keep the screensaver and the automatic blank timers off - a monitor
+# wall must stay lit on its own. `+dpms dpms 0 0 0` keeps the DPMS extension
+# enabled with every timeout at zero: the server will not blank by itself, but
+# the state stays readable (`xset q` shows `Monitor is`) and the viewer can use
+# DPMS for a blackout that deliberately switches the display off. `-dpms` would
+# disable the extension entirely, which makes that impossible.
+# To force every attached display on at its preferred resolution, add
 # `xrandr --auto` before openbox.
 PROG_ARGS=""
 [ $SUPERVISE -eq 1 ] && PROG_ARGS=" --supervise"
@@ -316,7 +321,12 @@ PROG_ARGS=""
 # \$DISPLAY and \$VNC_AUTH are expanded at runtime; $HOME_DIR is expanded here.
 cat > /usr/local/bin/xgview-session.sh <<EOF
 #!/bin/sh
-xset s off -dpms s noblank
+xset s off s noblank +dpms dpms 0 0 0
+# A blackout may switch the display off; if the viewer is killed or crashes,
+# the DPMS state is left dark with nobody to restore it. The supervisor starts
+# this script again on every restart, so light the screen here first. Harmless
+# when the server has no DPMS extension (the xset error is swallowed).
+xset dpms force on 2>/dev/null || true
 openbox &
 VNC_AUTH="-nopw"
 [ -f "$HOME_DIR/.vnc/passwd" ] && VNC_AUTH="-rfbauth $HOME_DIR/.vnc/passwd"

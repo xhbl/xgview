@@ -464,7 +464,8 @@ X closes with it.
 ```bash
 # cat > /usr/local/bin/xgview-session.sh <<'EOF'
 #!/bin/sh
-xset s off -dpms s noblank
+xset s off s noblank +dpms dpms 0 0 0
+xset dpms force on 2>/dev/null || true
 openbox &
 exec /home/admin/.local/opt/xgview/xgview --supervise
 EOF
@@ -472,8 +473,14 @@ EOF
 # chmod +x /home/admin/.local/opt/xgview/xgview
 ```
 
-`xset s off -dpms s noblank` disables the screen saver and display power saving.
-Bare X blanks after about ten minutes by default; a monitor wall must not.
+`xset s off s noblank` disables the screen saver, and `+dpms dpms 0 0 0` keeps
+the DPMS extension enabled with all three blank timers at zero: bare X blanks
+after about ten minutes by default, and a monitor wall must not. Keeping DPMS
+*enabled* rather than disabling it with `-dpms` matters for the blackout
+feature: with `-dpms` the extension is gone, `xset q` has no `Monitor is` line,
+and the viewer cannot switch the display off for a scheduled blank. The
+`force on` line lights the display again if a previous run left it dark - the
+supervisor starts this script on every restart.
 
 ### 7.2 About full screen
 
@@ -983,7 +990,7 @@ Use any VNC client (RealVNC Viewer, TightVNC, Remmina and so on) against
 | Xorg cannot open tty/DRM - permission errors | Missing privileges or logind | Install `xserver-xorg-legacy libpam-systemd dbus-user-session`, configure `Xwrapper.config`, join the input/video groups |
 | `ldd` shows `not found` | Missing system libraries (X11/GL, outside the package) | Install the matching packages |
 | The import/export file window does not appear, or freezes the interface | Historical: the old native-dialog path waited synchronously on portal/zenity, which a systemd session has no bus for | The current build draws its own file window (see 7.4); no system dialog, portal or D-Bus is involved |
-| The screen blanks after a while | X's default screen saver / power saving | Add `xset s off -dpms s noblank` to the session script, and install `x11-xserver-utils` |
+| The screen blanks after a while | X's default screen saver / power saving | Add `xset s off s noblank +dpms dpms 0 0 0` to the session script, and install `x11-xserver-utils` |
 | Chinese in the tty console shows as diamonds | The console's bitmap font has no Chinese (not related to `fonts-noto-cjk`) | The setup script sets the system language to English by default (`--no-en` turns that off); or `update-locale LANG=en_US.UTF-8 LANGUAGE=en` and log in again |
 | Rendering misbehaves (especially in a VM) | Vulkan backend problem | Set `WGPU_BACKEND=gl` |
 | VNC will not connect, or connects black | The graphical session is not running, or the wrong display is shared | `systemctl status monitor`, `pgrep -a x11vnc`, `/tmp/x11vnc.log`; make sure `:0` is shared (see 13.4) |
@@ -1045,7 +1052,8 @@ apt install -y --no-install-recommends \
 
 cat > /usr/local/bin/xgview-session.sh <<'EOF'
 #!/bin/sh
-xset s off -dpms s noblank
+xset s off s noblank +dpms dpms 0 0 0
+xset dpms force on 2>/dev/null || true
 openbox &
 exec /home/admin/.local/opt/xgview/xgview --supervise
 EOF

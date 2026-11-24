@@ -445,6 +445,12 @@ impl XgViewApp {
             // Explicitly, and before the process ends: `exit` runs no
             // destructors at all, so a `Drop` that released the wake request
             // would never be reached and the lock would outlive the program.
+            // Android never switches the display off itself, but a config
+            // carried over from a desktop can still say so - restore is a
+            // no-op unless this process actually darkened the screen.
+            if let Err(err) = monitor_core::display_off::restore() {
+                tracing::warn!(target: "xgview::display_off", %err, "cannot restore the display on exit");
+            }
             if let Err(err) = power::release() {
                 tracing::warn!(target: "xgview::power", %err, "cannot take the wake request back");
             }

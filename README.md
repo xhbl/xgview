@@ -246,7 +246,7 @@ mode that paints the display directly. On Debian, what that comes to:
 - **The viewer started from** **`~/.xinitrc`**, because nothing on such a box reads
   the XDG autostart entry:
   ```sh
-  xset -dpms s off &                      # see the last point below
+  xset s off s noblank +dpms dpms 0 0 0 & # see the last point below
   exec xgview --fullscreen --supervise    # and it comes back if it dies
   ```
 - **Packages**, on top of the window manager itself. The window system:
@@ -260,9 +260,11 @@ mode that paints the display directly. On Debian, what that comes to:
   decoders need nothing extra - FFmpeg and libva travel in the package.
 - **The screen.** [Keep awake](#keep-awake) cannot help here: there is no screen
   saver and no power service to inhibit over the session bus, and a bare Xorg may
-  not have one at all. The blanking is the X server's own DPMS, so it is turned off
-  at the X level - the `xset -dpms s off` above, or `Option "DPMS" "false"` in
-  `xorg.conf`. Sleep itself is still inhibited the usual way, through logind.
+  not have one at all. The blanking is the X server's own DPMS, so its timers are
+  zeroed at the X level - the `xset s off s noblank +dpms dpms 0 0 0` above. Keep
+  the extension *enabled*: `-dpms` or `Option "DPMS" "false"` in `xorg.conf` would
+  remove the `Monitor is` state that the blackout's display-off switch needs.
+  Sleep itself is still inhibited the usual way, through logind.
 
 A step-by-step walkthrough for Debian 13 - from a minimal install to a
 full-screen wall under systemd, plus Docker for Frigate and Home Assistant - is

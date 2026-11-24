@@ -469,6 +469,40 @@ impl XgViewApp {
         nav.item(&switch);
         dirty |= switch.changed();
 
+        // Turning the display off is a second, machine-dependent step. Where
+        // there is no way to do it - Android, Wayland, an X server without
+        // DPMS - the switch is not drawn at all: a greyed box would suggest a
+        // setting that is merely unavailable rather than one that does not
+        // exist here. The field stays in the configuration either way.
+        #[cfg(not(target_os = "android"))]
+        if monitor_core::display_off::supported() {
+            let power_off = ui
+                .add_enabled_ui(enabled, |ui| {
+                    ui.checkbox(
+                        &mut blackout.power_off_display,
+                        monitor_i18n::tr("settings-blackout-power-off"),
+                    )
+                })
+                .inner;
+            nav.item(&power_off);
+            dirty |= power_off.changed();
+            ui.label(
+                RichText::new(monitor_i18n::tr("settings-blackout-power-off-hint"))
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+            if let Some(error) = &monitor_core::display_off::status().error {
+                ui.label(
+                    RichText::new(monitor_i18n::tr_args(
+                        "settings-blackout-power-off-failed",
+                        &[("error", error.as_str().into())],
+                    ))
+                    .small()
+                    .color(theme::ERROR),
+                );
+            }
+        }
+
         // The wait after an interruption. Zero is a real choice - the
         // interruption then lasts the period out - so it is a slider value
         // rather than something hidden behind a checkbox.
@@ -571,6 +605,10 @@ impl XgViewApp {
             // The blank is worked out from the configuration on every frame, so
             // there is nothing to hand to anything: the next frame acts on this.
             self.needs_sync = true;
+            // A change to the display switch takes effect now, not at the next
+            // schedule boundary: unchecking it while the wall is dark has to
+            // light the screen again straight away.
+            self.apply_power_for_blackout();
         }
         dirty
     }

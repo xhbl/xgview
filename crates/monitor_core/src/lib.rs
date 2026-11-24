@@ -23,6 +23,8 @@
 //! * [`autostart`]  – start-on-boot helpers for Windows / Linux / Android.
 //! * [`power`]      – keep the machine awake and the screen on for a wall that
 //!   is meant to stay visible.
+//! * [`display_off`] – turn the display off and back on for a blackout that
+//!   really blanks it, and probe whether this machine can.
 //! * [`reboot`]     – whether this process may restart the machine, and how.
 //! * [`blackout`]   – the local clock and the evaluation behind the scheduled
 //!   blank that saves the display at night.
@@ -40,6 +42,7 @@ pub mod autostart;
 pub mod blackout;
 pub mod config;
 pub mod digest;
+pub mod display_off;
 pub mod discovery;
 pub mod error;
 pub mod h264;

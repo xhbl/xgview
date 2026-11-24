@@ -460,6 +460,14 @@ pub struct Blackout {
     /// while somebody is using the machine. `0` means the interruption lasts
     /// the rest of the period.
     pub resume_after_minutes: u16,
+    /// Whether a blank really powers the display off, where the machine can.
+    ///
+    /// A request, not a promise: the settings panel hides this on platforms
+    /// that cannot turn a display off, and a refused command is reported at
+    /// the switch. The field is kept on those platforms so a configuration
+    /// written on a capable machine survives being moved to one that cannot.
+    #[serde(default)]
+    pub power_off_display: bool,
     pub entries: Vec<BlackoutWindow>,
 }
 
@@ -472,7 +480,7 @@ impl Default for Blackout {
     /// behaving the way it did. Adding a period is then a second, deliberate
     /// step - and the switch has to be turned on for either to matter.
     fn default() -> Self {
-        Self { enabled: false, resume_after_minutes: 1, entries: Vec::new() }
+        Self { enabled: false, resume_after_minutes: 1, power_off_display: false, entries: Vec::new() }
     }
 }
 

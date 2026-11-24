@@ -2723,27 +2723,64 @@ impl XgViewApp {
 
     /// Asks for what the settings imply, and for what the blank needs on top.
     ///
-    /// A blank wall is a reason to keep the display awake that the viewer did
-    /// not choose, and it has to outrank the setting: a screen that goes black
-    /// and is then powered down is the state this feature exists to avoid. What
-    /// the viewer chose is left alone - the blank borrows the request, it does
-    /// not change it.
+    /// A blank wall is normally a reason to keep the display awake that the
+    /// viewer did not choose: a screen that goes black and is then powered
+    /// down is the state this feature exists to avoid. The one exception is
+    /// the viewer asking for the display to be switched off as part of the
+    /// blank. That reverses the order of operations, because a "keep the
+    /// screen on" assertion and an explicit power-off cannot both be held:
+    ///
+    ///   - going dark: drop the display assertion first (the system one stays),
+    ///     then ask the display to switch off;
+    ///   - coming back: light the display first, then restore the assertions.
+    ///
+    /// The whole thing is idempotent: it is called on every blank transition,
+    /// on a settings change and on an import, and only acts on a real change.
     fn apply_power_for_blackout(&mut self) {
+        let blackout = self.blackout_on;
+        let want_off = blackout
+            && self.config.blackout.power_off_display
+            && monitor_core::display_off::supported();
+        let was_off = monitor_core::display_off::status().off;
+
+        if want_off && !was_off {
+            // Leave the screen alone long enough to switch it off: on Windows
+            // and macOS the display assertion would otherwise keep the explicit
+            // power-off from taking effect. The system assertion stays.
+            self.apply_power_plain(true, false);
+            if let Err(err) = monitor_core::display_off::set(true) {
+                tracing::warn!(target: "xgview::blackout", %err, "cannot switch the display off");
+                // The screen is still on, so the assertions must go back to
+                // what a visible wall needs.
+                self.apply_power_plain(self.config.prevent_sleep || blackout, true);
+            } else {
+                tracing::info!(target: "xgview::blackout", "display switched off for the blank");
+            }
+        } else if !want_off && was_off {
+            // The reverse order: a screen that is still dark must be lit before
+            // anything claims to keep it on.
+            if let Err(err) = monitor_core::display_off::set(false) {
+                tracing::warn!(target: "xgview::blackout", %err, "cannot switch the display back on");
+            }
+            let prevent_sleep = self.config.prevent_sleep || blackout;
+            let keep_screen_on = self.config.keep_screen_on || blackout;
+            self.apply_power_plain(prevent_sleep, keep_screen_on);
+        } else {
+            let prevent_sleep = self.config.prevent_sleep || blackout;
+            let keep_screen_on = self.config.keep_screen_on || blackout;
+            self.apply_power_plain(prevent_sleep, keep_screen_on);
+        }
+        self.power = power::status();
+    }
+
+    /// The power half on its own, without the display switch.
+    fn apply_power_plain(&self, prevent_sleep: bool, keep_screen_on: bool) {
         if !power::is_supported() {
             return;
         }
-        let blackout = self.blackout_on;
-        let prevent_sleep = self.config.prevent_sleep || blackout;
-        let keep_screen_on = self.config.keep_screen_on || blackout;
         if let Err(err) = power::apply(prevent_sleep, keep_screen_on) {
-            tracing::warn!(
-                target: "xgview::power",
-                %err,
-                blackout,
-                "cannot hold the machine awake for the blank"
-            );
+            tracing::warn!(target: "xgview::power", %err, "cannot hold the machine awake");
         }
-        self.power = power::status();
     }
 
     fn needs_animation(&self) -> bool {
@@ -3638,6 +3675,12 @@ impl XgViewApp {
             {
                 crate::audio::shutdown();
                 crate::mic::shutdown();
+            }
+            // A screen we switched off for a blank must not be left dark when
+            // the viewer goes away - the supervisor may start us again, but
+            // the display is a hardware state nobody else will restore.
+            if let Err(err) = monitor_core::display_off::restore() {
+                tracing::warn!(target: "xgview::display_off", %err, "cannot restore the display on exit");
             }
             // The request outlives the viewport otherwise: on the desktop this
             // is the last moment anything of ours runs.
