@@ -79,6 +79,15 @@ const RECORDING_POLL: Duration = Duration::from_secs(30);
 /// with the waker off, 113% with it on, and the pictures arriving twenty times a
 /// second the whole time. Four is where a tile is still large enough for the
 /// twenty-five hertz timer to be the thing the eye sees missing.
+///
+/// Ten was tried, on the arithmetic that a fifteen a second sub-stream is
+/// sixty-seven milliseconds a picture and forty is not a divisor of sixty-seven,
+/// so each picture stayed up fifty milliseconds and then seventy-five. Painted on
+/// the stream's clock every picture did stay up sixty-six - and on the wall it
+/// looked like what it replaced. A small tile with large steps between pictures
+/// hides an unevenness that a magnified one shows; the magnified view keeps the
+/// waker, and the wall went back to its timer, a third of a core the lighter for
+/// it.
 const FRAME_PACED_TILES: usize = 4;
 
 /// Width the toolbar is laid out for at its full size.
@@ -2881,17 +2890,27 @@ impl XgViewApp {
         self.manager.frames().set_wake(waker);
     }
 
-    /// Whether this view is one to paint on the stream's clock rather than on
-    /// the wall's timer.
+    /// Whether the view shows one picture large - a magnified camera or a
+    /// replay - rather than a wall of them.
+    ///
+    /// The distinction matters twice: these are the views painted on every
+    /// refresh, and they are the ones the waker is installed for whatever the
+    /// wall's size.
+    fn paints_one_picture(&self) -> bool {
+        self.scheduler.is_zoomed() || self.playback.is_some()
+    }
+
+    /// Whether a view is painted on the stream's clock rather than on
+    /// [`LIVE_REPAINT`].
     ///
     /// A magnified picture and a replay are one large picture each, painted for
     /// as many cameras as there are - one. The wall shows up to
-    /// [`FRAME_PACED_TILES`] of them the same way, and past that the timer is
-    /// the cheaper answer: its twenty-five repaints a second already cover the
-    /// fifteen to twenty five a second these cameras send, and the extra ones a
-    /// waker asks for draw what the last one drew.
+    /// [`FRAME_PACED_TILES`] of them the same way; past that the timer is the
+    /// cheaper answer, because its twenty-five repaints a second already cover
+    /// the pictures these cameras send and the extra ones a waker asks for draw
+    /// what the last one drew.
     fn wants_frame_paced_repaint(&self) -> bool {
-        if self.scheduler.is_zoomed() || self.playback.is_some() {
+        if self.paints_one_picture() {
             return true;
         }
         let live = self.scheduler.current().map_or(0, |schedule| schedule.live().count());
@@ -3506,8 +3525,29 @@ impl XgViewApp {
             }
         }
 
-        let animation = self.needs_animation();
-        ctx.request_repaint_after(if animation { LIVE_REPAINT } else { Duration::from_millis(500) });
+        // A magnified picture and a replay ask for the next repaint as soon as
+        // this one is done, rather than on a timer.
+        //
+        // A picture handed over once every fifty milliseconds and presented the
+        // moment it is handed over lands wherever in the refresh it happened to
+        // arrive: on a hundred and twenty hertz that is six refreshes one time
+        // and eight the next. Measured on a screen recording of the doorbell, the
+        // timer-driven view showed 155 pictures in ten seconds where twenty a
+        // second is 200, with twenty-three of the gaps a full hundred
+        // milliseconds; asking for a repaint every refresh showed 193, with the
+        // ninetieth percentile gap down from a hundred milliseconds to sixty
+        // seven. What the eye reads as a stutter is the count, not the mean the
+        // counters print - which said fifty either way.
+        //
+        // The wall keeps its timer. The same change measured nothing the eye
+        // could see on ten small tiles, and cost a third of a core: a tile hides
+        // an uneven step that a magnified picture shows.
+        if self.paints_one_picture() {
+            ctx.request_repaint();
+        } else {
+            let animation = self.needs_animation();
+            ctx.request_repaint_after(if animation { LIVE_REPAINT } else { Duration::from_millis(500) });
+        }
 
         // The soft keyboard is moved by `keyboard::set_wanted` alone. egui would
         // otherwise answer its own focused `TextEdit` by asking eframe to enable
