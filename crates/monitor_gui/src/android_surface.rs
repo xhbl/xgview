@@ -466,6 +466,11 @@ fn block_on<F: std::future::Future>(future: F) -> Option<F::Output> {
 fn bar_screen(pixels_per_point: f32) -> egui::Context {
     let context = egui::Context::default();
     context.set_pixels_per_point(pixels_per_point);
+    // The zoom channel carries the display density here. egui applies
+    // Ctrl/Cmd+/-/0 itself at the end of every pass unless told not to, and a
+    // keyboard on Android would otherwise overwrite the density and pull the
+    // bar's pixel conversions out of step with the wall's.
+    context.options_mut(|options| options.zoom_with_keyboard = false);
     crate::theme::install(&context);
     crate::fonts::install_for(&context, &monitor_i18n::current_language());
     context
@@ -1120,6 +1125,12 @@ fn run() -> anyhow::Result<()> {
             let context = egui::Context::default();
             let pixels_per_point = DENSITY.load(Ordering::Acquire) as f32 / 1000.0;
             context.set_pixels_per_point(pixels_per_point);
+            // `set_pixels_per_point` is how the activity's density reaches
+            // egui on this path. egui's own Ctrl/Cmd+/-/0 handler runs at the
+            // end of every pass and would overwrite it, desyncing the UI's
+            // logical points from the surface's pixels. Interface scaling is
+            // a desktop feature; see `XgViewApp::sync_zoom`.
+            context.options_mut(|options| options.zoom_with_keyboard = false);
 
             let app = XgViewApp::new(
                 &context,
