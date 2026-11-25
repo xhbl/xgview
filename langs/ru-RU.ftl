@@ -660,4 +660,3 @@ camera-context-edit = Изменить камеру
 camera-context-delete = Удалить камеру
 camera-context-picture-fit = Подгонка изображения: { $next }
 camera-context-stream = Поток: { $next }
-camera-context-connection = Подключение: { $next }

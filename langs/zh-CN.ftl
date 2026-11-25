@@ -662,4 +662,3 @@ camera-context-edit = 编辑摄像头
 camera-context-delete = 删除摄像头
 camera-context-picture-fit = 画面比例：{ $next }
 camera-context-stream = 码流：{ $next }
-camera-context-connection = 连接：{ $next }

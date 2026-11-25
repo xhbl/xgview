@@ -718,4 +718,3 @@ camera-context-edit = Edit camera
 camera-context-delete = Delete camera
 camera-context-picture-fit = Picture fit: { $next }
 camera-context-stream = Stream: { $next }
-camera-context-connection = Connection: { $next }

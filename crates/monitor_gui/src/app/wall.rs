@@ -957,16 +957,6 @@ impl XgViewApp {
                                 ui.close();
                             }
                         }
-                        if !camera.is_ws_stream() {
-                            let connection = monitor_i18n::tr_args(
-                                "camera-context-connection",
-                                &[("next", camera.connection_label_for(camera.next_connection()).into())],
-                            );
-                            if ui.button(connection).clicked() {
-                                actions.connection_change = Some(camera_index);
-                                ui.close();
-                            }
-                        }
                     });
                 }
             }
@@ -1334,7 +1324,6 @@ impl XgViewApp {
         if actions.picture_fit.is_some()
             || actions.picture_fit_zoom.is_some()
             || actions.stream_change.is_some()
-            || actions.connection_change.is_some()
         {
             let slots = self.config.active_slots();
             if let Some(index) = actions.picture_fit {
@@ -1360,15 +1349,6 @@ impl XgViewApp {
                 if let Some(&slot) = slots.get(index) {
                     if let Some(camera) = self.config.cameras.get_mut(slot) {
                         camera.advance_stream();
-                    }
-                    self.needs_sync = true;
-                    self.mark_dirty();
-                }
-            }
-            if let Some(index) = actions.connection_change {
-                if let Some(&slot) = slots.get(index) {
-                    if let Some(camera) = self.config.cameras.get_mut(slot) {
-                        camera.advance_connection();
                     }
                     self.needs_sync = true;
                     self.mark_dirty();
@@ -2549,7 +2529,6 @@ mod tests {
         for key in [
             "camera-context-picture-fit",
             "camera-context-stream",
-            "camera-context-connection",
         ] {
             assert!(source.contains(key), "missing context entry: {key}");
         }
