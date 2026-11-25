@@ -370,6 +370,36 @@ impl XgViewApp {
                 .color(theme::TEXT_DIM),
         );
 
+        // Interface scale. The slider shows egui's live zoom so a Ctrl/+/-/0
+        // press is reflected here too, but it is applied only once the drag
+        // ends: egui computes a slider's value from the pointer's logical
+        // position, so changing zoom mid-drag would move the thumb under the
+        // finger. Every other change (reset button, keyboard arrows) is not a
+        // drag and is applied at once.
+        ui.add_space(theme::space::S);
+        let mut zoom_pct = (ui.ctx().zoom_factor() * 100.0).round() as i32;
+        let zoom = controls::slider(
+            &mut self.nav,
+            ui,
+            &mut zoom_pct,
+            (UI_ZOOM_MIN * 100.0) as i32..=(UI_ZOOM_MAX * 100.0) as i32,
+            10.0,
+            "%",
+            &monitor_i18n::tr("settings-ui-zoom"),
+            100,
+        );
+        if zoom.drag_stopped() || (zoom.changed() && !zoom.dragged()) {
+            let value = (zoom_pct as f32 / 100.0).clamp(UI_ZOOM_MIN, UI_ZOOM_MAX);
+            self.config.ui_zoom = value;
+            ui.ctx().set_zoom_factor(value);
+            dirty = true;
+        }
+        ui.label(
+            RichText::new(monitor_i18n::tr("settings-ui-zoom-hint"))
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+
         ui.add_space(theme::space::S);
         if self.settings_language(ui) {
             dirty = true;

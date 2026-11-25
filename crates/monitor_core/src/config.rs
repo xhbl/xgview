@@ -11,6 +11,13 @@ use crate::{APP_NAME, CONFIG_FILE_NAME};
 /// Version of the configuration schema written to disk.
 pub const CONFIG_VERSION: u32 = 1;
 
+/// Interface zoom limits, shared by the settings slider, the stored value and
+/// the clamp applied to egui's Ctrl/+/-/0 shortcuts. One definition keeps the
+/// three from drifting apart: egui's own range is wider (20-500%), so a
+/// shortcut is brought back here before it can disagree with the slider.
+pub const UI_ZOOM_MIN: f32 = 0.5;
+pub const UI_ZOOM_MAX: f32 = 2.0;
+
 /// Exponential backoff parameters used when a stream has to be reconnected.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -690,6 +697,14 @@ pub struct AppConfig {
     /// operating system, or `en` for English. A language that is not installed
     /// (no matching `.ftl` pack) falls back to English.
     pub language: String,
+    /// Interface zoom, between [`UI_ZOOM_MIN`] and [`UI_ZOOM_MAX`], `1.0`
+    /// being the native size.
+    ///
+    /// The same request egui's Ctrl/+/-/0 shortcuts make of
+    /// `Context::set_zoom_factor`, kept here so a wall comes back up at the
+    /// size its viewer chose. A shortcut changes the live value, and that
+    /// change is written back here so the two never disagree.
+    pub ui_zoom: f32,
     /// Decode on the GPU where the machine offers a decoder for it. It is only
     /// a preference: a device that cannot be opened, or a stream the hardware
     /// decoder will not take, is decoded on the CPU.
@@ -794,6 +809,7 @@ impl Default for AppConfig {
             prevent_sleep: true,
             keep_screen_on: true,
             language: "auto".to_string(),
+            ui_zoom: 1.0,
             prefer_hardware_decode: true,
             sound_on: false,
             talk_mute: false,
@@ -1347,6 +1363,30 @@ impl AppConfig {
                 "the shell's idle time is not a number; the shell will not hide itself"
             );
             0.0
+        };
+        // The interface zoom is written by a slider limited to UI_ZOOM_MIN..=MAX,
+        // and a shortcut is clamped to the same span before it is stored. A
+        // hand-edited document can still ask for something outside it - zero
+        // would divide the pointer mapping, a huge one would draw nothing but
+        // one tile - so bring it back to the one range the interface can show.
+        self.ui_zoom = if self.ui_zoom.is_finite() {
+            let before = self.ui_zoom;
+            let after = before.clamp(UI_ZOOM_MIN, UI_ZOOM_MAX);
+            if after != before {
+                tracing::warn!(
+                    target: "xgview::config",
+                    before,
+                    after,
+                    "the interface zoom is outside the range the interface can use"
+                );
+            }
+            after
+        } else {
+            tracing::warn!(
+                target: "xgview::config",
+                "the interface zoom is not a number; using the native size"
+            );
+            1.0
         };
         // There is always a group to add to: the built-in one is never removed,
         // and a configuration that somehow lost every group gets it back.

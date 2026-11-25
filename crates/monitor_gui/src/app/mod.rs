@@ -17,7 +17,7 @@ use tokio::runtime::Handle;
 use monitor_core::autostart::{self, AutostartStatus};
 use monitor_core::power::{self, PowerStatus};
 use monitor_core::reboot;
-use monitor_core::config::{AppConfig, Orientation};
+use monitor_core::config::{AppConfig, Orientation, UI_ZOOM_MAX, UI_ZOOM_MIN};
 use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{infer_sub_stream, ConnectionState, OsdItem, StreamKind, TileAspect};
 use monitor_core::pipeline::{CallFailure, ChannelManager, Diagnostic, StreamEvent, StreamStats};
@@ -1250,6 +1250,17 @@ pub struct XgViewApp {
     /// Whether the wall was blank on the last frame, so that going into and out
     /// of it is acted on once rather than on every frame of it.
     blackout_on: bool,
+    /// Whether the persisted interface zoom has been handed to egui yet.
+    ///
+    /// egui starts every process at 1.0 and knows nothing of our configuration.
+    /// The first frame carries the document's value into the context; after
+    /// that the direction reverses - egui is the authority, since Ctrl/+/-/0
+    /// change it without asking us, and a difference means a shortcut was used
+    /// and has to be written back.
+    zoom_restored: bool,
+    /// Set by an import so the next frame pushes the imported zoom into egui
+    /// rather than reading the pre-import live value back into the document.
+    accept_zoom: bool,
     decoder: &'static str,
     hardware_decoder: bool,
     /// Whether hardware and software decoding can be chosen between here. Left
@@ -2010,6 +2021,8 @@ impl XgViewApp {
             discovery,
             blackout: crate::blackout::BlackoutState::new(),
             blackout_on: false,
+            zoom_restored: false,
+            accept_zoom: false,
             slide: Slide::default(),
             needs_sync: true,
             dirty: false,
@@ -2783,6 +2796,52 @@ impl XgViewApp {
         }
     }
 
+    /// Keeps the persisted interface zoom and egui's live zoom in step.
+    ///
+    /// egui owns the live value: its own Ctrl/+/-/0 shortcuts change it at the
+    /// end of a pass without telling us. The first frame goes the other way -
+    /// the document's saved size is handed to egui - and from then on a
+    /// difference means a shortcut was used, so the new size is written back.
+    /// The direction is latched rather than guessed from which side changed:
+    /// `set_zoom_factor` only takes effect at the start of the next pass, so a
+    /// frame or two can pass with the two values still apart.
+    fn sync_zoom(&mut self, ctx: &egui::Context) {
+        const EPS: f32 = 0.001;
+        let live = ctx.zoom_factor();
+        let saved = self.config.ui_zoom;
+        if (live - saved).abs() <= EPS {
+            self.zoom_restored = true;
+            return;
+        }
+        // An import replaces the whole document, including its zoom. The
+        // imported size has to be pushed into egui the way the start-up size
+        // is, not mistaken for a shortcut and overwritten with the old live
+        // value. `accept_zoom` is set by the import path for exactly this.
+        if self.accept_zoom {
+            self.accept_zoom = false;
+            self.zoom_restored = false;
+            ctx.set_zoom_factor(saved);
+            return;
+        }
+        if self.zoom_restored {
+            // A shortcut moved the live zoom. egui allows 20-500%, wider than
+            // the slider: bring both sides back inside our span, so the thumb,
+            // the actual scale and the saved value never disagree. When the
+            // clamped value is already stored there is nothing to save - only
+            // the live zoom has to be pulled back to the edge.
+            let accepted = live.clamp(UI_ZOOM_MIN, UI_ZOOM_MAX);
+            if (accepted - saved).abs() > EPS {
+                self.config.ui_zoom = accepted;
+                self.mark_dirty();
+            }
+            if (accepted - live).abs() > EPS {
+                ctx.set_zoom_factor(accepted);
+            }
+        } else {
+            ctx.set_zoom_factor(saved);
+        }
+    }
+
     fn needs_animation(&self) -> bool {
         // The mark breathes, so a blank wall is never still.
         if self.blackout_on {
@@ -2955,6 +3014,7 @@ impl XgViewApp {
     }
 
     pub fn frame(&mut self, ctx: &egui::Context) {
+        self.sync_zoom(ctx);
         // The wall paints when a picture lands rather than on a timer. A twelve
         // frame stream is eighty-three milliseconds a frame, and the
         // forty-millisecond timer the wall runs on otherwise shows each picture
