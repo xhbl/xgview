@@ -64,7 +64,20 @@ static WIDTH: AtomicU32 = AtomicU32::new(1920);
 static HEIGHT: AtomicU32 = AtomicU32::new(1080);
 
 /// The display's density, so the interface is laid out at the size it should be.
+///
+/// This is the *native* ratio: physical pixels per device-independent point,
+/// handed over once by the activity. It is fed to egui as
+/// `native_pixels_per_point` and never carries the viewer's interface zoom.
 static DENSITY: AtomicU32 = AtomicU32::new(2000);
+
+/// The effective points-to-pixels ratio, including any interface zoom.
+///
+/// Written by the render loop every frame as `density * zoom` and read by the
+/// JNI input callbacks, which run off the render thread and have no `Context`
+/// to ask. Stored as the ratio times 1000, as `DENSITY` is. At 100% zoom this
+/// equals `DENSITY`; a larger interface scale makes both the UI's logical
+/// points and the touch coordinates use the same bigger ratio.
+static EFFECTIVE_PPP: AtomicU32 = AtomicU32::new(2000);
 
 /// The window the loop should be drawing into, or null while there is none.
 ///
@@ -339,7 +352,7 @@ pub fn push_touch(phase: i32, id: i32, x: f32, y: f32, force: f32) {
         2 => egui::TouchPhase::End,
         _ => egui::TouchPhase::Cancel,
     };
-    let pixels_per_point = DENSITY.load(Ordering::Acquire) as f32 / 1000.0;
+    let pixels_per_point = EFFECTIVE_PPP.load(Ordering::Acquire) as f32 / 1000.0;
     let pos = egui::pos2(x / pixels_per_point, y / pixels_per_point);
     push_event(egui::Event::Touch {
         device_id: egui::TouchDeviceId(0),
@@ -406,7 +419,7 @@ pub fn push_scroll(dx: f32, dy: f32) {
     if dx == 0.0 && dy == 0.0 {
         return;
     }
-    let pixels_per_point = DENSITY.load(Ordering::Acquire) as f32 / 1000.0;
+    let pixels_per_point = EFFECTIVE_PPP.load(Ordering::Acquire) as f32 / 1000.0;
     push_event(egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
         delta: egui::vec2(dx / pixels_per_point, dy / pixels_per_point),
@@ -463,13 +476,13 @@ fn block_on<F: std::future::Future>(future: F) -> Option<F::Output> {
 ///
 /// One function because the context and the renderer that draws it are one pair
 /// - see where the bar's surface is made in the loop.
-fn bar_screen(pixels_per_point: f32) -> egui::Context {
+///
+/// The display density reaches egui through each frame's `RawInput` as
+/// `native_pixels_per_point`; the context itself starts at zoom 1.0 like a
+/// desktop one. Until the interface scale is restored on Android the keyboard
+/// shortcut stays off, so an external keyboard cannot move the ratio.
+fn bar_screen() -> egui::Context {
     let context = egui::Context::default();
-    context.set_pixels_per_point(pixels_per_point);
-    // The zoom channel carries the display density here. egui applies
-    // Ctrl/Cmd+/-/0 itself at the end of every pass unless told not to, and a
-    // keyboard on Android would otherwise overwrite the density and pull the
-    // bar's pixel conversions out of step with the wall's.
     context.options_mut(|options| options.zoom_with_keyboard = false);
     crate::theme::install(&context);
     crate::fonts::install_for(&context, &monitor_i18n::current_language());
@@ -632,7 +645,12 @@ pub fn start(window: *mut c_void, internal: String, external: String, density: f
         return WALL_TICKET.current();
     }
     if density > 0.0 {
-        DENSITY.store((density * 1000.0) as u32, Ordering::Release);
+        let milli = (density * 1000.0) as u32;
+        DENSITY.store(milli, Ordering::Release);
+        // Until the first frame can report the context's real ratio, the
+        // native density is also the best answer for an input callback: the
+        // saved zoom is applied by the first frame from then on.
+        EFFECTIVE_PPP.store(milli, Ordering::Release);
     }
     if let Ok(mut directories) = DIRECTORIES.lock() {
         *directories = Some((PathBuf::from(internal), PathBuf::from(external)));
@@ -862,8 +880,7 @@ fn run() -> anyhow::Result<()> {
     // That panics, and the panic is fatal: it aborted the process on the way
     // back from the background, where the bar's surface is destroyed and made
     // again while the wall keeps running.
-    let bar_pixels = DENSITY.load(Ordering::Acquire) as f32 / 1000.0;
-    let mut bar_context = bar_screen(bar_pixels);
+    let mut bar_context = bar_screen();
 
     let started = Instant::now();
     let mut last = Instant::now();
@@ -1123,13 +1140,12 @@ fn run() -> anyhow::Result<()> {
             };
 
             let context = egui::Context::default();
-            let pixels_per_point = DENSITY.load(Ordering::Acquire) as f32 / 1000.0;
-            context.set_pixels_per_point(pixels_per_point);
-            // `set_pixels_per_point` is how the activity's density reaches
-            // egui on this path. egui's own Ctrl/Cmd+/-/0 handler runs at the
-            // end of every pass and would overwrite it, desyncing the UI's
-            // logical points from the surface's pixels. Interface scaling is
-            // a desktop feature; see `XgViewApp::sync_zoom`.
+            // The activity's density is fed to egui each frame as
+            // `native_pixels_per_point` in `RawInput`, the way eframe feeds a
+            // desktop window's scale factor. `zoom_factor` is left at 1.0 so
+            // it means the viewer's interface scale, not the screen's density.
+            // Until Android supports that scale the keyboard shortcut stays
+            // off; see `XgViewApp::sync_zoom`.
             context.options_mut(|options| options.zoom_with_keyboard = false);
 
             let app = XgViewApp::new(
@@ -1143,7 +1159,7 @@ fn run() -> anyhow::Result<()> {
                 target: "xgview",
                 width = fresh_config.width,
                 height = fresh_config.height,
-                pixels_per_point,
+                density = DENSITY.load(Ordering::Acquire) as f32 / 1000.0,
                 "the wall is drawing on the activity's surface"
             );
             surface = Some((fresh, fresh_config));
@@ -1206,8 +1222,24 @@ fn run() -> anyhow::Result<()> {
             .as_secs_f32()
             .clamp(1.0 / 120.0, 1.0 / 60.0);
         last = now;
-        let pixels_per_point = DENSITY.load(Ordering::Acquire) as f32 / 1000.0;
-        let input = egui::RawInput {
+        let density = DENSITY.load(Ordering::Acquire) as f32 / 1000.0;
+        // egui's own rule: pixels_per_point = zoom_factor *
+        // native_pixels_per_point. Density travels in the native slot, as a
+        // desktop window's scale factor does in eframe; zoom_factor is left
+        // free for the viewer's interface scale. At 100% the product is the
+        // old DENSITY, so every conversion here is unchanged on a wall that
+        // has never been zoomed.
+        let zoom = context.zoom_factor();
+        let pixels_per_point = density * zoom;
+        // The JNI input callbacks run off this thread and cannot ask the
+        // context, so hand them the same ratio every frame. Derive the stored
+        // milli-units from the density's own integer: at 100% this writes
+        // back exactly the value `start()` seeded, rather than losing a
+        // milli-unit to a float round trip and nudging touch by a fraction of
+        // a point. A zoomed wall scales that integer by the same factor.
+        let density_milli = DENSITY.load(Ordering::Acquire);
+        EFFECTIVE_PPP.store(((density_milli as f32 * zoom).round()) as u32, Ordering::Release);
+        let mut input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(
@@ -1221,6 +1253,11 @@ fn run() -> anyhow::Result<()> {
             events,
             ..Default::default()
         };
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(density);
         // A turned picture is the one the surface cannot draw: rotating the
         // view does not rotate the frames the compositor scans out of it, and
         // there is no texture for the wall's turned mesh to sample. Suspend the
@@ -1407,9 +1444,12 @@ fn run() -> anyhow::Result<()> {
             crate::android::set_video_visible(on_layer);
         }
         let jobs = context.tessellate(output.shapes, output.pixels_per_point);
+        // The descriptor's ratio must be the very one tessellation used, or
+        // the GPU's clip space and the vertices disagree and the picture
+        // blurs and jitters. `output` is authoritative; at 100% it is density.
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [surface_config.width, surface_config.height],
-            pixels_per_point,
+            pixels_per_point: output.pixels_per_point,
         };
         {
             let mut renderer = render_state.renderer.write();
@@ -1541,7 +1581,7 @@ fn run() -> anyhow::Result<()> {
                         // here belonged to the renderer that has just been
                         // dropped, and the atlas it had drawn is a texture this
                         // one has never been given. See `bar_screen`.
-                        bar_context = bar_screen(bar_pixels);
+                        bar_context = bar_screen();
                         last_focus = None;
                         // A new context knows nothing, so what the last one was
                         // told is forgotten with it: the next frame says it
@@ -1651,7 +1691,7 @@ fn run() -> anyhow::Result<()> {
                             });
                         }
                     }
-                    let bar_input = egui::RawInput {
+                    let mut bar_input = egui::RawInput {
                         screen_rect: Some(bar_rect),
                         time: Some(started.elapsed().as_secs_f64()),
                         events: bar_events,
@@ -1662,6 +1702,14 @@ fn run() -> anyhow::Result<()> {
                         focused: FOCUSED.load(Ordering::Acquire),
                         ..Default::default()
                     };
+                    // Same density as the wall, in the same native slot. The
+                    // bar's own zoom factor is its context's, so the two
+                    // screens keep one unit until interface scaling is on.
+                    bar_input
+                        .viewports
+                        .entry(egui::ViewportId::ROOT)
+                        .or_default()
+                        .native_pixels_per_point = Some(density);
                     // The ring the remote puts on a control is the one thing a
                     // paint cannot work out for itself: egui draws it for
                     // whatever its own memory says has the focus, and the focus
@@ -1719,7 +1767,7 @@ fn run() -> anyhow::Result<()> {
                         bar_context.tessellate(bar_output.shapes, bar_output.pixels_per_point);
                     let bar_screen = egui_wgpu::ScreenDescriptor {
                         size_in_pixels: [bar_config.width, bar_config.height],
-                        pixels_per_point,
+                        pixels_per_point: bar_output.pixels_per_point,
                     };
                     {
                         for (id, delta) in &bar_output.textures_delta.set {

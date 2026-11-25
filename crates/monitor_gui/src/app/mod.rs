@@ -2849,12 +2849,13 @@ impl XgViewApp {
     /// `set_zoom_factor` only takes effect at the start of the next pass, so a
     /// frame or two can pass with the two values still apart.
     ///
-    /// Desktop only. On Android the wall renders through its own surface path,
-    /// which uses `set_pixels_per_point` to carry the *display density* to
-    /// egui - the zoom channel is already occupied. Driving it from the saved
-    /// interface scale would desync every point-to-pixel conversion: the UI
-    /// stays put, the picture's rectangle and the navigation-bar gutters move,
-    /// and the wall blurs and jitters. The slider is hidden there as well.
+    /// Desktop only for now. Android used to carry its *display density* in
+    /// this channel via `set_pixels_per_point`, so a saved scale overwrote the
+    /// density and desynced the wall; the slider was hidden there too. The
+    /// surface path now feeds density as `native_pixels_per_point` instead,
+    /// leaving `zoom_factor` free, so this can be enabled on Android once the
+    /// remaining point-to-pixel conversions read the effective ratio. See
+    /// `priv/docs/android-ui-zoom-plan.md`.
     #[cfg(not(target_os = "android"))]
     fn sync_zoom(&mut self, ctx: &egui::Context) {
         const EPS: f32 = 0.001;

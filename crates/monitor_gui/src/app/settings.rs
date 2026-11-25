@@ -377,9 +377,10 @@ impl XgViewApp {
         // finger. Every other change (reset button, keyboard arrows) is not a
         // drag and is applied at once.
         //
-        // Desktop only. Android's surface path already uses egui's zoom
-        // channel for the display density; a scale here would desync the
-        // picture's rectangle from the UI. See `XgViewApp::sync_zoom`.
+        // Desktop only for now. Android used to keep the display density in
+        // egui's zoom channel, so a scale here desynced the picture from the
+        // UI. That channel is clean now; this stays gated until the remaining
+        // conversions read the effective ratio. See `XgViewApp::sync_zoom`.
         #[cfg(not(target_os = "android"))]
         {
             ui.add_space(theme::space::S);
