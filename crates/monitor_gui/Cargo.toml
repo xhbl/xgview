@@ -48,11 +48,27 @@ eframe = { version = "0.32", features = ["accesskit", "glow", "wayland", "x11"] 
 # The single-instance claim's kernel objects on Windows - a named mutex that says
 # whether another instance holds this configuration, and a named event it is
 # asked to come forward on. See `src/instance.rs`.
+# Reading the remote's keys straight from the input layer: the display server
+# may grab them, and the zoom keys have codes above X11's eight-bit limit.
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13.2"
+rustix = { version = "1.1", features = ["event"] }
+
 [target.'cfg(windows)'.dependencies]
+# The system media controls (SMTC) route a remote's play/next keys to us even
+# when the window has no focus. 0.8.3 is chosen over 0.9.3 to keep Rust 1.80
+# as the workspace MSRV - see priv/docs/media-keys-plan.md §5.1.
+souvlaki = "0.8.3"
+# To pull the bare Win32 HWND out of eframe's window handle for SMTC.
+raw-window-handle = "0.6"
 # `GetLogicalDrives` names the volumes the file picker offers without touching
 # the filesystem of each one: asking a disconnected network drive would block
 # the frame the window opens on.
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
+
+# macOS media keys (MPRemoteCommandCenter), same MSRV reason as Windows.
+[target.'cfg(target_os = "macos")'.dependencies]
+souvlaki = "0.8.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }

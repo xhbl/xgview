@@ -268,6 +268,17 @@ pub fn set_focused(focused: bool) {
 /// should still see - volume, the media keys, the language switch - and the
 /// activity answers the key event with this, so that it does.
 pub fn push_key(code: i32, pressed: bool, repeat: bool, meta: i32, unicode: i32) -> bool {
+    // A media key goes to the application's own channel, not egui's. Keeping
+    // it out of egui is what lets a text field stay untouched and lets the
+    // same hold cadence be used as on Linux.
+    if let Some(event) = crate::keymap::media_event(code, pressed, repeat) {
+        if let Some(tx) = MEDIA_TX.get() {
+            if tx.send(event).is_ok() {
+                wake();
+                return true;
+            }
+        }
+    }
     let Some(events) = crate::keymap::key_events(code, pressed, repeat, meta, unicode) else {
         return false;
     };
@@ -275,6 +286,17 @@ pub fn push_key(code: i32, pressed: bool, repeat: bool, meta: i32, unicode: i32)
         push_event(event);
     }
     true
+}
+
+/// The application's media channel, installed from `XgViewApp::new`.
+///
+/// Key events can arrive from JNI before the application has been built (the
+/// activity starts before the first frame), so the sender is optional: a key
+/// in that window falls through to egui's own path, which is harmless.
+static MEDIA_TX: OnceLock<crate::media::MediaTx> = OnceLock::new();
+
+pub fn set_media_tx(tx: crate::media::MediaTx) {
+    let _ = MEDIA_TX.set(tx);
 }
 
 /// How many fingers are on the glass, so a tap and a pinch can be told apart.

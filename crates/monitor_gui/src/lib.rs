@@ -41,6 +41,11 @@ pub mod android_surface;
 pub mod keymap;
 #[cfg(target_os = "android")]
 pub mod keyboard;
+pub mod media;
+#[cfg(target_os = "linux")]
+pub mod media_evdev;
+#[cfg(any(windows, target_os = "macos"))]
+pub mod media_souvlaki;
 pub mod mic;
 pub mod nav;
 pub mod theme;

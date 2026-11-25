@@ -1187,6 +1187,31 @@ pub struct XgViewApp {
     frame_clock: Option<crate::frame::FrameClock>,
     events_tx: Sender<BackgroundEvent>,
     events_rx: Receiver<BackgroundEvent>,
+    /// Media keys from every platform backend, drained once per frame.
+    ///
+    /// The senders are cloned out to the readers in `new`; the receiver and the
+    /// held-key table stay on the UI thread, so no backend ever touches the
+    /// application's state.
+    media_rx: crate::media::MediaRx,
+    /// Kept so a later hotplug (a receiver plugged in after start) can be
+    /// handed its own sender; the initial readers get clones in `new`.
+    #[allow(dead_code)]
+    media_tx: crate::media::MediaTx,
+    /// The system media session on Windows/macOS, opened on the first frame
+    /// once the window handle exists.
+    #[cfg(any(windows, target_os = "macos"))]
+    media_souvlaki: Option<crate::media_souvlaki::Souvlaki>,
+    /// Last playback state published to the media session, so a frame does
+    /// not re-send it every time.
+    #[cfg(any(windows, target_os = "macos"))]
+    media_souvlaki_playing: Option<bool>,
+    /// Keys held down, with the moment they were pressed and the moment the
+    /// next repeat is due. Only `pump_media` reads or writes this; see that
+    /// method for the cadence.
+    held_media: HashMap<
+        (crate::media::DeviceGroup, crate::media::MediaCommand),
+        (Instant, Instant),
+    >,
     /// What the file window was opened for, and `None` while it is closed.
     /// Both directions use the viewer's own picker, which is the only file
     /// window a remote can walk. See [`Self::ask_for_file`].
@@ -1901,6 +1926,11 @@ impl XgViewApp {
         // written, and nothing ever reads a `.part` as a video, so old ones go.
         download::cleanup_on_start();
         let (events_tx, events_rx) = unbounded();
+        let (media_tx, media_rx) = unbounded();
+        #[cfg(target_os = "linux")]
+        crate::media_evdev::spawn(egui_ctx.clone(), media_tx.clone());
+        #[cfg(target_os = "android")]
+        crate::android_surface::set_media_tx(media_tx.clone());
         let capabilities = monitor_codec::capabilities();
 
         // The state the plane uploads go through: eframe's on the desktop, the
@@ -1990,6 +2020,13 @@ impl XgViewApp {
             frame_clock: crate::frame::FrameClock::from_env(),
             events_tx,
             events_rx,
+            media_tx,
+            media_rx,
+            #[cfg(any(windows, target_os = "macos"))]
+            media_souvlaki: None,
+            #[cfg(any(windows, target_os = "macos"))]
+            media_souvlaki_playing: None,
+            held_media: HashMap::new(),
             file_job: None,
             file_picker: Modal::default(),
             file_picker_picked: None,
@@ -3014,6 +3051,14 @@ impl XgViewApp {
     }
 
     pub fn frame(&mut self, ctx: &egui::Context) {
+        #[cfg(any(windows, target_os = "macos"))]
+        if let Some(session) = self.media_souvlaki.as_mut() {
+            let playing = self.playback.is_some();
+            if self.media_souvlaki_playing != Some(playing) {
+                session.set_playing(playing);
+                self.media_souvlaki_playing = Some(playing);
+            }
+        }
         self.sync_zoom(ctx);
         // The wall paints when a picture lands rather than on a timer. A twelve
         // frame stream is eighty-three milliseconds a frame, and the
@@ -3029,6 +3074,7 @@ impl XgViewApp {
         // to another camera has to be noticed in the same frame it happens.
         self.track_surface_picture();
         self.pump_background(ctx);
+        self.pump_media(ctx);
         self.collect_events(ctx);
         // The strip a recording draws is kept as wide as it is drawn here,
         // rather than only where the viewer moves it: a read that ended in
@@ -3092,6 +3138,42 @@ impl eframe::App for XgViewApp {
         // still whole.
         if ctx.input(|input| input.viewport().close_requested()) {
             self.download.cancel();
+        }
+        #[cfg(any(windows, target_os = "macos"))]
+        if self.media_souvlaki.is_none() {
+            // The window handle only exists once a frame has been laid out;
+            // try again on the next frame if this one has none yet.
+            #[cfg(target_os = "windows")]
+            let hwnd = {
+                use raw_window_handle::HasWindowHandle;
+                _frame
+                .window_handle()
+                .ok()
+                .and_then(|handle| match handle.as_raw() {
+                    raw_window_handle::RawWindowHandle::Win32(win) => {
+                        Some(win.hwnd.get() as *mut std::ffi::c_void)
+                    }
+                    _ => None,
+                })
+            };
+            #[cfg(not(target_os = "windows"))]
+            let hwnd = None;
+            // souvlaki's Windows backend `expect`s an HWND; passing None would
+            // panic instead of degrading. Try again on a later frame.
+            let has_handle = hwnd.is_some();
+            #[cfg(not(target_os = "windows"))]
+            let has_handle = true;
+            if has_handle {
+                match crate::media_souvlaki::Souvlaki::new(hwnd, self.media_tx.clone()) {
+                    Ok(session) => {
+                        self.media_souvlaki = Some(session);
+                        self.media_souvlaki_playing = None;
+                    }
+                    Err(err) => {
+                        tracing::warn!(target: "xgview::media", %err, "cannot open the system media controls");
+                    }
+                }
+            }
         }
         self.frame(ctx);
     }
@@ -3673,6 +3755,191 @@ impl XgViewApp {
 }
 
 impl XgViewApp {
+    /// Drains media keys and runs the actions they ask for.
+    ///
+    /// Called once near the start of a frame, before the keys the window itself
+    /// received are routed: a media key is its own event, not an egui one, and
+    /// nothing downstream can consume or double-handle it.
+    ///
+    /// A one-shot `Command` acts at once. A `Hold` is different: the reader
+    /// sends only the down and up of the key, with no timers of its own, and
+    /// the repeat cadence lives here so every platform gets the same feel.
+    /// Pressing performs the first step immediately; the next is due 400ms
+    /// later and then every 150ms. Each frame wakes the context for the
+    /// nearest deadline. egui has no way to cancel a wake already asked for,
+    /// so a release simply stops renewing it - the pending wake costs one
+    /// idle frame. A key lost with its device, or held while a modal opens or
+    /// the picture stops being magnified, is dropped here as well, otherwise
+    /// a release that never arrives would keep the action running forever.
+    pub(super) fn pump_media(&mut self, ctx: &egui::Context) {
+        use crate::media::MediaEvent;
+
+        const FIRST_REPEAT: Duration = Duration::from_millis(400);
+        const REPEAT: Duration = Duration::from_millis(150);
+        const MAX_HOLD: Duration = Duration::from_secs(5);
+
+        let modal = self.modal_is_up() || self.show_settings;
+
+        // One pass over the queue, keeping its order. A fast tap can put both
+        // the down and the up in the same batch; processing them in order makes
+        // the up cancel the hold the down just started. Collecting the two
+        // separately and applying releases first would let the down re-register
+        // after its own release and repeat for the full five seconds.
+        if modal {
+            // A modal drops everything and leaves no key held, so closing it
+            // cannot resume a repeat that began before it opened.
+            while self.media_rx.try_recv().is_ok() {}
+            self.held_media.clear();
+            return;
+        }
+        while let Ok(event) = self.media_rx.try_recv() {
+            match event {
+                MediaEvent::Command(command) => self.run_media_command(command, ctx),
+                MediaEvent::Hold { group, command, pressed, at } => {
+                    let key = (group, command);
+                    if pressed {
+                        // Only continuous actions may hold; a stray Hold of a
+                        // one-shot action (Mute, PlayPause, a seek) must not be
+                        // repeated into a flip or a walk through the timeline.
+                        if !command.repeats_while_held() || !self.media_hold_allowed(command) {
+                            continue;
+                        }
+                        // A second down for a key already held is one the
+                        // reader could not de-duplicate; keep the earlier
+                        // deadline rather than restarting the cadence or
+                        // acting on it again.
+                        if !self.held_media.contains_key(&key) {
+                            self.run_media_command(command, ctx);
+                            self.held_media.insert(key, (at, at + FIRST_REPEAT));
+                        }
+                    } else {
+                        self.held_media.remove(&key);
+                    }
+                }
+                MediaEvent::DeviceLost(group) => {
+                    // A key held on a device that vanished will never send its
+                    // release; stop its repeats now rather than waiting for
+                    // the five-second cap.
+                    self.held_media.retain(|(held, _), _| held != &group);
+                }
+            }
+        }
+
+        // A magnified view can be left while a zoom key is still held. Drop
+        // such holds before looking at their deadlines, not only when a
+        // deadline comes due - otherwise the old hold quietly resumes if the
+        // view is magnified again within the next 400/150ms window.
+        let stale: Vec<_> = self
+            .held_media
+            .keys()
+            .filter(|(_, command)| !self.media_hold_allowed(*command))
+            .cloned()
+            .collect();
+        for key in stale {
+            self.held_media.remove(&key);
+        }
+
+        let now = Instant::now();
+
+        // Repeat everything that came due, at most one step per key this frame
+        // even if the UI was stalled past several deadlines.
+        let mut next_wake: Option<Instant> = None;
+        let due: Vec<_> = self
+            .held_media
+            .iter()
+            .filter(|(_, (_, deadline))| *deadline <= now)
+            .map(|(key, (pressed, deadline))| (key.clone(), *pressed, *deadline))
+            .collect();
+        for (key, pressed, _deadline) in due {
+            if !self.media_hold_allowed(key.1) {
+                self.held_media.remove(&key);
+                continue;
+            }
+            // The five-second cap runs from the press, not from the last
+            // repeat: a slow frame must not extend a hold indefinitely. Check
+            // it before acting, so the last frame at the cap does not add one
+            // more step than the hold was promised.
+            if now.duration_since(pressed) >= MAX_HOLD {
+                self.held_media.remove(&key);
+                continue;
+            }
+            self.run_media_command(key.1, ctx);
+            // Schedule from now, not from the old deadline: a frame that was
+            // late must not catch up by firing several steps in as many frames.
+            self.held_media.insert(key, (pressed, now + REPEAT));
+        }
+        for (_, deadline) in self.held_media.values() {
+            next_wake = Some(next_wake.map_or(*deadline, |soon: Instant| soon.min(*deadline)));
+        }
+        if let Some(deadline) = next_wake {
+            ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+
+    /// Whether a held action still has something to act on.
+    ///
+    /// Picture zoom is only meaningful on a magnified viewport; once the wall
+    /// goes back to the grid a held zoom key must stop rather than wait for a
+    /// viewport that is not there.
+    fn media_hold_allowed(&self, command: crate::media::MediaCommand) -> bool {
+        use crate::media::MediaCommand;
+        if matches!(command, MediaCommand::PictureZoomIn | MediaCommand::PictureZoomOut) {
+            return self.scheduler.is_zoomed();
+        }
+        true
+    }
+
+    /// Runs one media command. All routing lives here so a key, a system media
+    /// control and a future source all end up at the same actions.
+    fn run_media_command(&mut self, command: crate::media::MediaCommand, ctx: &egui::Context) {
+        use crate::media::MediaCommand;
+
+        match command {
+            MediaCommand::StepBack => self.tile_bar_activate(TileBarAction::StepBack, ctx),
+            MediaCommand::StepForward => self.tile_bar_activate(TileBarAction::StepForward, ctx),
+            MediaCommand::PrevEvent => self.tile_bar_activate(TileBarAction::PrevEvent, ctx),
+            MediaCommand::NextEvent => self.tile_bar_activate(TileBarAction::NextEvent, ctx),
+            MediaCommand::PlayPause => self.tile_bar_activate(TileBarAction::PlayPause, ctx),
+            MediaCommand::Mute => self.toggle_mute(),
+            MediaCommand::VolUp => self.adjust_volume(0.05),
+            MediaCommand::VolDown => self.adjust_volume(-0.05),
+            MediaCommand::PictureZoomIn => self.step_picture_zoom(1.25),
+            MediaCommand::PictureZoomOut => self.step_picture_zoom(1.0 / 1.25),
+        }
+    }
+
+    /// Sets internal volume from a media key, the same 0.05 step the settings
+    /// slider uses and the same sink the bar writes through.
+    fn adjust_volume(&mut self, delta: f32) {
+        let value = (self.config.volume + delta).clamp(0.0, 1.0);
+        if (value - self.config.volume).abs() < f32::EPSILON {
+            return;
+        }
+        self.config.volume = value;
+        if let Some(sink) = &self.audio {
+            sink.set_volume(value);
+        }
+        self.mark_dirty();
+    }
+
+    /// The speaker switch, shared with the magnified bar and the settings row
+    /// so a media key and either button flip the same state.
+    fn toggle_mute(&mut self) {
+        self.sound_on = !self.sound_on;
+        self.config.sound_on = self.sound_on;
+        self.apply_audio();
+        self.mark_dirty();
+    }
+
+    /// Steps the magnified picture's zoom about its own centre. Keys have no
+    /// pointer position to aim from, so this uses [`PictureZoom::stepped`].
+    fn step_picture_zoom(&mut self, delta: f32) {
+        if !self.scheduler.is_zoomed() {
+            return;
+        }
+        self.picture_zoom = self.picture_zoom.stepped(delta);
+    }
+
     /// The frame's background work: where the window sits among the others, the file
     /// dialog, the keyboard, and a close that was asked for.
     pub(super) fn pump_background(&mut self, ctx: &egui::Context) {

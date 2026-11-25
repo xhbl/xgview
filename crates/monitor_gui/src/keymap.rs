@@ -183,9 +183,52 @@ fn printable_char(unicode: i32) -> Option<char> {
     (!private_use && !printed.is_ascii_control()).then_some(printed)
 }
 
+/// A media key the interface owns, as one event for the shared media channel.
+///
+/// This is separate from [`from_android`] on purpose. Those keys stay absent
+/// from the egui table: the activity asks us whether a key was taken, and the
+/// answer comes from whichever table claimed it. Keeping the two tables apart
+/// means a key is either a command here or a name there, never both.
+///
+/// Volume stays with the system (24/25/164) and is never claimed here. The
+/// zoom keys are holdable: their down and up go to the UI's repeat cadence,
+/// the same one evdev drives on Linux. A repeat from the key map is ignored -
+/// the UI owns the cadence.
+pub fn media_event(code: i32, pressed: bool, repeat: bool) -> Option<crate::media::MediaEvent> {
+    use crate::media::{DeviceGroup, MediaCommand, MediaEvent};
+    if repeat {
+        return None;
+    }
+    let (command, holdable) = match code {
+        85 | 126 | 127 => (MediaCommand::PlayPause, false),
+        87 => (MediaCommand::NextEvent, false),
+        88 => (MediaCommand::PrevEvent, false),
+        89 => (MediaCommand::StepBack, false),
+        90 => (MediaCommand::StepForward, false),
+        168 => (MediaCommand::PictureZoomIn, true),
+        169 => (MediaCommand::PictureZoomOut, true),
+        // Volume and mute belong to the box, not the wall.
+        24 | 25 | 164 => return None,
+        _ => return None,
+    };
+    if !holdable && !pressed {
+        return None;
+    }
+    Some(if holdable {
+        MediaEvent::Hold {
+            group: DeviceGroup::named(DeviceGroup::ANDROID_SURFACES),
+            command,
+            pressed,
+            at: std::time::Instant::now(),
+        }
+    } else {
+        MediaEvent::Command(command)
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{from_android, key_events, printable_char, DIGITS};
+    use super::{from_android, key_events, media_event, printable_char, DIGITS};
 
     const CTRL: i32 = 0x1000;
     const SHIFT: i32 = 0x0001;
@@ -237,7 +280,9 @@ mod tests {
                 "keycode {code} is the interface's"
             );
         }
-        // Volume, mute, the media keys: the box's, not the wall's.
+        // Volume and mute are the box's, not the wall's. The media keys are
+        // claimed by `media_event` instead, so they are absent from this table
+        // too; a key must belong to exactly one of the two.
         for code in [24, 25, 164, 85, 87, 88, 126, 127, 219] {
             assert!(
                 from_android(code).is_none(),
@@ -341,6 +386,38 @@ mod tests {
         assert!(texts_of(29, true, 0x2000, 1).is_empty());
         // Shift is not a command: a shifted A is a capital A.
         assert_eq!(texts_of(29, true, SHIFT, 'A' as i32), vec!["A".to_owned()]);
+    }
+
+    #[test]
+    fn media_keys_become_commands_and_volume_stays_with_the_system() {
+        use crate::media::{DeviceGroup, MediaCommand, MediaEvent};
+
+        let once = |code| media_event(code, true, false);
+        assert!(matches!(once(85), Some(MediaEvent::Command(MediaCommand::PlayPause))));
+        assert!(matches!(once(126), Some(MediaEvent::Command(MediaCommand::PlayPause))));
+        assert!(matches!(once(127), Some(MediaEvent::Command(MediaCommand::PlayPause))));
+        assert!(matches!(once(87), Some(MediaEvent::Command(MediaCommand::NextEvent))));
+        assert!(matches!(once(88), Some(MediaEvent::Command(MediaCommand::PrevEvent))));
+        assert!(matches!(once(89), Some(MediaEvent::Command(MediaCommand::StepBack))));
+        assert!(matches!(once(90), Some(MediaEvent::Command(MediaCommand::StepForward))));
+        for code in [24, 25, 164] {
+            assert!(media_event(code, true, false).is_none(), "volume key {code}");
+        }
+        // A zoom key sends its down and up to the hold state machine.
+        let group = DeviceGroup::named(DeviceGroup::ANDROID_SURFACES);
+        assert!(matches!(
+            media_event(168, true, false),
+            Some(MediaEvent::Hold { command: MediaCommand::PictureZoomIn, pressed: true, .. })
+        ));
+        assert!(matches!(
+            media_event(169, false, false),
+            Some(MediaEvent::Hold { command: MediaCommand::PictureZoomOut, pressed: false, .. })
+        ));
+        assert_eq!(group.as_str(), DeviceGroup::ANDROID_SURFACES);
+        // Key-map repeats are ignored: the UI owns the cadence.
+        assert!(media_event(168, true, true).is_none());
+        // A one-shot key has no release event.
+        assert!(media_event(85, false, false).is_none());
     }
 
     #[test]

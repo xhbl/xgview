@@ -274,6 +274,21 @@ impl PictureZoom {
         Self { scale, center }
     }
 
+    /// The window a zoom key asked for: the picture grows about its own
+    /// centre, with no pointer or rectangle to aim from.
+    ///
+    /// A key has no position on the picture. Keeping the centre and changing
+    /// only the scale is what a viewer expects from one - the middle of what
+    /// they are looking at stays put. The same clamp as [`Self::zoomed`] keeps
+    /// the window inside the picture at either end, and returning to `1.0`
+    /// pulls the centre back to the middle, which is [`Self::FULL`].
+    pub fn stepped(self, delta: f32) -> Self {
+        let scale = (self.scale * delta).clamp(1.0, PICTURE_ZOOM_MAX);
+        let half = Vec2::splat(0.5 / scale);
+        let center = self.center.clamp(half, Vec2::splat(1.0) - half);
+        Self { scale, center }
+    }
+
     /// The window a drag asked for: the picture follows the hands.
     ///
     /// `delta` is how far the pointer moved this frame and `dest` where the
