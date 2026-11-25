@@ -66,7 +66,7 @@ static HEIGHT: AtomicU32 = AtomicU32::new(1080);
 /// The display's density, so the interface is laid out at the size it should be.
 ///
 /// This is the *native* ratio: physical pixels per device-independent point,
-/// handed over once by the activity. It is fed to egui as
+/// handed over by the activity. It is fed to egui as
 /// `native_pixels_per_point` and never carries the viewer's interface zoom.
 static DENSITY: AtomicU32 = AtomicU32::new(2000);
 
@@ -78,6 +78,30 @@ static DENSITY: AtomicU32 = AtomicU32::new(2000);
 /// equals `DENSITY`; a larger interface scale makes both the UI's logical
 /// points and the touch coordinates use the same bigger ratio.
 static EFFECTIVE_PPP: AtomicU32 = AtomicU32::new(2000);
+
+/// The viewer's interface zoom in milli-units (1000 = 100%).
+///
+/// The render loop publishes it so a density change arriving on a JNI thread
+/// can recompute `EFFECTIVE_PPP` at once, without waiting for the next frame
+/// and leaving a touch in between to use the old ratio.
+static ZOOM_MILLI: AtomicU32 = AtomicU32::new(1000);
+
+/// The activity reports a changed display density.
+///
+/// This can happen while the wall is up when the user changes display size or
+/// moves the window to a screen with another scaling. Both the native ratio
+/// and the ratio the input callbacks use have to move with it; a repaint is
+/// asked for so the wall relayouts on the next frame.
+pub fn set_density(density: f32) {
+    if !(density > 0.0) {
+        return;
+    }
+    let milli = (density * 1000.0) as u32;
+    DENSITY.store(milli, Ordering::Release);
+    let zoom = ZOOM_MILLI.load(Ordering::Acquire) as f32 / 1000.0;
+    EFFECTIVE_PPP.store(crate::effective_ppp_milli(milli, zoom), Ordering::Release);
+    wake();
+}
 
 /// The window the loop should be drawing into, or null while there is none.
 ///
@@ -642,17 +666,15 @@ pub fn start(window: *mut c_void, internal: String, external: String, density: f
     // handed over is one more reference to the window this side already has,
     // so it goes straight back rather than being taken for a second wall.
     if window == WINDOW.load(Ordering::Acquire) {
+        // The same surface handed over again, so the loop keeps running - but
+        // the density it arrived with may still be new. Take it before the
+        // early return, or an activity rebuilt on this window keeps the old
+        // ratio until something else happens.
+        set_density(density);
         crate::android::release_native_window(window);
         return WALL_TICKET.current();
     }
-    if density > 0.0 {
-        let milli = (density * 1000.0) as u32;
-        DENSITY.store(milli, Ordering::Release);
-        // Until the first frame can report the context's real ratio, the
-        // native density is also the best answer for an input callback: the
-        // saved zoom is applied by the first frame from then on.
-        EFFECTIVE_PPP.store(milli, Ordering::Release);
-    }
+    set_density(density);
     if let Ok(mut directories) = DIRECTORIES.lock() {
         *directories = Some((PathBuf::from(internal), PathBuf::from(external)));
     }
@@ -1238,6 +1260,9 @@ fn run() -> anyhow::Result<()> {
         // a point. A zoomed wall scales that integer by the same factor.
         let density_milli = DENSITY.load(Ordering::Acquire);
         EFFECTIVE_PPP.store(crate::effective_ppp_milli(density_milli, zoom), Ordering::Release);
+        // Publish the zoom too, so a density change arriving from JNI can
+        // recompute the effective ratio without waiting for this frame.
+        ZOOM_MILLI.store((zoom * 1000.0).round() as u32, Ordering::Release);
         let mut input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,

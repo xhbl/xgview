@@ -2,6 +2,7 @@ package com.xhbl.xgview;
 
 import android.app.Activity;
 import android.content.res.AssetManager;
+import android.content.res.Configuration;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -240,6 +241,10 @@ public class SurfaceActivity extends Activity {
                 if (superseded()) {
                     return;
                 }
+                // A surface is also remade when the display it lands on
+                // changes, so take the density here as well as in
+                // onConfigurationChanged - either callback may carry it first.
+                nativeSetDensity(getResources().getDisplayMetrics().density);
                 nativeResizeWall(wallToken, width, height);
             }
 
@@ -337,6 +342,22 @@ public class SurfaceActivity extends Activity {
         nativeWallFocus(hasFocus);
         if (hasFocus) {
             MainActivity.applySystemBars(this);
+        }
+    }
+
+    /**
+     * The display's density is one of the changes {@code configChanges} keeps
+     * the activity alive for, so nothing recreates the wall on a display-size
+     * change. Hand the new density to it all the same: the UI's points-to-pixels
+     * ratio and the touch coordinates both come from it. Without this the wall
+     * would keep laying out at the old density until its surface happened to be
+     * recreated.
+     */
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (wallToken != 0) {
+            nativeSetDensity(getResources().getDisplayMetrics().density);
         }
     }
 
@@ -1015,6 +1036,9 @@ public class SurfaceActivity extends Activity {
             Class<?> bridge);
 
     private static native void nativeResizeWall(long token, int width, int height);
+
+    /** Reports a display-density change while the wall is running. */
+    private static native void nativeSetDensity(float density);
 
     private static native void nativeStopWall(long token);
 

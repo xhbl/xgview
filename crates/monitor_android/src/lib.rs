@@ -244,6 +244,17 @@ pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeResizeWall(
     monitor_gui::android_surface::resize(token as u64, width, height);
 }
 
+/// The activity's display density changed while the wall was up.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xhbl_xgview_SurfaceActivity_nativeSetDensity(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    density: jni::sys::jfloat,
+) {
+    monitor_gui::android_surface::set_density(density);
+}
+
 /// The wall's surface is gone: stop drawing into it, if it is still ours.
 #[cfg(target_os = "android")]
 #[no_mangle]
