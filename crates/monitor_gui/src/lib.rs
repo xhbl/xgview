@@ -55,6 +55,44 @@ pub mod window;
 
 pub use app::XgViewApp;
 
+/// Effective points-to-pixels ratio in milli-units, from the display's native
+/// density in milli-units and the viewer's interface zoom.
+///
+/// egui's ratio is `zoom_factor * native_pixels_per_point`. The Android
+/// surface path keeps the native ratio in the density's integer milli-units
+/// and publishes the product for the JNI input callbacks, which have no
+/// `egui::Context` to ask. At zoom 1.0 the answer is exactly `density_milli`:
+/// deriving it from the integer avoids a float round trip that could clip a
+/// milli-unit and shift touch coordinates by a fraction of a point.
+// Only the Android surface path consumes this, but keeping it - and its
+// tests - on every host lets the unit tests run on a desktop.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn effective_ppp_milli(density_milli: u32, zoom: f32) -> u32 {
+    (density_milli as f32 * zoom).round() as u32
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::effective_ppp_milli;
+
+    #[test]
+    fn a_hundred_percent_keeps_the_density_exactly() {
+        // The common case on every device: the effective ratio must be the
+        // density handed over by the activity, bit for bit, or a touch used
+        // before the first frame lands a fraction of a point away.
+        for density in [1000, 1500, 2000, 2812, 3550] {
+            assert_eq!(effective_ppp_milli(density, 1.0), density);
+        }
+    }
+
+    #[test]
+    fn a_zoom_scales_the_density_by_the_same_factor() {
+        assert_eq!(effective_ppp_milli(2000, 1.5), 3000);
+        assert_eq!(effective_ppp_milli(2812, 0.5), 1406);
+        assert_eq!(effective_ppp_milli(2000, 2.0), 4000);
+    }
+}
+
 use std::path::PathBuf;
 
 use monitor_core::config::AppConfig;

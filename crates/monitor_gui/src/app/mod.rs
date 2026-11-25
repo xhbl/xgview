@@ -17,9 +17,7 @@ use tokio::runtime::Handle;
 use monitor_core::autostart::{self, AutostartStatus};
 use monitor_core::power::{self, PowerStatus};
 use monitor_core::reboot;
-use monitor_core::config::{AppConfig, Orientation};
-#[cfg(not(target_os = "android"))]
-use monitor_core::config::{UI_ZOOM_MAX, UI_ZOOM_MIN};
+use monitor_core::config::{AppConfig, Orientation, UI_ZOOM_MAX, UI_ZOOM_MIN};
 use monitor_core::layout::{GridLayout, NavigateOutcome};
 use monitor_core::model::{infer_sub_stream, ConnectionState, OsdItem, StreamKind, TileAspect};
 use monitor_core::pipeline::{CallFailure, ChannelManager, Diagnostic, StreamEvent, StreamStats};
@@ -1284,11 +1282,9 @@ pub struct XgViewApp {
     /// that the direction reverses - egui is the authority, since Ctrl/+/-/0
     /// change it without asking us, and a difference means a shortcut was used
     /// and has to be written back.
-    #[cfg(not(target_os = "android"))]
     zoom_restored: bool,
     /// Set by an import so the next frame pushes the imported zoom into egui
     /// rather than reading the pre-import live value back into the document.
-    #[cfg(not(target_os = "android"))]
     accept_zoom: bool,
     decoder: &'static str,
     hardware_decoder: bool,
@@ -2062,9 +2058,7 @@ impl XgViewApp {
             discovery,
             blackout: crate::blackout::BlackoutState::new(),
             blackout_on: false,
-            #[cfg(not(target_os = "android"))]
             zoom_restored: false,
-            #[cfg(not(target_os = "android"))]
             accept_zoom: false,
             slide: Slide::default(),
             needs_sync: true,
@@ -2849,14 +2843,12 @@ impl XgViewApp {
     /// `set_zoom_factor` only takes effect at the start of the next pass, so a
     /// frame or two can pass with the two values still apart.
     ///
-    /// Desktop only for now. Android used to carry its *display density* in
-    /// this channel via `set_pixels_per_point`, so a saved scale overwrote the
-    /// density and desynced the wall; the slider was hidden there too. The
-    /// surface path now feeds density as `native_pixels_per_point` instead,
-    /// leaving `zoom_factor` free, so this can be enabled on Android once the
-    /// remaining point-to-pixel conversions read the effective ratio. See
-    /// `priv/docs/android-ui-zoom-plan.md`.
-    #[cfg(not(target_os = "android"))]
+    /// Android used to carry its *display density* in this channel via
+    /// `set_pixels_per_point`, so a saved scale overwrote the density and
+    /// desynced the wall. The surface path now feeds density as
+    /// `native_pixels_per_point` instead, leaving `zoom_factor` free - the
+    /// same arrangement eframe has on the desktop - so one rule serves every
+    /// platform. See `priv/docs/android-ui-zoom-plan.md`.
     fn sync_zoom(&mut self, ctx: &egui::Context) {
         const EPS: f32 = 0.001;
         let live = ctx.zoom_factor();
@@ -3074,7 +3066,6 @@ impl XgViewApp {
                 self.media_souvlaki_playing = Some(playing);
             }
         }
-        #[cfg(not(target_os = "android"))]
         self.sync_zoom(ctx);
         // The wall paints when a picture lands rather than on a timer. A twelve
         // frame stream is eighty-three milliseconds a frame, and the

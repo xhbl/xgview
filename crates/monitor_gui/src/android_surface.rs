@@ -477,10 +477,11 @@ fn block_on<F: std::future::Future>(future: F) -> Option<F::Output> {
 /// One function because the context and the renderer that draws it are one pair
 /// - see where the bar's surface is made in the loop.
 ///
-/// The display density reaches egui through each frame's `RawInput` as
-/// `native_pixels_per_point`; the context itself starts at zoom 1.0 like a
-/// desktop one. Until the interface scale is restored on Android the keyboard
-/// shortcut stays off, so an external keyboard cannot move the ratio.
+/// The effective pixels-per-point (density times the wall's interface zoom)
+/// reaches egui through each frame's `RawInput` as
+/// `native_pixels_per_point`; this context's zoom factor stays at 1.0, so it
+/// has no second zoom to keep in step with the wall's. No keys are delivered
+/// to the bar - the wall reads them all - so its keyboard zoom stays off.
 fn bar_screen() -> egui::Context {
     let context = egui::Context::default();
     context.options_mut(|options| options.zoom_with_keyboard = false);
@@ -1143,11 +1144,9 @@ fn run() -> anyhow::Result<()> {
             // The activity's density is fed to egui each frame as
             // `native_pixels_per_point` in `RawInput`, the way eframe feeds a
             // desktop window's scale factor. `zoom_factor` is left at 1.0 so
-            // it means the viewer's interface scale, not the screen's density.
-            // Until Android supports that scale the keyboard shortcut stays
-            // off; see `XgViewApp::sync_zoom`.
-            context.options_mut(|options| options.zoom_with_keyboard = false);
-
+            // it means the viewer's interface scale, not the screen's density;
+            // egui's own Ctrl/Cmd+/-/0 shortcuts can now drive it as on a
+            // desktop, and `sync_zoom` writes the result back to the config.
             let app = XgViewApp::new(
                 &context,
                 &render_state,
@@ -1238,7 +1237,7 @@ fn run() -> anyhow::Result<()> {
         // milli-unit to a float round trip and nudging touch by a fraction of
         // a point. A zoomed wall scales that integer by the same factor.
         let density_milli = DENSITY.load(Ordering::Acquire);
-        EFFECTIVE_PPP.store(((density_milli as f32 * zoom).round()) as u32, Ordering::Release);
+        EFFECTIVE_PPP.store(crate::effective_ppp_milli(density_milli, zoom), Ordering::Release);
         let mut input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1702,14 +1701,19 @@ fn run() -> anyhow::Result<()> {
                         focused: FOCUSED.load(Ordering::Acquire),
                         ..Default::default()
                     };
-                    // Same density as the wall, in the same native slot. The
-                    // bar's own zoom factor is its context's, so the two
-                    // screens keep one unit until interface scaling is on.
+                    // The bar's native slot carries the *effective* ratio,
+                    // density times the wall's zoom, and its zoom factor stays
+                    // at 1.0. That gives it exactly the wall's pixels-per-point
+                    // without a second zoom to keep in step: the controls the
+                    // bar draws, and the wall-space rectangles mirrored into
+                    // it, all use the one unit. Feeding density here and
+                    // setting zoom separately would make egui rescale the
+                    // screen_rect a frame late on every zoom change.
                     bar_input
                         .viewports
                         .entry(egui::ViewportId::ROOT)
                         .or_default()
-                        .native_pixels_per_point = Some(density);
+                        .native_pixels_per_point = Some(pixels_per_point);
                     // The ring the remote puts on a control is the one thing a
                     // paint cannot work out for itself: egui draws it for
                     // whatever its own memory says has the focus, and the focus

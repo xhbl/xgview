@@ -630,10 +630,7 @@ impl XgViewApp {
             // The imported document carries its own interface size. Let the
             // next frame hand it to egui instead of treating the difference
             // from the old live zoom as a shortcut and writing that back.
-            #[cfg(not(target_os = "android"))]
-            {
-                self.accept_zoom = true;
-            }
+            self.accept_zoom = true;
             // The document is read by the planner and by `sync` below; both
             // must see the same cameras, groups, page and focus. A hand-edited
             // file can name a group that is not there, and normalising it moves
