@@ -291,8 +291,9 @@ pub fn push_key(code: i32, pressed: bool, repeat: bool, meta: i32, unicode: i32)
 /// The application's media channel, installed from `XgViewApp::new`.
 ///
 /// Key events can arrive from JNI before the application has been built (the
-/// activity starts before the first frame), so the sender is optional: a key
-/// in that window falls through to egui's own path, which is harmless.
+/// activity starts before the first frame), so the sender is optional. A media
+/// key in that window leaves `push_key` unclaimed and goes back to the system;
+/// only that short start-up window is affected.
 static MEDIA_TX: OnceLock<crate::media::MediaTx> = OnceLock::new();
 
 pub fn set_media_tx(tx: crate::media::MediaTx) {

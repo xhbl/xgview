@@ -70,7 +70,7 @@ fn desktop_owns_volume() -> bool {
         .find(|value| !value.trim().is_empty())
         .unwrap_or_default();
     let owns = desktop_owns_volume_from(&override_, &session_type, &desktop);
-    if !override_.is_empty() {
+    if !override_.trim().is_empty() {
         tracing::info!(target: "xgview::media", source = "XGVIEW_MEDIA_VOLUME", value = %override_, system = owns,
             "volume and mute ownership set by the environment");
     } else if owns {
@@ -86,6 +86,7 @@ fn desktop_owns_volume() -> bool {
 /// The decision itself, separated from the environment so it can be tested
 /// without mutating process-wide variables in parallel tests.
 fn desktop_owns_volume_from(override_: &str, session_type: &str, desktop: &str) -> bool {
+    let override_ = override_.trim();
     if override_.eq_ignore_ascii_case("system") {
         return true;
     }
@@ -102,7 +103,11 @@ fn run(ctx: egui::Context, tx: MediaTx) {
     let desktop_volume = desktop_owns_volume();
     let mut devices: HashMap<PathBuf, (Device, Opened)> = HashMap::new();
     let mut dedupe: HashMap<DeviceGroup, HashMap<u16, Instant>> = HashMap::new();
-    let mut last_rescan = Instant::now() - RESCAN;
+    // A process started within the first second of boot would underflow a
+    // plain `now - RESCAN` and panic the reader thread. Starting with "just
+    // rescanned" simply delays the first periodic rescan by one tick; the
+    // initial scan right below still happens immediately.
+    let mut last_rescan = Instant::now().checked_sub(RESCAN).unwrap_or_else(Instant::now);
     let _ = rescan(&mut devices, &tx, &ctx);
 
     loop {
@@ -199,6 +204,13 @@ fn run(ctx: egui::Context, tx: MediaTx) {
             }
         }
     }
+}
+
+/// Whether a press is a de-duplicated echo of one seen moments ago on the
+/// same physical device. Only presses are timed: a release is never suppressed,
+/// so a hold always ends even if its two nodes report the up twice.
+fn suppress_repeat(previous: Option<&Instant>, now: Instant) -> bool {
+    previous.is_some_and(|then| now.duration_since(*then) < DEDUPE)
 }
 
 /// Whether a read error means the device is gone rather than merely had
@@ -338,10 +350,8 @@ fn handle_event(
 
     let now = Instant::now();
     if value == 1 {
-        if let Some(previous) = last.get(&code) {
-            if now.duration_since(*previous) < DEDUPE {
-                return;
-            }
+        if suppress_repeat(last.get(&code), now) {
+            return;
         }
         last.insert(code, now);
     }
@@ -397,6 +407,13 @@ mod tests {
         assert!(!desktop_owns_volume_from("app", "wayland", "ubuntu:GNOME"));
         // An unrecognised override falls through to the session variables.
         assert!(desktop_owns_volume_from("maybe", "wayland", "ubuntu:GNOME"));
+        // Surrounding whitespace on the override is ignored, so a stray space
+        // in a config file still takes effect instead of silently falling back.
+        assert!(desktop_owns_volume_from("  system \n", "tty", ""));
+        assert!(!desktop_owns_volume_from(" app ", "wayland", "ubuntu:GNOME"));
+        // Whitespace-only is no override at all: fall through to the session.
+        assert!(desktop_owns_volume_from("   ", "wayland", "ubuntu:GNOME"));
+        assert!(!desktop_owns_volume_from("   ", "tty", "ubuntu:GNOME"));
     }
 
     #[test]
@@ -419,6 +436,18 @@ mod tests {
         for code in [69, 70, 81, 156, 157] {
             assert_eq!(command_for(code), None, "code {code} belongs to the keyboard");
         }
+    }
+
+    #[test]
+    fn a_press_within_the_de_dupe_window_is_suppressed() {
+        let now = Instant::now();
+        // No earlier press on this code: let it through.
+        assert!(!suppress_repeat(None, now));
+        // A second report of the same press within 40ms is one press.
+        assert!(suppress_repeat(Some(&now), now + DEDUPE - Duration::from_millis(1)));
+        // At and beyond the window it is a fresh press.
+        assert!(!suppress_repeat(Some(&now), now + DEDUPE));
+        assert!(!suppress_repeat(Some(&now), now + DEDUPE + Duration::from_millis(1)));
     }
 
     #[test]

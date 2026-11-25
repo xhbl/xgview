@@ -3858,8 +3858,12 @@ impl XgViewApp {
 
         let now = Instant::now();
 
-        // Repeat everything that came due, at most one step per key this frame
-        // even if the UI was stalled past several deadlines.
+        // Repeat everything that came due, at most one repeat per key this
+        // frame even if the UI was stalled past several deadlines. The first
+        // step of a press is applied when its Hold is drained above; if that
+        // press was already old enough to be due (a stalled frame), it can
+        // take its first repeat here in the same frame - the cadence still
+        // runs from the press, as the reader's timestamp intends.
         let mut next_wake: Option<Instant> = None;
         let due: Vec<_> = self
             .held_media

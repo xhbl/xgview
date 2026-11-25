@@ -529,6 +529,16 @@ Mouse and touch dragging horizontally over the grid also turns the page. The
 toolbar across the top offers the same layout, paging, full screen, settings and
 add-camera actions as buttons, for a device without a keyboard.
 
+A remote's media keys drive the wall too: play / pause toggles a recording and
+the event and ten-second keys jump through it; a short press of volume or zoom
+takes one step and holding it keeps stepping. Volume keys change the wall's own
+level on a kiosk with no desktop - a toast shows it, even with the settings panel open -
+but on a desktop, Windows, macOS and Android they are left to the system and
+change its volume instead. Zoom keys work only while a camera is magnified; on
+a desktop keyboard the bare `+` / `-` do the same, with `Ctrl` / `⌘` still
+resizing the interface. Whether a key arrives at all depends on that remote's
+own mapping.
+
 #### Remote control (DPAD)
 
 XGView is designed to be driven with nothing but a TV remote. Every action is
