@@ -38,6 +38,11 @@ impl Souvlaki {
         let mut controls = MediaControls::new(config).map_err(|err| err.to_string())?;
         controls
             .attach(move |event| {
+                // Log every command the OS actually routes here. Whether a
+                // remote's rewind / fast-forward keys become SMTC buttons at
+                // all is a Windows-side decision, so the log is what tells a
+                // dead key from a missing mapping.
+                tracing::info!(target: "xgview::media", ?event, "system media command");
                 let command = match event {
                     MediaControlEvent::Play | MediaControlEvent::Pause | MediaControlEvent::Toggle => {
                         Some(MediaCommand::PlayPause)

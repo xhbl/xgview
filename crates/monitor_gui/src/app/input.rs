@@ -1935,6 +1935,28 @@ impl XgViewApp {
             return;
         }
 
+        // The magnified picture's own zoom, about its centre. Handled here,
+        // before the grid/strip split, because the strip holds the focus through
+        // most of a recording and a viewer pointing at its controls still expects
+        // +/- to work on the picture. `consume_key(NONE, ..)` leaves Ctrl+/- to
+        // egui's UI zoom. Plus and Equals are OR-ed non-short-circuit so both
+        // events are drained; Shift+= and the keypad key are separate variants.
+        if self.scheduler.is_zoomed() && !self.modal_is_up() && !self.show_settings {
+            let (zoom_in, zoom_out) = ctx.input_mut(|input| {
+                let none = Modifiers::NONE;
+                (
+                    input.consume_key(none, Key::Plus) | input.consume_key(none, Key::Equals),
+                    input.consume_key(none, Key::Minus),
+                )
+            });
+            if zoom_in {
+                self.step_picture_zoom(1.25);
+            }
+            if zoom_out {
+                self.step_picture_zoom(1.0 / 1.25);
+            }
+        }
+
         self.keys_of_the_application(ctx, &keys);
         self.keys_of_the_wall(ctx, &keys);
 

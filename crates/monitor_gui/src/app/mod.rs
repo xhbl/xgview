@@ -3159,7 +3159,9 @@ impl eframe::App for XgViewApp {
             #[cfg(not(target_os = "windows"))]
             let hwnd = None;
             // souvlaki's Windows backend `expect`s an HWND; passing None would
-            // panic instead of degrading. Try again on a later frame.
+            // panic instead of degrading. Try again on a later frame. macOS
+            // needs no handle, so it opens unconditionally.
+            #[cfg(target_os = "windows")]
             let has_handle = hwnd.is_some();
             #[cfg(not(target_os = "windows"))]
             let has_handle = true;
@@ -3785,13 +3787,15 @@ impl XgViewApp {
         // the up cancel the hold the down just started. Collecting the two
         // separately and applying releases first would let the down re-register
         // after its own release and repeat for the full five seconds.
-        if modal {
-            // A modal drops everything and leaves no key held, so closing it
-            // cannot resume a repeat that began before it opened.
-            while self.media_rx.try_recv().is_ok() {}
-            self.held_media.clear();
-            return;
-        }
+        // A modal cancels repeats, not the whole channel. What a modal must
+        // not do is leave a key held: a release swallowed while the panel is
+        // open would keep the action running after it closed. So holds still
+        // take their single first step - volume and zoom arrive as holds and
+        // are exactly what one adjusts from the settings panel - but are not
+        // registered for repetition while it is up. One-shot commands run as
+        // usual too. Closing the panel can then not resume a repeat that
+        // began before it opened.
+        let modal_hold = modal;
         while let Ok(event) = self.media_rx.try_recv() {
             match event {
                 MediaEvent::Command(command) => self.run_media_command(command, ctx),
@@ -3802,6 +3806,16 @@ impl XgViewApp {
                         // one-shot action (Mute, PlayPause, a seek) must not be
                         // repeated into a flip or a walk through the timeline.
                         if !command.repeats_while_held() || !self.media_hold_allowed(command) {
+                            continue;
+                        }
+                        if modal_hold {
+                            // Volume and zoom arrive as Holds, so dropping them
+                            // here would leave exactly the keys one reaches for
+                            // while changing settings dead. Take the one step
+                            // the press asked for, but do not register a hold:
+                            // a release swallowed by the panel must not leave
+                            // a repeat running after it closes.
+                            self.run_media_command(command, ctx);
                             continue;
                         }
                         // A second down for a key already held is one the
@@ -3823,6 +3837,9 @@ impl XgViewApp {
                     self.held_media.retain(|(held, _), _| held != &group);
                 }
             }
+        }
+        if modal_hold {
+            self.held_media.clear();
         }
 
         // A magnified view can be left while a zoom key is still held. Drop
@@ -3909,17 +3926,23 @@ impl XgViewApp {
     }
 
     /// Sets internal volume from a media key, the same 0.05 step the settings
-    /// slider uses and the same sink the bar writes through.
+    /// slider uses and the same sink the bar writes through. The toast is the
+    /// only feedback a remote gets - there is no bar on the wall - so it is
+    /// shown even at the 0%/100% stops, where the step changes nothing.
     fn adjust_volume(&mut self, delta: f32) {
         let value = (self.config.volume + delta).clamp(0.0, 1.0);
-        if (value - self.config.volume).abs() < f32::EPSILON {
-            return;
+        if (value - self.config.volume).abs() >= f32::EPSILON {
+            self.config.volume = value;
+            if let Some(sink) = &self.audio {
+                sink.set_volume(value);
+            }
+            self.mark_dirty();
         }
-        self.config.volume = value;
-        if let Some(sink) = &self.audio {
-            sink.set_volume(value);
-        }
-        self.mark_dirty();
+        let pct = (value * 100.0).round() as i64;
+        self.flash(
+            monitor_i18n::tr_args("toast-volume", &[("pct", pct.into())]),
+            ToastKind::Info,
+        );
     }
 
     /// The speaker switch, shared with the magnified bar and the settings row
@@ -3929,6 +3952,10 @@ impl XgViewApp {
         self.config.sound_on = self.sound_on;
         self.apply_audio();
         self.mark_dirty();
+        self.flash(
+            monitor_i18n::tr(if self.sound_on { "toast-sound-on" } else { "toast-sound-off" }),
+            ToastKind::Info,
+        );
     }
 
     /// Steps the magnified picture's zoom about its own centre. Keys have no

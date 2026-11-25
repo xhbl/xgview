@@ -49,7 +49,57 @@ pub fn spawn(ctx: egui::Context, tx: MediaTx) {
     }
 }
 
+/// Whether a desktop session is present to take the volume keys.
+///
+/// A kiosk starts X itself from xinit and names no desktop; a GNOME or KDE
+/// session sets one of the XDG desktop variables. Where a desktop is up it
+/// already handles volume and mute, and this reader does not grab the devices -
+/// so acting on the same events would move the volume twice. Leaving them to
+/// the desktop is the "system first" rule the other platforms follow.
+///
+/// `XGVIEW_MEDIA_VOLUME` overrides the guess for a process started outside its
+/// desktop session (from SSH, say), where the session variables are not
+/// inherited: `system` leaves the keys to the desktop, `app` takes them here.
+/// Checked once at start-up: a process does not change session while it runs.
+fn desktop_owns_volume() -> bool {
+    let override_ = std::env::var("XGVIEW_MEDIA_VOLUME").unwrap_or_default();
+    let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+    let desktop = ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION"]
+        .iter()
+        .map(|name| std::env::var(name).unwrap_or_default())
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or_default();
+    let owns = desktop_owns_volume_from(&override_, &session_type, &desktop);
+    if !override_.is_empty() {
+        tracing::info!(target: "xgview::media", source = "XGVIEW_MEDIA_VOLUME", value = %override_, system = owns,
+            "volume and mute ownership set by the environment");
+    } else if owns {
+        tracing::info!(target: "xgview::media", desktop = %desktop, session_type = %session_type,
+            "desktop session present, leaving volume and mute to the system");
+    } else {
+        tracing::info!(target: "xgview::media", desktop = %desktop, session_type = %session_type,
+            "no desktop session, volume and mute come from the remote");
+    }
+    owns
+}
+
+/// The decision itself, separated from the environment so it can be tested
+/// without mutating process-wide variables in parallel tests.
+fn desktop_owns_volume_from(override_: &str, session_type: &str, desktop: &str) -> bool {
+    if override_.eq_ignore_ascii_case("system") {
+        return true;
+    }
+    if override_.eq_ignore_ascii_case("app") {
+        return false;
+    }
+    // A tty session is how SSH and console logins arrive, including a shell
+    // opened into a machine that happens to be running a desktop elsewhere.
+    // Its variables say nothing about who handles the volume keys.
+    !desktop.trim().is_empty() && session_type.trim() != "tty"
+}
+
 fn run(ctx: egui::Context, tx: MediaTx) {
+    let desktop_volume = desktop_owns_volume();
     let mut devices: HashMap<PathBuf, (Device, Opened)> = HashMap::new();
     let mut dedupe: HashMap<DeviceGroup, HashMap<u16, Instant>> = HashMap::new();
     let mut last_rescan = Instant::now() - RESCAN;
@@ -110,7 +160,7 @@ fn run(ctx: egui::Context, tx: MediaTx) {
                 Ok(events) => {
                     let last = dedupe.entry(opened.group.clone()).or_default();
                     for event in events {
-                        handle_event(event, &opened.group, last, &tx, &ctx);
+                        handle_event(event, &opened.group, last, &tx, &ctx, desktop_volume);
                     }
                 }
                 Err(err) if is_gone(&err) => {
@@ -249,17 +299,33 @@ fn command_for(code: u16) -> Option<(MediaCommand, bool)> {
     Some((command, command.repeats_while_held()))
 }
 
+/// The three volume codes go to the desktop when one owns them; every other
+/// media key stays with us. Kept apart from the event reader so the rule can be
+/// tested without a kernel device.
+fn volume_belongs_to_desktop(desktop_volume: bool, code: u16) -> bool {
+    // KEY_MUTE / KEY_VOLUMEDOWN / KEY_VOLUMEUP are consecutive in the kernel's
+    // input-event-codes.h, so the range names exactly the three volume keys.
+    desktop_volume && matches!(code, 113..=115)
+}
+
 fn handle_event(
     event: InputEvent,
     group: &DeviceGroup,
     last: &mut HashMap<u16, Instant>,
     tx: &MediaTx,
     ctx: &egui::Context,
+    desktop_volume: bool,
 ) {
     if event.event_type() != EventType::KEY {
         return;
     }
     let code = event.code();
+    // Mute and the two volume steps are the desktop's when one is running.
+    // Drop both ends of a hold so a key released after the wall opened cannot
+    // leave a repeat behind; the desktop sees the same kernel events anyway.
+    if volume_belongs_to_desktop(desktop_volume, code) {
+        return;
+    }
     let Some((command, holdable)) = command_for(code) else {
         return;
     };
@@ -313,6 +379,39 @@ mod tests {
         assert_eq!(command_for(208), Some((MediaCommand::StepForward, false)));
         assert_eq!(command_for(418), Some((MediaCommand::PictureZoomIn, true)));
         assert_eq!(command_for(419), Some((MediaCommand::PictureZoomOut, true)));
+    }
+
+    #[test]
+    fn desktop_volume_detection_covers_kiosk_desktop_and_ssh() {
+        // NVR: xinit names no desktop and has no session type.
+        assert!(!desktop_owns_volume_from("", "", ""));
+        // GNOME on Wayland or X11 from its own session.
+        assert!(desktop_owns_volume_from("", "wayland", "ubuntu:GNOME"));
+        assert!(desktop_owns_volume_from("", "x11", "KDE"));
+        // Only XDG_SESSION_DESKTOP set still counts.
+        assert!(desktop_owns_volume_from("", "wayland", "xfce"));
+        // SSH into a desktop box is a tty: it cannot tell who owns the keys.
+        assert!(!desktop_owns_volume_from("", "tty", "ubuntu:GNOME"));
+        // Explicit override wins in either direction.
+        assert!(desktop_owns_volume_from("system", "tty", ""));
+        assert!(!desktop_owns_volume_from("app", "wayland", "ubuntu:GNOME"));
+        // An unrecognised override falls through to the session variables.
+        assert!(desktop_owns_volume_from("maybe", "wayland", "ubuntu:GNOME"));
+    }
+
+    #[test]
+    fn a_desktop_takes_all_three_volume_keys_and_nothing_else() {
+        for code in [113, 114, 115] {
+            assert!(volume_belongs_to_desktop(true, code), "code {code} is the desktop's");
+        }
+        // On a kiosk the same keys are ours; with or without a desktop, the
+        // transport and zoom keys never belong to the desktop under this rule.
+        for code in [113, 114, 115] {
+            assert!(!volume_belongs_to_desktop(false, code), "code {code} is ours on a kiosk");
+        }
+        for code in [163, 164, 165, 168, 208, 418, 419] {
+            assert!(!volume_belongs_to_desktop(true, code), "code {code} is never the volume");
+        }
     }
 
     #[test]
