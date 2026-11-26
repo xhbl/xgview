@@ -495,6 +495,109 @@ fn block_on<F: std::future::Future>(future: F) -> Option<F::Output> {
     Some(runtime.block_on(future))
 }
 
+/// The alpha mode a surface must be configured with to show the picture under
+/// it. Both surfaces sit over something - the wall over the video's view, the
+/// bar over the picture - so neither can let wgpu pick for itself: `Auto`
+/// tries `Opaque` first and would put a black frame over everything, and on a
+/// device offering only post-multiplied alpha it panics inside wgpu.
+///
+/// Pre-multiplied is the mode egui's colours are in - its blend equation is
+/// `one, one-minus-src-alpha` - so it is the one to ask for. `Inherit` leaves
+/// the choice to the platform and is known to work on the devices here.
+/// Post-multiplied is deliberately absent: the compositor would multiply the
+/// colours a second time and every translucent edge would go dark. A surface
+/// offering nothing but that is better left opaque, which sends the picture
+/// back to the wall rather than showing it through a wrongly blended layer.
+/// `Opaque` is returned only when neither good mode is offered; the caller
+/// must then fall back to drawing on the wall, because an opaque overlay
+/// cannot show the picture beneath it.
+fn choose_alpha_mode(caps: &wgpu::SurfaceCapabilities) -> wgpu::CompositeAlphaMode {
+    for preferred in [
+        wgpu::CompositeAlphaMode::PreMultiplied,
+        wgpu::CompositeAlphaMode::Inherit,
+    ] {
+        if caps.alpha_modes.contains(&preferred) {
+            return preferred;
+        }
+    }
+    wgpu::CompositeAlphaMode::Opaque
+}
+
+/// Draw one egui output onto one surface, textures and all.
+///
+/// The wall and the bar own separate surfaces, contexts and renderers, but the
+/// last half of their frame is the same work: upload the textures the frame
+/// made, build the buffers for the tessellated shapes, draw them into the
+/// target, submit, and free the textures no longer needed. What differs between
+/// the two callers is the data - the target view, its size, the clear colour
+/// (the wall is opaque, the bar lets the picture show through), the pass label,
+/// and each frame's own pixels-per-point. Keeping the work in one place means a
+/// change to the texture or submission order cannot be made for one surface
+/// and forgotten for the other.
+///
+/// The pixels-per-point is passed through to the descriptor unchanged:
+/// tessellation used that very ratio, and a descriptor that disagrees puts the
+/// vertices and the GPU's clip space at odds - the picture blurs and jitters.
+///
+/// The renderer arrives as `&mut` so the wall's caller can hold its one
+/// `RwLock` write guard across the whole call. Everything in here runs on that
+/// guard without taking the lock again, so nothing called from a renderer
+/// method may come back to this `RenderState` to register or free a texture -
+/// that would try to take the same non-reentrant lock. Today the video path
+/// only does that work earlier in the frame, on this same thread, before the
+/// wall's draw begins.
+fn draw_layer(
+    renderer: &mut egui_wgpu::Renderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    view: &wgpu::TextureView,
+    label: &'static str,
+    clear_alpha: f64,
+    size_in_pixels: [u32; 2],
+    pixels_per_point: f32,
+    textures: &egui::TexturesDelta,
+    jobs: &[egui::epaint::ClippedPrimitive],
+) {
+    let screen = egui_wgpu::ScreenDescriptor {
+        size_in_pixels,
+        pixels_per_point,
+    };
+    for (id, delta) in &textures.set {
+        renderer.update_texture(device, queue, *id, delta);
+    }
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let prepared = renderer.update_buffers(device, queue, &mut encoder, jobs, &screen);
+    {
+        let mut pass = encoder
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: clear_alpha,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            })
+            .forget_lifetime();
+        renderer.render(&mut pass, jobs, &screen);
+    }
+    queue.submit(prepared.into_iter().chain(std::iter::once(encoder.finish())));
+    for id in &textures.free {
+        renderer.free_texture(id);
+    }
+}
+
 /// A fresh `egui::Context` for the bar's own surface: the same theme, the same
 /// faces, the same pixels per point as the wall's, on a different screen.
 ///
@@ -512,6 +615,84 @@ fn bar_screen() -> egui::Context {
     crate::theme::install(&context);
     crate::fonts::install_for(&context, &monitor_i18n::current_language());
     context
+}
+
+/// What the strip's frame last knew about the wall's input and focus.
+///
+/// The strip paints and does not read: the wall's context is the one the keys
+/// and the pointer arrive in, and the strip's copy would draw every control
+/// idle, with no ring, if those two things were not carried across. Both
+/// directions matter - a focus handed out and never taken back would leave the
+/// ring on a control the viewer has left.
+///
+/// Held together because the three answers are one state: they are written
+/// every frame, read back on the next, and all forgotten together when the
+/// bar's renderer is rebuilt and with it its context. Resetting them in one
+/// place keeps a new context from inheriting a pointer or a focus it was never
+/// told about.
+#[derive(Default)]
+struct BarMirror {
+    pointer: Option<egui::Pos2>,
+    pointer_down: bool,
+    focus: Option<egui::Id>,
+}
+
+impl BarMirror {
+    /// Drop everything the last context was told. Called when this one is made.
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Project the wall's current pointer and focus into the strip: produce
+    /// the pointer events its frame needs and hand its memory the same focus.
+    /// `shift` moves wall-space points into the strip's own frame.
+    fn project(
+        &mut self,
+        wall: &egui::Context,
+        bar: &egui::Context,
+        shift: egui::Vec2,
+    ) -> Vec<egui::Event> {
+        let (pointer_pos, pointer_down) =
+            wall.input(|input| (input.pointer.latest_pos(), input.pointer.primary_down()));
+        let mut events = Vec::new();
+        if pointer_pos != self.pointer {
+            self.pointer = pointer_pos;
+            events.push(match pointer_pos {
+                Some(pos) => egui::Event::PointerMoved(pos + shift),
+                None => egui::Event::PointerGone,
+            });
+        }
+        if pointer_down != self.pointer_down {
+            self.pointer_down = pointer_down;
+            if let Some(pos) = pointer_pos {
+                events.push(egui::Event::PointerButton {
+                    pos: pos + shift,
+                    button: egui::PointerButton::Primary,
+                    pressed: pointer_down,
+                    modifiers: egui::Modifiers::default(),
+                });
+            }
+        }
+
+        match wall.memory(|memory| memory.focused()) {
+            Some(focused) => bar.memory_mut(|memory| memory.request_focus(focused)),
+            None => bar.memory_mut(|memory| {
+                if let Some(stale) = memory.focused() {
+                    memory.surrender_focus(stale);
+                }
+            }),
+        }
+        let now_focused = wall.memory(|memory| memory.focused());
+        if now_focused != self.focus {
+            self.focus = now_focused;
+            tracing::debug!(
+                target: "xgview::tilebar",
+                focused = ?now_focused,
+                "the focus the strip was given"
+            );
+        }
+        events
+    }
 }
 
 /// This launch's hold on the Vulkan attempt marker, and the backend it chose.
@@ -847,13 +1028,8 @@ fn run() -> anyhow::Result<()> {
         None;
     let mut bar_attached: *mut c_void = std::ptr::null_mut();
     let mut bar_held: *mut c_void = std::ptr::null_mut();
-    let mut last_focus: Option<egui::Id> = None;
-    // What the strip's frame was last told about the pointer. It is carried
-    // across because the strip paints and does not read: the wall's context is
-    // the one the events arrive in, and without a copy of the pointer the
-    // controls there are drawn idle however hard they are being pressed.
-    let mut last_pointer: Option<egui::Pos2> = None;
-    let mut last_pointer_down = false;
+    // The strip's view of the wall's pointer and focus; see `BarMirror`.
+    let mut mirror = BarMirror::default();
     let mut bar_open = false;
     // Whether the overlay had something to say last frame; see the bar's own
     // block below.
@@ -1031,17 +1207,12 @@ fn run() -> anyhow::Result<()> {
                 };
                 // The same alpha mode the first attach asks for: a surface that
                 // comes back is one whose format the platform may have decided
-                // again, and `Auto` picks opaque when it can.
+                // again, and `Auto` picks opaque when it can. One helper for
+                // both attaches, or a surface the activity handed back could
+                // come up in a different mode from the one it started with.
                 let caps = fresh.get_capabilities(&render_state.adapter);
                 let fresh_config = wgpu::SurfaceConfiguration {
-                    alpha_mode: if caps
-                        .alpha_modes
-                        .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
-                    {
-                        wgpu::CompositeAlphaMode::PreMultiplied
-                    } else {
-                        caps.alpha_modes[0]
-                    },
+                    alpha_mode: choose_alpha_mode(&caps),
                     ..fresh_config
                 };
                 fresh.configure(&render_state.device, &fresh_config);
@@ -1132,14 +1303,7 @@ fn run() -> anyhow::Result<()> {
             // egui painted - the alpha mode has to be asked for.
             let caps = fresh.get_capabilities(&adapter);
             let fresh_config = wgpu::SurfaceConfiguration {
-                alpha_mode: if caps
-                    .alpha_modes
-                    .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
-                {
-                    wgpu::CompositeAlphaMode::PreMultiplied
-                } else {
-                    caps.alpha_modes[0]
-                },
+                alpha_mode: choose_alpha_mode(&caps),
                 ..fresh_config
             };
             fresh.configure(&device, &fresh_config);
@@ -1467,59 +1631,22 @@ fn run() -> anyhow::Result<()> {
             tracing::info!(target: "xgview", visible = on_layer, "the picture's view");
             crate::android::set_video_visible(on_layer);
         }
-        let jobs = context.tessellate(output.shapes, output.pixels_per_point);
-        // The descriptor's ratio must be the very one tessellation used, or
-        // the GPU's clip space and the vertices disagree and the picture
-        // blurs and jitters. `output` is authoritative; at 100% it is density.
-        let screen = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [surface_config.width, surface_config.height],
-            pixels_per_point: output.pixels_per_point,
-        };
+        let pixels_per_point = output.pixels_per_point;
+        let jobs = context.tessellate(output.shapes, pixels_per_point);
         {
             let mut renderer = render_state.renderer.write();
-            for (id, delta) in &output.textures_delta.set {
-                renderer.update_texture(&device, &queue, *id, delta);
-            }
-        }
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        let prepared = render_state.renderer.write().update_buffers(
-            &device,
-            &queue,
-            &mut encoder,
-            &jobs,
-            &screen,
-        );
-        {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("wall"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.0,
-                                g: 0.0,
-                                b: 0.0,
-                                a: 1.0,
-                            }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                })
-                .forget_lifetime();
-            render_state.renderer.read().render(&mut pass, &jobs, &screen);
-        }
-        queue.submit(prepared.into_iter().chain(std::iter::once(encoder.finish())));
-        {
-            let mut renderer = render_state.renderer.write();
-            for id in &output.textures_delta.free {
-                renderer.free_texture(id);
-            }
+            draw_layer(
+                &mut renderer,
+                &device,
+                &queue,
+                &view,
+                "wall",
+                1.0,
+                [surface_config.width, surface_config.height],
+                pixels_per_point,
+                &output.textures_delta,
+                &jobs,
+            );
         }
         frame.present();
         // The first frame that reached the screen: a Vulkan attempt this far is
@@ -1557,8 +1684,18 @@ fn run() -> anyhow::Result<()> {
                         (BAR_WIDTH.load(Ordering::Acquire), BAR_HEIGHT.load(Ordering::Acquire));
                     if let Some(config) = fresh.get_default_config(&render_state.adapter, width, height)
                     {
-                        fresh.configure(&render_state.device, &config);
                         let caps = fresh.get_capabilities(&render_state.adapter);
+                        // The default config leaves alpha at `Auto`, and wgpu
+                        // resolves that to `Opaque` whenever the device offers
+                        // it - even when a see-through mode is also there.
+                        // With an opaque surface the bar's transparent clear
+                        // becomes a black rectangle over the picture, so the
+                        // mode has to be asked for, as it is for the wall.
+                        let config = wgpu::SurfaceConfiguration {
+                            alpha_mode: choose_alpha_mode(&caps),
+                            ..config
+                        };
+                        fresh.configure(&render_state.device, &config);
                         tracing::info!(
                             target: "xgview",
                             width = config.width,
@@ -1574,11 +1711,12 @@ fn run() -> anyhow::Result<()> {
                         // black rectangle over the picture instead. There is
                         // no second arrangement of layers that fixes it, but
                         // there is an older one: give the frames back to the
-                        // wall and let it draw the whole screen itself.
-                        let opaque = caps
-                            .alpha_modes
-                            .iter()
-                            .all(|mode| *mode == wgpu::CompositeAlphaMode::Opaque);
+                        // wall and let it draw the whole screen itself. The
+                        // test is the mode actually chosen, not whether every
+                        // mode on offer is opaque: `Auto` used to choose
+                        // `Opaque` on a device that also offered a transparent
+                        // one, while this said no and left the black frame.
+                        let opaque = config.alpha_mode == wgpu::CompositeAlphaMode::Opaque;
                         OPAQUE_ONLY.store(opaque, Ordering::Release);
                         if opaque {
                             tracing::warn!(
@@ -1606,13 +1744,11 @@ fn run() -> anyhow::Result<()> {
                         // dropped, and the atlas it had drawn is a texture this
                         // one has never been given. See `bar_screen`.
                         bar_context = bar_screen();
-                        last_focus = None;
                         // A new context knows nothing, so what the last one was
                         // told is forgotten with it: the next frame says it
                         // again rather than assuming it is still known, or a
                         // control under a stationary finger would stay unlit.
-                        last_pointer = None;
-                        last_pointer_down = false;
+                        mirror.reset();
                     }
                 }
             }
@@ -1651,8 +1787,6 @@ fn run() -> anyhow::Result<()> {
             match bar_surface.get_current_texture() {
                 Ok(bar_frame) => {
                     let view = bar_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                    let mut encoder =
-                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                     // The bar's own frame.
                     let bar_rect = egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -1693,28 +1827,7 @@ fn run() -> anyhow::Result<()> {
                     // idle, so a button that is being held down looks untouched
                     // until the state it changed shows up, which on a box with
                     // a mouse or a finger reads as "the click did nothing".
-                    let (pointer_pos, pointer_down) = context.input(|input| {
-                        (input.pointer.latest_pos(), input.pointer.primary_down())
-                    });
-                    let mut bar_events = Vec::new();
-                    if pointer_pos != last_pointer {
-                        last_pointer = pointer_pos;
-                        bar_events.push(match pointer_pos {
-                            Some(pos) => egui::Event::PointerMoved(pos + shift),
-                            None => egui::Event::PointerGone,
-                        });
-                    }
-                    if pointer_down != last_pointer_down {
-                        last_pointer_down = pointer_down;
-                        if let Some(pos) = pointer_pos {
-                            bar_events.push(egui::Event::PointerButton {
-                                pos: pos + shift,
-                                button: egui::PointerButton::Primary,
-                                pressed: pointer_down,
-                                modifiers: egui::Modifiers::default(),
-                            });
-                        }
-                    }
+                    let bar_events = mirror.project(&context, &bar_context, shift);
                     let mut bar_input = egui::RawInput {
                         screen_rect: Some(bar_rect),
                         time: Some(started.elapsed().as_secs_f64()),
@@ -1739,39 +1852,6 @@ fn run() -> anyhow::Result<()> {
                         .entry(egui::ViewportId::ROOT)
                         .or_default()
                         .native_pixels_per_point = Some(pixels_per_point);
-                    // The ring the remote puts on a control is the one thing a
-                    // paint cannot work out for itself: egui draws it for
-                    // whatever its own memory says has the focus, and the focus
-                    // lives in the wall's context - the one that reads the
-                    // arrows. So it is carried across, every frame, and the
-                    // strip's copy of the bar lights the same control the
-                    // wall's copy would.
-                    //
-                    // Both ways: the wall gives the focus up when the viewer
-                    // leaves the bar - Back, a press on the picture, the window
-                    // losing it - and a mirror that only ever hands the focus
-                    // out would keep the ring on the last control for ever.
-                    match context.memory(|memory| memory.focused()) {
-                        Some(focused) => {
-                            bar_context.memory_mut(|memory| memory.request_focus(focused))
-                        }
-                        None => bar_context.memory_mut(|memory| {
-                            if let Some(stale) = memory.focused() {
-                                memory.surrender_focus(stale);
-                            }
-                        }),
-                    }
-                    {
-                        let now_focused = context.memory(|memory| memory.focused());
-                        if now_focused != last_focus {
-                            last_focus = now_focused;
-                            tracing::debug!(
-                                target: "xgview::tilebar",
-                                focused = ?now_focused,
-                                "the focus the strip was given"
-                            );
-                        }
-                    }
                     let open = app.bar_open();
                     if open != bar_open {
                         bar_open = open;
@@ -1792,57 +1872,23 @@ fn run() -> anyhow::Result<()> {
                             .min()
                             .unwrap_or(Duration::MAX),
                     );
-                    let bar_jobs =
-                        bar_context.tessellate(bar_output.shapes, bar_output.pixels_per_point);
-                    let bar_screen = egui_wgpu::ScreenDescriptor {
-                        size_in_pixels: [bar_config.width, bar_config.height],
-                        pixels_per_point: bar_output.pixels_per_point,
-                    };
-                    {
-                        for (id, delta) in &bar_output.textures_delta.set {
-                            bar_renderer.update_texture(&device, &queue, *id, delta);
-                        }
-                    }
-                    let prepared = bar_renderer.update_buffers(
+                    let bar_ppp = bar_output.pixels_per_point;
+                    let bar_jobs = bar_context.tessellate(bar_output.shapes, bar_ppp);
+                    // Nothing under the bar is the bar's: the strip is
+                    // see-through wherever it has nothing to say, so the
+                    // picture runs under it as it does everywhere else.
+                    draw_layer(
+                        bar_renderer,
                         &device,
                         &queue,
-                        &mut encoder,
+                        &view,
+                        "bar",
+                        0.0,
+                        [bar_config.width, bar_config.height],
+                        bar_ppp,
+                        &bar_output.textures_delta,
                         &bar_jobs,
-                        &bar_screen,
                     );
-                    {
-                        let mut pass = encoder
-                            .begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("bar"),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: &view,
-                                    resolve_target: None,
-                                    ops: wgpu::Operations {
-                                        // Nothing under the bar is the bar's:
-                                        // the strip is see-through wherever it
-                                        // has nothing to say, so the picture
-                                        // runs under it as it does everywhere
-                                        // else.
-                                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                                            r: 0.0,
-                                            g: 0.0,
-                                            b: 0.0,
-                                            a: 0.0,
-                                        }),
-                                        store: wgpu::StoreOp::Store,
-                                    },
-                                })],
-                                depth_stencil_attachment: None,
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                            })
-                            .forget_lifetime();
-                        bar_renderer.render(&mut pass, &bar_jobs, &bar_screen);
-                    }
-                    queue.submit(prepared.into_iter().chain(std::iter::once(encoder.finish())));
-                    for id in &bar_output.textures_delta.free {
-                        bar_renderer.free_texture(id);
-                    }
                     bar_frame.present();
                 }
                 Err(error) => {

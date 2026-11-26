@@ -2873,6 +2873,18 @@ mod tests {
         &rest[..end]
     }
 
+    /// The marks that actually occur in `source`, in source order. `find` on
+    /// each alone would let a reordered body pass, and reordered paint passes
+    /// are exactly what moves an egui widget's auto id.
+    fn marks_in_order<'a>(source: &'a str, marks: &[&'a str]) -> Vec<&'a str> {
+        let mut found: Vec<(usize, &'a str)> = marks
+            .iter()
+            .filter_map(|mark| source.find(mark).map(|at| (at, *mark)))
+            .collect();
+        found.sort_by_key(|(at, _)| *at);
+        found.into_iter().map(|(_, mark)| mark).collect()
+    }
+
     /// The band is the wall's frame and the pictures are the wall's pictures: a
     /// page on its way past goes behind the band, not over it. Painted before
     /// them - which it was - a page leaving the viewport stood in the strip's
@@ -2901,6 +2913,151 @@ mod tests {
         assert!(
             method(source, "fn draw_overlay_only").contains(".strip_band()"),
             "the overlay paints the band the wall recorded"
+        );
+    }
+
+    /// The bar's copy on the overlay is obtained by running the same paint
+    /// passes the wall ran, in the same order. It is not a second hand-written
+    /// bar: egui derives a widget's id from where it sits in the Ui's creation
+    /// order, so one pass moved, added or skipped between the two contexts
+    /// sends the mirrored focus to the wrong control - the ring vanishes while
+    /// magnified, and nothing in the types catches it.
+    #[test]
+    fn the_bar_copy_runs_the_walls_paint_passes() {
+        let bars = include_str!("bars.rs");
+        let wall = method(bars, "pub(super) fn toolbar(&mut self");
+        let copy = method(bars, "pub(super) fn paint_toolbar_copy");
+
+        // The landscape tool row is five passes: the back button's click
+        // changes the zoom the paging pass below reads, so paint and apply
+        // have to interleave there rather than around the whole row. It is the
+        // ORDER that fixes an auto id, so presence alone is not enough.
+        // Match the call, not the bare name: a name also occurs in doc
+        // comments and in the pass functions' own definitions.
+        let passes = [
+            "self.paint_toolbar_a(ui)",
+            "self.paint_toolbar_b(ui,",
+            "self.paint_toolbar_c(ui)",
+            "self.paint_toolbar_d(ui)",
+            "self.paint_toolbar_e(ui)",
+        ];
+        assert_eq!(
+            marks_in_order(wall, &passes),
+            passes,
+            "the wall's paint passes changed order"
+        );
+        assert_eq!(
+            marks_in_order(copy, &passes),
+            passes,
+            "the copy must run the same passes in the same order"
+        );
+        // On the wall each apply must follow its own paint, before the next
+        // paint creates widgets: a batch of applies at the end would let the
+        // paging pass read a zoom the back button has not changed yet.
+        let interleaved = [
+            "self.paint_toolbar_a(ui)", "self.apply_toolbar_a(",
+            "self.paint_toolbar_b(ui,", "self.apply_toolbar_b(",
+            "self.paint_toolbar_c(ui)", "self.apply_toolbar_c(",
+            "self.paint_toolbar_d(ui)", "self.apply_toolbar_d(",
+            "self.paint_toolbar_e(ui)", "self.apply_toolbar_e(",
+        ];
+        assert_eq!(
+            marks_in_order(wall, &interleaved),
+            interleaved,
+            "paint and apply must interleave; a later pass reads what an earlier click wrote"
+        );
+        // The copy must not consume a click: the wall is the only frame that
+        // reads the pointer and the remote, and it already ran this frame.
+        assert!(
+            !copy.contains("apply_toolbar_"),
+            "the copy paints only; the wall owns every click"
+        );
+        // Both rows are laid out in the same scopes, and the "more" button of
+        // pass b reads the layout pass a painted before its click was applied.
+        for body in [wall, copy] {
+            assert!(body.contains("horizontal_centered("), "the row is centred");
+            assert!(
+                body.contains("Layout::right_to_left(Align::Center)"),
+                "the right-hand group is laid out right to left"
+            );
+        }
+        assert!(wall.contains("let current = a.current"), "the wall carries the pre-click layout");
+        assert!(copy.contains("let current = a.current"), "the copy carries the same layout");
+
+        let wall_status = method(bars, "pub(super) fn status_bar(&mut self");
+        let copy_status = method(bars, "pub(super) fn paint_status_bar_copy");
+        assert!(wall_status.contains("paint_status_bar"));
+        assert!(copy_status.contains("paint_status_bar"));
+        assert!(
+            !copy_status.contains("status_author"),
+            "the copy must not write the wall's author control"
+        );
+    }
+
+    /// The two copy rows are put on their own Areas, under the wall's panel
+    /// ids, with their cover band painted inside the same Area before the
+    /// widgets. Each of these has been a real failure on a device: a different
+    /// id lost the focus ring, a band on a separate Area came up over the
+    /// buttons after a pin-to-bar round trip and left an empty coloured strip,
+    /// and a rect without the panel frame's margin crowded the portrait status
+    /// row into the edge. None of them is visible to the type system.
+    #[test]
+    fn the_bar_copy_keeps_the_walls_ids_and_geometry() {
+        let source = include_str!("wall.rs");
+        let overlay = method(source, "pub fn draw_overlay_only");
+
+        // Each row's Area must carry the wall's panel id AND salt its child
+        // with the same id, inside that row's own closure. Two global contains
+        // checks would pass if the two ids were crossed over - the exact way
+        // the mirrored focus lands on the wrong control.
+        // Slice from each Area's own constructor to the next, so the id on
+        // the Area and the salt on its child are checked together.
+        let tool_at = overlay.find("Area::new(Id::new(\"xgview-toolbar\"))").expect("tool Area");
+        let status_at = overlay.find("Area::new(Id::new(\"xgview-status\"))").expect("status Area");
+        assert!(tool_at < status_at);
+        let tool_block = &overlay[tool_at..status_at];
+        let status_block = &overlay[status_at..];
+        for (row, body) in [("xgview-toolbar", tool_block), ("xgview-status", status_block)] {
+            assert!(
+                body.contains(&format!("Area::new(Id::new(\"{row}\"))")),
+                "the copy's Area must carry the wall's panel id ({row})"
+            );
+            assert!(
+                body.contains(&format!("panel_row(ui, Id::new(\"{row}\")")),
+                "the child Ui in this Area must be salted with the same id ({row})"
+            );
+            // The band and the widgets share one paint list, so their order
+            // is fixed by code, not by egui's re-built layer order.
+            let band = body.find("paint_band(").expect("a cover band in this Area");
+            let widgets = body.find("panel_row(").expect("the widgets in this Area");
+            assert!(band < widgets, "the band goes behind the buttons ({row})");
+        }
+        assert!(
+            overlay.contains("Frame::side_top_panel(&panel_style).inner_margin")
+                && overlay.contains("let inner = rect - panel_margin"),
+            "the copy's content rect must be inset like the wall panel's"
+        );
+        // The rects come from the wall's panels, moved into the strip's frame
+        // by the same shift the picture used; without it the right-hand
+        // controls sit over the wrong press targets on a kept navigation bar.
+        assert!(
+            overlay.contains("let shift = picture.min - strip.min")
+                && overlay.contains("toolbar_rect.translate(shift)")
+                && overlay.contains("status_rect.translate(shift)"),
+            "the rows are the wall's panel rects, shifted into the strip"
+        );
+        assert!(
+            overlay.contains("XgViewApp::bands(self.chrome.bars, strip)"),
+            "the cover is the band the wall recorded"
+        );
+        // Reproducing the panel's child Ui chain is what puts the mirrored
+        // focus id on the copied widget; dropping a level loses the ring.
+        let panel_row = method(overlay, "let panel_row = |ui: &mut egui::Ui");
+        assert!(
+            panel_row.contains(".id_salt(id)")
+                && panel_row.matches("new_child(").count() >= 2
+                && panel_row.contains("expand_to_include_rect(rect)"),
+            "the copy must keep the panel's id chain and honest rect"
         );
     }
 
