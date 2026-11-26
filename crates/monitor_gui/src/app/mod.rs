@@ -2264,6 +2264,15 @@ impl XgViewApp {
         {
             return true;
         }
+        // The donation dialog on the About page is a Modal too, but its state
+        // lives in egui's store rather than on the application, so it is not
+        // one of the fields above. Without this the picture keeps its surface
+        // while the dialog is up and covers it whole - the same fate the file
+        // picker had before windows were taught to suspend the view.
+        #[cfg(juanz)]
+        if crate::juanz::is_open(ctx) {
+            return true;
+        }
         // The soft keyboard's box is pinned to the top of the screen rather
         // than following its field, so a field in a panel can still have its
         // box over the picture. Only while it is actually up: `editing` is the

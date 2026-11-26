@@ -586,6 +586,14 @@ impl XgViewApp {
                 if let Some(band) = band {
                     paint_band(ui.painter(), band);
                 }
+                // The viewer's own toolbar and status bar live on the wall,
+                // under the picture's surface. A pinch can scale that surface
+                // past its box into their bands, and the letterbox bands above
+                // stop at the tile - they cannot reach those bands. Their
+                // cover is painted together with the rows themselves in the
+                // Areas below, so that the band is always behind the widgets
+                // and never comes up over them when those Areas are re-shown
+                // after a pin-to-bar round trip.
                 if let Some(box_) = self.picture_rect {
                     let box_ = box_.translate(picture.min - strip.min);
                     for letterbox in bands_around(video, box_) {
@@ -684,6 +692,100 @@ impl XgViewApp {
                     }
                 }
             });
+        // The viewer's tool row and status row, painted over the picture on
+        // this layer. Their Areas carry the WALL's panel ids, not a name of
+        // their own: egui derives every widget's auto id from the top-level Ui
+        // id (`Ui::new` seeds `next_auto_id_salt` from it), and the bar's frame
+        // mirrors the wall's focused widget id into this context every frame.
+        // With any other id the copy's widgets get different ids and the ring
+        // has nothing to land on. They read the wall's already-applied state
+        // (this frame runs after the wall's) and consume no response, so the
+        // presses still belong to the wall. The layout rect is the rect the
+        // wall's panels actually used (`chrome.bars`), shifted into the strip's
+        // frame - not the full-width band - so a kept navigation gutter does
+        // not shift the right-hand controls off their press targets.
+        #[cfg(target_os = "android")]
+        if self.chrome.visible {
+            if let Some((toolbar_rect, status_rect)) = self.chrome.bars {
+                let shift = picture.min - strip.min;
+                let toolbar_rect = toolbar_rect.translate(shift);
+                let status_rect = status_rect.translate(shift);
+                // The cover for each row is painted inside that row's own
+                // Area, immediately before its widgets. A band on a separate
+                // Area cannot stay behind them: the strip's layer order is
+                // rebuilt whenever the overlay goes away and comes back - a
+                // pin-to-bar round trip - and the band can come up over the
+                // widgets, leaving a coloured empty strip with no controls.
+                // Here the band and its widgets share one paint list, so the
+                // band is always first and the widgets always over it.
+                let cover = XgViewApp::bands(self.chrome.bars, strip);
+                // The Area is the panel's top-level Ui: its id seeds the
+                // auto-id counter. The wall's TopBottomPanel then descends
+                // through two more child Uis before it paints the row -
+                // `show_inside` (salted with the panel id, laid out top-down
+                // left-aligned) and `Frame::begin` (unsalted, and inset by
+                // the side panel frame's inner margin). Reproduce all of it,
+                // or the copied buttons get different ids and the mirrored
+                // focus ring has nowhere to land, and their rects disagree
+                // with the wall's - seen as a narrower margin, or a portrait
+                // status row crowded into the left edge, only while magnified.
+                // `Response::has_focus` compares the widget id with the focus
+                // id the bar context carries over from the wall.
+                // The rects are given explicitly: an Area's own Ui is sized
+                // by its contents, so inheriting its available rect would let
+                // the row collapse to the width of the first button. Neither
+                // rect nor margin enters the id derivation, so the ring stays
+                // aligned while the geometry matches the wall's.
+                let panel_style = ctx.style();
+                let panel_margin = egui::Frame::side_top_panel(&panel_style).inner_margin;
+                let panel_row = |ui: &mut egui::Ui,
+                                 id: Id,
+                                 rect: egui::Rect,
+                                 copy: fn(&Self, &mut egui::Ui)| {
+                    let mut panel = ui.new_child(
+                        egui::UiBuilder::new()
+                            .id_salt(id)
+                            .max_rect(rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    let inner = rect - panel_margin;
+                    let mut frame = panel.new_child(
+                        egui::UiBuilder::new().max_rect(inner),
+                    );
+                    copy(self, &mut frame);
+                    // The widgets live in child Uis, and a child's extents
+                    // reach its parent only when the child ends. Make the
+                    // Area's own Ui - and the panel child - span the whole
+                    // row whatever the buttons' own extent, so the size
+                    // `Area::end` stores matches the panel's rectangle. This
+                    // is what egui's panels do to keep their rect honest. It
+                    // is not what keeps the band behind the buttons: that
+                    // band is painted in this same Area, before them.
+                    ui.expand_to_include_rect(rect);
+                    panel.expand_to_include_rect(rect);
+                };
+                egui::Area::new(Id::new("xgview-toolbar"))
+                    .fixed_pos(toolbar_rect.min)
+                    .default_size(toolbar_rect.size())
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        if let Some((top, _)) = cover {
+                            paint_band(ui.painter(), top);
+                        }
+                        panel_row(ui, Id::new("xgview-toolbar"), toolbar_rect, Self::paint_toolbar_copy)
+                    });
+                egui::Area::new(Id::new("xgview-status"))
+                    .fixed_pos(status_rect.min)
+                    .default_size(status_rect.size())
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        if let Some((_, bottom)) = cover {
+                            paint_band(ui.painter(), bottom);
+                        }
+                        panel_row(ui, Id::new("xgview-status"), status_rect, Self::paint_status_bar_copy)
+                    });
+            }
+        }
         // And the toast, which is not the bar's: a projection, an error, or the
         // name of the fit the switch has just moved to - this frame's news, in
         // the middle of the screen or at the foot of it. The wall paints the
@@ -2996,3 +3098,4 @@ mod tests {
         );
     }
 }
+

@@ -100,25 +100,6 @@ impl XgViewApp {
         self.apply_audio();
     }
 
-    /// The orientation button, shared by both bars: the shape is the mode it
-    /// switches to. Drawn only where the device can stand upright.
-    pub(super) fn orientation_button(&mut self, ui: &mut egui::Ui, items: &mut Vec<(Id, Rect)>) {
-        if !self.supports_portrait {
-            return;
-        }
-        let (icon, key, tip) = if self.is_portrait() {
-            (Icon::Landscape, "toolbar-orientation-landscape", "toolbar-orientation-landscape-tip")
-        } else {
-            (Icon::Portrait, "toolbar-orientation-portrait", "toolbar-orientation-portrait-tip")
-        };
-        let response = icons::button(ui, icon, false, &monitor_i18n::tr(tip));
-        items.push((response.id, response.rect));
-        self.name(&response, key);
-        if response.clicked() {
-            self.set_orientation(!self.is_portrait());
-        }
-    }
-
     pub(super) fn turn_page(&mut self, forward: bool, keyboard: bool) -> bool {
         let previous = self.scheduler.page();
         let changed = if forward { self.scheduler.next_page() } else { self.scheduler.prev_page() };
