@@ -3,6 +3,19 @@
 What each release changed, newest first. Releases before 1.2.98 are in the git
 history.
 
+## 2.3.66
+
+Changes since 2.3.53.
+
+- **Media keys drive the wall on every platform.** Linux reads a remote straight from evdev, so the keys work without window focus and the zoom keys above X11's eight-bit limit arrive too. Windows and macOS register as a media session and Android feeds the activity's key codes into the same channel. Play/pause toggles a recording, the event and ten-second keys step through it, and a held volume or zoom key keeps stepping. The README lists what each key does and which ones the system keeps.
+- **The interface scale is remembered.** A slider in Display settings sets it from 50% to 200%, alongside the Ctrl/+/-/0 shortcuts, and a shortcut writes its result back. On Android the display density now occupies egui's native-ratio slot instead of its zoom slot, which frees the zoom channel for the same scale without moving the picture's gutters or blurring it; a density change while the activity stays alive is followed as well.
+- **Blackout can turn the display off.** Where the machine supports it, a new switch powers the monitor down during a scheduled blank and wakes it on input. The computer itself stays awake, and the switch is not offered where the display cannot be controlled.
+- **The magnified picture no longer covers the toolbar and status bar on Android.** Both rows are painted on the overlay above the video surface as well, with the same widget identities, focus ring, spacing and touch targets as the wall's own rows, in landscape and upright. Dialogs raised over the picture stay visible too.
+- **Fixed:** the connection switch was removed from a tile's right-click menu, where reaching for Picture fit or Stream could land on it and reconnect a working feed. It remains in the camera list, where a press is deliberate.
+- **Fixed:** a settings panel no longer swallows single remote presses, a hold stops repeating when its device disappears, and the desktop keyboard's bare `+` / `-` step picture zoom on a magnified camera. Volume changes now show a toast in all three interface languages.
+- **Fixed:** the evdev reader no longer panics when the viewer starts within the first second of boot, and a padded `XGVIEW_MEDIA_VOLUME` value is no longer mistaken for no override.
+- **Fixed:** switching the bar pin back and forth no longer leaves black bands where the rows should be, and a surface that offers both opaque and transparent modes can no longer turn the transparent bar into a black sheet.
+
 ## 2.3.53
 
 Changes since 2.3.38.
