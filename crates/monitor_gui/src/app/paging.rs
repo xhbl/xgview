@@ -27,6 +27,9 @@ impl XgViewApp {
         // it: there is nowhere else for it to be drawn.
         self.leave_playback();
         self.scheduler.zoom_out();
+        #[cfg(not(target_os = "android"))]
+        self.scheduler.set_page_layout(self.scheduler.page(), layout);
+        #[cfg(target_os = "android")]
         self.scheduler.set_layout(layout);
         self.slide = Slide::default();
         self.needs_sync = true;
@@ -101,16 +104,10 @@ impl XgViewApp {
     }
 
     pub(super) fn turn_page(&mut self, forward: bool, keyboard: bool) -> bool {
-        let previous = self.scheduler.page();
+        let old_view = self.current_view(self.config.enabled_count());
         let changed = if forward { self.scheduler.next_page() } else { self.scheduler.prev_page() };
         if changed {
-            let layout = self.scheduler.layout();
-            let total = self.config.enabled_count();
-            let outgoing = PageView {
-                layout,
-                first: previous * layout.capacity(),
-                cells: grid::page_cells(layout, previous, total),
-            };
+            let outgoing = old_view;
             self.slide.start(if forward { 1.0 } else { -1.0 }, Some(outgoing));
             self.needs_sync = true;
             self.mark_dirty();
@@ -127,7 +124,7 @@ impl XgViewApp {
     /// Only the grid: a magnified viewport is not a grid and steps along the
     /// channel list instead. See [`Self::step_zoom`].
     pub(super) fn navigate(&mut self, dir: Direction) -> NavigateOutcome {
-        let previous_page = self.scheduler.page();
+        let old_view = self.current_view(self.config.enabled_count());
         let outcome = self.scheduler.navigate(dir);
         if matches!(outcome, NavigateOutcome::Blocked) {
             return outcome;
@@ -135,13 +132,7 @@ impl XgViewApp {
 
         let sign = if dir == Direction::Left { -1.0 } else { 1.0 };
         let outgoing = if matches!(outcome, NavigateOutcome::PageTurned { .. }) {
-            let layout = self.scheduler.layout();
-            let total = self.config.enabled_count();
-            Some(PageView {
-                layout,
-                first: previous_page * layout.capacity(),
-                cells: grid::page_cells(layout, previous_page, total),
-            })
+            Some(old_view)
         } else {
             None
         };

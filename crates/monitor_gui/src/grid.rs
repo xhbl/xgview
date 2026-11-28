@@ -321,6 +321,7 @@ pub struct TileActions {
     pub stream_change: Option<usize>,
     pub zoom: Option<usize>,
     pub drag_started: bool,
+    pub drag_camera: Option<usize>,
     pub drag_delta: f32,
     pub drag_stopped: bool,
     /// Where the pointer was when the tile was clicked, if it was.
@@ -587,7 +588,11 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
     // the two navigations against each other.
     let sense = if tile.interactive { Sense::CLICK | Sense::DRAG } else { Sense::hover() };
     let response = ui.interact(rect, tile.id, sense);
-    let painter = ui.painter_at(rect);
+    paint_visual(&ui.painter_at(rect), rect, tile);
+    response
+}
+
+pub(crate) fn paint_visual(painter: &egui::Painter, rect: Rect, tile: &Tile<'_>) {
     let dim = |color: Color32| if tile.dim { color.gamma_multiply(0.5) } else { color };
 
     // What a tile is, is its picture, drawn edge to edge: the line between two
@@ -603,7 +608,7 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
         if tile.focused {
             ring(&painter, rect);
         }
-        return response;
+        return;
     }
 
     let body = rect;
@@ -657,7 +662,6 @@ pub fn paint(ui: &mut Ui, rect: Rect, tile: &Tile<'_>) -> Response {
         ring(&painter, rect);
     }
 
-    response
 }
 
 /// Draws the four corners of a tile's on-screen display.

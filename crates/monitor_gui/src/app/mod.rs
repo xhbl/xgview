@@ -1120,6 +1120,24 @@ pub struct XgViewApp {
     persisted: AppConfig,
     config_path: PathBuf,
     scheduler: Scheduler,
+    #[cfg(not(target_os = "android"))]
+    extra_windows: Vec<monitor_core::config::WallWindow>,
+    #[cfg(not(target_os = "android"))]
+    clear_wall_confirmation: bool,
+    #[cfg(not(target_os = "android"))]
+    workspace_saved: Option<monitor_core::config::LocalWorkspace>,
+    #[cfg(not(target_os = "android"))]
+    wall_pinned: bool,
+    #[cfg(not(target_os = "android"))]
+    wall_drag: Option<usize>,
+    #[cfg(not(target_os = "android"))]
+    wall_opened: HashSet<usize>,
+    #[cfg(not(target_os = "android"))]
+    wall_slides: HashMap<usize, Slide>,
+    #[cfg(not(target_os = "android"))]
+    wall_drop_target: Option<usize>,
+    #[cfg(not(target_os = "android"))]
+    wall_release: bool,
     manager: ChannelManager,
     handle: Handle,
     channels: HashMap<usize, ChannelUi>,
@@ -1732,6 +1750,8 @@ mod recording;
 use download::{DownloadChoice, DownloadState};
 mod pickers;
 mod settings;
+#[cfg(not(target_os = "android"))]
+mod multi_window;
 mod streams;
 mod wall;
 mod windows;
@@ -1995,11 +2015,43 @@ impl XgViewApp {
         scopes.extend(file_picker::scopes());
         scopes.extend(download::scopes());
 
+        #[cfg(not(target_os = "android"))]
+        let workspace_saved = monitor_core::config::LocalWorkspace::load(&monitor_core::config::LocalWorkspace::path_for(&config_path)).filter(|w| w.group == config.active_index());
+        #[cfg(not(target_os = "android"))]
+        let extra_windows = workspace_saved.as_ref().map(|w| w.windows.clone()).unwrap_or_default();
+        #[cfg(not(target_os = "android"))]
+        let mut scheduler = scheduler;
+        #[cfg(not(target_os = "android"))]
+        if let Some(w) = &workspace_saved {
+            scheduler.restore_layouts(w.layouts.clone());
+            let cameras = config.active_cameras();
+            let mut order: Vec<usize> = w.order.iter().filter_map(|id| cameras.iter().position(|c| &c.id == id)).collect();
+            for i in 0..cameras.len() { if !order.contains(&i) { order.push(i); } }
+            scheduler.set_order(order); scheduler.set_page(w.page);
+        }
         let mut app = Self {
             persisted: config.clone(),
             config,
             config_path,
             scheduler,
+            #[cfg(not(target_os = "android"))]
+            extra_windows,
+            #[cfg(not(target_os = "android"))]
+            clear_wall_confirmation: false,
+            #[cfg(not(target_os = "android"))]
+            workspace_saved,
+            #[cfg(not(target_os = "android"))]
+            wall_pinned: true,
+            #[cfg(not(target_os = "android"))]
+            wall_drag: None,
+            #[cfg(not(target_os = "android"))]
+            wall_opened: HashSet::new(),
+            #[cfg(not(target_os = "android"))]
+            wall_slides: HashMap::new(),
+            #[cfg(not(target_os = "android"))]
+            wall_drop_target: None,
+            #[cfg(not(target_os = "android"))]
+            wall_release: false,
             manager,
             handle,
             channels: HashMap::new(),
@@ -2323,7 +2375,7 @@ impl XgViewApp {
             // texture of it would be three megabytes a frame uploaded for
             // nobody. Its last one stays where it is, which is what the
             // viewport falls back to when the recording has nothing yet.
-            if self.view_index(index) != index {
+            if self.view_index(index) != index && !self.scheduler.extra_page_contains(index) {
                 self.surface_moments.remove(&index);
                 continue;
             }
@@ -3112,8 +3164,12 @@ impl XgViewApp {
         if self.file_job.is_some() {
             self.draw_file_picker(ctx);
         }
+        #[cfg(not(target_os = "android"))]
+        { self.wall_drop_target = None; self.wall_release = false; }
         self.draw_chrome(ctx);
         self.draw_wall(ctx);
+        #[cfg(not(target_os = "android"))]
+        { self.draw_extra_windows(ctx); self.finish_wall_drag(ctx); }
         self.end_frame(ctx, start, focus_before);
     }
 }

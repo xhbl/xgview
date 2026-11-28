@@ -12,11 +12,17 @@ impl XgViewApp {
                 cells: vec![Some(index)],
             },
             _ => {
-                let layout = self.scheduler.layout();
                 let page = self.scheduler.page();
-                PageView { layout, first: page * layout.capacity(), cells: grid::page_cells(layout, page, total) }
+                self.wall_page_view(page)
             }
         }
+    }
+
+    pub(super) fn wall_page_view(&self, page: usize) -> PageView {
+        let info = self.scheduler.info_at(page);
+        let mut cells: Vec<_> = self.scheduler.indices_at(page).into_iter().map(Some).collect();
+        cells.resize(info.capacity, None);
+        PageView { layout: self.scheduler.layout_at(page), first: info.start, cells }
     }
 
     /// Page revealed by a finger drag, when it exists.
@@ -34,8 +40,7 @@ impl XgViewApp {
         if page >= self.scheduler.page_count() {
             return None;
         }
-        let layout = self.scheduler.layout();
-        Some(PageView { layout, first: page * layout.capacity(), cells: grid::page_cells(layout, page, total) })
+        Some(self.wall_page_view(page))
     }
 
     /// Where the magnified viewport's picture is drawn this frame, if it has one.
@@ -820,7 +825,7 @@ impl XgViewApp {
     // The tile is described by the handful of values its caller already holds;
     // a bundle would be repacked from these same values at every call.
     #[allow(clippy::too_many_arguments)]
-    fn tile_of<'a>(
+    pub(super) fn tile_of<'a>(
         &'a self,
         id: Id,
         index: Option<usize>,
@@ -949,19 +954,21 @@ impl XgViewApp {
         // the wall behind the picture, not about what the viewer is looking
         // at. Read once for the frame so every menu names the same fields.
         let zoomed = self.scheduler.is_zoomed();
+        let zoomed = zoomed && tag != 3;
         // A recording playing on the magnified channel has no camera actions:
         // edit, delete, fit, stream and connection all describe the live wall,
         // not the file being played, and their presses would interrupt it. The
         // picture still takes clicks and drags (the next block) - only its
         // context menu is withheld.
         let playing_back = self.playback.is_some();
+        let playing_back = playing_back && tag != 3;
 
         for (cell, index) in view.cells.iter().enumerate() {
             let rect = grid::tile_rect(origin, view.layout, cell, grid::LINE);
             if rect.max.x < area.min.x - 4.0 || rect.min.x > area.max.x + 4.0 {
                 continue;
             }
-            let tile =
+            let mut tile =
                 self.tile_of(
                     Id::new(("xgview-tile", tag, cell, index.unwrap_or(usize::MAX))),
                     *index,
@@ -971,6 +978,12 @@ impl XgViewApp {
                     interactive,
                     ring,
                 );
+            if tag == 3 {
+                tile.channel = index.and_then(|i| self.channels.get(&i));
+                tile.video = index.and_then(|i| self.textures.get(&i)).map(|t| t.surface);
+                tile.on_video_layer = false; tile.rotated = false; tile.picture_zoom = None; tile.state_frame = None; tile.recording = None; tile.clock = None; tile.focused = false;
+                tile.aspect = index.and_then(|i| cameras.get(i)).map(|c| c.aspect).unwrap_or_default();
+            }
             let response = grid::paint(ui, rect, &tile);
             if interactive && !playing_back {
                 if let Some(camera_index) = *index {
@@ -1073,6 +1086,7 @@ impl XgViewApp {
                 }
                 if response.drag_started() {
                     actions.drag_started = true;
+                    actions.drag_camera = *index;
                 }
                 // This needs no guard against the frame a finger lands on, the
                 // way `drag_frame` does: a tile senses a click as well as a drag,
@@ -1095,6 +1109,67 @@ impl XgViewApp {
             }
         }
         actions
+    }
+
+    pub(super) fn apply_wall_camera_actions(&mut self, actions: &TileActions) {
+        if actions.edit_camera.is_some() || actions.delete_camera.is_some() {
+            let slots = self.config.active_slots();
+
+            if let Some(index) = actions.edit_camera {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(draft) = self.config.cameras.get(slot).map(CameraDraft::from_source) {
+                        self.camera_edit.open(CameraEdit { slot, draft });
+                        self.camera_edit.from = None;
+                    }
+                }
+            } else if let Some(index) = actions.delete_camera {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(camera) = self.config.cameras.get(slot) {
+                        self.remove_confirm.open(RemoveConfirm {
+                            slot,
+                            name: camera.name.clone(),
+                        });
+                        self.remove_confirm.from = None;
+                    }
+                }
+            }
+        }
+
+        if actions.picture_fit.is_some()
+            || actions.picture_fit_zoom.is_some()
+            || actions.stream_change.is_some()
+        {
+            let slots = self.config.active_slots();
+            if let Some(index) = actions.picture_fit {
+                if let Some(&slot) = slots.get(index) {
+                    let portrait = self.is_portrait();
+                    if let Some(camera) = self.config.cameras.get_mut(slot) {
+                        camera.advance_aspect(portrait);
+                    }
+                    self.mark_dirty();
+                }
+            }
+            if let Some(index) = actions.picture_fit_zoom {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(camera) = self.config.cameras.get_mut(slot) {
+                        let next = camera.next_zoom_aspect();
+                        camera.zoom_aspect = Some(next);
+                        self.flash_centered(monitor_i18n::tr(next.label()), ToastKind::Info);
+                    }
+                    self.mark_dirty();
+                }
+            }
+            if let Some(index) = actions.stream_change {
+                if let Some(&slot) = slots.get(index) {
+                    if let Some(camera) = self.config.cameras.get_mut(slot) {
+                        camera.advance_stream();
+                    }
+                    self.needs_sync = true;
+                    self.mark_dirty();
+                }
+            }
+        }
+
     }
 
     pub(super) fn draw_grid(&mut self, ui: &mut egui::Ui) {
@@ -1400,62 +1475,11 @@ impl XgViewApp {
 
         let mut actions = self.paint_view(ui, picture_area, &cameras, &view, dx, true, 2);
 
-        if actions.edit_camera.is_some() || actions.delete_camera.is_some() {
-            let slots = self.config.active_slots();
-
-            if let Some(index) = actions.edit_camera {
-                if let Some(&slot) = slots.get(index) {
-                    if let Some(draft) = self.config.cameras.get(slot).map(CameraDraft::from_source) {
-                        self.camera_edit.open(CameraEdit { slot, draft });
-                        self.camera_edit.from = None;
-                    }
-                }
-            } else if let Some(index) = actions.delete_camera {
-                if let Some(&slot) = slots.get(index) {
-                    if let Some(camera) = self.config.cameras.get(slot) {
-                        self.remove_confirm.open(RemoveConfirm {
-                            slot,
-                            name: camera.name.clone(),
-                        });
-                        self.remove_confirm.from = None;
-                    }
-                }
-            }
-        }
-
-        if actions.picture_fit.is_some()
-            || actions.picture_fit_zoom.is_some()
-            || actions.stream_change.is_some()
-        {
-            let slots = self.config.active_slots();
-            if let Some(index) = actions.picture_fit {
-                if let Some(&slot) = slots.get(index) {
-                    let portrait = self.is_portrait();
-                    if let Some(camera) = self.config.cameras.get_mut(slot) {
-                        camera.advance_aspect(portrait);
-                    }
-                    self.mark_dirty();
-                }
-            }
-            if let Some(index) = actions.picture_fit_zoom {
-                if let Some(&slot) = slots.get(index) {
-                    if let Some(camera) = self.config.cameras.get_mut(slot) {
-                        let next = camera.next_zoom_aspect();
-                        camera.zoom_aspect = Some(next);
-                        self.flash_centered(monitor_i18n::tr(next.label()), ToastKind::Info);
-                    }
-                    self.mark_dirty();
-                }
-            }
-            if let Some(index) = actions.stream_change {
-                if let Some(&slot) = slots.get(index) {
-                    if let Some(camera) = self.config.cameras.get_mut(slot) {
-                        camera.advance_stream();
-                    }
-                    self.needs_sync = true;
-                    self.mark_dirty();
-                }
-            }
+        self.apply_wall_camera_actions(&actions);
+        #[cfg(not(target_os = "android"))]
+        if !self.wall_pinned && !self.scheduler.is_zoomed() {
+            self.wall_edit_drag(ui, picture_area, &view, &actions);
+            actions.drag_started = false; actions.drag_delta = 0.0; actions.drag_stopped = false;
         }
 
         // A drag on the magnified picture is the picture moving, not the page:

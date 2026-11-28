@@ -29,6 +29,7 @@ settings-tab-system = System
 settings-tab-about = About
 settings-tab-cameras-count = Cameras ({ $count })
 settings-grid = Grid
+settings-add-wall-window = Open next page in a new window
 settings-ui-zoom = Interface scale
 settings-ui-zoom-hint = From 50% to 200%. Applied when you let go, so the slider does not jump under your finger. Ctrl/+/-/0 change it too, and are remembered.
 settings-osd = On-screen display
@@ -721,3 +722,13 @@ camera-context-edit = Edit camera
 camera-context-delete = Delete camera
 camera-context-picture-fit = Picture fit: { $next }
 camera-context-stream = Stream: { $next }
+
+wall-save = Save windows
+
+wall-clear-question = Delete the saved window configuration?
+
+wall-clear-yes = Delete
+
+wall-clear-no = Cancel
+
+wall-pin = Lock camera layout

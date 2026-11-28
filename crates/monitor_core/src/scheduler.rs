@@ -241,6 +241,9 @@ pub struct Scheduler {
     zoom: Option<usize>,
     channel_count: usize,
     current: Option<Schedule>,
+    extra_pages: Vec<usize>,
+    page_layouts: Vec<GridLayout>,
+    order: Vec<usize>,
     /// Set while the wall is blacked out: every channel is parked regardless of
     /// what the grid is showing.
     suspended: bool,
@@ -271,6 +274,9 @@ impl Scheduler {
             zoom: None,
             channel_count,
             current: None,
+            extra_pages: Vec::new(),
+            page_layouts: Vec::new(),
+            order: Vec::new(),
             suspended: false,
             park_others: true,
             recording: None,
@@ -279,10 +285,60 @@ impl Scheduler {
         scheduler
     }
 
-    pub fn layout(&self) -> GridLayout {
-        self.layout
+    /// Additional desktop wall pages, sharing the same channel plans.
+    pub fn set_extra_pages(&mut self, mut pages: Vec<usize>) {
+        pages.sort_unstable();
+        pages.dedup();
+        self.extra_pages = pages;
     }
 
+    pub fn extra_page_contains(&self, index: usize) -> bool {
+        index < self.channel_count && self.extra_pages.iter().any(|&p| p < self.page_count() && self.indices_at(p).contains(&index))
+    }
+
+    pub fn layout(&self) -> GridLayout {
+        self.layout_at(self.page)
+    }
+
+    pub fn layout_at(&self, page: usize) -> GridLayout { self.page_layouts.get(page).copied().unwrap_or(self.layout) }
+    pub fn layouts(&self) -> &[GridLayout] { &self.page_layouts }
+    pub fn set_page_layout(&mut self, page: usize, layout: GridLayout) {
+        if page >= self.page_count() { return; }
+        self.page_layouts.resize(self.page_layouts.len().max(page + 1), self.layout);
+        self.page_layouts[page] = layout;
+        self.normalize();
+    }
+    pub fn restore_layouts(&mut self, layouts: Vec<GridLayout>) { self.page_layouts = layouts; self.normalize(); }
+    pub fn info_at(&self, page: usize) -> PageInfo {
+        let mut start = 0usize;
+        let mut ranges = Vec::new();
+        loop {
+            let capacity = self.layout_at(ranges.len()).capacity();
+            let end = (start + capacity).min(self.channel_count);
+            ranges.push((start, end, capacity));
+            if end == self.channel_count { break; }
+            start = end;
+        }
+        let page = page.min(ranges.len()-1);
+        let (start,end,capacity) = ranges[page];
+        PageInfo { page, page_count: ranges.len(), capacity, total: self.channel_count, start, end }
+    }
+    pub fn indices_at(&self, page: usize) -> Vec<usize> {
+        let info = self.info_at(page);
+        (info.start..info.end).map(|i| self.order.get(i).copied().unwrap_or(i)).collect()
+    }
+    pub fn set_order(&mut self, order: Vec<usize>) {
+        let mut sorted = order.clone(); sorted.sort_unstable();
+        if sorted == (0..self.channel_count).collect::<Vec<_>>() { self.order = order; }
+    }
+    pub fn order(&self) -> &[usize] { &self.order }
+    pub fn swap_channels(&mut self, a: usize, b: usize) {
+        if a >= self.channel_count || b >= self.channel_count { return; }
+        if self.order.len() != self.channel_count { self.order = (0..self.channel_count).collect(); }
+        let x = self.order.iter().position(|i| *i == a).unwrap();
+        let y = self.order.iter().position(|i| *i == b).unwrap();
+        self.order.swap(x,y);
+    }
     pub fn page(&self) -> usize {
         self.page
     }
@@ -300,11 +356,11 @@ impl Scheduler {
     }
 
     pub fn page_count(&self) -> usize {
-        layout::page_count(self.channel_count, self.layout.capacity())
+        self.info_at(usize::MAX).page_count
     }
 
     pub fn page_info(&self) -> PageInfo {
-        layout::page_info(self.page, self.layout, self.channel_count)
+        self.info_at(self.page)
     }
 
     pub fn is_zoomed(&self) -> bool {
@@ -317,6 +373,7 @@ impl Scheduler {
     }
 
     pub fn set_channel_count(&mut self, count: usize) {
+        if self.channel_count != count { self.order.clear(); }
         self.channel_count = count;
         self.normalize();
     }
@@ -340,13 +397,13 @@ impl Scheduler {
     }
 
     pub fn set_layout(&mut self, layout: GridLayout) {
-        self.layout = layout;
+        if self.page_layouts.is_empty() { self.layout = layout; } else { self.set_page_layout(self.page, layout); }
         self.normalize();
     }
 
     /// Cycles 1x1 -> 2x2 -> 3x3 -> 4x4 (or the reverse).
     pub fn cycle_layout(&mut self, forward: bool) {
-        let layout = if forward { self.layout.next() } else { self.layout.prev() };
+        let layout = if forward { self.layout().next() } else { self.layout().prev() };
         self.set_layout(layout);
     }
 
@@ -387,14 +444,26 @@ impl Scheduler {
         if cell >= info.len() {
             self.focus = None;
         } else {
-            self.focus = Some(info.start + cell);
+            self.focus = self.indices_at(self.page).get(cell).copied();
         }
         self.normalize();
     }
 
     /// Moves the focus; turns the page when the focus leaves the current page.
     pub fn navigate(&mut self, dir: Direction) -> NavigateOutcome {
-        let outcome = layout::navigate(self.layout, self.page, self.focus, dir, self.channel_count);
+        let outcome = if self.page_layouts.is_empty() && self.order.is_empty() {
+            layout::navigate(self.layout, self.page, self.focus, dir, self.channel_count)
+        } else {
+            let indices = self.indices_at(self.page);
+            let cell = self.focus.and_then(|f| indices.iter().position(|&i| i == f));
+            match layout::navigate(self.layout(), 0, cell, dir, indices.len()) {
+                NavigateOutcome::Moved { focus } => NavigateOutcome::Moved { focus: indices[focus] },
+                _ => {
+                    let target = match dir { Direction::Left => self.page.checked_sub(1), Direction::Right if self.page+1 < self.page_count() => Some(self.page+1), _ => None };
+                    if let Some(page) = target { let next = self.indices_at(page); let focus = if dir == Direction::Left { next.last() } else { next.first() }; if let Some(&focus) = focus { NavigateOutcome::PageTurned { page, focus } } else { NavigateOutcome::Blocked } } else { NavigateOutcome::Blocked }
+                }
+            }
+        };
         match outcome {
             NavigateOutcome::Moved { focus } => self.focus = Some(focus),
             NavigateOutcome::PageTurned { page, focus } => {
@@ -494,7 +563,7 @@ impl Scheduler {
         };
         self.focus = Some(next);
         self.zoom = Some(next);
-        self.page = layout::page_of(next, self.layout.capacity());
+        self.page = (0..self.page_count()).find(|&p| self.indices_at(p).contains(&next)).unwrap_or(0);
         true
     }
 
@@ -511,14 +580,14 @@ impl Scheduler {
     /// Builds the decoding schedule for the given (enabled) cameras.
     pub fn schedule(&self, cameras: &[CameraSource]) -> Schedule {
         let total = cameras.len();
-        let page_info = layout::page_info(self.page, self.layout, total);
+        let page_info = self.page_info();
 
         let zoom = match self.zoom {
             Some(index) if index < total => Some(index),
             _ => None,
         };
 
-        let (visible, live): (Vec<Option<usize>>, Vec<usize>) = match zoom {
+        let (visible, mut live): (Vec<Option<usize>>, Vec<usize>) = match zoom {
             Some(index) => {
                 // A magnified viewport shows one camera. What it decodes is one
                 // camera too, unless the viewer has not settled yet: for the
@@ -527,7 +596,7 @@ impl Scheduler {
                 // than a page's worth of sessions - see [`Self::park_others`].
                 let mut live = vec![index];
                 if !self.park_others {
-                    live.extend(page_info.start..page_info.end);
+                    live.extend(self.indices_at(self.page));
                     live.sort_unstable();
                     live.dedup();
                 }
@@ -542,14 +611,24 @@ impl Scheduler {
                 (vec![Some(index)], live)
             }
             None => {
-                let indices: Vec<usize> = (page_info.start..page_info.end).collect();
-                let mut cells = vec![None; self.layout.capacity()];
+                let indices: Vec<usize> = self.indices_at(self.page);
+                let mut cells = vec![None; self.layout().capacity()];
                 for (slot, index) in indices.iter().enumerate() {
                     cells[slot] = Some(*index);
                 }
                 (cells, indices)
             }
         };
+
+        // A recording replaces the live camera only in the primary window.
+        // Extra pages still need their live pictures, even during magnification.
+        for &page in &self.extra_pages {
+            if page < page_info.page_count {
+                live.extend(self.indices_at(page));
+            }
+        }
+        live.sort_unstable();
+        live.dedup();
 
         // Every grid pulls the cheap sub stream, the 1x1 layout included: what
         // the wall is showing is a wall either way, and one cell on screen does
@@ -578,7 +657,7 @@ impl Scheduler {
                     // socket stays open and no decoder stays running.
                     ChannelMode::Suspend
                 } else if live.contains(&index) {
-                    let stream = if zoom == Some(index) {
+                    let stream = if zoom == Some(index) && self.recording != Some(index) {
                         StreamKind::Main
                     } else {
                         camera.grid_stream()
@@ -602,7 +681,7 @@ impl Scheduler {
             .collect();
 
         Schedule {
-            layout: self.layout,
+            layout: self.layout(),
             page: page_info.page,
             page_info,
             zoom,
@@ -668,8 +747,8 @@ impl Scheduler {
         // Keep the focus on the visible page so DPAD navigation stays coherent.
         let info = self.page_info();
         if let Some(focus) = self.focus {
-            if !info.contains(focus) {
-                self.focus = Some(info.start + focus.min(info.len().saturating_sub(1)));
+            if !self.indices_at(self.page).contains(&focus) {
+                self.focus = if self.order.is_empty() && self.page_layouts.is_empty() { Some(info.start + focus.min(info.len().saturating_sub(1))) } else { self.indices_at(self.page).first().copied() };
             }
         }
     }
@@ -683,6 +762,36 @@ mod tests {
         (0..count)
             .map(|index| CameraSource::new(format!("cam {index}"), format!("rtsp://10.0.0.{index}/live")))
             .collect()
+    }
+
+    #[test]
+    fn extra_pages_share_channels_and_release_on_close() {
+        let cameras = cameras(10);
+        let mut scheduler = Scheduler::new(GridLayout::G2x2, 0, Some(0), cameras.len());
+        scheduler.set_extra_pages(vec![1, 1, 2, 99]);
+        assert_eq!(scheduler.refresh(&cameras).len(), 10);
+        assert_eq!(scheduler.schedule(&cameras).live().count(), 10);
+        scheduler.set_page(1);
+        assert_eq!(scheduler.schedule(&cameras).live().count(), 6);
+        scheduler.refresh(&cameras);
+        scheduler.set_extra_pages(vec![1]);
+        assert_eq!(scheduler.refresh(&cameras).len(), 2);
+        assert_eq!(scheduler.schedule(&cameras).live().count(), 4);
+        scheduler.set_suspended(true);
+        assert_eq!(scheduler.schedule(&cameras).live().count(), 0);
+    }
+
+    #[test]
+    fn extra_page_stays_live_during_zoom_and_recording() {
+        let cameras = cameras(8);
+        let mut scheduler = Scheduler::new(GridLayout::G2x2, 0, Some(0), cameras.len());
+        scheduler.set_extra_pages(vec![0, 1]);
+        assert!(scheduler.zoom_in());
+        assert_eq!(scheduler.schedule(&cameras).live().count(), 8);
+        scheduler.set_recording(Some(0));
+        assert_eq!(scheduler.schedule(&cameras).mode_of(0), ChannelMode::Decode(StreamKind::Sub));
+        scheduler.set_extra_pages(vec![1]);
+        assert_eq!(scheduler.schedule(&cameras).mode_of(0), ChannelMode::Suspend);
     }
 
     #[test]
@@ -1018,4 +1127,43 @@ mod tests {
         let changes = scheduler.refresh(&cameras);
         assert_eq!(changes.len(), 8);
     }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+ use super::*;
+ #[test]
+ fn camera_count_changes_reset_order_and_keep_dense_pages() {
+     let mut s = Scheduler::new(GridLayout::G2x2, 0, None, 6);
+     s.swap_channels(0, 5);
+     s.set_page_layout(0, GridLayout::G1x1);
+     for count in [7, 5, 0] {
+         s.set_channel_count(count);
+         assert_eq!((0..s.page_count()).flat_map(|p| s.indices_at(p)).collect::<Vec<_>>(), (0..count).collect::<Vec<_>>());
+         assert_eq!(s.layout_at(0), GridLayout::G1x1);
+     }
+ }
+ #[test]
+ fn extra_pages_follow_variable_layouts() {
+     let cameras: Vec<_> = (0..10).map(|i| CameraSource::new(format!("cam {i}"), format!("rtsp://10.0.0.{i}/live"))).collect();
+     let mut s = Scheduler::new(GridLayout::G2x2, 0, None, 10);
+     s.set_page_layout(0, GridLayout::G1x1);
+     s.set_extra_pages(vec![1, 1]);
+     assert_eq!(s.schedule(&cameras).live().count(), 5);
+     assert!(s.extra_page_contains(4));
+     assert!(!s.extra_page_contains(5));
+     s.set_extra_pages(vec![]);
+     assert_eq!(s.schedule(&cameras).live().count(), 1);
+ }
+
+ #[test] fn resizing_preserves_all_channels() {
+ let mut s=Scheduler::new(GridLayout::G4x4,0,None,36);
+ s.set_page_layout(1,GridLayout::G3x3);
+ s.set_page_layout(0,GridLayout::G2x2);
+ assert_eq!(s.indices_at(0),vec![0,1,2,3]);
+ assert_eq!(s.indices_at(1),(4..13).collect::<Vec<_>>());
+ assert_eq!((0..s.page_count()).flat_map(|p|s.indices_at(p)).collect::<Vec<_>>(),(0..36).collect::<Vec<_>>());
+ s.swap_channels(0,12); assert_eq!(s.indices_at(0)[0],12);
+ s.set_page_layout(0,GridLayout::G4x4); assert_eq!(s.indices_at(0)[0],12);
+ }
 }

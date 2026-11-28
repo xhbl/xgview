@@ -40,6 +40,17 @@ impl XgViewApp {
             self.scheduler.set_channel_count(count);
         }
 
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut pages = Vec::new();
+            for w in &self.extra_windows {
+                pages.push(w.page);
+                if let Some(slide) = self.wall_slides.get(&w.id) {
+                    if let Some(p) = super::multi_window::slide_neighbour(w.page, slide, self.scheduler.page_count()) { pages.push(p); }
+                }
+            }
+            self.scheduler.set_extra_pages(pages);
+        }
         let cameras = self.config.active_cameras();
         let changes = self.scheduler.refresh(&cameras);
         if !changes.is_empty() {
@@ -80,7 +91,10 @@ impl XgViewApp {
         // The grid, the page and the cursor all belong to the orientation
         // being drawn. Turning the wall parks this side before the other side
         // is loaded, so neither can overwrite the other's place.
+        #[cfg(target_os = "android")]
         self.config.group_mut().set_view(self.orientation.is_portrait(), layout, page, focus);
+        #[cfg(not(target_os = "android"))]
+        if self.scheduler.layouts().is_empty() { self.config.group_mut().set_view(self.orientation.is_portrait(), layout, page, focus); }
     }
 
     pub(super) fn save_now(&mut self) {

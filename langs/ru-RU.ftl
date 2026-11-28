@@ -27,6 +27,7 @@ settings-tab-system = Система
 settings-tab-about = О программе
 settings-tab-cameras-count = Камеры ({ $count })
 settings-grid = Раскладка
+settings-add-wall-window = Открыть следующую страницу в новом окне
 settings-ui-zoom = Масштаб интерфейса
 settings-ui-zoom-hint = От 50% до 200%. Применяется после отпускания ползунка, чтобы он не прыгал под пальцем. Ctrl/+/-/0 тоже меняют размер и запоминаются.
 settings-osd = Экранная информация
@@ -663,3 +664,13 @@ camera-context-edit = Изменить камеру
 camera-context-delete = Удалить камеру
 camera-context-picture-fit = Подгонка изображения: { $next }
 camera-context-stream = Поток: { $next }
+
+wall-save = Сохранить окна
+
+wall-clear-question = Удалить сохранённую конфигурацию окон?
+
+wall-clear-yes = Удалить
+
+wall-clear-no = Отмена
+
+wall-pin = Зафиксировать раскладку камер
