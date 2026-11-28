@@ -511,6 +511,8 @@ impl XgViewApp {
             self.apply_toolbar_b(&mut items, b);
             let c = self.paint_toolbar_c(ui);
             self.apply_toolbar_c(&mut items, c);
+            #[cfg(not(target_os = "android"))]
+            self.wall_window_controls(ui, &mut items);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let d = self.paint_toolbar_d(ui);
                 self.apply_toolbar_d(&mut items, d);

@@ -22,6 +22,10 @@ use crate::theme;
 pub enum Icon {
     /// Add something: two strokes crossing.
     Plus,
+    /// Open another native wall window.
+    WindowPlus,
+    WallSave,
+    WallPin,
     /// Settings: a cogwheel.
     Gear,
     /// Enter full screen: four corners opening outwards.
@@ -495,6 +499,21 @@ pub fn paint_turned(painter: &Painter, rect: Rect, icon: Icon, stroke: Stroke, t
         Icon::Plus => {
             painter.add(line(&[at(0.5, 0.05), at(0.5, 0.95)]));
             painter.add(line(&[at(0.05, 0.5), at(0.95, 0.5)]));
+        }
+        Icon::WallPin => {
+            painter.add(line(&[at(0.27,0.10),at(0.73,0.10),at(0.64,0.45),at(0.84,0.65),at(0.16,0.65),at(0.36,0.45),at(0.27,0.10)]));
+            painter.add(line(&[at(0.50,0.65),at(0.50,0.95)]));
+        }
+        Icon::WallSave => {
+            painter.add(line(&[at(0.08,0.08),at(0.75,0.08),at(0.92,0.25),at(0.92,0.92),at(0.08,0.92),at(0.08,0.08)]));
+            painter.rect_stroke(square(0.25,0.08,0.65,0.40), CornerRadius::same(1), stroke, StrokeKind::Inside);
+            painter.rect_stroke(square(0.25,0.55,0.75,0.92), CornerRadius::same(1), stroke, StrokeKind::Inside);
+        }
+        Icon::WindowPlus => {
+            painter.rect_stroke(square(0.04, 0.12, 0.96, 0.88), CornerRadius::same(1), stroke, StrokeKind::Inside);
+            painter.add(line(&[at(0.04, 0.32), at(0.96, 0.32)]));
+            painter.add(line(&[at(0.50, 0.43), at(0.50, 0.77)]));
+            painter.add(line(&[at(0.33, 0.60), at(0.67, 0.60)]));
         }
         Icon::Grid => {
             for (x, y) in [(0.04, 0.04), (0.54, 0.04), (0.04, 0.54), (0.54, 0.54)] {

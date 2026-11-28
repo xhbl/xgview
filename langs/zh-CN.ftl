@@ -27,6 +27,7 @@ settings-tab-system = 系统
 settings-tab-about = 关于
 settings-tab-cameras-count = 摄像头 ({ $count })
 settings-grid = 宫格
+settings-add-wall-window = 在新窗口中打开下一页
 settings-ui-zoom = 界面缩放
 settings-ui-zoom-hint = 50% 到 200%。松开拉杆后才生效，避免拖动时跳动。Ctrl/+/-/0 也可调整，并会被记住。
 settings-osd = 屏显
@@ -665,3 +666,13 @@ camera-context-edit = 编辑摄像头
 camera-context-delete = 删除摄像头
 camera-context-picture-fit = 画面比例：{ $next }
 camera-context-stream = 码流：{ $next }
+
+wall-save = 保存窗口
+
+wall-clear-question = 删除已保存的窗口配置？
+
+wall-clear-yes = 删除
+
+wall-clear-no = 取消
+
+wall-pin = 锁定摄像机布局

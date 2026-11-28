@@ -641,6 +641,18 @@ fn default_combined_info() -> CombinedInfo {
     ]
 }
 
+/// Native window state; page layouts and camera order belong to the workspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WallWindow {
+    pub id: usize,
+    #[serde(default)]
+    pub page: usize,
+    #[serde(default)]
+    pub geometry: Option<[f32; 4]>,
+    #[serde(default)]
+    pub fullscreen: bool,
+}
+
 /// Persisted application configuration (`xgvconfig.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -2519,5 +2531,75 @@ mod tests {
         // forgotten camera stays, at the end.
         assert!(config.apply_order(&[b.clone(), "nobody".to_string(), c.clone()]));
         assert_eq!(ids(&config), vec![b, c, a]);
+    }
+}
+
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LocalWorkspace {
+    pub windows: Vec<WallWindow>,
+    pub layouts: Vec<GridLayout>,
+    pub order: Vec<String>,
+    pub page: usize,
+    pub group: usize,
+}
+impl LocalWorkspace {
+    /// A separate sidecar for each configuration, never part of its export.
+    pub fn path_for(config: &Path) -> PathBuf {
+        config.with_extension("workspace.json")
+    }
+    pub fn load(path: &Path) -> Option<Self> { serde_json::from_slice(&std::fs::read(path).ok()?).ok() }
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let data = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        write_private(&tmp, &data)?;
+        std::fs::rename(tmp, path)?;
+        sync_directory_of(path)
+    }
+}
+
+#[cfg(test)]
+mod local_workspace_tests {
+ use super::*;
+ #[test] fn workspace_is_not_exported() {
+ let config=AppConfig::default();
+ let json=config.to_json().unwrap();
+ assert!(!json.contains("wall_windows"));
+ assert!(!json.contains("workspace"));
+ let w=LocalWorkspace { layouts: vec![GridLayout::G3x3], ..Default::default() };
+ assert_eq!(serde_json::from_str::<LocalWorkspace>(&serde_json::to_string(&w).unwrap()).unwrap(),w);
+ }
+}
+
+#[cfg(test)]
+mod workspace_file_tests {
+    use super::*;
+    #[test]
+    fn workspace_sidecars_are_independent_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = LocalWorkspace::path_for(&dir.path().join("a.json"));
+        let b = LocalWorkspace::path_for(&dir.path().join("b.json"));
+        assert_ne!(a, b);
+        let mut w = LocalWorkspace { windows: vec![WallWindow { id: 1, page: 2, geometry: Some([10., 20., 640., 480.]), fullscreen: true }], ..Default::default() };
+        w.save(&a).unwrap();
+        assert_eq!(LocalWorkspace::load(&a), Some(w.clone()));
+        w.windows[0].fullscreen = false;
+        w.save(&a).unwrap();
+        assert_eq!(LocalWorkspace::load(&a), Some(w));
+        assert!(LocalWorkspace::load(&b).is_none());
+        std::fs::write(&a, b"invalid json").unwrap();
+        assert!(LocalWorkspace::load(&a).is_none());
+    }
+    #[test]
+    fn obsolete_window_fields_are_ignored() {
+        let w: WallWindow = serde_json::from_str(r#"{"id":1,"page":2,"layout":"unused","cameras":["old"]}"#).unwrap();
+        assert_eq!(w.page, 2);
+        let json = serde_json::to_value(w).unwrap();
+        assert!(json.get("layout").is_none());
+        assert!(json.get("cameras").is_none());
     }
 }

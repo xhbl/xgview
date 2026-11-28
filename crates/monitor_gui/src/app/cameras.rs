@@ -65,6 +65,10 @@ impl XgViewApp {
     /// configuration is where a group's layout, paging and focus wait while it
     /// is not on the wall.
     pub(super) fn park_group_view(&mut self) {
+        #[cfg(not(target_os = "android"))]
+        if !self.scheduler.layouts().is_empty() {
+            return;
+        }
         let (layout, page, focus) =
             (self.scheduler.layout(), self.scheduler.page(), self.scheduler.focus());
         self.config
@@ -80,6 +84,15 @@ impl XgViewApp {
     /// new group magnified on whatever sits at that index there. A group
     /// arriving on the wall arrives whole, on the page and focus it was left at.
     pub(super) fn load_group_view(&mut self) {
+        #[cfg(not(target_os = "android"))]
+        {
+            self.extra_windows.clear();
+            self.wall_opened.clear();
+            self.wall_slides.clear();
+            self.wall_drag = None;
+            self.scheduler.restore_layouts(Vec::new());
+            self.scheduler.set_order((0..self.scheduler.channel_count()).collect());
+        }
         self.tile_bar.hide();
         // A recording belongs to a camera of the group being left; the group
         // arriving has its own, and nothing of the old one is drawn here.
@@ -94,6 +107,8 @@ impl XgViewApp {
         self.scheduler.set_layout(layout);
         self.scheduler.set_page(page);
         self.scheduler.set_focus(focus);
+        #[cfg(not(target_os = "android"))]
+        self.persist_wall_windows();
         self.needs_sync = true;
         self.apply_audio();
     }
