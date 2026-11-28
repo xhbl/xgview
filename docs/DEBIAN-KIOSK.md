@@ -2,8 +2,7 @@
 
 **Goal**: Debian 13 with no desktop environment, where systemd starts the Rust
 egui program `xgview` full screen at boot. When the program exits, the tty1
-login prompt comes back. Frigate and Home Assistant then run in Docker on the
-same machine (an Intel N100).
+login prompt comes back.
 
 **Test environment**: the "runtime environment for a single GUI program" was
 first verified in VMware Workstation Player, without testing hardware decoding;
@@ -62,7 +61,7 @@ physical) it detected; check them before letting it continue.
 > VNC is built in: the script always installs x11vnc and starts it with the
 > session (port 5900). The default password is `vnc`; override it with
 > `--vnc your-password`, for example
-> `bash /home/admin/debian-kiosk.sh --vnc 123456` (see section 13).
+> `bash /home/admin/debian-kiosk.sh --vnc 123456` (see section 12).
 
 **4. Reboot and check**
 
@@ -72,11 +71,10 @@ physical) it detected; check them before letting it continue.
 
 | Option | Effect |
 |---|---|
-| `--no-docker` | Do not install Docker (Docker CE is installed by default, for Frigate / Home Assistant; turn it off for a test VM) |
 | `--no-sudo` | Do not install sudo (it is installed by default, and the user is added to the sudo group) |
 | `--no-supervise` | Do not use the program's own supervisor (it starts with `--supervise` by default) |
 | `--no-en` | Do not change the system language (by default it is set to `en_US.UTF-8`, so the tty console does not garble Chinese; the XGView interface language is unaffected) |
-| `--vnc password` | Write the VNC password (port 5900); x11vnc is always installed and started with the session, and without this option the password is left as it is (default `vnc` on first install) (see section 13) |
+| `--vnc password` | Write the VNC password (port 5900); x11vnc is always installed and started with the session, and without this option the password is left as it is (default `vnc` on first install) (see section 12) |
 | `--start` | Start the service as soon as the setup is done |
 | `-u user`, `-p program-path` | Override the detected user or program path |
 | `--xg package` | Point at an `xgview-*.tar.gz`; the script unpacks it and runs its `install.sh` as the ordinary user, stopping the running service first and starting it again afterwards (it checks that the file exists) |
@@ -113,10 +111,9 @@ physical) it detected; check them before letting it continue.
 9. [Day-to-day operations and short commands](#9-day-to-day-operations-and-short-commands)
 10. [Notes for testing in VMware](#10-notes-for-testing-in-vmware)
 11. [Moving to the Intel N100](#11-moving-to-the-intel-n100)
-12. [Docker: Frigate and Home Assistant](#12-docker-frigate-and-home-assistant)
-13. [Remote viewing over VNC](#13-remote-viewing-over-vnc)
-14. [Troubleshooting quick reference](#14-troubleshooting-quick-reference)
-15. [Appendix: file list](#15-appendix-file-list)
+12. [Remote viewing over VNC](#12-remote-viewing-over-vnc)
+13. [Troubleshooting quick reference](#13-troubleshooting-quick-reference)
+14. [Appendix: file list](#14-appendix-file-list)
 
 ---
 
@@ -167,10 +164,6 @@ At the installer's software-selection step:
   escalate (see section 3).
 - If the installer asks about enabling non-free firmware, **say yes** (the N100
   needs its iGPU firmware).
-- Docker is installed later; nothing Docker-related has to be selected at
-  install time.
-- When planning disks, put the Frigate recordings on a separate large disk or
-  partition if you will record.
 
 ---
 
@@ -820,89 +813,14 @@ name differs.
 
 ### 11.4 Resource notes
 
-The N100 has four cores, shared between the GUI and Frigate:
+The N100 has four cores:
 
 - Prefer **sub streams** in the wall, or use VAAPI hardware decoding
-- Frigate records by stream copy (no transcoding) and detects on the sub stream
 - With many cameras, watch `intel_gpu_top` for iGPU saturation
-- The GUI and Frigate can share the same iGPU without conflict
 
 ---
 
-## 12. Docker: Frigate and Home Assistant
-
-### 12.1 Installing Docker (from the official repository)
-
-Do not use Debian's own `docker.io`. Add the official apt repository as
-described at docs.docker.com/engine/install/debian, then:
-
-```bash
-# apt install docker-ce docker-ce-cli containerd.io docker-compose-plugin
-```
-
-Docker needs no graphical stack and is entirely independent of the
-Xorg/openbox setup above.
-
-### 12.2 Frigate hardware acceleration (N100)
-
-The key part of the compose file:
-
-```yaml
-services:
-  frigate:
-    image: ghcr.io/blakeblackshear/frigate:stable
-    restart: unless-stopped
-    shm_size: "256mb"
-    devices:
-      - /dev/dri/renderD128:/dev/dri/renderD128
-    environment:
-      - LIBVA_DRIVER_NAME=iHD
-    volumes:
-      - ./config:/config
-      - /path/to/media:/media/frigate
-```
-
-In Frigate's `config.yml`:
-
-```yaml
-ffmpeg:
-  hwaccel_args: preset-vaapi        # or preset-intel-qsv-h264 / preset-intel-qsv-h265
-
-detectors:
-  ov:
-    type: openvino
-    device: GPU
-```
-
-OpenVINO on the iGPU means the N100 needs no Coral. The OpenVINO detector also
-needs its `model` section, as in Frigate's own documentation - follow the version
-you run.
-
-### 12.3 Home Assistant (container)
-
-```yaml
-services:
-  homeassistant:
-    image: ghcr.io/home-assistant/home-assistant:stable
-    restart: unless-stopped
-    network_mode: host
-    volumes:
-      - ./ha-config:/config
-      - /etc/localtime:/etc/localtime:ro
-```
-
-- `network_mode: host` is what device discovery and mDNS rely on.
-- The container edition has **no add-on store**; MQTT, Zigbee2MQTT and the rest
-  run as their own compose services.
-
-### 12.4 Storage planning
-
-Frigate records a lot: put its recordings on a separate large disk or partition;
-the system disk (`/var/lib/docker`) should only hold images and configuration.
-
----
-
-## 13. Remote viewing over VNC
+## 12. Remote viewing over VNC
 
 Use it when no monitor is attached, or to look in remotely: connect with VNC to
 **the X session running on tty1 (`:0`)** and you see the real wall, not a new
@@ -912,7 +830,7 @@ It uses `x11vnc`: it attaches to the existing X display and shares it instead of
 starting a desktop of its own. **The script always installs x11vnc and starts it
 with the session**; `--vnc` only controls the password written.
 
-### 13.1 Installed by the setup script (recommended)
+### 12.1 Installed by the setup script (recommended)
 
 The script always installs x11vnc and starts it with the session; `--vnc` only
 controls the password:
@@ -929,7 +847,7 @@ bash /home/admin/debian-kiosk.sh --vnc your-password
 - **Reinstall without `--vnc`**: the existing password is kept.
 - **With `--vnc new-password`**: it replaces the old one.
 
-### 13.2 Installing by hand (to see how it works)
+### 12.2 Installing by hand (to see how it works)
 
 ```bash
 # apt install --no-install-recommends x11vnc
@@ -953,12 +871,12 @@ x11vnc -display "$DISPLAY" -rfbauth /home/admin/.vnc/passwd -rfbport 5900 \
 Apply it with `xgr` (or the stop/start sequence in 9.5; a plain `systemctl
 restart monitor` can be canceled by the tty1 getty).
 
-### 13.3 Connecting
+### 12.3 Connecting
 
 Use any VNC client (RealVNC Viewer, TightVNC, Remmina and so on) against
 `machine-ip:5900` with the password given to `--vnc`.
 
-### 13.4 Notes and troubleshooting
+### 12.4 Notes and troubleshooting
 
 - VNC exists only **while the graphical session runs**: the program exits → X
   ends → VNC disconnects. **Disconnecting a viewer does not affect the wall**
@@ -975,7 +893,7 @@ Use any VNC client (RealVNC Viewer, TightVNC, Remmina and so on) against
 
 ---
 
-## 14. Troubleshooting quick reference
+## 13. Troubleshooting quick reference
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -993,11 +911,11 @@ Use any VNC client (RealVNC Viewer, TightVNC, Remmina and so on) against
 | The screen blanks after a while | X's default screen saver / power saving | Add `xset s off s noblank +dpms dpms 0 0 0` to the session script, and install `x11-xserver-utils` |
 | Chinese in the tty console shows as diamonds | The console's bitmap font has no Chinese (not related to `fonts-noto-cjk`) | The setup script sets the system language to English by default (`--no-en` turns that off); or `update-locale LANG=en_US.UTF-8 LANGUAGE=en` and log in again |
 | Rendering misbehaves (especially in a VM) | Vulkan backend problem | Set `WGPU_BACKEND=gl` |
-| VNC will not connect, or connects black | The graphical session is not running, or the wrong display is shared | `systemctl status monitor`, `pgrep -a x11vnc`, `/tmp/x11vnc.log`; make sure `:0` is shared (see 13.4) |
+| VNC will not connect, or connects black | The graphical session is not running, or the wrong display is shared | `systemctl status monitor`, `pgrep -a x11vnc`, `/tmp/x11vnc.log`; make sure `:0` is shared (see 12.4) |
 
 ---
 
-## 15. Appendix: file list
+## 14. Appendix: file list
 
 | Path | Purpose |
 |---|---|
@@ -1034,7 +952,7 @@ be installed; embedding would remove that dependency and make
 ### Appendix B: the whole setup inline (run as root)
 
 > The full version is [`scripts/debian-kiosk.sh`](../scripts/debian-kiosk.sh)
-> (automatic user detection, environment detection, Intel drivers, Docker, VNC
+> (automatic user detection, environment detection, Intel drivers, VNC
 > and so on); see "Quick start" at the top. Below is the minimal inline version
 > without those extras.
 

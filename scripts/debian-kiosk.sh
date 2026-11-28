@@ -3,7 +3,7 @@
 # debian-kiosk.sh
 # One-shot setup on a "minimal install" of Debian 13: start xgview full screen
 # at boot, with no desktop. When the program exits, the tty1 login prompt comes
-# back. Docker (for Frigate / Home Assistant) is installed optionally.
+# back.
 #
 # Steps:
 #   1. From Windows, upload this script and the release package to the target
@@ -30,8 +30,6 @@
 #   --xg package   path to the release tar.gz (named like
 #                  xgview-1.4.70-linux-x86_64.tar.gz); the script unpacks it to a
 #                  temporary directory and runs its install.sh as the user
-#   --no-docker    do not install Docker (by default Docker CE with the compose
-#                  plugin is installed)
 #   --no-sudo      do not install sudo (by default it is installed and the user
 #                  is added to the sudo group)
 #   --no-supervise do not use the program's own supervisor (by default it runs
@@ -60,7 +58,6 @@ set -euo pipefail
 # ---------- arguments ----------
 USER_NAME=""
 PROG=""
-WANT_DOCKER=1
 WANT_SUDO=1
 SUPERVISE=1
 START_NOW=0
@@ -80,8 +77,6 @@ while [ $# -gt 0 ]; do
       shift
       if [ $# -gt 0 ]; then XG_PKG="$1"; shift; fi
       [ -n "$XG_PKG" ] || { echo "--xg needs a package path"; usage 1; } ;;
-    --docker) WANT_DOCKER=1; shift ;;
-    --no-docker|--nodocker) WANT_DOCKER=0; shift ;;
     --sudo) WANT_SUDO=1; shift ;;
     --no-sudo) WANT_SUDO=0; shift ;;
     --no-supervise) SUPERVISE=0; shift ;;
@@ -138,7 +133,7 @@ grep -q GenuineIntel /proc/cpuinfo && IS_INTEL=1
 say "Configuration"
 echo "user: $USER_NAME    program: $PROG"
 echo "environment: $([ $IS_VM -eq 1 ] && echo 'virtual machine' || echo 'physical machine')    Intel CPU: $([ $IS_INTEL -eq 1 ] && echo yes || echo no)"
-echo "Docker: $([ $WANT_DOCKER -eq 1 ] && echo install || echo skip)    sudo: $([ $WANT_SUDO -eq 1 ] && echo install || echo skip)    --supervise: $([ $SUPERVISE -eq 1 ] && echo on || echo off)"
+echo "sudo: $([ $WANT_SUDO -eq 1 ] && echo install || echo skip)    --supervise: $([ $SUPERVISE -eq 1 ] && echo on || echo off)"
 echo "VNC: installing x11vnc (port 5900)$([ -n "$VNC_PWD" ] && echo ', password updated' || echo ', password left as it is')"
 echo "system language: $([ $WANT_EN -eq 1 ] && echo 'set to English en_US.UTF-8' || echo 'left as it is')"
 [ -n "$XG_PKG" ] && echo "package: $XG_PKG (installed automatically)"
@@ -421,30 +416,7 @@ systemctl set-default multi-user.target
 systemd-analyze verify /etc/systemd/system/monitor.service \
   && echo "unit file syntax check passed"
 
-# ---------- 6. optional: Docker CE ----------
-if [ $WANT_DOCKER -eq 1 ]; then
-  say "Installing Docker (official repository)"
-  install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-  chmod a+r /etc/apt/keyrings/docker.asc
-  CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
-  cat > /etc/apt/sources.list.d/docker.sources <<EOF
-Types: deb
-URIs: https://download.docker.com/linux/debian
-Suites: $CODENAME
-Components: stable
-Signed-By: /etc/apt/keyrings/docker.asc
-EOF
-  apt-get update
-  if apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
-    systemctl enable --now docker
-    docker --version || true
-  else
-    warn "Docker failed to install: the official repository may not carry $CODENAME yet; see docs.docker.com/engine/install/debian"
-  fi
-fi
-
-# ---------- 7. system language (English by default, so the tty console is readable) ----------
+# ---------- 6. system language (English by default, so the tty console is readable) ----------
 # The console uses a bitmap font without CJK glyphs, so Chinese system messages
 # show as diamonds. This only affects system and shell messages; the XGView
 # interface language comes from the program's own configuration.
